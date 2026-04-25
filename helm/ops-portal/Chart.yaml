@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ops-portal
+description: Azure Ops Intelligence & Optimization Portal
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_SUBSCRIPTION_IDS=${AZURE_SUBSCRIPTION_IDS}
+      - KEYVAULT_URL=${KEYVAULT_URL}
+      - SMTP_HOST=mta01.az.3pc.att.com
+      - SMTP_PORT=25
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
+        VITE_AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+        VITE_API_BASE_URL: /api/v1
+        VITE_REDIRECT_URI: http://localhost:3000
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend

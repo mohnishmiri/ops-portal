@@ -1,0 +1,17 @@
+[
+  {
+    "url": "http://127.0.0.1:5177/api/v1/checksum-schedules/",
+    "status": 200,
+    "body": "{\"success\":true,\"count\":13,\"schedules\":[{\"id\":13,\"name\":\"ces-eastus2-uat-synapse\",\"description\":\"Auto-seeded schedule for ces-eastus2-uat-synapse\",\"module_type\":\"synapse\",\"system\":\"ces\",\"environment\":\"uat\",\"workspace_name\":\"ces-eastus2-uat-synapse\",\"cluster_id\":\"\",\"cluster_name\":\"\",\"namespaces\":[],\"schedule_type\":\"cron\",\"interval_hours\":24,\"cron_expression\":\"57 15 * * *\",\"timezone\":\"America/New_Yo"
+  },
+  {
+    "url": "http://127.0.0.1:5177/api/v1/checksum-schedules/13",
+    "status": 200,
+    "body": "{\"id\":13,\"name\":\"ces-eastus2-uat-synapse\",\"description\":\"Auto-seeded schedule for ces-eastus2-uat-synapse\",\"module_type\":\"synapse\",\"system\":\"ces\",\"environment\":\"uat\",\"workspace_name\":\"ces-eastus2-uat-synapse\",\"cluster_id\":\"\",\"cluster_name\":\"\",\"namespaces\":[],\"schedule_type\":\"cron\",\"interval_hours\":24,\"cron_expression\":\"57 15 * * *\",\"timezone\":\"America/New_York\",\"notification_emails\":[\"mz7819@att.c"
+  },
+  {
+    "url": "http://127.0.0.1:5177/api/v1/compliance/export/excel",
+    "status": 500,
+    "body": "{\"detail\":\"Excel export generation failed: \"}"
+  }
+]

@@ -1,0 +1,131 @@
+############################################################
+# 1) Secrets / Environment files
+############################################################
+.env
+.env.*
+.env*
+!.env.example
+!.env.sample
+
+############################################################
+# 2) OS generated files
+############################################################
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+
+############################################################
+# 3) Editor / IDE
+############################################################
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# JetBrains
+.idea/
+*.iml
+
+# Misc
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+############################################################
+# 4) Logs / temp
+############################################################
+*.log
+logs/
+tmp/
+temp/
+
+############################################################
+# 5) Frontend (React 18 + TypeScript + Tailwind)
+############################################################
+# Dependencies
+frontend/node_modules/
+**/node_modules/
+
+# Build outputs
+frontend/dist/
+frontend/build/
+frontend/out/
+**/dist/
+**/build/
+**/out/
+
+# Vite / bundler caches
+frontend/.vite/
+frontend/.cache/
+**/.vite/
+**/.cache/
+
+# Test / coverage
+frontend/coverage/
+**/coverage/
+
+# TypeScript build info
+*.tsbuildinfo
+
+############################################################
+# 6) Backend (FastAPI / Python)
+############################################################
+# Python bytecode / cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+backend/.venv/
+backend/venv/
+backend/env/
+
+# Test / type checker / linter caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Uvicorn / FastAPI runtime
+*.pid
+
+############################################################
+# 7) Reports / PDF artifacts (if generated)
+############################################################
+*.pdf
+reports/output/
+reports/tmp/
+backend/reports/output/
+backend/reports/tmp/
+
+############################################################
+# 8) Docker / container overrides (optional)
+############################################################
+docker-compose.override.yml
+
+############################################################
+# 9) Optional: Local database / runtime artifacts
+############################################################
+*.sqlite
+*.db
+backend/nul
+error.txt
+docs/generate_ppt.py
+docs/ATTCC_OpsPortal_Leadership_Presentation.pptx
+docs/ATT_OpsPortal_Leadership_Presentation.pptx
+docs/~$ATT_OpsPortal_Leadership_Presentation.pptx

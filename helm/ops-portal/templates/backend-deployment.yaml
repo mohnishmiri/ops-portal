@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ops-portal.fullname" . }}-backend
+  labels:
+    app.kubernetes.io/name: {{ include "ops-portal.name" . }}
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  {{- if not .Values.backend.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "ops-portal.name" . }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      {{- if .Values.backend.podAnnotations }}
+      annotations:
+        {{- toYaml .Values.backend.podAnnotations | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "ops-portal.name" . }}
+        app.kubernetes.io/component: backend
+        {{- range $key, $val := .Values.backend.podLabels }}
+        {{ $key }}: {{ $val | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ops-portal.fullname" . }}-backend
+      {{- if .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: backend
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.backend.image.repository }}:{{ default .Chart.AppVersion .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            {{- if .Values.backend.azureKeyVaultSecrets.enabled }}
+            {{- range .Values.backend.azureKeyVaultSecrets.items }}
+            - name: {{ .envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .kubernetesSecretName }}
+                  key: {{ default .envName .dataKey }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.backend.env }}
+            {{- range $key, $val := .Values.backend.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- end }}
+          {{- if .Values.backend.secretProvider.enabled }}
+          volumeMounts:
+            - name: secrets-store
+              mountPath: "/mnt/secrets-store"
+              readOnly: true
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.backend.probes.liveness.path }}
+              port: {{ .Values.backend.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.backend.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.backend.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.backend.probes.readiness.path }}
+              port: {{ .Values.backend.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.backend.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.backend.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+      {{- if .Values.backend.secretProvider.enabled }}
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "ops-portal.fullname" . }}-backend-secrets
+      {{- end }}

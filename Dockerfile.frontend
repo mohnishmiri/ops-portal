@@ -1,0 +1,114 @@
+# ============================================================
+# Azure Ops Portal — Frontend Dockerfile (Multi-stage build)
+# ============================================================
+# Stage 1: Build React app
+FROM artifact.it.att.com/apm0014313-dkr-attcc-group/node:22.16.0-alpine AS builder
+
+ARG AUTH_NPM_TOKEN
+
+WORKDIR /build
+
+# Corporate proxy configuration
+ENV HTTP_PROXY=http://proxy.conexus.svc.local:3128
+ENV HTTPS_PROXY=http://proxy.conexus.svc.local:3128
+ENV NO_PROXY=localhost,127.0.0.1,.svc,.local
+
+
+RUN echo "PROXY=http://proxy.conexus.svc.local:3128" > .npmrc && \
+    echo "HTTP_PROXY=http://proxy.conexus.svc.local:3128" >> .npmrc && \
+    echo "HTTPS_PROXY=http://proxy.conexus.svc.local:3128" >> .npmrc && \
+    echo "registry=https://artifact.it.att.com/artifactory/api/npm/apm0014313-npm-group/" >> .npmrc && \
+    echo "always-auth=true" >> .npmrc && \
+    echo "strict-ssl=false" >> .npmrc && \
+    echo "email=m47355@att.com" >> .npmrc && \
+    echo "//artifact.it.att.com/artifactory/api/npm/apm0014313-npm-group/:_auth=\"${AUTH_NPM_TOKEN}\"" >> .npmrc
+
+RUN npm config set registry https://artifact.it.att.com/artifactory/api/npm/apm0014313-npm-group/ && \
+    npm config set proxy http://proxy.conexus.svc.local:3128 && \
+    npm config set https-proxy http://proxy.conexus.svc.local:3128
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --no-audit
+
+COPY frontend/ ./
+
+
+
+RUN npm run build
+
+# Stage 2: Production NGINX image
+FROM artifact.it.att.com/apm0014313-dkr-attcc-group/nginx:latest AS production
+
+# Security: remove default config
+RUN rm /etc/nginx/conf.d/default.conf
+
+ENV BACKEND_UPSTREAM=http://backend:8000
+
+COPY <<'EOF' /docker-entrypoint.d/40-write-runtime-config.sh
+#!/bin/sh
+set -eu
+
+cat > /usr/share/nginx/html/env-config.js <<EOC
+window.__OPS_PORTAL_CONFIG__ = {
+    VITE_AZURE_CLIENT_ID: "${VITE_AZURE_CLIENT_ID:-}",
+    VITE_AZURE_TENANT_ID: "${VITE_AZURE_TENANT_ID:-}",
+    VITE_REDIRECT_URI: "${VITE_REDIRECT_URI:-}",
+    VITE_API_BASE_URL: "${VITE_API_BASE_URL:-}"
+};
+EOC
+EOF
+
+RUN chmod +x /docker-entrypoint.d/40-write-runtime-config.sh
+
+# Custom NGINX config for SPA routing
+COPY <<'EOF' /etc/nginx/templates/app.conf.template
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+    set $opsportal_forwarded_proto $scheme;
+    if ($http_x_forwarded_proto != "") {
+        set $opsportal_forwarded_proto $http_x_forwarded_proto;
+    }
+
+    # SPA fallback
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # API proxy (in k8s, handled by ingress; this is for local docker-compose)
+    location /api/ {
+        proxy_pass ${BACKEND_UPSTREAM}/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $opsportal_forwarded_proto;
+        proxy_set_header X-Forwarded-Host $host;
+    }
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://login.microsoftonline.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://login.microsoftonline.com https://*.azure.com" always;
+
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+}
+EOF
+
+COPY --from=builder /build/dist /usr/share/nginx/html
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD wget --quiet --tries=1 --spider http://localhost:80/ || exit 1
+
+EXPOSE 80

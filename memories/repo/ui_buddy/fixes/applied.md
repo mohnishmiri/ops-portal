@@ -1,0 +1,33 @@
+# Applied Fixes
+
+- Added Redis-backed page payload caching for the Leadership dashboard route, Leadership advisor/forecast responses, Amortized summary/drilldown responses, and Optimization summary responses.
+- Added Admin cache release controls across backend and frontend, and clarified the Admin TTL setting as page cache retention.
+- Increased React Query client retention for Leadership, Optimization summary, and Amortized queries so revisits reuse warm client-side data longer.
+- Added a shared ATT-themed compliance grid style helper and sortable header component.
+- Standardized the dashboard resource grid with search, sorting, pagination, and ATT-themed table chrome.
+- Standardized Synapse checksum comparison, Synapse drift, Synapse verification runs, Synapse pipeline results, AKS verification runs, and AKS pod results tables.
+- Upgraded the schedule list with search, sorting, pagination, ATT-themed table styling, and aligned action states.
+- Replaced schedule summary emoji icons with SVG icons.
+- Standardized Key Vault expiring items, vault inventory, secrets, keys, and certificates grids with shared ATT-themed shells, sortable headers, top search, bottom pagination, and icon-only action buttons.
+- Refreshed the Key Vault page shell with stronger KPI cards, an elevated control-center header, and a polished selected-vault tab container aligned to the ATT palette.
+- Standardized Infra Alerts grids and action buttons onto the shared ATT table/button system, including sortable headers, consistent pagers, and icon-based action controls across alerts, configurations, resources, and notification history.
+- Enabled automatic polling for all Infra Alerts grid-backed queries so alert, configuration, resource, and notification tables refresh without manual reloads.
+- Extended automatic polling to the remaining frontend grid-backed queries, including Key Vault, compliance checksum and drift grids, admin subscriptions, operations tables, optimization recommendations, leadership budget tables, environment cost tables, and amortized cost drilldowns.
+- Normalized the Leadership dashboard AI Cost Advisor and Wastage Summary sections onto the shared MetricCard shell, including MetricCard-style waste KPIs and ATT-aligned breakdown chrome.
+- Removed the duplicated Leadership Top Savings Opportunities chart and AI Cost Recommendations by Resource table because the same savings signals are already surfaced in the advisor, category chart, and wastage summary.
+- Upgraded the Leadership Non-Prod vs Prod trend card into an executive-style section with a stronger ATT shell, clearer chart presentation, and four meaningful summary MetricCards replacing the noisy month-by-month mini-card grid.
+- Removed the Leadership Savings by Recommendation Category panel, widened the lower chart summary-card layouts to prevent compressed cards, and changed the Executive Forecast to a prod vs non-prod year-end projection.
+- Removed the Optimization page from top-level navigation and redirected the legacy /optimization route back to Leadership Dashboard because the data is now consolidated there.
+- Deleted the dead frontend OptimizationPage component after removing its route and navigation entry.
+- Replaced the Leadership dashboard's local prod/non-prod forecast heuristic with a backend Ollama forecast flow, including a dedicated forecast API, frontend forecast hook, and six-month actual-plus-forecast chart with local fallback when the model is unavailable.
+- Removed the redundant Leadership Non-Prod vs Prod Cost Trend section because the same prod vs non-prod story is now covered by the executive forecast card.
+- Standardized all `/env-costs` page tables in `frontend/src/pages/AmortizedCostDashboard.tsx` with ATT shared grid shells, per-grid search in the top-right, and bottom pagination controls.
+- Added shared `audit_logs`-backed CRUD history for Key Vault secret/key mutations, including a new Key Vault Audit History tab with ATT-styled search, filters, sorting, and pagination.
+- Added Admin-managed CORS origins editing plus runtime-refreshing backend CORS enforcement backed by the shared `admin_config` table.
+- Fixed the AKS CronJobs resume/suspend refresh path so the grid updates immediately in the UI and the backend DB cache is refreshed after CronJob mutations instead of serving stale cached state.
+- Fixed the Leadership Dashboard optimization summary so orphaned snapshots are only counted when their source disk or snapshot no longer exists, and wired the page refresh action to refresh the optimization summary data as well as the leadership snapshot.
+- Removed blob-export CSV usage from the amortized and env-cost ingestion paths so DB-cached cost views now load from Azure Cost Management APIs only, including detailed Cost Details report ingestion for amortized drill-down data.
+- Replaced the shared app-shell gear badges with a closer match to the provided ATT globe artwork in the header, login screen, and footer, and updated the embedded favicon plus fallback SVG asset to use the same corrected globe so the visible app logo and browser tab icon stay aligned.
+- Tightened the corrected ATT globe viewBox and increased the shared shell render sizes so the same logo artwork appears larger and cleaner in both the app header and browser-tab favicon without changing the icon design itself.
+- Removed the decorative badge frame around the shared ATT globe so the attached logo renders directly at a larger size in the app shell, and matched the favicon crop to that same direct-logo presentation without changing the underlying artwork.
+- Fixed the Compliance dashboard to prefer live checksum and drift snapshots over stale persisted score rows, aligned AKS summary cards to the latest scoped snapshot dates instead of "today", and relabeled the resource-table issue column to "Detected Issues" so the displayed counts match the current dataset more closely.

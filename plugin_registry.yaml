@@ -1,0 +1,99 @@
+# ============================================================
+# Azure Ops Portal — Plugin Registry & Extensibility Guide
+# ============================================================
+# This file documents the plugin system and how to create
+# new plugins for the Ops Intelligence Portal.
+# ============================================================
+
+plugins:
+  # Built-in plugins shipped with the portal
+  builtin:
+    - name: aks_insights
+      version: "1.0.0"
+      description: "AKS cluster and node pool operational intelligence"
+      routes_prefix: /api/v1/plugins/aks
+      dashboards:
+        - name: AKS Cluster Overview
+          widget_type: table
+      required_permissions:
+        - cost:read
+
+    - name: keyvault_ops
+      version: "1.0.0"
+      description: "Key Vault secret lifecycle management"
+      routes_prefix: /api/v1/plugins/keyvault
+      dashboards:
+        - name: Secret Inventory
+          widget_type: table
+      required_permissions:
+        - cost:read     # list/search
+        - cost:admin    # view secret values
+
+  # Template for creating a custom plugin
+  custom_template:
+    name: my_custom_plugin
+    version: "0.1.0"
+    description: "Template for custom plugin development"
+    routes_prefix: /api/v1/plugins/my-custom
+    dashboards:
+      - name: Custom Dashboard Widget
+        widget_type: chart  # chart | table | metric | list
+    required_permissions:
+      - cost:read
+
+# ──────────────────────────────────────────────────────────────
+# How to Create a Plugin
+# ──────────────────────────────────────────────────────────────
+#
+# 1. Create a Python package under backend/app/plugins/<name>/
+#
+# 2. Create __init__.py implementing PluginBase:
+#
+#    from app.plugins import PluginBase
+#    from app.auth import get_current_user, require_role
+#    from fastapi import APIRouter, Depends
+#
+#    class MyPlugin(PluginBase):
+#        def get_metadata(self):
+#            return {
+#                "name": "my_plugin",
+#                "version": "1.0.0",
+#                "description": "What it does",
+#                "routes_prefix": "/api/v1/plugins/my-plugin",
+#                "dashboards": [{"name": "Widget", "widget_type": "chart"}],
+#            }
+#
+#        def get_router(self) -> APIRouter:
+#            router = APIRouter(prefix="/my-plugin", tags=["My Plugin"])
+#
+#            @router.get("/data")
+#            async def get_data(user=Depends(get_current_user)):
+#                return {"data": "example"}
+#
+#            return router
+#
+#        async def on_startup(self):
+#            # Initialize clients/connections
+#            pass
+#
+#        async def on_shutdown(self):
+#            # Cleanup
+#            pass
+#
+# 3. The plugin auto-discovery system in app/plugins/__init__.py
+#    will detect it via pkgutil on startup.
+#
+# 4. Add a React widget in frontend/src/components/plugins/
+#    that fetches from /api/v1/plugins/my-plugin/
+#
+# ──────────────────────────────────────────────────────────────
+# Plugin Ideas for Future Development
+# ──────────────────────────────────────────────────────────────
+# - Reserved Instance Utilization tracker
+# - Savings Plan coverage analyzer
+# - Tag compliance auditor
+# - Cost anomaly detector (ML-based)
+# - Multi-cloud cost aggregator (AWS/GCP)
+# - Budget workflow approvals
+# - Chargeback / showback reporting
+# ──────────────────────────────────────────────────────────────

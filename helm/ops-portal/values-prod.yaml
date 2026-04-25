@@ -1,0 +1,62 @@
+# Environment-specific overrides for production
+global:
+  environment: production
+
+backend:
+  replicaCount: 3
+  azureKeyVaultSecrets:
+    enabled: true
+  secretProvider:
+    enabled: false
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 65
+  env: {}
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+frontend:
+  replicaCount: 3
+  azureKeyVaultSecrets:
+    enabled: true
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit-connections: "5"
+    nginx.ingress.kubernetes.io/rate-limit-rps: "10"
+  azureKeyVaultCertificates:
+    enabled: true
+    vaultName: ""  # Set via CI: --set ingress.azureKeyVaultCertificates.vaultName
+    items:
+      - akvCertificateName: opsportal-ingress-tls
+        kubernetesSecretName: ops-portal-tls
+        chainOrder: ensureserverfirst
+  hosts:
+    - host: ops-portal.yourdomain.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+        - path: /api
+          pathType: Prefix
+          service: backend
+  tls:
+    - secretName: ops-portal-tls
+      hosts:
+        - ops-portal.yourdomain.com
+
+networkPolicy:
+  enabled: true

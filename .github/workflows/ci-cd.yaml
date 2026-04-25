@@ -1,0 +1,388 @@
+# ============================================================
+# Azure Ops Portal — CI/CD Pipeline (GitHub Actions)
+# ============================================================
+# Build, test, scan, and deploy backend + frontend to AKS
+# ============================================================
+
+name: Ops Portal CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "helm/**"
+      - ".github/workflows/ci-cd.yaml"
+      - "Dockerfile.backend"
+      - "Dockerfile.frontend"
+      - "docker-compose.yaml"
+      - "plugin_registry.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "helm/**"
+      - ".github/workflows/ci-cd.yaml"
+      - "Dockerfile.backend"
+      - "Dockerfile.frontend"
+      - "docker-compose.yaml"
+      - "plugin_registry.yaml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  JFROG_REGISTRY: artifact.it.att.com   # e.g., artifact.it.att.com/docker-local
+  IMAGE_REGISTRY_PATH: artifact.it.att.com/apm0014313-dkr-attcc-stage/com.att.attcc
+  HELM_RELEASE: ops-portal
+  HELM_CHART_PATH: helm/ops-portal
+  DEV_NAMESPACE: opsportal
+  PROD_NAMESPACE: opsportal
+  BACKEND_ENV_SECRET_NAME: ops-portal-backend-env
+  FRONTEND_ENV_SECRET_NAME: ops-portal-frontend-env
+  WORKING_DIR: .
+  PIP_INDEX_URL: https://${{ secrets['JFROG_USERNAME'] }}:${{ secrets['JFROG_PASSWORD'] }}@artifact.it.att.com/artifactory/api/pypi/apm0014313-pyp-group/simple
+  UV_DEFAULT_INDEX: https://${{ secrets['JFROG_USERNAME'] }}:${{ secrets['JFROG_PASSWORD'] }}@artifact.it.att.com/artifactory/api/pypi/apm0014313-pyp-group/simple
+  UV_INDEX_URL: https://${{ secrets['JFROG_USERNAME'] }}:${{ secrets['JFROG_PASSWORD'] }}@artifact.it.att.com/artifactory/api/pypi/apm0014313-pyp-group/simple
+
+jobs:
+  # ── Lint & Unit Tests ────────────────────────────────────────
+  test-backend:
+    runs-on: concordia-linux-cpu4-ram14gi
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}/backend
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Common Python CI
+        id: ci
+        uses: ./.github/actions/python-ci
+        with:
+          working-directory: backend
+          python-version: "3.13"
+          coverage-xml: "true"
+          upload-coverage-html: "true"
+          run-mypy: "false"
+          run-bandit: "true"
+          bandit-config-path: "bandit.yaml"
+          
+  test-frontend:
+    runs-on: concordia-linux-cpu4-ram14gi
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ${{ env.WORKING_DIR }}/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint 2>/dev/null || echo "No lint script configured"
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_AZURE_CLIENT_ID: placeholder
+          VITE_AZURE_TENANT_ID: placeholder
+          VITE_API_BASE_URL: http://localhost:8000
+
+  # ── Security Scanning ────────────────────────────────────────
+  security-scan:
+    runs-on: concordia-linux-cpu4-ram14gi
+    needs: [test-backend, test-frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Run bandit security scan
+        run: uvx bandit -r ${{ env.WORKING_DIR }}/backend/app/ -f json -o bandit-report.json || true
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  # ── Build & Push Docker Images ───────────────────────────────
+  build-images:
+    runs-on: concordia-linux-cpu4-ram14gi
+    needs: [test-backend, test-frontend, security-scan]
+    if: github.event_name != 'pull_request'
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+      backend-version-tag: ${{ steps.meta.outputs.backend-version-tag }}
+      frontend-version-tag: ${{ steps.meta.outputs.frontend-version-tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: meta
+        run: |
+          BACKEND_VERSION=$(awk -F' *= *' '/^version = / {gsub(/"/, "", $2); print $2; exit}' backend/pyproject.toml)
+          FRONTEND_VERSION=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' frontend/package.json | head -n1)
+
+          if [[ -z "$BACKEND_VERSION" ]]; then
+            echo "Unable to determine backend version from backend/pyproject.toml" >&2
+            exit 1
+          fi
+          if [[ -z "$FRONTEND_VERSION" ]]; then
+            echo "Unable to determine frontend version from frontend/package.json" >&2
+            exit 1
+          fi
+
+          BACKEND_VERSION_TAG=$(echo "$BACKEND_VERSION" | sed 's/[^A-Za-z0-9_.-]/-/g')
+          FRONTEND_VERSION_TAG=$(echo "$FRONTEND_VERSION" | sed 's/[^A-Za-z0-9_.-]/-/g')
+
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            TAG="$GITHUB_SHA"
+          else
+            TAG="dev-$GITHUB_SHA"
+          fi
+          echo "tag=${TAG:0:12}" >> "$GITHUB_OUTPUT"
+          echo "backend-version=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
+          echo "backend-version-tag=$BACKEND_VERSION_TAG" >> "$GITHUB_OUTPUT"
+          echo "frontend-version=$FRONTEND_VERSION" >> "$GITHUB_OUTPUT"
+          echo "frontend-version-tag=$FRONTEND_VERSION_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Login to JFrog Registry
+        uses: docker/login-action@v3
+        with:
+          registry: artifact.it.att.com
+          username: ${{ secrets['JFROG_USERNAME'] }}
+          password: ${{ secrets['JFROG_PASSWORD'] }}
+
+      - name: Build & Push Backend
+        env:
+          DOCKER_BUILDKIT: "1"
+          JFROG_USERNAME: ${{ secrets['JFROG_USERNAME'] }}
+          JFROG_PASSWORD: ${{ secrets['JFROG_PASSWORD'] }}
+          BACKEND_IMAGE: artifact.it.att.com/apm0014313-dkr-attcc-stage/com.att.attcc/ops-portal-backend
+        run: |
+          docker build \
+            --secret id=jfrog_user,env=JFROG_USERNAME \
+            --secret id=jfrog_token,env=JFROG_PASSWORD \
+            --build-arg IMAGE_NAME=ops-portal-backend \
+            --build-arg IMAGE_VERSION=${{ steps.meta.outputs.backend-version-tag }} \
+            --build-arg VCS_REF=$GITHUB_SHA \
+            --build-arg HTTP_PROXY="${HTTP_PROXY:-}" \
+            --build-arg HTTPS_PROXY="${HTTPS_PROXY:-}" \
+            -f ${{ env.WORKING_DIR }}/Dockerfile.backend \
+            -t $BACKEND_IMAGE:${{ steps.meta.outputs.tag }} \
+            -t $BACKEND_IMAGE:${{ steps.meta.outputs.backend-version-tag }} \
+            -t $BACKEND_IMAGE:latest \
+            ${{ env.WORKING_DIR }}
+          echo "running this -> docker push $BACKEND_IMAGE:${{ steps.meta.outputs.tag }}"
+          docker push $BACKEND_IMAGE:${{ steps.meta.outputs.tag }}
+          docker push $BACKEND_IMAGE:${{ steps.meta.outputs.backend-version-tag }}
+          docker push $BACKEND_IMAGE:latest
+
+      - name: Build & Push Frontend
+        env:
+          FRONTEND_IMAGE: artifact.it.att.com/apm0014313-dkr-attcc-stage/com.att.attcc/ops-portal-frontend
+        run: |
+          docker build \
+            -f ${{ env.WORKING_DIR }}/Dockerfile.frontend \
+            --build-arg AUTH_NPM_TOKEN=${{ secrets['AUTH_NPM_TOKEN'] }} \
+            -t $FRONTEND_IMAGE:${{ steps.meta.outputs.tag }} \
+            -t $FRONTEND_IMAGE:${{ steps.meta.outputs.frontend-version-tag }} \
+            -t $FRONTEND_IMAGE:latest \
+            ${{ env.WORKING_DIR }}
+          docker push $FRONTEND_IMAGE:${{ steps.meta.outputs.tag }}
+          docker push $FRONTEND_IMAGE:${{ steps.meta.outputs.frontend-version-tag }}
+          docker push $FRONTEND_IMAGE:latest
+
+      - name: Scan images with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "artifact.it.att.com/apm0014313-dkr-attcc-stage/com.att.attcc/ops-portal-backend:${{ steps.meta.outputs.tag }}"
+          format: table
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+
+  # ── Deploy to Dev ────────────────────────────────────────────
+  deploy-dev:
+    runs-on: concordia-linux-cpu4-ram14gi
+    needs: build-images
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    environment:
+      name: dev
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets['AZURE_CLIENT_ID'] }}
+          tenant-id: ${{ secrets['AZURE_TENANT_ID'] }}
+          subscription-id: ${{ secrets['AZURE_SUBSCRIPTION_ID'] }}
+          
+      # 2. Get AKS credentials
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets['AKS_RESOURCE_GROUP'] || vars['AKS_RESOURCE_GROUP'] }}
+          cluster-name: ${{ secrets['AKS_CLUSTER_NAME'] || secrets['AKS_CLUSTER'] || vars['AKS_CLUSTER_NAME'] || vars['AKS_CLUSTER'] }}
+
+      # 3. Install kubelogin
+      - name: Install kubelogin
+        uses: azure/use-kubelogin@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4. Convert kubeconfig to use kubelogin (Service Principal mode)
+      - name: Convert Kubeconfig
+        run: |
+          kubelogin convert-kubeconfig -l workloadidentity
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_FEDERATED_TOKEN_FILE: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+      
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      
+      - name: Convert Kubeconfig
+        run: |
+          kubelogin convert-kubeconfig -l azurecli
+      
+      - name: Deploy to AKS (dev)
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE }} \
+            ${{ env.WORKING_DIR }}/${{ env.HELM_CHART_PATH }} \
+            --namespace ${{ env.DEV_NAMESPACE }} \
+            --create-namespace \
+            -f ${{ env.WORKING_DIR }}/${{ env.HELM_CHART_PATH }}/values.yaml \
+            -f ${{ env.WORKING_DIR }}/${{ env.HELM_CHART_PATH }}/values-dev.yaml \
+            --set backend.image.tag=${{ needs.build-images.outputs.backend-version-tag }} \
+            --set frontend.image.tag=${{ needs.build-images.outputs.frontend-version-tag }} \
+            --set-string backend.podAnnotations.ci-build=${{ needs.build-images.outputs.image-tag }} \
+            --set-string frontend.podAnnotations.ci-build=${{ needs.build-images.outputs.image-tag }} \
+            --set backend.azureKeyVaultSecrets.vaultName=${{ secrets['KEYVAULT_NAME'] }} \
+            --set frontend.azureKeyVaultSecrets.vaultName=${{ secrets['KEYVAULT_NAME'] }} \
+            --set ingress.azureKeyVaultCertificates.vaultName=${{ secrets['KEYVAULT_NAME'] }} \
+            --set ingress.hosts[0].host=${{ secrets['DEV_HOSTNAME'] }} \
+            --set ingress.tls[0].hosts[0]=${{ secrets['DEV_HOSTNAME'] }} \
+            --wait --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl -n ${{ env.DEV_NAMESPACE }} rollout status deployment/${{ env.HELM_RELEASE }}-backend --timeout=120s
+          kubectl -n ${{ env.DEV_NAMESPACE }} rollout status deployment/${{ env.HELM_RELEASE }}-frontend --timeout=120s
+
+  # ── Deploy to Production ─────────────────────────────────────
+  deploy-production:
+    runs-on: concordia-linux-cpu4-ram14gi
+    needs: build-images
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    environment:
+      name: prod
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets['AZURE_CLIENT_ID'] }}
+          tenant-id: ${{ secrets['AZURE_TENANT_ID'] }}
+          subscription-id: ${{ secrets['AZURE_SUBSCRIPTION_ID'] }}
+
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets['AKS_RESOURCE_GROUP'] || vars['AKS_RESOURCE_GROUP'] }}
+          cluster-name: ${{ secrets['AKS_CLUSTER_NAME'] || secrets['AKS_CLUSTER'] || vars['AKS_CLUSTER_NAME'] || vars['AKS_CLUSTER'] }}
+
+      - name: Install kubelogin
+        uses: azure/use-kubelogin@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Convert Kubeconfig
+        run: kubelogin convert-kubeconfig -l spn
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Verify AKS context
+        run: kubectl get nodes
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy to AKS (production)
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE }} \
+            ${{ env.WORKING_DIR }}/${{ env.HELM_CHART_PATH }} \
+            --namespace ${{ env.PROD_NAMESPACE }} \
+            --create-namespace \
+            -f ${{ env.WORKING_DIR }}/${{ env.HELM_CHART_PATH }}/values.yaml \
+            -f ${{ env.WORKING_DIR }}/${{ env.HELM_CHART_PATH }}/values-prod.yaml \
+            --set global.imageRegistry=${{ env.IMAGE_REGISTRY_PATH }} \
+            --set backend.image.tag=${{ needs.build-images.outputs.backend-version-tag }} \
+            --set frontend.image.tag=${{ needs.build-images.outputs.frontend-version-tag }} \
+            --set-string backend.podAnnotations.ci-build=${{ needs.build-images.outputs.image-tag }} \
+            --set-string frontend.podAnnotations.ci-build=${{ needs.build-images.outputs.image-tag }} \
+            --set backend.azureKeyVaultSecrets.vaultName=${{ secrets['KEYVAULT_NAME'] }} \
+            --set frontend.azureKeyVaultSecrets.vaultName=${{ secrets['KEYVAULT_NAME'] }} \
+            --set ingress.azureKeyVaultCertificates.vaultName=${{ secrets['KEYVAULT_NAME'] }} \
+            --set ingress.hosts[0].host=${{ secrets['PROD_HOSTNAME'] }} \
+            --set ingress.tls[0].hosts[0]=${{ secrets['PROD_HOSTNAME'] }} \
+            --wait --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deployment/${{ env.HELM_RELEASE }}-backend --timeout=120s
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deployment/${{ env.HELM_RELEASE }}-frontend --timeout=120s
+
+      - name: Notify on success
+        if: success()
+        run: echo "Production deployment successful — backend ${{ needs.build-images.outputs.backend-version-tag }}, frontend ${{ needs.build-images.outputs.frontend-version-tag }}"

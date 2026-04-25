@@ -1,0 +1,239 @@
+# ============================================================
+# Azure Ops Portal — Helm Chart Values
+# ============================================================
+
+global:
+  environment: production
+  imageRegistry: ""  # e.g., myacr.azurecr.io or artifact.it.att.com/apm0014313-dkr-attcc-stage/com.att.attcc
+  imagePullSecrets: 
+    - name: regcred  # Kubernetes Secret for pulling from private registry
+
+# ── Backend ────────────────────────────────────────────────────
+
+backend:
+  replicaCount: 2
+
+  podAnnotations: {}
+
+  image:
+    repository: ops-portal-backend
+    tag: ""  # Defaults to Chart.appVersion when not overridden
+    pullPolicy: Always
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  env: {}
+
+  azureKeyVaultSecrets:
+    enabled: false
+    vaultName: ""
+    items:
+      - envName: ENVIRONMENT
+        akvSecretName: opsportal-backend-environment
+        kubernetesSecretName: ops-portal-backend-environment
+      - envName: LOG_LEVEL
+        akvSecretName: opsportal-backend-log-level
+        kubernetesSecretName: ops-portal-backend-log-level
+      - envName: AZURE_TENANT_ID
+        akvSecretName: opsportal-backend-azure-tenant-id
+        kubernetesSecretName: ops-portal-backend-azure-tenant-id
+      - envName: AZURE_CLIENT_ID
+        akvSecretName: opsportal-backend-azure-client-id
+        kubernetesSecretName: ops-portal-backend-azure-client-id
+      - envName: AZURE_CLIENT_SECRET
+        akvSecretName: opsportal-backend-azure-client-secret
+        kubernetesSecretName: ops-portal-backend-azure-client-secret
+      - envName: AZURE_SUBSCRIPTION_IDS
+        akvSecretName: opsportal-backend-azure-subscription-ids
+        kubernetesSecretName: ops-portal-backend-azure-subscription-ids
+      - envName: REDIS_URL
+        akvSecretName: opsportal-backend-redis-url
+        kubernetesSecretName: ops-portal-backend-redis-url
+      - envName: DATABASE_URL
+        akvSecretName: opsportal-backend-database-url
+        kubernetesSecretName: ops-portal-backend-database-url
+      - envName: DB_ECHO
+        akvSecretName: opsportal-backend-db-echo
+        kubernetesSecretName: ops-portal-backend-db-echo
+      - envName: SMTP_HOST
+        akvSecretName: opsportal-backend-smtp-host
+        kubernetesSecretName: ops-portal-backend-smtp-host
+      - envName: SMTP_PORT
+        akvSecretName: opsportal-backend-smtp-port
+        kubernetesSecretName: ops-portal-backend-smtp-port
+      - envName: SMTP_USER
+        akvSecretName: opsportal-backend-smtp-user
+        kubernetesSecretName: ops-portal-backend-smtp-user
+      - envName: SMTP_PASSWORD
+        akvSecretName: opsportal-backend-smtp-password
+        kubernetesSecretName: ops-portal-backend-smtp-password
+      - envName: SMTP_FROM_ADDRESS
+        akvSecretName: opsportal-backend-smtp-from-address
+        kubernetesSecretName: ops-portal-backend-smtp-from-address
+      - envName: SMTP_USE_TLS
+        akvSecretName: opsportal-backend-smtp-use-tls
+        kubernetesSecretName: ops-portal-backend-smtp-use-tls
+      - envName: KEYVAULT_URL
+        akvSecretName: opsportal-backend-keyvault-url
+        kubernetesSecretName: ops-portal-backend-keyvault-url
+      - envName: CORS_ORIGINS
+        akvSecretName: opsportal-backend-cors-origins
+        kubernetesSecretName: ops-portal-backend-cors-origins
+      - envName: RATE_LIMIT_RPM
+        akvSecretName: opsportal-backend-rate-limit-rpm
+        kubernetesSecretName: ops-portal-backend-rate-limit-rpm
+
+  # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.
+  secretProvider:
+    enabled: false
+    keyvaultName: ""  # Your Azure Key Vault name
+    tenantId: ""
+    clientId: ""      # Managed Identity client ID
+    secrets:
+      - name: AZURE_TENANT_ID
+        key: azure-tenant-id
+      - name: AZURE_CLIENT_ID
+        key: azure-client-id
+      - name: AZURE_SUBSCRIPTION_IDS
+        key: azure-subscription-ids
+      - name: DATABASE_URL
+        key: database-url
+      - name: KEYVAULT_URL
+        key: keyvault-url
+
+  probes:
+    liveness:
+      path: /healthz
+      port: 8000
+      initialDelaySeconds: 15
+      periodSeconds: 20
+    readiness:
+      path: /readyz
+      port: 8000
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+  serviceAccount:
+    create: true
+    annotations:
+      azure.workload.identity/client-id: ""  # Managed Identity Client ID
+
+  podLabels:
+    azure.workload.identity/use: "true"
+
+# ── Frontend ───────────────────────────────────────────────────
+
+frontend:
+  replicaCount: 2
+
+  podAnnotations: {}
+
+  image:
+    repository: ops-portal-frontend
+    tag: ""  # Defaults to Chart.appVersion when not overridden
+    pullPolicy: Always
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 80
+
+  env: {}
+
+  azureKeyVaultSecrets:
+    enabled: false
+    vaultName: ""
+    items:
+      - envName: VITE_AZURE_CLIENT_ID
+        akvSecretName: opsportal-frontend-azure-client-id
+        kubernetesSecretName: ops-portal-frontend-azure-client-id
+      - envName: VITE_AZURE_TENANT_ID
+        akvSecretName: opsportal-frontend-azure-tenant-id
+        kubernetesSecretName: ops-portal-frontend-azure-tenant-id
+      - envName: VITE_REDIRECT_URI
+        akvSecretName: opsportal-frontend-redirect-uri
+        kubernetesSecretName: ops-portal-frontend-redirect-uri
+      - envName: VITE_API_BASE_URL
+        akvSecretName: opsportal-frontend-api-base-url
+        kubernetesSecretName: ops-portal-frontend-api-base-url
+
+# ── Ingress ────────────────────────────────────────────────────
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    #nginx.ingress.kubernetes.io/rate-limit-connections: "10"
+    #nginx.ingress.kubernetes.io/rate-limit-rps: "20"
+  hosts:
+    - host: attccopsportal.stage.att.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+        - path: /api
+          pathType: Prefix
+          service: backend
+  azureKeyVaultCertificates:
+    enabled: false
+    vaultName: ""
+    items:
+      - akvCertificateName: opsportal-ingress-tls
+        kubernetesSecretName: ops-portal-tls
+        #chainOrder: ensureserverfirst
+  tls:
+    - secretName: ops-portal-tls
+      hosts:
+        - attccopsportal.stage.att.com
+
+# ── Redis ──────────────────────────────────────────────────────
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+
+# ── Network Policy ─────────────────────────────────────────────
+
+networkPolicy:
+  enabled: true

@@ -1,0 +1,172 @@
+name: "Python Workspace CI"
+description: "Common Python CI steps: setup, lint, type check, tests with coverage, security scan, artifacts"
+inputs:
+  working-directory:
+    description: "Directory containing the Python workspace pyproject.toml"
+    required: false
+    default: "backend"
+  python-version:
+    description: "Python version to install via setup-uv"
+    required: false
+    default: "3.13"
+  coverage-target:
+    description: "Coverage target passed to pytest --cov"
+    required: false
+    default: "app"
+  coverage-xml:
+    description: "Whether to generate and upload XML coverage report"
+    required: false
+    default: "false"
+  upload-coverage-html:
+    description: "Whether to upload HTML coverage report"
+    required: false
+    default: "true"
+  run-bandit:
+    description: "Whether to run bandit security scan"
+    required: false
+    default: "true"
+  run-mypy:
+    description: "Whether to run mypy type checking"
+    required: false
+    default: "true"
+  bandit-config-path:
+    description: "Path to bandit config file"
+    required: false
+    default: "bandit.yaml"
+  enable-cache:
+    description: "Enable caching for uv global cache and virtual environment"
+    required: false
+    default: "true"
+outputs:
+  safe_ref_name:
+    description: "Branch/ref name sanitized for artifact naming"
+    value: ${{ steps.sanitize.outputs.safe_ref_name }}
+runs:
+  using: "composite"
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Cache uv global cache
+      if: ${{ inputs.enable-cache == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ inputs.python-version }}-${{ hashFiles('uv.lock', '**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-${{ inputs.python-version }}-
+
+    - name: Cache virtual environment
+      if: ${{ inputs.enable-cache == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.working-directory }}/.venv
+        key: ${{ runner.os }}-venv-${{ inputs.python-version }}-${{ hashFiles('uv.lock', '**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-venv-${{ inputs.python-version }}-
+
+    - name: Bridge pip index auth to uv
+      shell: bash
+      run: |
+        if [ -n "${PIP_INDEX_URL:-}" ] && [ -z "${UV_DEFAULT_INDEX:-}" ] && [ -z "${UV_INDEX_URL:-}" ]; then
+          echo "UV_DEFAULT_INDEX=$PIP_INDEX_URL" >> "$GITHUB_ENV"
+          echo "UV_INDEX_URL=$PIP_INDEX_URL" >> "$GITHUB_ENV"
+        fi
+
+    - name: Sync workspace
+      shell: bash
+      run: |
+        cd "${{ inputs.working-directory }}"
+        uv sync --all-groups --extra dev
+
+    - name: Lint (ruff)
+      shell: bash
+      run: |
+        cd "${{ inputs.working-directory }}"
+        uv run --extra dev ruff check .
+
+    - name: Format check (ruff)
+      shell: bash
+      run: |
+        cd "${{ inputs.working-directory }}"
+        uv run --extra dev ruff format --check .
+
+    - name: Type check (mypy)
+      if: ${{ inputs.run-mypy == 'true' }}
+      shell: bash
+      run: |
+        cd "${{ inputs.working-directory }}"
+        uv run --extra dev mypy .
+
+    - name: Tests with coverage
+      id: tests
+      shell: bash
+      run: |
+        set -e
+        cd "${{ inputs.working-directory }}"
+        COVERAGE_ARGS="--cov=${{ inputs.coverage-target }}"
+        if [ "${{ inputs.upload-coverage-html }}" = "true" ]; then
+          COVERAGE_ARGS="$COVERAGE_ARGS --cov-report=html"
+        fi
+        if [ "${{ inputs.coverage-xml }}" = "true" ]; then
+          COVERAGE_ARGS="$COVERAGE_ARGS --cov-report=xml"
+        fi
+        echo "Running: uv run --extra dev pytest $COVERAGE_ARGS"
+        uv run --extra dev pytest $COVERAGE_ARGS
+
+    - name: Sanitize ref name for artifact usage
+      id: sanitize
+      shell: bash
+      run: |
+        SAFE_REF_NAME="${GITHUB_REF_NAME//\//-}"
+        echo "safe_ref_name=$SAFE_REF_NAME" >> "$GITHUB_OUTPUT"
+
+    - name: Upload coverage HTML Report
+      if: ${{ inputs.upload-coverage-html == 'true' }}
+      uses: actions/upload-artifact@v5
+      with:
+        name: coverage-html-${{ steps.sanitize.outputs.safe_ref_name }}
+        path: ${{ inputs.working-directory }}/htmlcov/
+        retention-days: 7
+
+    - name: Upload coverage XML Report
+      if: ${{ inputs.coverage-xml == 'true' }}
+      uses: actions/upload-artifact@v5
+      with:
+        name: coverage-xml-${{ steps.sanitize.outputs.safe_ref_name }}
+        path: ${{ inputs.working-directory }}/coverage.xml
+        retention-days: 7
+
+    - name: Run bandit (security static analysis)
+      if: ${{ inputs.run-bandit == 'true' }}
+      shell: bash
+      run: |
+        cd "${{ inputs.working-directory }}"
+        BANDIT_CONFIG_PATH="${{ inputs.bandit-config-path }}"
+        BANDIT_ARGS=(-q -o bandit_report.txt -f txt -r .)
+        if [ -n "$BANDIT_CONFIG_PATH" ]; then
+          if [ -f "$BANDIT_CONFIG_PATH" ]; then
+            BANDIT_ARGS+=(-c "$BANDIT_CONFIG_PATH")
+          else
+            echo "Bandit config not found at $BANDIT_CONFIG_PATH; running with defaults."
+          fi
+        fi
+        uv run --extra dev bandit "${BANDIT_ARGS[@]}" || true
+
+    - name: Upload bandit report
+      if: ${{ inputs.run-bandit == 'true' }}
+      uses: actions/upload-artifact@v5
+      with:
+        name: bandit-report-${{ steps.sanitize.outputs.safe_ref_name }}
+        path: ${{ inputs.working-directory }}/bandit_report.txt
+        retention-days: 7
+
+    - name: Clean artifacts (local workspace)
+      if: always()
+      shell: bash
+      run: |
+        cd "${{ inputs.working-directory }}"
+        rm -rf htmlcov/ coverage.xml bandit_report.txt

@@ -1,0 +1,1 @@
+window.__OPS_PORTAL_CONFIG__ = window.__OPS_PORTAL_CONFIG__ || {};

@@ -1,0 +1,63 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ops-portal.fullname" . }}-backend
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "ops-portal.name" . }}
+      app.kubernetes.io/component: backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8000
+          protocol: TCP
+    # Allow traffic from frontend pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "ops-portal.name" . }}
+              app.kubernetes.io/component: frontend
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # Allow DNS
+    - to: []
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow HTTPS to Azure APIs
+    - to: []
+      ports:
+        - port: 443
+          protocol: TCP
+    # Allow Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - port: 6379
+          protocol: TCP
+    # Allow PostgreSQL
+    - to: []
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Allow SMTP
+    - to: []
+      ports:
+        - port: 25
+          protocol: TCP
+{{- end }}

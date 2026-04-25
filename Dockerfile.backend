@@ -1,0 +1,66 @@
+# syntax=artifact.it.att.com/apm0014313-dkr-attcc-group/docker/dockerfile:1.7
+
+# ============================================================
+# Azure Ops Portal — Backend Dockerfile
+# ============================================================
+
+ARG BASE_IMAGE_TAG=3.13
+FROM artifact.it.att.com/apm0014313-dkr-attcc-group/attcc-python-base:${BASE_IMAGE_TAG}
+
+ARG IMAGE_NAME="ops-portal-backend"
+ARG IMAGE_VERSION="dev"
+ARG VCS_REF="unknown"
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+
+LABEL org.opencontainers.image.title="$IMAGE_NAME" \
+      org.opencontainers.image.version="$IMAGE_VERSION" \
+      org.opencontainers.image.revision="$VCS_REF"
+
+WORKDIR /app
+
+# IMPORTANT:
+# The shared base image defaults uv to the system interpreter.
+# This service ships as a self-contained app venv under /app/.venv.
+ENV UV_SYSTEM_PYTHON=0 \
+    UV_NATIVE_TLS=true \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    VIRTUAL_ENV=/app/.venv \
+    PATH=/app/.venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    ENVIRONMENT=production
+
+COPY . .
+
+RUN --mount=type=secret,id=jfrog_user \
+    --mount=type=secret,id=jfrog_token \
+    set -eux; \
+    export JFROG_USER="$(cat /run/secrets/jfrog_user)"; \
+    export JFROG_TOKEN="$(cat /run/secrets/jfrog_token)"; \
+    echo "JFrog user detected? ${JFROG_USER:+yes}"; \
+    export PIP_INDEX_URL="https://${JFROG_USER}:${JFROG_TOKEN}@artifact.it.att.com/artifactory/api/pypi/apm0014313-pyp-group/simple"; \
+    export UV_DEFAULT_INDEX="$PIP_INDEX_URL"; \
+    export UV_INDEX_URL="$PIP_INDEX_URL"; \
+    export UV_INDEX_PRIVATE_ARTIFACTORY_USERNAME="$JFROG_USER"; \
+    export UV_INDEX_PRIVATE_ARTIFACTORY_PASSWORD="$JFROG_TOKEN"; \
+    export UV_INDEX_USERNAME="$JFROG_USER"; \
+    export UV_INDEX_PASSWORD="$JFROG_TOKEN"; \
+    if [ -n "$HTTP_PROXY" ]; then export HTTP_PROXY="$HTTP_PROXY"; fi; \
+    if [ -n "$HTTPS_PROXY" ]; then export HTTPS_PROXY="$HTTPS_PROXY"; fi; \
+    rm -rf /app/.venv; \
+    uv sync --frozen --no-dev --project /app/backend; \
+    rm -rf /root/.cache/uv; \
+    chown -R appuser:appuser /app
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/healthz || exit 1
+
+USER appuser
+
+WORKDIR /app/backend
+
+EXPOSE 8000
+
+ENTRYPOINT ["uvicorn"]
+CMD ["app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]

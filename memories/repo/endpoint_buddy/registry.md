@@ -1,0 +1,22 @@
+# Compliance Page Endpoint Registry
+
+- GET /compliance page on frontend dev server
+- GET /healthz
+- GET /api/v1/compliance/dashboard
+- GET /api/v1/compliance/synapse/drift/summary
+- GET /api/v1/compliance/synapse/drift
+- GET /api/v1/compliance/synapse/workspaces
+- GET /api/v1/compliance/synapse/checksum-comparison
+- GET /api/v1/compliance/checksum/runs
+- GET /api/v1/compliance/checksum/metrics
+- GET /api/v1/compliance/checksum/results
+- GET /api/v1/compliance/aks/namespaces
+- GET /api/v1/aks/clusters/cached
+- GET /api/v1/checksum-schedules/
+- GET /api/v1/checksum-schedules/{schedule_id}
+- GET /api/v1/compliance/export/excel
+- GET /api/v1/compliance/checksum/download/{run_id}
+- POST /api/v1/compliance/scores/calculate
+- POST /api/v1/compliance/checksum/verify
+- POST /api/v1/compliance/aks/checksum/verify
+- POST /api/v1/compliance/synapse/collect-checksums

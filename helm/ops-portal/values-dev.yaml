@@ -1,0 +1,57 @@
+# Environment-specific overrides for dev
+global:
+  environment: production
+  imageRegistry: "artifact.it.att.com:22609/apm0014313-dkr-attcc-stage/com.att.attcc"
+
+backend:
+  replicaCount: 1
+  azureKeyVaultSecrets:
+    enabled: true
+    vaultName: "attcc-eastus2-stge-kv"
+  secretProvider:
+    enabled: false
+  autoscaling:
+    enabled: false
+  env: {}
+  resources:
+    requests:
+      cpu: 2
+      memory: 4Gi
+    limits:
+      cpu: 4
+      memory: 8Gi
+
+frontend:
+  replicaCount: 1
+  azureKeyVaultSecrets:
+    enabled: true
+  env:
+    VITE_REDIRECT_URI: "https://attccopsportal.stage.att.com"
+    VITE_API_BASE_URL: "/api/v1"
+  autoscaling:
+    enabled: false
+
+ingress:
+  hosts:
+    - host: attccopsportal.stage.att.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+        - path: /api
+          pathType: Prefix
+          service: backend
+  azureKeyVaultCertificates:
+    enabled: false
+    vaultName: "attcc-eastus2-stge-kv"
+    items:
+      - akvCertificateName: opsportal-ingress-tls
+        kubernetesSecretName: ops-portal-tls
+        #chainOrder: ensureserverfirst
+  tls:
+    - secretName: ops-portal-tls
+      hosts:
+        - attccopsportal.stage.att.com
+
+networkPolicy:
+  enabled: false
