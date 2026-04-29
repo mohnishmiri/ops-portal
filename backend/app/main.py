@@ -181,6 +181,17 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize database
     await init_db()
 
+    # Seed canonical module/page resources + default role permissions
+    try:
+        from app.core.database import get_db_session
+        from app.core.resource_registry import seed_permissions, seed_resources
+
+        async for db in get_db_session():
+            await seed_resources(db)
+            await seed_permissions(db)
+    except Exception as exc:
+        logger.warning("resource_seed_failed", error=str(exc)[:300])
+
     # When running tests, skip non-essential background startup tasks
     skip_background = settings.ENVIRONMENT == "test"
 

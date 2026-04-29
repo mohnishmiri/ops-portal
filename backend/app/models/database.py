@@ -46,8 +46,16 @@ class Resource(Base):
     resource_type = Column(String(50), nullable=False)  # 'module' or 'page'
     resource_name = Column(String(255), nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
+    # Hierarchy: a page's parent_id points to its module resource
+    parent_id = Column(Integer, ForeignKey("resources.id"), nullable=True, index=True)
+    # Frontend route path this resource maps to (e.g. '/aks', '/env-costs')
+    route_path = Column(String(500), nullable=True)
+    # System resources are seeded on startup and cannot be deleted via API
+    is_system = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    permissions = relationship("Permission", back_populates="resource", cascade="all, delete-orphan")
 
 
 class Permission(Base):
@@ -63,7 +71,7 @@ class Permission(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    resource = relationship("Resource")
+    resource = relationship("Resource", back_populates="permissions")
 
 
 # =============================================================================

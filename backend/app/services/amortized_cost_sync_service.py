@@ -46,6 +46,11 @@ logger = structlog.get_logger(__name__)
 STALE_HOURS = 4
 RUNNING_SYNC_TIMEOUT_MINUTES = 180
 
+# Azure Cost Management can retroactively adjust costs for recent days.
+# Re-sync the last N days on every run to pick up those corrections,
+# while leaving stable historical data untouched.
+CORRECTION_WINDOW_DAYS = 7
+
 
 class AmortizedCostSyncService:
     """Syncs amortized cost data from Azure Cost Management into PostgreSQL."""
@@ -119,82 +124,305 @@ class AmortizedCostSyncService:
                 triggered_by=triggered_by,
             )
 
-    async def _load_rows_from_azure_api(self, months: int) -> list[dict]:
-        """Load amortized cost rows from the Azure Cost Management Query API."""
-        monitored_subscription_ids = await get_monitored_subscription_ids()
-        if not monitored_subscription_ids:
-            logger.info("amortized_cost_sync_skipped_no_monitored_subscriptions")
-            return []
-
+    async def _fetch_subscription_metadata(
+        self, monitored_ids: list[str]
+    ) -> dict[str, dict]:
+        """Fetch subscription display name and environment from AdminSubscription table."""
         result = await self._db.execute(
             select(
                 AdminSubscription.subscription_id,
                 AdminSubscription.subscription_name,
                 AdminSubscription.environment,
-            ).where(
-                AdminSubscription.subscription_id.in_(monitored_subscription_ids),
-            )
+            ).where(AdminSubscription.subscription_id.in_(monitored_ids))
         )
-        subscription_metadata = {
-            subscription_id: {
-                "subscription_name": subscription_name,
-                "environment": environment,
-            }
-            for subscription_id, subscription_name, environment in result.all()
+        return {
+            sub_id: {"subscription_name": name, "environment": env}
+            for sub_id, name, env in result.all()
         }
 
-        end_date = date.today()
-        start_date = self._get_rolling_start_date(end_date, months)
+    async def _compute_fetch_ranges(
+        self,
+        monitored_ids: list[str],
+        full_start_date: date,
+        end_date: date,
+    ) -> dict[str, list[tuple[date, date]]]:
+        """Return the per-subscription list of (start, end) date ranges to fetch.
 
-        normalized_rows: list[dict] = []
-        query_failures: list[str] = []
+        Each range is an independent fetch+delete unit:
+          • One range per MISSING calendar month.
+          • Extra ranges for any multi-day holes WITHIN months that have
+            partial data — e.g. Jan 1-29 present + Feb 14-28 present means
+            Jan 30 - Feb 13 is detected and added as a gap range.
+          • The CORRECTION WINDOW (last CORRECTION_WINDOW_DAYS days) is
+            always included so retroactive Azure adjustments are captured.
+        """
+        correction_cutoff = end_date - timedelta(days=CORRECTION_WINDOW_DAYS)
 
-        for subscription_id in monitored_subscription_ids:
-            scope = f"/subscriptions/{subscription_id}"
+        # Calendar months to check for gaps (first of each month < correction_cutoff)
+        all_months_in_range: list[str] = []
+        cur = full_start_date.replace(day=1)
+        while cur < correction_cutoff:
+            all_months_in_range.append(cur.strftime("%Y-%m"))
+            month = cur.month + 1
+            year = cur.year
+            if month > 12:
+                month = 1
+                year += 1
+            cur = cur.replace(year=year, month=month)
+
+        # Which months already have data per subscription? (month-level check)
+        months_result = await self._db.execute(
+            select(
+                AmortizedCostRecord.subscription_id,
+                func.substr(AmortizedCostRecord.cost_date, 1, 7).label("month_year"),
+            )
+            .where(
+                AmortizedCostRecord.subscription_id.in_(monitored_ids),
+                AmortizedCostRecord.cost_date >= full_start_date.isoformat(),
+                AmortizedCostRecord.cost_date < correction_cutoff.isoformat(),
+            )
+            .distinct()
+        )
+        months_per_sub: dict[str, set[str]] = {}
+        for row in months_result:
+            months_per_sub.setdefault(row.subscription_id, set()).add(row.month_year)
+
+        # All distinct dates per subscription — needed to detect intra-month gaps
+        # where BOTH flanking months have some data but there is a multi-day hole
+        # at or near the month boundary (e.g. Jan 30 - Feb 13 missing while Jan
+        # 1-29 and Feb 14-28 exist).  The result set is small (≤365 rows per sub).
+        dates_result = await self._db.execute(
+            select(
+                AmortizedCostRecord.subscription_id,
+                AmortizedCostRecord.cost_date,
+            )
+            .where(
+                AmortizedCostRecord.subscription_id.in_(monitored_ids),
+                AmortizedCostRecord.cost_date >= full_start_date.isoformat(),
+                AmortizedCostRecord.cost_date < correction_cutoff.isoformat(),
+            )
+            .distinct()
+            .order_by(AmortizedCostRecord.subscription_id, AmortizedCostRecord.cost_date)
+        )
+        dates_per_sub: dict[str, list[date]] = {}
+        for row in dates_result:
             try:
-                metadata = subscription_metadata.get(subscription_id, {})
-                subscription_name = metadata.get("subscription_name") or subscription_id
-                environment = metadata.get("environment")
+                d = date.fromisoformat(str(row.cost_date))
+            except (ValueError, TypeError):
+                continue
+            dates_per_sub.setdefault(row.subscription_id, []).append(d)
 
-                rows = await self._cost_service.query_amortized_cost_rows(scope, start_date, end_date)
-                for row in rows:
-                    row["subscription_name"] = str(row.get("subscription_name") or subscription_name).strip()
-                    row["subscription_id"] = str(row.get("subscription_id") or subscription_id).strip()
-                    row["resource_name"] = self._normalize_resource_name(
-                        row.get("resource_name"),
-                        meter_name=row.get("meter_name"),
-                        meter_category=row.get("meter_category"),
-                        resource_group=row.get("resource_group"),
-                    )
-                    row["env_label"] = self._derive_env_label(
-                        {
-                            "env_label": row.get("env_label"),
-                            "environment": environment,
-                            "subscription_name": subscription_name,
-                            "subscription_id": subscription_id,
-                        }
-                    )
-                    normalized_rows.append(row)
+        per_sub_ranges: dict[str, list[tuple[date, date]]] = {}
+        for sub_id in monitored_ids:
+            existing_months = months_per_sub.get(sub_id, set())
+            missing_months = sorted(m for m in all_months_in_range if m not in existing_months)
+            missing_months_set = set(missing_months)
 
+            ranges: list[tuple[date, date]] = []
+
+            # ── 1. Missing complete months ─────────────────────────────
+            for month_str in missing_months:
+                year, mon = int(month_str[:4]), int(month_str[5:7])
+                month_first = date(year, mon, 1)
+                range_start = max(full_start_date, month_first)
+                if mon == 12:
+                    month_last = date(year, 12, 31)
+                else:
+                    month_last = date(year, mon + 1, 1) - timedelta(days=1)
+                range_end = min(month_last, correction_cutoff - timedelta(days=1))
+                ranges.append((range_start, range_end))
+
+            # ── 2. Intra-range gap detection ───────────────────────────
+            # Scan consecutive existing dates; any gap > 1 day is a hole
+            # that must be re-fetched.  Holes that fall inside a month
+            # already queued as "missing" are skipped (already covered).
+            existing_dates = dates_per_sub.get(sub_id, [])
+
+            def _add_gap(gap_s: date, gap_e: date) -> None:
+                """Split [gap_s, gap_e] at month boundaries; add segments not
+                already covered by a full missing-month range."""
+                seg = gap_s
+                while seg <= gap_e:
+                    sy, sm = seg.year, seg.month
+                    seg_month = f"{sy:04d}-{sm:02d}"
+                    seg_last = (
+                        date(sy, 12, 31)
+                        if sm == 12
+                        else date(sy, sm + 1, 1) - timedelta(days=1)
+                    )
+                    seg_end = min(seg_last, gap_e)
+                    if seg_month not in missing_months_set:
+                        ranges.append((seg, seg_end))
+                    seg = date(sy + 1, 1, 1) if sm == 12 else date(sy, sm + 1, 1)
+
+            # 2a. Gaps between consecutive existing dates
+            for i in range(len(existing_dates) - 1):
+                prev_d = existing_dates[i]
+                next_d = existing_dates[i + 1]
+                if (next_d - prev_d).days > 1:
+                    _add_gap(prev_d + timedelta(days=1), next_d - timedelta(days=1))
+
+            # 2b. Trailing gap — from the last existing date to the correction
+            # window start.  Covers the case where a partial month's data ends
+            # before the end of that month and no later month is flagged missing.
+            if existing_dates:
+                last_d = existing_dates[-1]
+                trail_end = correction_cutoff - timedelta(days=1)
+                if last_d + timedelta(days=1) <= trail_end:
+                    _add_gap(last_d + timedelta(days=1), trail_end)
+
+            # ── 3. Correction window (always) ──────────────────────────
+            ranges.append((correction_cutoff, end_date))
+
+            per_sub_ranges[sub_id] = ranges
+            logger.debug(
+                "amortized_sync_fetch_ranges",
+                subscription_id=sub_id,
+                missing_months=missing_months,
+                range_count=len(ranges),
+                has_gap=bool(missing_months) or len(ranges) > 1,
+            )
+        return per_sub_ranges
+
+    async def _delete_fetch_ranges(
+        self,
+        per_sub_ranges: dict[str, list[tuple[date, date]]],
+    ) -> None:
+        """Delete DB records for each specific (start, end) range being re-fetched.
+
+        Only the exact ranges that were successfully fetched are deleted —
+        months outside those ranges are never touched.
+        """
+        for sub_id, ranges in per_sub_ranges.items():
+            for range_start, range_end in ranges:
+                await self._db.execute(
+                    delete(AmortizedCostRecord).where(
+                        AmortizedCostRecord.subscription_id == sub_id,
+                        AmortizedCostRecord.cost_date >= range_start.isoformat(),
+                        AmortizedCostRecord.cost_date <= range_end.isoformat(),
+                    )
+                )
+        await self._db.commit()
+
+    @staticmethod
+    def _split_into_monthly_chunks(start: date, end: date) -> list[tuple[date, date]]:
+        """Split [start, end] into monthly sub-ranges for resilient per-month fetching.
+
+        Fetching one month at a time means a 429 rate-limit on one month
+        does not block all subsequent months from being synced.
+        """
+        chunks: list[tuple[date, date]] = []
+        cur = start
+        while cur <= end:
+            year, month = cur.year, cur.month
+            if month == 12:
+                last_day = date(year, 12, 31)
+                next_start = date(year + 1, 1, 1)
+            else:
+                last_day = date(year, month + 1, 1) - timedelta(days=1)
+                next_start = date(year, month + 1, 1)
+            chunk_end = min(last_day, end)
+            chunks.append((cur, chunk_end))
+            if next_start > end:
+                break
+            cur = next_start
+        return chunks
+
+    async def _load_rows_incremental(
+        self,
+        sub_metadata: dict[str, dict],
+        per_sub_ranges: dict[str, list[tuple[date, date]]],
+        end_date: date,
+    ) -> tuple[list[dict], list[str], dict[str, list[tuple[date, date]]]]:
+        """Fetch cost rows from Azure for each subscription's specific date ranges.
+
+        Each range is fetched independently — a 429 on one range (e.g. a large
+        historical backfill) does not block other ranges.  A subscription is
+        added to failed_sub_ids only when ALL its ranges fail.
+
+        Returns (normalized_rows, failed_sub_ids, successful_ranges).
+        successful_ranges contains only the ranges that were actually fetched —
+        these are the ranges passed to _delete_fetch_ranges so only successfully
+        refreshed data is ever deleted from the DB.
+        """
+        normalized_rows: list[dict] = []
+        failed_sub_ids: list[str] = []
+        successful_ranges: dict[str, list[tuple[date, date]]] = {}
+
+        for sub_id, ranges in per_sub_ranges.items():
+            scope = f"/subscriptions/{sub_id}"
+            metadata = sub_metadata.get(sub_id, {})
+            sub_name = metadata.get("subscription_name") or sub_id
+            environment = metadata.get("environment")
+
+            sub_rows: list[dict] = []
+            sub_successful_ranges: list[tuple[date, date]] = []
+
+            for range_start, range_end in ranges:
+                logger.info(
+                    "amortized_cost_subscription_fetching",
+                    subscription_id=sub_id,
+                    fetch_start=range_start.isoformat(),
+                    end_date=range_end.isoformat(),
+                )
+                try:
+                    rows = await self._cost_service.query_amortized_cost_rows(
+                        scope, range_start, range_end
+                    )
+                    for row in rows:
+                        row["subscription_name"] = str(row.get("subscription_name") or sub_name).strip()
+                        row["subscription_id"] = str(row.get("subscription_id") or sub_id).strip()
+                        row["resource_name"] = self._normalize_resource_name(
+                            row.get("resource_name"),
+                            meter_name=row.get("meter_name"),
+                            meter_category=row.get("meter_category"),
+                            resource_group=row.get("resource_group"),
+                        )
+                        row["env_label"] = self._derive_env_label(
+                            {
+                                "env_label": row.get("env_label"),
+                                "environment": environment,
+                                "subscription_name": sub_name,
+                                "subscription_id": sub_id,
+                            }
+                        )
+                        sub_rows.append(row)
+                    sub_successful_ranges.append((range_start, range_end))
+                    logger.info(
+                        "amortized_cost_chunk_loaded",
+                        subscription_id=sub_id,
+                        chunk_start=range_start.isoformat(),
+                        chunk_end=range_end.isoformat(),
+                        rows_fetched=len(rows),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "amortized_cost_chunk_failed",
+                        subscription_id=sub_id,
+                        chunk_start=range_start.isoformat(),
+                        chunk_end=range_end.isoformat(),
+                        error=str(exc)[:300],
+                    )
+
+            if sub_successful_ranges:
+                normalized_rows.extend(sub_rows)
+                successful_ranges[sub_id] = sub_successful_ranges
                 logger.info(
                     "amortized_cost_subscription_loaded",
-                    subscription_id=subscription_id,
-                    normalized_count=len(normalized_rows),
+                    subscription_id=sub_id,
+                    rows_fetched=len(sub_rows),
+                    successful_ranges=len(sub_successful_ranges),
+                    failed_ranges=len(ranges) - len(sub_successful_ranges),
                 )
-            except Exception as exc:
-                query_failures.append(f"{subscription_id}: {str(exc)[:200]}")
+            else:
+                failed_sub_ids.append(sub_id)
                 logger.error(
                     "amortized_cost_subscription_load_failed",
-                    subscription_id=subscription_id,
-                    error=str(exc)[:300],
+                    subscription_id=sub_id,
+                    error=f"all {len(ranges)} ranges failed",
                 )
 
-        if not normalized_rows and query_failures:
-            raise RuntimeError(
-                "Azure amortized sync failed for all monitored subscriptions: " + " | ".join(query_failures[:3])
-            )
-
-        return normalized_rows
+        return normalized_rows, failed_sub_ids, successful_ranges
 
     @staticmethod
     def _normalize_resource_name(
@@ -236,17 +464,19 @@ class AmortizedCostSyncService:
         target_day = min(end_date.day, monthrange(target_year, target_month)[1])
         return date(target_year, target_month, target_day)
 
-    # ── Full sync (azure api → DB) ───────────────────────────────────
+    # ── Full sync (azure api → DB, incremental) ──────────────────────
 
     async def full_sync(
         self,
         months: int = 2,
         triggered_by: str = "manual",
     ) -> dict:
-        """Download Azure Cost API data, normalize it, and bulk-insert into PostgreSQL.
+        """Download Azure Cost API data, normalize it, and append into PostgreSQL.
 
-        The sync is idempotent — existing records are deleted before a
-        fresh insert so there is no risk of duplicates.
+        Incremental — only fetches date ranges missing from the DB, plus
+        the last CORRECTION_WINDOW_DAYS days per subscription to capture
+        any retroactive Azure cost adjustments.  Historical records are
+        never deleted, so every sync is safe to run at any frequency.
         """
         sync_record = AmortizedCostSyncStatus(
             sync_type="full",
@@ -259,11 +489,58 @@ class AmortizedCostSyncService:
         started_at = sync_record.started_at or datetime.utcnow()
 
         try:
-            rows = await self._load_rows_from_azure_api(months)
+            end_date = date.today()
+            full_start_date = self._get_rolling_start_date(end_date, months)
 
-            # Always replace the current amortized cache so the dashboard
-            # cannot continue serving stale rows after an empty sync.
-            await self._db.execute(delete(AmortizedCostRecord))
+            monitored_ids = await get_monitored_subscription_ids()
+            if not monitored_ids:
+                logger.info("amortized_cost_sync_skipped_no_monitored_subscriptions")
+                sync_record.status = "completed"
+                sync_record.completed_at = datetime.utcnow()
+                sync_record.months_synced = months
+                sync_record.rows_synced = 0
+                sync_record.total_cost = 0.0
+                await self._db.commit()
+                await cache_manager.invalidate("pagecache:amortized:*")
+                duration_seconds = max(0.0, (sync_record.completed_at - started_at).total_seconds())
+                return {
+                    "status": "completed",
+                    "months_synced": months,
+                    "rows_synced": 0,
+                    "total_cost": 0.0,
+                    "started_at": started_at.isoformat(),
+                    "completed_at": sync_record.completed_at.isoformat(),
+                    "duration_seconds": round(duration_seconds, 2),
+                    "note": "no_monitored_subscriptions",
+                }
+
+            # Step 1: Subscription metadata (names, environments)
+            sub_metadata = await self._fetch_subscription_metadata(monitored_ids)
+
+            # Step 2: Compute specific fetch ranges per subscription.
+            # Each range is either a missing calendar month or the correction
+            # window — existing complete months are never included.
+            per_sub_ranges = await self._compute_fetch_ranges(
+                monitored_ids, full_start_date, end_date
+            )
+
+            # Step 3: Fetch from Azure FIRST — before any deletes.
+            # Each range is fetched independently; a 429 on one range does not
+            # prevent other ranges from being synced or existing data from being
+            # preserved.
+            rows, failed_sub_ids, successful_ranges = await self._load_rows_incremental(
+                sub_metadata, per_sub_ranges, end_date
+            )
+
+            if not rows and failed_sub_ids:
+                raise RuntimeError(
+                    "Azure amortized sync failed for all monitored subscriptions: "
+                    + ", ".join(failed_sub_ids[:3])
+                )
+
+            # Step 4: Delete ONLY the ranges that were successfully re-fetched.
+            # Failed ranges keep their existing DB records — no data is lost.
+            await self._delete_fetch_ranges(successful_ranges)
 
             if not rows:
                 sync_record.status = "completed"
@@ -273,10 +550,7 @@ class AmortizedCostSyncService:
                 sync_record.total_cost = 0.0
                 await self._db.commit()
                 await cache_manager.invalidate("pagecache:amortized:*")
-                duration_seconds = max(
-                    0.0,
-                    (sync_record.completed_at - started_at).total_seconds(),
-                )
+                duration_seconds = max(0.0, (sync_record.completed_at - started_at).total_seconds())
                 return {
                     "status": "completed",
                     "months_synced": months,
@@ -287,6 +561,7 @@ class AmortizedCostSyncService:
                     "duration_seconds": round(duration_seconds, 2),
                 }
 
+            # Step 5: Insert new rows in batches of 5 000 to limit memory pressure
             now = datetime.utcnow()
             batch: list[AmortizedCostRecord] = []
             total_cost = 0.0
@@ -316,7 +591,6 @@ class AmortizedCostSyncService:
                 batch.append(rec)
                 total_cost += r.get("cost", 0.0)
 
-                # Flush in batches of 5 000 to limit memory pressure
                 if len(batch) >= 5000:
                     self._db.add_all(batch)
                     await self._db.flush()
@@ -327,17 +601,14 @@ class AmortizedCostSyncService:
 
             await self._db.commit()
 
-            # ── Record success ────────────────────────────────────────
+            # Step 6: Record success
             sync_record.status = "completed"
             sync_record.completed_at = datetime.utcnow()
             sync_record.months_synced = months
             sync_record.rows_synced = len(rows)
             sync_record.total_cost = round(total_cost, 2)
             await self._db.commit()
-            duration_seconds = max(
-                0.0,
-                (sync_record.completed_at - started_at).total_seconds(),
-            )
+            duration_seconds = max(0.0, (sync_record.completed_at - started_at).total_seconds())
 
             logger.info(
                 "amortized_cost_sync_completed",
@@ -345,11 +616,12 @@ class AmortizedCostSyncService:
                 rows=len(rows),
                 total_cost=round(total_cost, 2),
                 triggered_by=triggered_by,
+                partial_failures=len(failed_sub_ids),
             )
 
             await cache_manager.invalidate("pagecache:amortized:*")
 
-            # ── Aggregate into time-series summaries ───────────────────
+            # Step 7: Rebuild time-series aggregation summaries
             try:
                 await self._aggregate_cost_summaries()
             except Exception as agg_exc:
@@ -357,7 +629,6 @@ class AmortizedCostSyncService:
                     "amortized_cost_aggregation_failed",
                     error=str(agg_exc)[:500],
                 )
-                # Aggregation failure is non-fatal; sync already succeeded
 
             return {
                 "status": "completed",
@@ -367,6 +638,7 @@ class AmortizedCostSyncService:
                 "started_at": started_at.isoformat(),
                 "completed_at": sync_record.completed_at.isoformat(),
                 "duration_seconds": round(duration_seconds, 2),
+                "partial_failures": len(failed_sub_ids),
             }
 
         except Exception as exc:
@@ -374,10 +646,7 @@ class AmortizedCostSyncService:
             sync_record.completed_at = datetime.utcnow()
             sync_record.error_message = str(exc)[:2000]
             await self._db.commit()
-            duration_seconds = max(
-                0.0,
-                (sync_record.completed_at - started_at).total_seconds(),
-            )
+            duration_seconds = max(0.0, (sync_record.completed_at - started_at).total_seconds())
             logger.error(
                 "amortized_cost_sync_failed",
                 error=str(exc)[:500],
@@ -402,13 +671,13 @@ class AmortizedCostSyncService:
                 func.sum(AmortizedCostRecord.cost_amount).label("total_cost"),
                 func.sum(
                     case(
-                        (AmortizedCostRecord.env_label == "PROD", AmortizedCostRecord.cost_amount),
+                        (AmortizedCostRecord.env_label == "Prod", AmortizedCostRecord.cost_amount),
                         else_=0.0,
                     )
                 ).label("prod_cost"),
                 func.sum(
                     case(
-                        (AmortizedCostRecord.env_label != "PROD", AmortizedCostRecord.cost_amount),
+                        (AmortizedCostRecord.env_label == "Non-Prod", AmortizedCostRecord.cost_amount),
                         else_=0.0,
                     )
                 ).label("nonprod_cost"),
@@ -436,59 +705,38 @@ class AmortizedCostSyncService:
             self._db.add_all(daily_summaries)
 
         # ── Weekly Summary ─────────────────────────────────────────
-        # Aggregate daily summaries into weeks (ISO week format)
-        weekly_result = await self._db.execute(
+        # Load all daily summaries in one query, aggregate in Python.
+        # (The previous approach issued 3 DB queries per day — O(n) — which
+        # is extremely slow with 12 months of data.)
+        all_daily_result = await self._db.execute(
             select(
                 AmortizedCostDailySummary.cost_date,
-            )
-            .distinct()
-            .order_by(AmortizedCostDailySummary.cost_date)
+                AmortizedCostDailySummary.total_cost,
+                AmortizedCostDailySummary.production_cost,
+                AmortizedCostDailySummary.non_production_cost,
+            ).order_by(AmortizedCostDailySummary.cost_date)
         )
-        daily_dates = [str(row[0]) for row in weekly_result.all()]
+        all_daily_rows = all_daily_result.all()
 
         weeks = defaultdict(
             lambda: {
                 "total_cost": 0.0,
                 "production_cost": 0.0,
                 "non_production_cost": 0.0,
-                "service_count": set(),
-                "resource_count": set(),
             }
         )
 
-        for daily_date in daily_dates:
-            # Calculate ISO week start (Monday)
+        for cost_date, total, prod, nonprod in all_daily_rows:
             try:
                 from datetime import datetime as dt
 
-                d = dt.strptime(daily_date, "%Y-%m-%d")
+                d = dt.strptime(str(cost_date), "%Y-%m-%d")
                 week_start = (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
-                weeks[week_start]["total_cost"] += (
-                    await self._db.scalar(
-                        select(func.sum(AmortizedCostDailySummary.total_cost)).where(
-                            AmortizedCostDailySummary.cost_date == daily_date
-                        )
-                    )
-                    or 0.0
-                )
-                weeks[week_start]["production_cost"] += (
-                    await self._db.scalar(
-                        select(func.sum(AmortizedCostDailySummary.production_cost)).where(
-                            AmortizedCostDailySummary.cost_date == daily_date
-                        )
-                    )
-                    or 0.0
-                )
-                weeks[week_start]["non_production_cost"] += (
-                    await self._db.scalar(
-                        select(func.sum(AmortizedCostDailySummary.non_production_cost)).where(
-                            AmortizedCostDailySummary.cost_date == daily_date
-                        )
-                    )
-                    or 0.0
-                )
+                weeks[week_start]["total_cost"] += float(total or 0.0)
+                weeks[week_start]["production_cost"] += float(prod or 0.0)
+                weeks[week_start]["non_production_cost"] += float(nonprod or 0.0)
             except Exception as e:
-                logger.warning("week_start_calculation_failed", date=daily_date, error=str(e))
+                logger.warning("week_start_calculation_failed", date=cost_date, error=str(e))
 
         await self._db.execute(delete(AmortizedCostWeeklySummary))
         if weeks:
@@ -507,15 +755,20 @@ class AmortizedCostSyncService:
             self._db.add_all(weekly_summaries)
 
         # ── Monthly Summary ────────────────────────────────────────
-        monthly_result = await self._db.execute(
-            select(
-                func.substr(AmortizedCostDailySummary.cost_date, 1, 7).label("month_year"),
-                func.sum(AmortizedCostDailySummary.total_cost).label("total_cost"),
-                func.sum(AmortizedCostDailySummary.production_cost).label("prod_cost"),
-                func.sum(AmortizedCostDailySummary.non_production_cost).label("nonprod_cost"),
-            ).group_by(func.substr(AmortizedCostDailySummary.cost_date, 1, 7))
-        )
-        monthly_rows = monthly_result.all()
+        # Build from the in-memory daily data to avoid a PostgreSQL GROUP BY
+        # parameter-binding mismatch that causes "column must appear in GROUP BY".
+        months_agg: dict[str, dict[str, float]] = {}
+        for cost_date, total, prod, nonprod in all_daily_rows:
+            month_key = str(cost_date)[:7]
+            if month_key not in months_agg:
+                months_agg[month_key] = {"total": 0.0, "prod": 0.0, "nonprod": 0.0}
+            months_agg[month_key]["total"] += float(total or 0.0)
+            months_agg[month_key]["prod"] += float(prod or 0.0)
+            months_agg[month_key]["nonprod"] += float(nonprod or 0.0)
+        monthly_rows = [
+            (month_key, d["total"], d["prod"], d["nonprod"])
+            for month_key, d in sorted(months_agg.items())
+        ]
 
         await self._db.execute(delete(AmortizedCostMonthlySummary))
         if monthly_rows:
@@ -706,6 +959,216 @@ class AmortizedCostSyncService:
             elapsed_ms=round((perf_counter() - started) * 1000, 2),
         )
         return payload
+
+    # ── Leadership dashboard builder ──────────────────────────────────
+
+    async def build_leadership_dashboard(self) -> "LeadershipDashboard | None":
+        """Build a leadership dashboard payload from amortized_cost_records in DB.
+
+        Returns None when the DB has no records for the recent trend window.
+        Used by LeadershipSyncService to produce consistent data from the
+        same underlying source as the amortized cost page.
+        """
+        from decimal import Decimal
+
+        from app.schemas.cost import (
+            CostByGroup,
+            CostDataPoint,
+            CostTrendDirection,
+            GroupByDimension,
+            KPIMetric,
+            LeadershipDashboard,
+            MonthlyCostPoint,
+        )
+
+        today = date.today()
+        month_start = today.replace(day=1)
+        trend_start = today - timedelta(days=15)
+        prev_month_end = month_start - timedelta(days=1)
+        prev_month_start = prev_month_end.replace(day=1)
+        six_months_ago = (month_start - timedelta(days=180)).replace(day=1)
+
+        # Return None if there are no records for the recent window
+        count_result = await self._db.execute(
+            select(func.count(AmortizedCostRecord.id)).where(
+                AmortizedCostRecord.cost_date >= trend_start.isoformat()
+            )
+        )
+        if (count_result.scalar() or 0) == 0:
+            return None
+
+        # Current month total
+        current_scalar = await self._db.scalar(
+            select(func.sum(AmortizedCostRecord.cost_amount)).where(
+                AmortizedCostRecord.cost_date >= month_start.isoformat(),
+                AmortizedCostRecord.cost_date <= today.isoformat(),
+            )
+        )
+        current_total = Decimal(str(round(current_scalar or 0.0, 2)))
+
+        # Previous month total
+        prev_scalar = await self._db.scalar(
+            select(func.sum(AmortizedCostRecord.cost_amount)).where(
+                AmortizedCostRecord.cost_date >= prev_month_start.isoformat(),
+                AmortizedCostRecord.cost_date <= prev_month_end.isoformat(),
+            )
+        )
+        prev_total = Decimal(str(round(prev_scalar or 0.0, 2)))
+
+        change_pct = float((current_total - prev_total) / prev_total * 100) if prev_total else 0.0
+        trend = (
+            CostTrendDirection.UP
+            if change_pct > 5
+            else (CostTrendDirection.DOWN if change_pct < -5 else CostTrendDirection.STABLE)
+        )
+
+        monitored_ids = await get_monitored_subscription_ids()
+        kpis = [
+            KPIMetric(
+                name="Total Monthly Spend",
+                value=current_total,
+                unit="USD",
+                trend=trend,
+                change_pct=change_pct,
+                description="Current month Azure spend across all subscriptions",
+            ),
+            KPIMetric(
+                name="Month-over-Month Change",
+                value=round(change_pct, 1),
+                unit="%",
+                trend=trend,
+                change_pct=change_pct,
+                description="Cost change compared to previous month",
+            ),
+            KPIMetric(
+                name="Subscriptions Monitored",
+                value=len(monitored_ids),
+                unit="count",
+                trend=CostTrendDirection.STABLE,
+                change_pct=0.0,
+                description="Number of Azure subscriptions under cost monitoring",
+            ),
+        ]
+
+        # Daily cost trend (last 16 days, grouped by subscription)
+        daily_result = await self._db.execute(
+            select(
+                AmortizedCostRecord.cost_date,
+                AmortizedCostRecord.subscription_name,
+                AmortizedCostRecord.subscription_id,
+                func.sum(AmortizedCostRecord.cost_amount).label("total"),
+            )
+            .where(
+                AmortizedCostRecord.cost_date >= trend_start.isoformat(),
+                AmortizedCostRecord.cost_date <= today.isoformat(),
+            )
+            .group_by(
+                AmortizedCostRecord.cost_date,
+                AmortizedCostRecord.subscription_name,
+                AmortizedCostRecord.subscription_id,
+            )
+            .order_by(AmortizedCostRecord.cost_date)
+        )
+        cost_trend: list[CostDataPoint] = [
+            CostDataPoint(
+                date=date.fromisoformat(str(cost_date)),
+                cost=Decimal(str(round(float(total or 0), 2))),
+                currency="USD",
+                group_value=sub_name or sub_id or "unknown",
+                group_dimension=GroupByDimension.SUBSCRIPTION,
+            )
+            for cost_date, sub_name, sub_id, total in daily_result.all()
+        ]
+
+        # Top spenders by subscription (current month)
+        spender_result = await self._db.execute(
+            select(
+                AmortizedCostRecord.subscription_name,
+                AmortizedCostRecord.subscription_id,
+                func.sum(AmortizedCostRecord.cost_amount).label("total"),
+            )
+            .where(
+                AmortizedCostRecord.cost_date >= month_start.isoformat(),
+                AmortizedCostRecord.cost_date <= today.isoformat(),
+            )
+            .group_by(AmortizedCostRecord.subscription_name, AmortizedCostRecord.subscription_id)
+            .order_by(func.sum(AmortizedCostRecord.cost_amount).desc())
+            .limit(10)
+        )
+        spender_rows = spender_result.all()
+        grand_total = sum(float(r.total or 0) for r in spender_rows) or 1.0
+        top_spenders: list[CostByGroup] = [
+            CostByGroup(
+                group_dimension=GroupByDimension.SUBSCRIPTION,
+                group_value=r.subscription_name or r.subscription_id or "Unknown",
+                total_cost=Decimal(str(round(float(r.total or 0), 2))),
+                percentage_of_total=round(float(r.total or 0) / grand_total * 100, 2),
+                currency="USD",
+            )
+            for r in spender_rows
+        ]
+
+        # 6-month trend (monthly prod vs non-prod)
+        monthly_result = await self._db.execute(
+            select(
+                func.substr(AmortizedCostRecord.cost_date, 1, 7).label("month_year"),
+                AmortizedCostRecord.subscription_name,
+                AmortizedCostRecord.subscription_id,
+                AmortizedCostRecord.env_label,
+                func.sum(AmortizedCostRecord.cost_amount).label("total"),
+            )
+            .where(
+                AmortizedCostRecord.cost_date >= six_months_ago.isoformat(),
+                AmortizedCostRecord.cost_date <= today.isoformat(),
+            )
+            .group_by(
+                func.substr(AmortizedCostRecord.cost_date, 1, 7),
+                AmortizedCostRecord.subscription_name,
+                AmortizedCostRecord.subscription_id,
+                AmortizedCostRecord.env_label,
+            )
+            .order_by(func.substr(AmortizedCostRecord.cost_date, 1, 7))
+        )
+
+        monthly_buckets: dict[str, dict] = {}
+        for month_year, sub_name, sub_id, env_label, total in monthly_result.all():
+            mk = str(month_year)
+            if mk not in monthly_buckets:
+                monthly_buckets[mk] = {"prod": 0.0, "nonprod": 0.0, "subs": {}}
+            cost_val = float(total or 0.0)
+            label = sub_name or sub_id or "unknown"
+            monthly_buckets[mk]["subs"][label] = monthly_buckets[mk]["subs"].get(label, 0.0) + cost_val
+            if env_label == "Prod":
+                monthly_buckets[mk]["prod"] += cost_val
+            else:
+                monthly_buckets[mk]["nonprod"] += cost_val
+
+        six_month_trend: list[MonthlyCostPoint] = []
+        for mk in sorted(monthly_buckets.keys()):
+            parts = mk.split("-")
+            label = date(int(parts[0]), int(parts[1]), 1).strftime("%b %Y")
+            d = monthly_buckets[mk]
+            pr = Decimal(str(round(d["prod"], 2)))
+            np_cost = Decimal(str(round(d["nonprod"], 2)))
+            six_month_trend.append(
+                MonthlyCostPoint(
+                    month=mk,
+                    month_label=label,
+                    total_cost=pr + np_cost,
+                    prod_cost=pr,
+                    non_prod_cost=np_cost,
+                    subscription_breakdown={k: Decimal(str(round(v, 2))) for k, v in d["subs"].items()},
+                )
+            )
+
+        return LeadershipDashboard(
+            kpis=kpis,
+            cost_trend=cost_trend,
+            top_spenders=top_spenders,
+            six_month_trend=six_month_trend,
+            savings_opportunities=Decimal("0"),
+            report_date=datetime.utcnow(),
+        )
 
     # ── Sync-status endpoint helper ───────────────────────────────────
 

@@ -51,71 +51,70 @@ class _FakeSession:
 
 
 @pytest.mark.anyio
-async def test_full_sync_filters_rows_to_monitored_subscriptions(
+async def test_full_sync_inserts_only_targeted_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """full_sync inserts the rows returned by _load_rows_incremental."""
+    from datetime import date as _date
+
     db = _FakeSession()
     service = AmortizedCostSyncService(db)
 
-    sample_rows = [
-        {
-            "date": "2026-03-01",
-            "cost": 10.5,
-            "meter_category": "Compute",
-            "meter_subcategory": "VM",
-            "meter_name": "D2s_v5",
-            "resource_group": "rg-a",
-            "resource_name": "vm-a",
-            "resource_type": "Microsoft.Compute/virtualMachines",
-            "resource_location": "eastus",
-            "subscription_name": "Subscription A",
-            "subscription_id": "sub-a",
-            "service_name": "Virtual Machines",
-            "charge_type": "Usage",
-            "pricing_model": "OnDemand",
-            "publisher_type": "Azure",
-            "frequency": "UsageBased",
-            "currency": "USD",
-            "env_label": "Prod",
-        },
-        {
-            "date": "2026-03-01",
-            "cost": 22.0,
-            "meter_category": "Storage",
-            "meter_subcategory": "Blob",
-            "meter_name": "Hot LRS",
-            "resource_group": "rg-b",
-            "resource_name": "storage-b",
-            "resource_type": "Microsoft.Storage/storageAccounts",
-            "resource_location": "eastus2",
-            "subscription_name": "Subscription B",
-            "subscription_id": "sub-b",
-            "service_name": "Storage",
-            "charge_type": "Usage",
-            "pricing_model": "OnDemand",
-            "publisher_type": "Azure",
-            "frequency": "UsageBased",
-            "currency": "USD",
-            "env_label": "Non-Prod",
-        },
-    ]
+    sample_row = {
+        "date": "2026-03-01",
+        "cost": 22.0,
+        "meter_category": "Storage",
+        "meter_subcategory": "Blob",
+        "meter_name": "Hot LRS",
+        "resource_group": "rg-b",
+        "resource_name": "storage-b",
+        "resource_type": "Microsoft.Storage/storageAccounts",
+        "resource_location": "eastus2",
+        "subscription_name": "Subscription B",
+        "subscription_id": "sub-b",
+        "service_name": "Storage",
+        "charge_type": "Usage",
+        "pricing_model": "OnDemand",
+        "publisher_type": "Azure",
+        "frequency": "UsageBased",
+        "currency": "USD",
+        "env_label": "Non-Prod",
+    }
 
-    async def fake_load_rows_from_azure_api(months: int) -> list[dict]:
-        assert months == 2
-        return [sample_rows[1]]
+    async def fake_get_monitored_ids():
+        return ["sub-b"]
 
-    async def fake_invalidate(_pattern: str) -> None:
-        return None
+    async def fake_fetch_metadata(ids):
+        return {"sub-b": {"subscription_name": "Sub B", "environment": "nonprod"}}
+
+    async def fake_compute_fetch_ranges(ids, full_start, end_date):
+        return {"sub-b": [(full_start, end_date)]}
+
+    async def fake_delete_fetch_ranges(per_sub):
+        pass
+
+    async def fake_load_rows_incremental(sub_meta, per_sub, end_date):
+        return [sample_row], [], per_sub
+
+    async def fake_invalidate(_pattern):
+        pass
+
+    async def fake_aggregate():
+        pass
 
     monkeypatch.setattr(
-        service,
-        "_load_rows_from_azure_api",
-        fake_load_rows_from_azure_api,
+        "app.services.amortized_cost_sync_service.get_monitored_subscription_ids",
+        fake_get_monitored_ids,
     )
+    monkeypatch.setattr(service, "_fetch_subscription_metadata", fake_fetch_metadata)
+    monkeypatch.setattr(service, "_compute_fetch_ranges", fake_compute_fetch_ranges)
+    monkeypatch.setattr(service, "_delete_fetch_ranges", fake_delete_fetch_ranges)
+    monkeypatch.setattr(service, "_load_rows_incremental", fake_load_rows_incremental)
     monkeypatch.setattr(
         "app.services.amortized_cost_sync_service.cache_manager.invalidate",
         fake_invalidate,
     )
+    monkeypatch.setattr(service, "_aggregate_cost_summaries", fake_aggregate)
 
     result = await service.full_sync(months=2, triggered_by="manual")
 
@@ -123,27 +122,24 @@ async def test_full_sync_filters_rows_to_monitored_subscriptions(
     assert result["rows_synced"] == 1
     assert result["total_cost"] == 22.0
     assert result["duration_seconds"] >= 0
-    assert any("amortized_cost_records" in str(statement) for statement in db.executed)
     assert len(db.bulk_added) == 1
     assert db.bulk_added[0].subscription_id == "sub-b"
 
 
 @pytest.mark.anyio
-async def test_load_rows_from_azure_api_uses_query_api_rows(
+async def test_load_rows_incremental_uses_query_api_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = _FakeSession(execute_results=[[("sub-a", "Subscription A", "production")]])
-    service = AmortizedCostSyncService(db)
-    call_count = 0
+    """_load_rows_incremental calls query_amortized_cost_rows once per monthly chunk."""
+    from datetime import date as _date
 
-    async def fake_get_monitored_subscription_ids() -> list[str]:
-        return ["sub-a"]
+    db = _FakeSession()
+    service = AmortizedCostSyncService(db)
+    call_args: list[tuple] = []
 
     async def fake_query_amortized_cost_rows(scope: str, start_date, end_date) -> list[dict]:
-        nonlocal call_count
-        call_count += 1
+        call_args.append((scope, start_date, end_date))
         assert scope == "/subscriptions/sub-a"
-
         return [
             {
                 "date": "2026-03-01",
@@ -166,19 +162,33 @@ async def test_load_rows_from_azure_api_uses_query_api_rows(
             },
         ]
 
-    monkeypatch.setattr(
-        "app.services.amortized_cost_sync_service.get_monitored_subscription_ids",
-        fake_get_monitored_subscription_ids,
-    )
     monkeypatch.setattr(service._cost_service, "query_amortized_cost_rows", fake_query_amortized_cost_rows)
 
-    rows = await service._load_rows_from_azure_api(months=2)
+    sub_metadata = {"sub-a": {"subscription_name": "Subscription A", "environment": "production"}}
+    per_sub_ranges = {
+        "sub-a": [
+            (_date(2026, 1, 1), _date(2026, 1, 31)),
+            (_date(2026, 2, 1), _date(2026, 2, 28)),
+            (_date(2026, 3, 1), _date(2026, 3, 31)),
+        ]
+    }
+    end_date = _date(2026, 3, 31)
 
-    assert len(rows) == 1
-    assert call_count >= 1
+    rows, failures, successful = await service._load_rows_incremental(sub_metadata, per_sub_ranges, end_date)
+
+    # 3 explicit ranges → 3 API calls, one per range
+    scope = "/subscriptions/sub-a"
+    assert len(call_args) == 3
+    assert call_args[0] == (scope, _date(2026, 1, 1), _date(2026, 1, 31))
+    assert call_args[1] == (scope, _date(2026, 2, 1), _date(2026, 2, 28))
+    assert call_args[2] == (scope, _date(2026, 3, 1), _date(2026, 3, 31))
+
+    # One row returned per range → 3 total rows
+    assert len(rows) == 3
+    assert len(failures) == 0
     assert rows[0]["subscription_id"] == "sub-a"
     assert rows[0]["subscription_name"] == "Subscription A"
-    assert rows[0]["resource_name"] == "Storage"
+    assert rows[0]["resource_name"] == "Storage"  # normalized from meter_category fallback
 
 
 @pytest.mark.anyio
@@ -405,3 +415,91 @@ def test_build_analytics_returns_requested_window_when_rows_are_empty() -> None:
     assert payload["source_date_range"] == {"start": "", "end": ""}
     assert payload["latest_available_date"] is None
     assert payload["has_pending_source_data"] is False
+
+
+def test_split_into_monthly_chunks_covers_all_months() -> None:
+    chunks = AmortizedCostSyncService._split_into_monthly_chunks(
+        date(2026, 1, 15), date(2026, 3, 31)
+    )
+    assert chunks == [
+        (date(2026, 1, 15), date(2026, 1, 31)),
+        (date(2026, 2, 1), date(2026, 2, 28)),
+        (date(2026, 3, 1), date(2026, 3, 31)),
+    ]
+
+
+def test_split_into_monthly_chunks_single_month() -> None:
+    chunks = AmortizedCostSyncService._split_into_monthly_chunks(
+        date(2026, 4, 20), date(2026, 4, 27)
+    )
+    assert chunks == [(date(2026, 4, 20), date(2026, 4, 27))]
+
+
+def test_split_into_monthly_chunks_year_boundary() -> None:
+    chunks = AmortizedCostSyncService._split_into_monthly_chunks(
+        date(2025, 12, 15), date(2026, 1, 31)
+    )
+    assert chunks == [
+        (date(2025, 12, 15), date(2025, 12, 31)),
+        (date(2026, 1, 1), date(2026, 1, 31)),
+    ]
+
+
+@pytest.mark.anyio
+async def test_load_rows_incremental_partial_month_failure_preserves_successful_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If one monthly chunk gets 429, rows from other chunks are still returned.
+    The sub is NOT added to failed_sub_ids as long as at least one chunk succeeded.
+    """
+    from datetime import date as _date
+
+    db = _FakeSession()
+    service = AmortizedCostSyncService(db)
+
+    call_num = 0
+
+    async def fake_query(scope: str, start_date, end_date) -> list[dict]:
+        nonlocal call_num
+        call_num += 1
+        if call_num == 1:
+            raise RuntimeError("(429) Too many requests")
+        return [
+            {
+                "date": start_date.isoformat(),
+                "cost": 5.0,
+                "meter_category": "Compute",
+                "meter_subcategory": "",
+                "meter_name": "",
+                "resource_group": "rg",
+                "resource_name": "vm",
+                "resource_type": "",
+                "resource_location": "",
+                "subscription_name": "",
+                "subscription_id": "",
+                "service_name": "Compute",
+                "charge_type": "Usage",
+                "pricing_model": "",
+                "publisher_type": "Azure",
+                "frequency": "UsageBased",
+                "currency": "USD",
+            }
+        ]
+
+    monkeypatch.setattr(service._cost_service, "query_amortized_cost_rows", fake_query)
+
+    sub_metadata = {"sub-x": {"subscription_name": "Sub X", "environment": "production"}}
+    per_sub_ranges = {
+        "sub-x": [
+            (_date(2026, 1, 1), _date(2026, 1, 31)),
+            (_date(2026, 2, 1), _date(2026, 2, 28)),
+        ]
+    }
+    end_date = _date(2026, 2, 28)
+
+    rows, failures, successful = await service._load_rows_incremental(sub_metadata, per_sub_ranges, end_date)
+
+    # Jan chunk failed (429), Feb chunk succeeded → sub-x not in failures
+    assert "sub-x" not in failures
+    assert len(rows) == 1  # Only Feb row returned
+    assert rows[0]["subscription_id"] == "sub-x"

@@ -11,7 +11,7 @@ LOG_FILE="$SCRIPT_DIR/backend.log"
 PORT=8002
 
 # ── Environment defaults ──
-export ENVIRONMENT="${ENVIRONMENT:-production}"
+export ENVIRONMENT="${ENVIRONMENT:-development}"
 export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
 export no_proxy="127.0.0.1,localhost,${no_proxy:-}"
 

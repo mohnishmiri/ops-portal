@@ -99,12 +99,15 @@ class LeadershipSyncService:
             )
 
     async def full_sync(self, triggered_by: str = "manual") -> dict:
-        """Pull leadership data from Azure APIs and persist to DB.
+        """Pull leadership data and persist to DB.
+
+        Tries to build the dashboard from the amortized cost DB first
+        (consistent with the amortized cost page).  Falls back to live
+        Azure Cost Management APIs if no amortized data is available.
 
         Appends a new snapshot instead of deleting old ones so that
         time-series history is preserved.  Records older than
-        ``SNAPSHOT_RETENTION_DAYS`` are pruned to prevent unbounded
-        growth.
+        ``SNAPSHOT_RETENTION_DAYS`` are pruned to prevent unbounded growth.
         """
         sync_record = LeadershipSyncStatus(
             sync_type="full",
@@ -116,14 +119,37 @@ class LeadershipSyncService:
         await self._db.commit()
 
         try:
-            # Resolve monitored subscriptions from Admin Control Panel
             monitored_ids = await get_monitored_subscription_ids()
 
-            # Fetch live data from Azure via DashboardService
-            data = await self._dashboard_svc.get_leadership_dashboard(
-                subscription_ids=monitored_ids or None,
-                refresh=True,
-            )
+            # Build from amortized DB first — consistent with the amortized cost page
+            data = None
+            try:
+                from app.services.amortized_cost_sync_service import AmortizedCostSyncService
+
+                amortized_svc = AmortizedCostSyncService(self._db)
+                data = await amortized_svc.build_leadership_dashboard()
+                if data:
+                    logger.info(
+                        "leadership_sync_built_from_amortized_db",
+                        triggered_by=triggered_by,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "leadership_from_amortized_db_failed",
+                    error=str(exc)[:300],
+                )
+
+            # Fall back to live Azure API when no amortized data exists
+            if data is None:
+                logger.info(
+                    "leadership_sync_falling_back_to_live_azure",
+                    triggered_by=triggered_by,
+                )
+                data = await self._dashboard_svc.get_leadership_dashboard(
+                    subscription_ids=monitored_ids or None,
+                    refresh=True,
+                )
+
             payload_json = data.model_dump_json()
 
             # Append the new snapshot (preserve history for time-series)

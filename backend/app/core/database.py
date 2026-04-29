@@ -128,6 +128,31 @@ async def create_tables() -> None:
                     """
                 )
             )
+            # Backfill RBAC columns added to the resources table (Apr 2026)
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS resources
+                    ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES resources(id)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS resources
+                    ADD COLUMN IF NOT EXISTS route_path VARCHAR(500)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS resources
+                    ADD COLUMN IF NOT EXISTS is_system BOOLEAN NOT NULL DEFAULT FALSE
+                    """
+                )
+            )
         logger.info("Database tables verified/created successfully")
     except Exception as e:
         logger.error("Failed to create database tables", error=str(e))

@@ -1,8 +1,18 @@
 /**
- * App Entry — Root application with MSAL auth and routing.
+ * App Entry — Root application with MSAL auth, routing, and access control.
  *
- * When running in dev mode (no Azure AD credentials) the MSAL auth gate is
- * bypassed and the dashboard renders immediately.
+ * Access control layers:
+ *  1. MSAL gate (prod only) — user must be authenticated via Azure AD.
+ *  2. Role check (AuthContext) — user must have at least one portal role.
+ *  3. Module/page check (PermissionsContext + ProtectedRoute) — user or their
+ *     role must have an explicit permission record for the page they visit.
+ *     Admin role bypasses all checks.
+ *
+ * Adding a new page:
+ *  1. Import the page component.
+ *  2. Add a <Route> wrapped in <ProtectedRoute module="…" page="…">.
+ *  3. Add a nav entry with the matching module/page strings.
+ *  4. Register the resource in backend resource_registry.py.
  */
 
 import React, { Component, ErrorInfo, ReactNode, useEffect } from "react";
@@ -21,18 +31,20 @@ import InfraAlertPage from "./pages/InfraAlertPage";
 import AmortizedCostDashboard from "./pages/AmortizedCostDashboard";
 import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
+import ProtectedRoute from "./components/ProtectedRoute";
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: 1,
       refetchOnWindowFocus: false,
-      staleTime: 5 * 60 * 1000, // 5 minutes
+      staleTime: 5 * 60 * 1000,
     },
   },
 });
 
-// ── Navigation ────────────────────────────────────────────────────────
+// ── Brand ──────────────────────────────────────────────────────────────────────
 
 const APP_VERSION = "1.0.0";
 const BRAND_LOGO_PATH = "/att-globe.svg?v=20260413c";
@@ -46,21 +58,45 @@ const BrandMark: React.FC<{ sizeClassName?: string; imageClassName?: string }> =
   </div>
 );
 
+// ── Navigation ────────────────────────────────────────────────────────────────
+
+/**
+ * Nav item definition.
+ *
+ * module/page strings map directly to resource_name values in the backend
+ * resource registry.  Leave them undefined for the admin item which uses
+ * the role-based isAdmin check instead.
+ */
+interface NavItem {
+  to: string;
+  label: string;
+  module?: string;
+  page?: string;
+}
+
+const ALL_NAV_ITEMS: NavItem[] = [
+  { to: "/",           label: "Leadership Dashboard", module: "cost_management",  page: "leadership_dashboard" },
+  { to: "/env-costs",  label: "Amortized Costs",      module: "cost_management",  page: "amortized_costs" },
+  { to: "/keyvault",   label: "Key Vault",             module: "keyvault",         page: "keyvault_main" },
+  { to: "/aks",        label: "AKS Operations",        module: "aks_operations",   page: "aks_main" },
+  { to: "/compliance", label: "Compliance",            module: "compliance",       page: "compliance_main" },
+  { to: "/infra-alerts", label: "Infra Alerts",        module: "infra_alerts",     page: "infra_alerts_main" },
+];
+
 const Navigation: React.FC = () => {
-  // useMsal() is only valid inside <MsalProvider>, so guard for dev mode
   const msal = isDevMode ? null : useMsal();
   const activeAccount = msal?.instance.getActiveAccount() ?? msal?.accounts?.[0];
   const { isAdmin } = useAuth();
+  const { canViewModule, canViewPage, isLoading: permsLoading } = usePermissions();
 
-  const navItems = [
-    { to: "/", label: "Leadership Dashboard" },
-    { to: "/env-costs", label: "Amortized Costs" },
-    { to: "/keyvault", label: "Key Vault" },
-    { to: "/aks", label: "AKS Operations" },
-    { to: "/compliance", label: "Compliance" },
-    { to: "/infra-alerts", label: "Infra Alerts" },
-    ...(isAdmin ? [{ to: "/admin", label: "Admin" }] : []),
-  ];
+  // Filter nav items to only those the user can view.
+  // While permissions are still loading we show all items (they'll be guarded at the route level).
+  const visibleNavItems = ALL_NAV_ITEMS.filter((item) => {
+    if (isAdmin || permsLoading) return true;
+    const modOk  = item.module ? canViewModule(item.module) : true;
+    const pageOk = item.page   ? canViewPage(item.page)   : true;
+    return modOk && pageOk;
+  });
 
   return (
     <nav className="bg-white shadow-sm border-b border-att-400/20">
@@ -70,18 +106,17 @@ const Navigation: React.FC = () => {
             <div className="flex items-center gap-3">
               <BrandMark sizeClassName="h-10 w-10" imageClassName="h-full w-full" />
               <div className="flex flex-col leading-none">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-att-500">
-                  AT&amp;T
-                </span>
+                <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-att-500">AT&amp;T</span>
                 <span className="font-bold text-gray-900">OpsPortal</span>
               </div>
             </div>
 
             <div className="hidden md:flex items-center gap-1">
-              {navItems.map((item) => (
+              {visibleNavItems.map((item) => (
                 <NavLink
                   key={item.to}
                   to={item.to}
+                  end={item.to === "/"}
                   className={({ isActive }) =>
                     `px-3 py-2 rounded-md text-sm font-medium transition ${
                       isActive
@@ -93,6 +128,18 @@ const Navigation: React.FC = () => {
                   {item.label}
                 </NavLink>
               ))}
+              {isAdmin && (
+                <NavLink
+                  to="/admin"
+                  className={({ isActive }) =>
+                    `px-3 py-2 rounded-md text-sm font-medium transition ${
+                      isActive ? "bg-att-50 text-att-600" : "text-gray-600 hover:text-att-500 hover:bg-att-50"
+                    }`
+                  }
+                >
+                  Admin
+                </NavLink>
+              )}
             </div>
           </div>
 
@@ -103,9 +150,7 @@ const Navigation: React.FC = () => {
               </span>
             )}
             <span className="text-sm text-gray-600">
-              {isDevMode
-                ? "Local Developer"
-                : activeAccount?.name || activeAccount?.username}
+              {isDevMode ? "Local Developer" : activeAccount?.name || activeAccount?.username}
             </span>
             {!isDevMode && (
               <button
@@ -122,23 +167,19 @@ const Navigation: React.FC = () => {
   );
 };
 
-// ── Login Page ────────────────────────────────────────────────────────
+// ── Login Page ───────────────────────────────────────────────────────────────��─
 
 const LoginPage: React.FC = () => {
   const { instance } = useMsal();
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-att-50 to-att-100 flex items-center justify-center">
       <div className="bg-white rounded-2xl shadow-xl p-10 max-w-md w-full text-center">
         <div className="flex justify-center mb-6">
           <BrandMark sizeClassName="h-28 w-28" imageClassName="h-full w-full" />
         </div>
-        <h1 className="text-2xl font-bold text-gray-900 mb-2">
-          AT&T OpsPortal
-        </h1>
+        <h1 className="text-2xl font-bold text-gray-900 mb-2">AT&T OpsPortal</h1>
         <p className="text-gray-600 mb-8">
-          Sign in with your organization account to access infrastructure
-          dashboards, cost analytics, and operational insights.
+          Sign in with your organization account to access infrastructure dashboards, cost analytics, and operational insights.
         </p>
         <button
           onClick={() => instance.loginRedirect(loginRequest)}
@@ -151,14 +192,9 @@ const LoginPage: React.FC = () => {
   );
 };
 
-// ── Root App ──────────────────────────────────────────────────────────
+// ── Error Boundary ───────────────────────────────────────────────────────────��─
 
-// ── Error Boundary ────────────────────────────────────────────────────
-
-interface ErrorBoundaryState {
-  hasError: boolean;
-  error: Error | null;
-}
+interface ErrorBoundaryState { hasError: boolean; error: Error | null; }
 
 class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
   state: ErrorBoundaryState = { hasError: false, error: null };
@@ -192,7 +228,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
   }
 }
 
-// ── Main content (shared between dev and prod modes) ─────────────────
+// ── Footer ─────────────────────────────────────────────────────────────────────
 
 const Footer: React.FC = () => (
   <footer className="bg-att-700 text-white mt-auto">
@@ -213,7 +249,8 @@ const Footer: React.FC = () => (
   </footer>
 );
 
-/** Route guard — redirects non-admin users away from /admin. */
+// ── Admin route guards ─────────────────────────────────────────────────���───────
+
 const AdminRoute: React.FC = () => {
   const { isAdmin } = useAuth();
   return isAdmin ? <AdminDashboard /> : <Navigate to="/" replace />;
@@ -224,27 +261,88 @@ const AdminPermissionsRoute: React.FC = () => {
   return isAdmin ? <PermissionsManagement /> : <Navigate to="/" replace />;
 };
 
+// ── Main app content ───────────────────────────────────────────────────────────
+
 const MainContent: React.FC = () => (
   <BrowserRouter>
     <div className="min-h-screen flex flex-col bg-gray-50">
       <Navigation />
       <main className="flex-1 mx-auto max-w-7xl w-full px-4 sm:px-6 lg:px-8 py-2">
         <Routes>
-          <Route path="/" element={<LeadershipDashboard />} />
-          <Route path="/optimization" element={<Navigate to="/" replace />} />
-          <Route path="/env-costs" element={<AmortizedCostDashboard />} />
-          <Route path="/keyvault" element={<KeyVaultPage />} />
-          <Route path="/aks" element={<AKSOperationsPage />} />
-          <Route path="/compliance" element={<CompliancePage />} />
-          <Route path="/infra-alerts" element={<InfraAlertPage />} />
+          {/* Leadership Dashboard — cost_management module */}
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute module="cost_management" page="leadership_dashboard" label="Leadership Dashboard">
+                <LeadershipDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Amortized Costs — cost_management module */}
+          <Route
+            path="/env-costs"
+            element={
+              <ProtectedRoute module="cost_management" page="amortized_costs" label="Amortized Costs">
+                <AmortizedCostDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Key Vault */}
+          <Route
+            path="/keyvault"
+            element={
+              <ProtectedRoute module="keyvault" page="keyvault_main" label="Key Vault">
+                <KeyVaultPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* AKS Operations */}
+          <Route
+            path="/aks"
+            element={
+              <ProtectedRoute module="aks_operations" page="aks_main" label="AKS Operations">
+                <AKSOperationsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Compliance */}
+          <Route
+            path="/compliance"
+            element={
+              <ProtectedRoute module="compliance" page="compliance_main" label="Compliance">
+                <CompliancePage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Infra Alerts */}
+          <Route
+            path="/infra-alerts"
+            element={
+              <ProtectedRoute module="infra_alerts" page="infra_alerts_main" label="Infrastructure Alerts">
+                <InfraAlertPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Admin — role-gated (admin role only, no resource record needed) */}
           <Route path="/admin" element={<AdminRoute />} />
           <Route path="/admin/permissions" element={<AdminPermissionsRoute />} />
+
+          {/* Legacy redirect */}
+          <Route path="/optimization" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       <Footer />
     </div>
   </BrowserRouter>
 );
+
+// ── Root ───────────────────────────────────────────────────────────────────────
 
 const App: React.FC = () => {
   useEffect(() => {
@@ -253,25 +351,14 @@ const App: React.FC = () => {
       { rel: "shortcut icon" },
       { rel: "apple-touch-icon" },
     ];
-
     iconLinks.forEach(({ rel, type }) => {
       let link = document.head.querySelector(`link[rel="${rel}"]`) as HTMLLinkElement | null;
-
-      if (!link) {
-        link = document.createElement("link");
-        link.rel = rel;
-        document.head.appendChild(link);
-      }
-
-      if (type) {
-        link.type = type;
-      }
-
+      if (!link) { link = document.createElement("link"); link.rel = rel; document.head.appendChild(link); }
+      if (type) link.type = type;
       link.href = BRAND_LOGO_PATH;
     });
   }, []);
 
-  // In dev mode, skip MSAL entirely and render the app directly
   if (isDevMode) {
     console.info(
       "%c[DEV MODE]%c Azure AD credentials not configured — auth bypassed.",
@@ -281,17 +368,18 @@ const App: React.FC = () => {
     return (
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
-          <TimezoneProvider>
-            <ErrorBoundary>
-              <MainContent />
-            </ErrorBoundary>
-          </TimezoneProvider>
+          <PermissionsProvider>
+            <TimezoneProvider>
+              <ErrorBoundary>
+                <MainContent />
+              </ErrorBoundary>
+            </TimezoneProvider>
+          </PermissionsProvider>
         </AuthProvider>
       </QueryClientProvider>
     );
   }
 
-  // Production: full MSAL auth gate
   return (
     <MsalProvider instance={msalInstance}>
       <QueryClientProvider client={queryClient}>
@@ -301,11 +389,13 @@ const App: React.FC = () => {
 
         <AuthenticatedTemplate>
           <AuthProvider>
-            <TimezoneProvider>
-              <ErrorBoundary>
-                <MainContent />
-              </ErrorBoundary>
-            </TimezoneProvider>
+            <PermissionsProvider>
+              <TimezoneProvider>
+                <ErrorBoundary>
+                  <MainContent />
+                </ErrorBoundary>
+              </TimezoneProvider>
+            </PermissionsProvider>
           </AuthProvider>
         </AuthenticatedTemplate>
       </QueryClientProvider>

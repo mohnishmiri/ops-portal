@@ -1036,6 +1036,9 @@ const AdminDashboard: React.FC = () => {
 
       {/* Subscription Table */}
       <SubscriptionTable subs={data.subscriptions} onShowAdd={() => setShowAddForm(true)} />
+
+      {/* Admin Utilities — links to RBAC/permissions management */}
+      <AdminUtilities />
     </div>
   );
 };

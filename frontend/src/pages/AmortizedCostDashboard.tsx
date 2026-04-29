@@ -226,7 +226,7 @@ const AmortizedCostDashboard: React.FC = () => {
   const { formatDate } = usePortalTimezone();
   const { canWrite } = useAuth();
   const [env, setEnv] = useState("ALL");
-  const [months, setMonths] = useState(2);
+  const [months, setMonths] = useState(3);
   const [activeTab, setActiveTab] = useState<"overview" | "services" | "resources" | "pivot" | "drilldown">("overview");
   const [drilldownFilter, setDrilldownFilter] = useState<{
     resource_group?: string;
@@ -235,7 +235,7 @@ const AmortizedCostDashboard: React.FC = () => {
   }>({});
   const [drilldownEnabled, setDrilldownEnabled] = useState(false);
 
-  const { data, isLoading, error, refetch, isFetching } = useAmortizedCostSummary(env, months);
+  const { data, isLoading, error, refetch, isFetching, dataUpdatedAt } = useAmortizedCostSummary(env, months);
   const {
     data: drilldownData,
     isLoading: drilldownLoading,
@@ -253,6 +253,33 @@ const AmortizedCostDashboard: React.FC = () => {
       refetch();
     }
   }, [syncStatus?.status, refetch]);
+
+  // Track "last refreshed X min ago" for the auto-refresh indicator
+  const [lastRefreshLabel, setLastRefreshLabel] = useState("just now");
+  useEffect(() => {
+    const update = () => {
+      if (!dataUpdatedAt) return;
+      const ageMin = Math.floor((Date.now() - dataUpdatedAt) / 60_000);
+      setLastRefreshLabel(ageMin < 1 ? "just now" : `${ageMin} min ago`);
+    };
+    update();
+    const t = setInterval(update, 30_000);
+    return () => clearInterval(t);
+  }, [dataUpdatedAt]);
+
+  // Detect data gaps: 3+ consecutive $0-cost days in the middle of the trend
+  // (not the edges, which may genuinely have no data yet)
+  const gapDaysDetected = useMemo(() => {
+    const trend = data?.daily_trend;
+    if (!trend || trend.length < 14) return 0;
+    const middle = trend.slice(7, -3); // ignore first 7 and last 3 days
+    let max = 0, run = 0;
+    for (const day of middle) {
+      if ((day as { cost: number }).cost === 0) { run++; max = Math.max(max, run); }
+      else run = 0;
+    }
+    return max;
+  }, [data?.daily_trend]);
 
   const handleSync = useCallback(() => {
     syncMutation.mutate({ months });
@@ -300,10 +327,6 @@ const AmortizedCostDashboard: React.FC = () => {
 
   const hasData = Boolean(data && data.row_count > 0);
   const summary = data ?? null;
-  const syncRowsSynced = Number(syncMutation.data?.rows_synced ?? 0);
-  const syncTotalCost = Number(syncMutation.data?.total_cost ?? 0);
-  const syncDurationSeconds = Number(syncMutation.data?.duration_seconds ?? 0);
-
   const tabs = [
     { id: "overview" as const, label: "Overview" },
     { id: "services" as const, label: "Services" },
@@ -322,6 +345,10 @@ const AmortizedCostDashboard: React.FC = () => {
             {hasData
               ? `Auto-synced from Azure • ${summary?.date_range.start} to ${summary?.date_range.end} • ${summary?.row_count.toLocaleString()} line items`
               : "Auto-synced from Azure • no cached amortized rows available yet"}
+          </p>
+          <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1.5">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+            Live · refreshes every 5 min · last refreshed {lastRefreshLabel}
           </p>
         </div>
 
@@ -417,21 +444,32 @@ const AmortizedCostDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Sync success notification */}
-      {syncMutation.isSuccess && (
-        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          <span className="font-medium">Sync completed</span> —{" "}
-          {syncRowsSynced.toLocaleString()} rows synced,{" "}
-          total {fmtCompact(syncTotalCost)} in {syncDurationSeconds.toFixed(1)}s
-        </div>
-      )}
-
       {/* Sync error notification */}
       {syncMutation.isError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           <span className="font-medium">Sync failed</span> — {String(syncMutation.error)}
         </div>
       )}
+
+      {/* Data gap warning — shown when 3+ consecutive $0-cost days are detected
+          in the middle of the trend, which indicates missing data rather than
+          genuine zero spend.  Leadership should not report on data with gaps. */}
+      {gapDaysDetected >= 3 && !syncMutation.isPending && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 flex items-start gap-3">
+          <svg className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          </svg>
+          <div>
+            <p className="font-semibold">Data gap detected — not ready for leadership reporting</p>
+            <p className="mt-0.5 text-amber-700">
+              The chart shows {gapDaysDetected} consecutive days with $0 cost, which indicates missing Azure data rather than genuine zero spend.
+              Click <span className="font-medium">Sync from Azure</span> (with <span className="font-medium">Last 12 months</span> selected) to fill the gap.
+              Repeat 2–3 times if Azure rate-limits the first attempt.
+            </p>
+          </div>
+        </div>
+      )}
+
 
       {hasData && summary ? (
         <>

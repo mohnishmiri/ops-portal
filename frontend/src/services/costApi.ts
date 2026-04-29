@@ -1612,7 +1612,7 @@ export function useAmortizedCostSummary(
       const { data } = await apiClient.get(`/costs/amortized-summary?${params}`);
       return data;
     },
-    staleTime: 10 * 60 * 1000, // 10 min — data only changes daily
+    staleTime: SLOW_GRID_POLL_INTERVAL, // match refetch interval so every poll actually runs
     gcTime: 60 * 60 * 1000,
     refetchInterval: SLOW_GRID_POLL_INTERVAL,
   });
