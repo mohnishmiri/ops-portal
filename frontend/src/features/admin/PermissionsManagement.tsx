@@ -20,8 +20,10 @@ import {
   useCreatePermission,
   useDeleteResource,
   useDeletePermission,
+  usePermissionsAuditLog,
   ResourceItem,
   PermissionItem,
+  AuditLogEntry,
 } from "../../services/permissionsApi";
 
 // ── Resource display-name mapping ─────────────────────────────────────────────
@@ -530,14 +532,163 @@ const MatrixTab: React.FC = () => {
   );
 };
 
+// ── Tab 4 — Audit Log ─────────────────────────────────────────────────────────
+
+const ACTION_META: Record<string, { label: string; color: string }> = {
+  permission_granted: { label: "Permission Granted", color: "bg-green-100 text-green-700" },
+  permission_revoked: { label: "Permission Revoked", color: "bg-red-100 text-red-700" },
+  resource_created:   { label: "Resource Created",   color: "bg-blue-100 text-blue-700" },
+  resource_updated:   { label: "Resource Updated",   color: "bg-amber-100 text-amber-700" },
+  resource_deleted:   { label: "Resource Deleted",   color: "bg-red-100 text-red-700" },
+};
+
+const fmtTs = (iso: string): string => {
+  try {
+    const d = new Date(iso + (iso.endsWith("Z") ? "" : "Z"));
+    return d.toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+};
+
+const AuditLogTab: React.FC = () => {
+  const [days, setDays] = React.useState(30);
+  const { data, isLoading, isError, refetch } = usePermissionsAuditLog(days);
+  const entries: AuditLogEntry[] = data?.entries ?? [];
+
+  return (
+    <div className="space-y-4">
+      {/* Controls */}
+      <div className="bg-white rounded-xl p-5 shadow-sm border flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-gray-800">Access Management Audit Trail</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Every permission grant / revoke and resource change made by admins is recorded here.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-medium text-gray-600">Show last</label>
+          <select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400"
+          >
+            <option value={7}>7 days</option>
+            <option value={30}>30 days</option>
+            <option value={90}>90 days</option>
+            <option value={365}>1 year</option>
+          </select>
+          <button
+            onClick={() => refetch()}
+            className="px-3 py-1.5 text-xs font-semibold border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Stats strip */}
+      {!isLoading && !isError && (
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          {(["permission_granted", "permission_revoked", "resource_created", "resource_updated", "resource_deleted"] as const).map((action) => {
+            const meta = ACTION_META[action];
+            const count = entries.filter((e) => e.action === action).length;
+            return (
+              <div key={action} className="bg-white rounded-lg border px-4 py-3 shadow-sm text-center">
+                <div className="text-xl font-bold text-gray-800">{count}</div>
+                <div className={`mt-1 inline-flex px-2 py-0.5 rounded text-xs font-semibold ${meta.color}`}>
+                  {meta.label}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="bg-white rounded-xl shadow-sm border">
+        {isError && (
+          <div className="px-5 py-3 text-sm text-red-700 bg-red-50 border-b rounded-t-xl">
+            Failed to load audit log. <button onClick={() => refetch()} className="underline font-semibold">Retry</button>
+          </div>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 border-b">
+              <tr className="text-left text-xs text-gray-500 font-semibold">
+                <th className="py-2.5 px-4">Timestamp</th>
+                <th className="py-2.5 px-4">Action</th>
+                <th className="py-2.5 px-4">Summary</th>
+                <th className="py-2.5 px-4">Actor</th>
+                <th className="py-2.5 px-4">IP Address</th>
+              </tr>
+            </thead>
+            <tbody>
+              {isLoading ? (
+                <tr><td colSpan={5} className="py-8 text-center text-gray-400">Loading…</td></tr>
+              ) : entries.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-10 text-center text-gray-400">
+                    <div className="flex flex-col items-center gap-2">
+                      <svg className="h-8 w-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                          d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                      </svg>
+                      <span className="text-sm text-gray-400">No audit entries in the last {days} days</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : entries.map((entry) => {
+                const meta = ACTION_META[entry.action] ?? { label: entry.action, color: "bg-gray-100 text-gray-600" };
+                return (
+                  <tr key={entry.id} className="border-t hover:bg-gray-50 transition-colors">
+                    <td className="py-2.5 px-4 font-mono text-xs text-gray-500 whitespace-nowrap">
+                      {fmtTs(entry.timestamp)}
+                    </td>
+                    <td className="py-2.5 px-4">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${meta.color}`}>
+                        {meta.label}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-4 text-gray-700 max-w-sm">
+                      {entry.summary}
+                    </td>
+                    <td className="py-2.5 px-4 text-xs text-gray-500">
+                      <div className="font-medium text-gray-700">{entry.actor_email}</div>
+                      <div className="font-mono text-gray-400 text-[10px]">{entry.actor_user_id}</div>
+                    </td>
+                    <td className="py-2.5 px-4 font-mono text-xs text-gray-400">
+                      {entry.ip_address ?? "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {entries.length > 0 && (
+          <div className="px-5 py-2.5 border-t bg-gray-50 rounded-b-xl text-xs text-gray-500 flex justify-between">
+            <span>{entries.length} {entries.length === 1 ? "entry" : "entries"} in the last {days} days</span>
+            <span>Ordered newest first · max 500 records</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ── Main component ────────────────────────────────────────────────────────────
 
-type TabKey = "resources" | "permissions" | "matrix";
+type TabKey = "resources" | "permissions" | "matrix" | "audit";
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: "resources", label: "Resources" },
+  { key: "resources",   label: "Resources" },
   { key: "permissions", label: "Permissions" },
-  { key: "matrix", label: "Access Matrix" },
+  { key: "matrix",      label: "Access Matrix" },
+  { key: "audit",       label: "Audit Log" },
 ];
 
 const PermissionsManagement: React.FC = () => {
@@ -575,6 +726,7 @@ const PermissionsManagement: React.FC = () => {
       {activeTab === "resources" && <ResourcesTab />}
       {activeTab === "permissions" && <PermissionsTab />}
       {activeTab === "matrix" && <MatrixTab />}
+      {activeTab === "audit" && <AuditLogTab />}
     </div>
   );
 };

@@ -1,6 +1,7 @@
 """
-Unit tests for the granular RBAC endpoints (/api/v1/permissions/*) and the
-effective-permissions endpoint (/api/v1/auth/my-permissions).
+Unit tests for the granular RBAC endpoints (/api/v1/permissions/*), the
+effective-permissions endpoint (/api/v1/auth/my-permissions), and the
+audit log endpoint (/api/v1/permissions/audit-log).
 
 All tests use the SQLite in-memory engine from conftest.py — no live Postgres
 required.  Each test function gets a fresh session (function-scoped fixture) so
@@ -332,3 +333,126 @@ async def test_my_permissions_reader_inherits_module_access_to_page(app, db_sess
         assert "view" in data["pages"]["inherit_page"]
     finally:
         app.dependency_overrides.clear()
+
+
+# ── Audit Log ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_audit_log_records_permission_grant(admin_client):
+    """Granting a permission writes a permission_granted audit entry."""
+    res = await _create_resource(admin_client, "audit_grant_mod")
+    await _create_permission(admin_client, "role", "read", res["id"], "view")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    grant_entries = [e for e in entries if e["action"] == "permission_granted"]
+    assert any(
+        e["resource_name"] == "audit_grant_mod" and e["subject_id"] == "read"
+        for e in grant_entries
+    ), f"Expected permission_granted entry not found in: {grant_entries}"
+
+
+@pytest.mark.anyio
+async def test_audit_log_records_permission_revoke(admin_client):
+    """Revoking a permission writes a permission_revoked audit entry."""
+    res = await _create_resource(admin_client, "audit_revoke_mod")
+    perm = await _create_permission(admin_client, "role", "write", res["id"], "edit")
+    await admin_client.delete(f"/api/v1/permissions/permissions/{perm['id']}")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    revoke_entries = [e for e in entries if e["action"] == "permission_revoked"]
+    assert any(
+        e["resource_name"] == "audit_revoke_mod" and e["subject_id"] == "write"
+        for e in revoke_entries
+    ), f"Expected permission_revoked entry not found in: {revoke_entries}"
+
+
+@pytest.mark.anyio
+async def test_audit_log_records_resource_creation(admin_client):
+    """Creating a resource writes a resource_created audit entry."""
+    await _create_resource(admin_client, "audit_create_res", rtype="module",
+                           description="For audit test")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    created_entries = [e for e in entries if e["action"] == "resource_created"]
+    assert any(
+        e["resource_name"] == "audit_create_res"
+        for e in created_entries
+    ), f"Expected resource_created entry not found in: {created_entries}"
+
+
+@pytest.mark.anyio
+async def test_audit_log_records_resource_deletion(admin_client):
+    """Deleting a custom resource writes a resource_deleted audit entry."""
+    res = await _create_resource(admin_client, "audit_delete_res")
+    await admin_client.delete(f"/api/v1/permissions/resources/{res['id']}")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    deleted_entries = [e for e in entries if e["action"] == "resource_deleted"]
+    assert any(
+        e["resource_name"] == "audit_delete_res"
+        for e in deleted_entries
+    ), f"Expected resource_deleted entry not found in: {deleted_entries}"
+
+
+@pytest.mark.anyio
+async def test_audit_log_entry_has_required_fields(admin_client):
+    """Every audit entry contains the mandatory fields."""
+    res = await _create_resource(admin_client, "audit_fields_mod")
+    await _create_permission(admin_client, "role", "read", res["id"], "view")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    assert len(entries) > 0, "Audit log should not be empty"
+
+    entry = entries[0]
+    for field in ("id", "timestamp", "actor_user_id", "actor_email", "action", "summary"):
+        assert field in entry, f"Missing required field '{field}' in audit entry"
+    assert entry["actor_user_id"] == "test-admin"
+    assert entry["actor_email"] == "admin@example.com"
+
+
+@pytest.mark.anyio
+async def test_audit_log_summary_is_human_readable(admin_client):
+    """The summary field describes the action in plain language."""
+    res = await _create_resource(admin_client, "audit_summary_mod")
+    await _create_permission(admin_client, "role", "read", res["id"], "view")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    entries = resp.json()["entries"]
+    grant = next((e for e in entries if e["action"] == "permission_granted"), None)
+    assert grant is not None
+    assert "view" in grant["summary"]
+    assert "audit_summary_mod" in grant["summary"]
+
+
+@pytest.mark.anyio
+async def test_audit_log_returns_newest_first(admin_client):
+    """Entries are ordered from newest to oldest."""
+    res = await _create_resource(admin_client, "audit_order_mod")
+    await _create_permission(admin_client, "role", "read", res["id"], "view")
+    await _create_permission(admin_client, "role", "write", res["id"], "edit")
+
+    resp = await admin_client.get("/api/v1/permissions/audit-log")
+    entries = resp.json()["entries"]
+    timestamps = [e["timestamp"] for e in entries]
+    assert timestamps == sorted(timestamps, reverse=True), (
+        "Audit entries should be ordered newest-first"
+    )
+
+
+@pytest.mark.anyio
+async def test_audit_log_non_admin_cannot_access(reader_client, monkeypatch):
+    """Non-admin users cannot read the audit log."""
+    import app.auth as auth_module
+    monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
+    resp = await reader_client.get("/api/v1/permissions/audit-log")
+    assert resp.status_code == 403

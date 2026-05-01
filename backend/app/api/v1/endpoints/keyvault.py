@@ -195,6 +195,19 @@ class CreateKeyRequest(BaseModel):
     expires: str | None = None  # ISO-8601 date (defaults to now + 360 days)
 
 
+class ExtendSecretExpiryRequest(BaseModel):
+    """Extend a single secret's expiry by 360 days from its current expiry."""
+
+    vault_uri: str
+    name: str
+
+
+class BulkExtendSecretExpiryRequest(BaseModel):
+    """Extend expiry for multiple secrets (each +360 days from current expiry)."""
+
+    secrets: list[ExtendSecretExpiryRequest]
+
+
 # ── Dashboard ──────────────────────────────────────────────────────────
 
 
@@ -437,6 +450,110 @@ async def delete_secret(
         )
         logger.warning("delete_secret_error", vault_uri=vault_uri, name=name, error=str(e))
         raise HTTPException(status_code=502, detail=f"Cannot delete secret: {_friendly_error(e)}")
+
+
+@router.post(
+    "/secrets/extend-expiry",
+    summary="Extend a secret's expiry by 360 days (Write)",
+)
+async def extend_secret_expiry(
+    request: ExtendSecretExpiryRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Fetch current secret value and update its expiry to current_expiry + 360 days."""
+    try:
+        current = await service.get_secret_value(request.vault_uri, request.name)
+        current_expires = current.get("expires")
+        if current_expires:
+            new_expiry = (datetime.fromisoformat(current_expires) + timedelta(days=360)).isoformat()
+        else:
+            new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
+
+        result = await service.create_or_update_secret(
+            vault_uri=request.vault_uri,
+            name=request.name,
+            value=current["value"],
+            content_type=current.get("content_type") or None,
+            expires=new_expiry,
+        )
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="update_secret",
+            resource_type="secret",
+            resource_name=request.name,
+            vault_uri=request.vault_uri,
+            status="success",
+            details={"extended_expiry": new_expiry, "previous_expiry": current_expires},
+        )
+        background_tasks.add_task(sync_service.sync_vault, request.vault_uri, triggered_by="mutation")
+        return {**result, "new_expiry": new_expiry, "previous_expiry": current_expires}
+    except Exception as e:
+        logger.warning("extend_secret_expiry_error", vault_uri=request.vault_uri, name=request.name, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot extend secret expiry: {_friendly_error(e)}")
+
+
+@router.post(
+    "/secrets/bulk-extend-expiry",
+    summary="Extend expiry for multiple secrets by 360 days (Write)",
+)
+async def bulk_extend_secret_expiry(
+    request: BulkExtendSecretExpiryRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Extend expiry for multiple secrets by 360 days each. Returns success/failure per secret."""
+    results = []
+    vaults_touched: set[str] = set()
+
+    for item in request.secrets:
+        try:
+            current = await service.get_secret_value(item.vault_uri, item.name)
+            current_expires = current.get("expires")
+            if current_expires:
+                new_expiry = (datetime.fromisoformat(current_expires) + timedelta(days=360)).isoformat()
+            else:
+                new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
+
+            await service.create_or_update_secret(
+                vault_uri=item.vault_uri,
+                name=item.name,
+                value=current["value"],
+                content_type=current.get("content_type") or None,
+                expires=new_expiry,
+            )
+            await _write_keyvault_audit_log(
+                db,
+                request=http_request,
+                user=user,
+                action="update_secret",
+                resource_type="secret",
+                resource_name=item.name,
+                vault_uri=item.vault_uri,
+                status="success",
+                details={"extended_expiry": new_expiry, "previous_expiry": current_expires, "bulk": True},
+            )
+            vaults_touched.add(item.vault_uri)
+            results.append({"name": item.name, "vault_uri": item.vault_uri, "status": "success", "new_expiry": new_expiry})
+        except Exception as e:
+            logger.warning("bulk_extend_secret_error", vault_uri=item.vault_uri, name=item.name, error=str(e))
+            results.append({"name": item.name, "vault_uri": item.vault_uri, "status": "failed", "error": _friendly_error(e)})
+
+    for vault_uri in vaults_touched:
+        background_tasks.add_task(sync_service.sync_vault, vault_uri, triggered_by="mutation")
+
+    success_count = sum(1 for r in results if r["status"] == "success")
+    return {"results": results, "success_count": success_count, "failed_count": len(results) - success_count}
 
 
 # ── Keys ───────────────────────────────────────────────────────────────

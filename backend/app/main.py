@@ -315,7 +315,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("compliance_startup_check_failed", error=str(exc)[:200])
 
-    # ── Clean up any previously auto-seeded checksum schedules ──────────
+    # ── Clean up any previously auto-seeded schedules ───────────────────
     # Only user-created schedules should remain.  Auto-seeded entries
     # (created_by == "system-auto-seed") are removed on every startup so
     # they never reappear even after a redeployment.
@@ -323,15 +323,19 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
         from sqlalchemy import delete as _del
 
         from app.core.database import get_db_session
-        from app.models.database import ChecksumScheduleConfig
+        from app.models.database import AlertScheduleConfig, ChecksumScheduleConfig
 
         async for db in get_db_session():
-            result = await db.execute(
+            cs_result = await db.execute(
                 _del(ChecksumScheduleConfig).where(ChecksumScheduleConfig.created_by == "system-auto-seed")
             )
-            if result.rowcount:
+            as_result = await db.execute(
+                _del(AlertScheduleConfig).where(AlertScheduleConfig.created_by == "system-auto-seed")
+            )
+            total_removed = (cs_result.rowcount or 0) + (as_result.rowcount or 0)
+            if total_removed:
                 await db.commit()
-                logger.info("auto_seeded_schedules_removed", count=result.rowcount)
+                logger.info("auto_seeded_schedules_removed", count=total_removed)
     except Exception as exc:
         logger.warning("auto_seed_cleanup_failed", error=str(exc)[:200])
 

@@ -904,6 +904,7 @@ class KeyVaultService:
             "total_certificates": total_certs,
             "expiring_within_30_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 30]),
             "expiring_within_90_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 90]),
+            "expiring_within_360_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 360]),
             "expiring_items": expiring_soon,
             "vault_summaries": vault_summaries,
             "generated_at": datetime.utcnow().isoformat(),
@@ -946,14 +947,14 @@ def _epoch_to_iso(epoch: int | None) -> str | None:
 
 
 def _check_expiry(expiring_list: list, item: dict, vault_name: str, item_type: str) -> None:
-    """Check if an item is expiring within 90 days and add to list."""
+    """Check if an item is expiring within 360 days and add to list."""
     expires = item.get("expires")
     if not expires:
         return
     try:
         exp_date = datetime.fromisoformat(expires)
         days_remaining = (exp_date - datetime.utcnow()).days
-        if 0 <= days_remaining <= 90:
+        if 0 <= days_remaining <= 360:
             expiring_list.append(
                 {
                     "name": item["name"],

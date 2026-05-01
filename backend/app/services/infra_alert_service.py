@@ -18,6 +18,7 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.services.email_notification_service import EmailNotificationService
 from app.models.database import (
     AlertScheduleConfig,
     CustomExpiryAlert,
@@ -302,12 +303,34 @@ class InfraAlertService:
         await self._db_commit()
 
         logger.info("vm_alert_acknowledged", alert_id=alert_id, by=acknowledged_by)
+
+        try:
+            cfg_result = await self.db.execute(
+                select(VMThresholdAlertConfig).where(VMThresholdAlertConfig.id == alert.config_id)
+            )
+            config = cfg_result.scalar_one_or_none()
+            emails = (config.notification_emails or []) if config else []
+            if emails:
+                email_svc = EmailNotificationService(self.db)
+                await email_svc.send_alert_status_change(
+                    recipient_emails=emails,
+                    alert_type="vm_threshold",
+                    resource_name=alert.vm_name,
+                    action="acknowledged",
+                    action_by=acknowledged_by,
+                    alert_id=alert_id,
+                    extra_details={"Metric": alert.metric_type.upper(), "Severity": alert.severity},
+                )
+        except Exception as exc:
+            logger.warning("vm_ack_email_failed", alert_id=alert_id, error=str(exc)[:200])
+
         return {"id": alert_id, "status": "acknowledged"}
 
     async def resolve_vm_alert(
         self,
         alert_id: int,
         resolution_notes: str | None = None,
+        resolved_by: str | None = None,
     ) -> dict[str, Any]:
         """Resolve a VM threshold alert."""
         if self.db is None:
@@ -324,6 +347,30 @@ class InfraAlertService:
         await self._db_commit()
 
         logger.info("vm_alert_resolved", alert_id=alert_id)
+
+        try:
+            cfg_result = await self.db.execute(
+                select(VMThresholdAlertConfig).where(VMThresholdAlertConfig.id == alert.config_id)
+            )
+            config = cfg_result.scalar_one_or_none()
+            emails = (config.notification_emails or []) if config else []
+            if emails:
+                email_svc = EmailNotificationService(self.db)
+                extra = {"Metric": alert.metric_type.upper(), "Severity": alert.severity}
+                if resolution_notes:
+                    extra["Resolution Notes"] = resolution_notes
+                await email_svc.send_alert_status_change(
+                    recipient_emails=emails,
+                    alert_type="vm_threshold",
+                    resource_name=alert.vm_name,
+                    action="resolved",
+                    action_by=resolved_by or "system",
+                    alert_id=alert_id,
+                    extra_details=extra,
+                )
+        except Exception as exc:
+            logger.warning("vm_resolve_email_failed", alert_id=alert_id, error=str(exc)[:200])
+
         return {"id": alert_id, "status": "resolved"}
 
     async def get_vm_metrics(
@@ -600,12 +647,34 @@ class InfraAlertService:
         await self._db_commit()
 
         logger.info("expiry_alert_acknowledged", alert_id=alert_id, by=acknowledged_by)
+
+        try:
+            cfg_result = await self.db.execute(
+                select(CustomExpiryAlertConfig).where(CustomExpiryAlertConfig.id == alert.config_id)
+            )
+            config = cfg_result.scalar_one_or_none()
+            emails = (config.notification_emails or []) if config else []
+            if emails:
+                email_svc = EmailNotificationService(self.db)
+                await email_svc.send_alert_status_change(
+                    recipient_emails=emails,
+                    alert_type=alert.alert_type,
+                    resource_name=alert.resource_name,
+                    action="acknowledged",
+                    action_by=acknowledged_by,
+                    alert_id=alert_id,
+                    extra_details={"Days Until Expiry": alert.days_until_expiry, "Severity": alert.severity},
+                )
+        except Exception as exc:
+            logger.warning("expiry_ack_email_failed", alert_id=alert_id, error=str(exc)[:200])
+
         return {"id": alert_id, "status": "acknowledged"}
 
     async def resolve_expiry_alert(
         self,
         alert_id: int,
         resolution_notes: str | None = None,
+        resolved_by: str | None = None,
     ) -> dict[str, Any]:
         """Resolve a custom expiry alert."""
         if self.db is None:
@@ -622,6 +691,30 @@ class InfraAlertService:
         await self._db_commit()
 
         logger.info("expiry_alert_resolved", alert_id=alert_id)
+
+        try:
+            cfg_result = await self.db.execute(
+                select(CustomExpiryAlertConfig).where(CustomExpiryAlertConfig.id == alert.config_id)
+            )
+            config = cfg_result.scalar_one_or_none()
+            emails = (config.notification_emails or []) if config else []
+            if emails:
+                email_svc = EmailNotificationService(self.db)
+                extra = {"Days Until Expiry": alert.days_until_expiry, "Severity": alert.severity}
+                if resolution_notes:
+                    extra["Resolution Notes"] = resolution_notes
+                await email_svc.send_alert_status_change(
+                    recipient_emails=emails,
+                    alert_type=alert.alert_type,
+                    resource_name=alert.resource_name,
+                    action="resolved",
+                    action_by=resolved_by or "system",
+                    alert_id=alert_id,
+                    extra_details=extra,
+                )
+        except Exception as exc:
+            logger.warning("expiry_resolve_email_failed", alert_id=alert_id, error=str(exc)[:200])
+
         return {"id": alert_id, "status": "resolved"}
 
     # =========================================================================
@@ -1292,12 +1385,34 @@ class InfraAlertService:
         await self._db_commit()
 
         logger.info("pg_flex_alert_acknowledged", alert_id=alert_id, by=acknowledged_by)
+
+        try:
+            cfg_result = await self.db.execute(
+                select(PGFlexServerAlertConfig).where(PGFlexServerAlertConfig.id == alert.config_id)
+            )
+            config = cfg_result.scalar_one_or_none()
+            emails = (config.notification_emails or []) if config else []
+            if emails:
+                email_svc = EmailNotificationService(self.db)
+                await email_svc.send_alert_status_change(
+                    recipient_emails=emails,
+                    alert_type="pg_flex_server",
+                    resource_name=alert.server_name,
+                    action="acknowledged",
+                    action_by=acknowledged_by,
+                    alert_id=alert_id,
+                    extra_details={"Metric": alert.metric_type.upper(), "Severity": alert.severity},
+                )
+        except Exception as exc:
+            logger.warning("pg_ack_email_failed", alert_id=alert_id, error=str(exc)[:200])
+
         return {"id": alert_id, "status": "acknowledged"}
 
     async def resolve_pg_flex_alert(
         self,
         alert_id: int,
         resolution_notes: str | None = None,
+        resolved_by: str | None = None,
     ) -> dict[str, Any]:
         """Resolve a PG Flexible Server alert."""
         if self.db is None:
@@ -1314,6 +1429,30 @@ class InfraAlertService:
         await self._db_commit()
 
         logger.info("pg_flex_alert_resolved", alert_id=alert_id)
+
+        try:
+            cfg_result = await self.db.execute(
+                select(PGFlexServerAlertConfig).where(PGFlexServerAlertConfig.id == alert.config_id)
+            )
+            config = cfg_result.scalar_one_or_none()
+            emails = (config.notification_emails or []) if config else []
+            if emails:
+                email_svc = EmailNotificationService(self.db)
+                extra = {"Metric": alert.metric_type.upper(), "Severity": alert.severity}
+                if resolution_notes:
+                    extra["Resolution Notes"] = resolution_notes
+                await email_svc.send_alert_status_change(
+                    recipient_emails=emails,
+                    alert_type="pg_flex_server",
+                    resource_name=alert.server_name,
+                    action="resolved",
+                    action_by=resolved_by or "system",
+                    alert_id=alert_id,
+                    extra_details=extra,
+                )
+        except Exception as exc:
+            logger.warning("pg_resolve_email_failed", alert_id=alert_id, error=str(exc)[:200])
+
         return {"id": alert_id, "status": "resolved"}
 
     # =========================================================================

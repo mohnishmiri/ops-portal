@@ -9,14 +9,18 @@ Full management interface for Azure Kubernetes Service operations:
 - 3-Tier cached data retrieval (Redis L1 → DB L2 → Live API L3)
 """
 
+from datetime import UTC, datetime
+
 import structlog
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
+from app.models.database import AuditLog
 from app.services.aks_operations_service import (
     AKSOperationsService,
     get_aks_operations_service,
@@ -29,6 +33,50 @@ router = APIRouter()
 
 def _get_service(db: Session = Depends(get_db)) -> AKSOperationsService:
     return get_aks_operations_service(db)
+
+
+def _cluster_name_from_id(cluster_id: str) -> str:
+    """Extract short cluster name from Azure resource ID."""
+    return cluster_id.rstrip("/").rsplit("/", 1)[-1]
+
+
+async def _write_aks_audit_log(
+    db: Session | None,
+    *,
+    user: UserContext,
+    action: str,
+    resource_type: str,
+    resource_name: str,
+    cluster_id: str,
+    namespace: str,
+    status: str,
+    details: dict,
+) -> None:
+    """Write an AuditLog entry for AKS operations."""
+    if db is None:
+        return
+    try:
+        entry = AuditLog(
+            user_id=user.user_id,
+            user_email=user.email,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_name,
+            details={
+                "page": "AKSOperationsPage",
+                "cluster_id": cluster_id,
+                "cluster_name": _cluster_name_from_id(cluster_id),
+                "namespace": namespace,
+                "resource_name": resource_name,
+                **details,
+            },
+            status=status,
+            timestamp=datetime.now(UTC),
+        )
+        db.add(entry)
+        db.commit()
+    except Exception as exc:
+        logger.warning("aks_audit_log_failed", action=action, resource=resource_name, error=str(exc))
 
 
 # ── Request/Response Models ────────────────────────────────────────────
@@ -376,8 +424,10 @@ async def list_deployments(
 )
 async def scale_deployment(
     request: ScaleDeploymentRequest,
+    http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Scale a deployment with audit logging."""
     result = await service.scale_deployment(
@@ -389,7 +439,29 @@ async def scale_deployment(
         user_email=user.email,
     )
 
-    if not result.get("success"):
+    success = result.get("success", False)
+    prev = result.get("previous_replicas")
+    new_r = result.get("new_replicas", request.replicas)
+    action = "scale_up" if (prev is None or request.replicas >= (prev or 0)) else "scale_down"
+
+    await _write_aks_audit_log(
+        db,
+        user=user,
+        action=action,
+        resource_type="deployment",
+        resource_name=request.deployment_name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={
+            "previous_replicas": prev,
+            "new_replicas": new_r,
+            "operation_id": result.get("operation_id"),
+            "error": result.get("error"),
+        },
+    )
+
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Scale operation failed"))
 
     return result
@@ -427,8 +499,10 @@ async def restart_deployment(
 )
 async def create_deployment(
     request: CreateDeploymentRequest,
+    http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Create a new deployment."""
     result = await service.create_deployment(
@@ -447,7 +521,19 @@ async def create_deployment(
         user_id=user.user_id,
         user_email=user.email,
     )
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        user=user,
+        action="create_deployment",
+        resource_type="deployment",
+        resource_name=request.name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={"image": request.image, "replicas": request.replicas, "error": result.get("error")},
+    )
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Create failed"))
     return result
 
@@ -459,8 +545,10 @@ async def create_deployment(
 )
 async def update_deployment(
     request: UpdateDeploymentRequest,
+    http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Update an existing deployment."""
     result = await service.update_deployment(
@@ -477,7 +565,19 @@ async def update_deployment(
         user_id=user.user_id,
         user_email=user.email,
     )
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        user=user,
+        action="update_deployment",
+        resource_type="deployment",
+        resource_name=request.name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={"image": request.image, "replicas": request.replicas, "error": result.get("error")},
+    )
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Update failed"))
     return result
 
@@ -491,8 +591,10 @@ async def delete_deployment(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
     namespace: str = Query(..., description="Kubernetes namespace"),
     name: str = Query(..., description="Deployment name"),
+    http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Delete a deployment."""
     result = await service.delete_deployment(
@@ -502,7 +604,19 @@ async def delete_deployment(
         user_id=user.user_id,
         user_email=user.email,
     )
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        user=user,
+        action="delete_deployment",
+        resource_type="deployment",
+        resource_name=name,
+        cluster_id=cluster_id,
+        namespace=namespace,
+        status="success" if success else "failed",
+        details={"error": result.get("error")},
+    )
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Delete failed"))
     return result
 

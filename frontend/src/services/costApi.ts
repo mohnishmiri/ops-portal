@@ -1011,6 +1011,7 @@ export interface KeyVaultDashboard {
   total_certificates: number;
   expiring_within_30_days: number;
   expiring_within_90_days: number;
+  expiring_within_360_days: number;
   expiring_items: ExpiringItem[];
   vault_summaries: VaultSummary[];
   generated_at: string;
@@ -1308,6 +1309,36 @@ export function useDeleteSecret() {
       await new Promise((r) => setTimeout(r, 600));
       await qc.invalidateQueries({ queryKey: ["keyvault", "secrets", vars.vaultUri] });
       qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+    },
+  });
+}
+
+export function useExtendSecretExpiry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ vault_uri, name }: { vault_uri: string; name: string }) => {
+      const { data } = await apiClient.post("/keyvault/secrets/extend-expiry", { vault_uri, name });
+      return data;
+    },
+    onSettled: async () => {
+      await new Promise((r) => setTimeout(r, 600));
+      qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+    },
+  });
+}
+
+export function useBulkExtendSecretExpiry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (secrets: { vault_uri: string; name: string }[]) => {
+      const { data } = await apiClient.post("/keyvault/secrets/bulk-extend-expiry", { secrets });
+      return data as { results: { name: string; vault_uri: string; status: string; new_expiry?: string; error?: string }[]; success_count: number; failed_count: number };
+    },
+    onSettled: async () => {
+      await new Promise((r) => setTimeout(r, 600));
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },

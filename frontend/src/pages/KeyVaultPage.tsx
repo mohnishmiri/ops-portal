@@ -27,6 +27,8 @@ import {
   useKeyVaultSyncStatus,
   useKeyVaultSync,
   useKeyVaultSyncVault,
+  useExtendSecretExpiry,
+  useBulkExtendSecretExpiry,
   refreshVaultSecrets,
   refreshVaultKeys,
   refreshVaultCertificates,
@@ -324,13 +326,27 @@ const KPICard: React.FC<{
 
 // ── Expiring Items Alert ──────────────────────────────────────────────
 
-const ExpiringItemsTable: React.FC<{ items: ExpiringItem[]; totalCount?: number; onRefresh: () => void; refreshing: boolean }> = ({ items, totalCount, onRefresh, refreshing }) => {
+const ExpiringItemsTable: React.FC<{
+  items: ExpiringItem[];
+  totalCount?: number;
+  onRefresh: () => void;
+  refreshing: boolean;
+  vaultUriByName: Record<string, string>;
+  canWrite: boolean;
+  onToast: (t: ToastState) => void;
+}> = ({ items, totalCount, onRefresh, refreshing, vaultUriByName, canWrite, onToast }) => {
   const { timezone } = usePortalTimezone();
   const fmt = (iso: string | null) => fmtDate(iso, timezone);
   const [search, setSearch] = React.useState("");
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [sort, setSort] = React.useState<SortState<"name" | "vault_name" | "type" | "expires" | "days_remaining">>({ key: "days_remaining", direction: "asc" });
+  const [fixingName, setFixingName] = React.useState<string | null>(null);
+  const [bulkFixing, setBulkFixing] = React.useState(false);
+
+  const extendMutation = useExtendSecretExpiry();
+  const bulkExtendMutation = useBulkExtendSecretExpiry();
+
   const filtered = items.filter(
     (item) =>
       (item.name || "").toLowerCase().includes(search.toLowerCase()) ||
@@ -350,6 +366,45 @@ const ExpiringItemsTable: React.FC<{ items: ExpiringItem[]; totalCount?: number;
   const safePage = Math.min(page, totalPages);
   const paginated = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
 
+  const expiring90Secrets = items.filter((i) => i.type === "secret" && i.days_remaining <= 90);
+
+  const handleFix = async (item: ExpiringItem) => {
+    const vault_uri = vaultUriByName[item.vault_name];
+    if (!vault_uri) {
+      onToast({ type: "error", message: `Cannot find vault URI for ${item.vault_name}` });
+      return;
+    }
+    setFixingName(item.name);
+    try {
+      await extendMutation.mutateAsync({ vault_uri, name: item.name });
+      onToast({ type: "success", message: `Extended expiry for ${item.name} by 360 days` });
+      onRefresh();
+    } catch (e: unknown) {
+      onToast({ type: "error", message: `Failed to extend ${item.name}: ${(e as Error).message}` });
+    } finally {
+      setFixingName(null);
+    }
+  };
+
+  const handleBulkFix = async () => {
+    if (!expiring90Secrets.length) return;
+    setBulkFixing(true);
+    try {
+      const secrets = expiring90Secrets.map((i) => ({ vault_uri: vaultUriByName[i.vault_name] || "", name: i.name })).filter((s) => s.vault_uri);
+      const result = await bulkExtendMutation.mutateAsync(secrets);
+      if (result.failed_count > 0) {
+        onToast({ type: "error", message: `Bulk fix: ${result.success_count} succeeded, ${result.failed_count} failed` });
+      } else {
+        onToast({ type: "success", message: `Extended expiry for ${result.success_count} secret(s) by 360 days` });
+      }
+      onRefresh();
+    } catch (e: unknown) {
+      onToast({ type: "error", message: `Bulk fix failed: ${(e as Error).message}` });
+    } finally {
+      setBulkFixing(false);
+    }
+  };
+
   if (!items.length) {
     return (
       <div className="rounded-2xl border border-att-100 bg-gradient-to-br from-white to-att-50/50 p-6 shadow-sm">
@@ -360,16 +415,32 @@ const ExpiringItemsTable: React.FC<{ items: ExpiringItem[]; totalCount?: number;
   }
   return (
     <div className={gridStyles.shell}>
-      <GridToolbar
-        search={search}
-        onSearch={(value) => { setSearch(value); setPage(1); }}
-        placeholder="Search expiring items..."
-        countLabel={`${search ? filtered.length : (totalCount ?? filtered.length)} expiring within 90 days`}
-        pageSize={pageSize}
-        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
-        onRefresh={onRefresh}
-        refreshing={refreshing}
-      />
+      <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+        <GridToolbar
+          search={search}
+          onSearch={(value) => { setSearch(value); setPage(1); }}
+          placeholder="Search expiring items..."
+          countLabel={`${search ? filtered.length : (totalCount ?? filtered.length)} expiring within 90 days`}
+          pageSize={pageSize}
+          onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+        />
+        {canWrite && expiring90Secrets.length > 0 && (
+          <button
+            onClick={handleBulkFix}
+            disabled={bulkFixing}
+            className="shrink-0 rounded-lg bg-att-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-att-800 disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {bulkFixing ? (
+              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={14} height={14}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            )}
+            {bulkFixing ? "Fixing…" : `Bulk Fix ${expiring90Secrets.length} Secret${expiring90Secrets.length !== 1 ? "s" : ""} (+360d)`}
+          </button>
+        )}
+      </div>
       <div className="overflow-auto max-h-64">
         <table className={gridStyles.table}>
           <thead className={gridStyles.head}>
@@ -379,28 +450,50 @@ const ExpiringItemsTable: React.FC<{ items: ExpiringItem[]; totalCount?: number;
               <th className={gridStyles.headerCell}><SortableHeader label="Type" active={sort.key === "type"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "type"))} /></th>
               <th className={gridStyles.headerCell}><SortableHeader label="Expires" active={sort.key === "expires"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "expires"))} /></th>
               <th className={gridStyles.headerCellCenter}><SortableHeader label="Days Left" active={sort.key === "days_remaining"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "days_remaining"))} align="center" /></th>
+              {canWrite && <th className={gridStyles.headerCell}>Action</th>}
             </tr>
           </thead>
           <tbody>
-            {paginated.map((item, i) => (
-              <tr key={i} className={gridStyles.row}>
-                <td className={gridStyles.strongCell}>{item.name}</td>
-                <td className={gridStyles.cell}>{item.vault_name}</td>
-                <td className={gridStyles.cell}>
-                  <Badge
-                    label={item.type}
-                    color={item.type === "certificate" ? "purple" : item.type === "key" ? "blue" : "gray"}
-                  />
-                </td>
-                <td className={gridStyles.cell}>{fmt(item.expires)}</td>
-                <td className={gridStyles.centerCell}>
-                  <Badge
-                    label={`${item.days_remaining}d`}
-                    color={item.days_remaining <= 7 ? "red" : item.days_remaining <= 30 ? "yellow" : "blue"}
-                  />
-                </td>
-              </tr>
-            ))}
+            {paginated.map((item, i) => {
+              const isFixable = item.type === "secret" && item.days_remaining <= 90 && !!vaultUriByName[item.vault_name];
+              const isFixin = fixingName === item.name;
+              return (
+                <tr key={i} className={gridStyles.row}>
+                  <td className={gridStyles.strongCell}>{item.name}</td>
+                  <td className={gridStyles.cell}>{item.vault_name}</td>
+                  <td className={gridStyles.cell}>
+                    <Badge
+                      label={item.type}
+                      color={item.type === "certificate" ? "purple" : item.type === "key" ? "blue" : "gray"}
+                    />
+                  </td>
+                  <td className={gridStyles.cell}>{fmt(item.expires)}</td>
+                  <td className={gridStyles.centerCell}>
+                    <Badge
+                      label={`${item.days_remaining}d`}
+                      color={item.days_remaining <= 7 ? "red" : item.days_remaining <= 30 ? "yellow" : item.days_remaining <= 90 ? "blue" : "gray"}
+                    />
+                  </td>
+                  {canWrite && (
+                    <td className={gridStyles.cell}>
+                      {isFixable && (
+                        <button
+                          onClick={() => handleFix(item)}
+                          disabled={isFixin || bulkFixing}
+                          className="rounded px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 hover:bg-green-200 disabled:opacity-50 flex items-center gap-1"
+                          title="Update expiry to current expiry + 360 days"
+                        >
+                          {isFixin ? (
+                            <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+                          ) : null}
+                          {isFixin ? "Fixing…" : "Fix (+360d)"}
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -2183,7 +2276,7 @@ const KeyVaultPage: React.FC = () => {
       </div>
 
       {/* KPI Row */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
         <KPICard title="Vaults" value={d.total_vaults} icon={Icons.vault("text-blue-600")} color="bg-blue-50" />
         <KPICard title="Secrets" value={d.total_secrets} icon={Icons.secret("text-green-600")} color="bg-green-50" />
         <KPICard title="Keys" value={d.total_keys} icon={Icons.key("text-purple-600")} color="bg-purple-50" />
@@ -2205,7 +2298,15 @@ const KeyVaultPage: React.FC = () => {
       </div>
 
       {/* Expiring Items Alert */}
-      <ExpiringItemsTable items={d.expiring_items || []} totalCount={d.expiring_within_90_days} onRefresh={handleDashboardRefresh} refreshing={refreshingDashboard} />
+      <ExpiringItemsTable
+        items={(d.expiring_items || []).filter((i) => i.days_remaining <= 90)}
+        totalCount={d.expiring_within_90_days}
+        onRefresh={handleDashboardRefresh}
+        refreshing={refreshingDashboard}
+        vaultUriByName={Object.fromEntries((d.vault_summaries || []).map((v) => [v.name, v.vault_uri]))}
+        canWrite={canWrite}
+        onToast={setToast}
+      />
 
       {/* Vault Inventory */}
       <VaultSummaryTable

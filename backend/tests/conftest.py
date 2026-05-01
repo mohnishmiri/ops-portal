@@ -15,6 +15,7 @@ Fixtures exposed:
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.auth import get_current_user
@@ -23,12 +24,30 @@ from app.main import create_application
 from app.models.database import Permission, Resource
 from app.schemas.auth import UserContext, UserRole
 
+# audit_logs uses JSONB which SQLite can't compile.  We create an equivalent
+# table using TEXT for the details column so the audit writes in the
+# permissions endpoints succeed inside the test suite.
+_AUDIT_LOGS_SQLITE_DDL = """
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    user_id      VARCHAR(255) NOT NULL,
+    user_email   VARCHAR(255),
+    action       VARCHAR(100) NOT NULL,
+    resource_type VARCHAR(100) NOT NULL,
+    resource_id  VARCHAR(500),
+    details      TEXT,
+    ip_address   VARCHAR(50),
+    status       VARCHAR(20) DEFAULT 'success'
+)
+"""
+
 
 # ── In-memory SQLite engine ────────────────────────────────────────────────────
 
 @pytest.fixture
 async def db_engine():
-    """Fresh in-memory SQLite engine — only Resource + Permission tables."""
+    """Fresh in-memory SQLite engine — Resource, Permission, and audit_logs tables."""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         echo=False,
@@ -37,6 +56,7 @@ async def db_engine():
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Resource.__table__.create(c, checkfirst=True))
         await conn.run_sync(lambda c: Permission.__table__.create(c, checkfirst=True))
+        await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
     yield engine
     await engine.dispose()
 

@@ -645,6 +645,7 @@ class KeyVaultSyncService:
             "total_certificates": total_certs,
             "expiring_within_30_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 30]),
             "expiring_within_90_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 90]),
+            "expiring_within_360_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 360]),
             "expiring_items": expiring_soon,
             "vault_summaries": vault_summaries,
             "generated_at": datetime.utcnow().isoformat(),
@@ -812,13 +813,13 @@ def _check_expiry_from_db(
     expires_str: str | None,
     enabled: bool,
 ) -> None:
-    """Check if an item is expiring within 90 days (from DB string)."""
+    """Check if an item is expiring within 360 days (from DB string)."""
     if not expires_str:
         return
     try:
         exp_date = datetime.fromisoformat(expires_str)
         days_remaining = (exp_date - datetime.utcnow()).days
-        if 0 <= days_remaining <= 90:
+        if 0 <= days_remaining <= 360:
             expiring_list.append(
                 {
                     "name": name,

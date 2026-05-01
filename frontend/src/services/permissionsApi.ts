@@ -142,6 +142,42 @@ export function useDeletePermission() {
   });
 }
 
+// ── Audit log hook ────────────────────────────────────────────────────────────
+
+export interface AuditLogEntry {
+  id: number;
+  timestamp: string;
+  actor_user_id: string;
+  actor_email: string;
+  action: string;
+  summary: string;
+  subject_type?: string | null;
+  subject_id?: string | null;
+  resource_name?: string | null;
+  resource_type?: string | null;
+  permission_type?: string | null;
+  ip_address?: string | null;
+}
+
+export interface AuditLogResponse {
+  entries: AuditLogEntry[];
+  total: number;
+}
+
+export function usePermissionsAuditLog(days = 30) {
+  return useQuery<AuditLogResponse>({
+    queryKey: ["permissions", "audit-log", days],
+    queryFn: async () => {
+      const resp = await apiClient.get<AuditLogResponse>(
+        `/permissions/audit-log?days=${days}&limit=500`
+      );
+      return resp.data;
+    },
+    staleTime: 60 * 1000, // 1 min — audit log doesn't need real-time updates
+    refetchOnWindowFocus: false,
+  });
+}
+
 // ── Effective permissions hook ────────────────────────────────────────────────
 
 export function useMyPermissions() {

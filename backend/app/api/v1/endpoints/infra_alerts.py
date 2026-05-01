@@ -467,6 +467,7 @@ async def resolve_vm_alert(
     return await service.resolve_vm_alert(
         alert_id=alert_id,
         resolution_notes=request.resolution_notes,
+        resolved_by=user.email or user.user_id,
     )
 
 
@@ -650,6 +651,7 @@ async def resolve_expiry_alert(
     return await service.resolve_expiry_alert(
         alert_id=alert_id,
         resolution_notes=request.resolution_notes,
+        resolved_by=user.email or user.user_id,
     )
 
 
@@ -889,6 +891,7 @@ async def resolve_pg_flex_alert(
     return await service.resolve_pg_flex_alert(
         alert_id=alert_id,
         resolution_notes=request.resolution_notes,
+        resolved_by=user.email or user.user_id,
     )
 
 

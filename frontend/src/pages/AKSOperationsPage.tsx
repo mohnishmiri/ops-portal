@@ -472,6 +472,18 @@ const AKSOperationsPage: React.FC = () => {
   const handleScale = async () => {
     if (!scaleDialog || !selectedCluster) return;
     const { deployment, replicas } = scaleDialog;
+    const prevReplicas = deployment.replicas;
+    const action = replicas >= prevReplicas ? "scale_up" : "scale_down";
+    const activityId = addMutationActivity({
+      deploymentName: deployment.name,
+      namespace: deployment.namespace,
+      action,
+      targetReplicas: replicas,
+      previousReplicas: prevReplicas,
+      startedAt: Date.now(),
+      status: "pending",
+    });
+    setScaleDialog(null);
     try {
       await scaleDeploymentMutation.mutateAsync({
         clusterId: selectedCluster.id,
@@ -479,17 +491,11 @@ const AKSOperationsPage: React.FC = () => {
         deploymentName: deployment.name,
         replicas,
       });
-      showToast(`Scaling ${deployment.name} to ${replicas} replicas…`);
-      setScalingActivity({
-        deploymentName: deployment.name,
-        namespace: deployment.namespace,
-        targetReplicas: replicas,
-        startedAt: Date.now(),
-      });
+      updateMutationActivity(activityId, { status: "scaling", message: `0/${replicas} pods ready` });
     } catch (e: any) {
+      updateMutationActivity(activityId, { status: "failed", message: e?.response?.data?.detail || "Scale failed" });
       showToast(e?.response?.data?.detail || "Scale failed", "error");
     }
-    setScaleDialog(null);
   };
 
   // Handle restart deployment
@@ -687,15 +693,27 @@ const AKSOperationsPage: React.FC = () => {
   // Handle Delete Deployment
   const handleDeleteDeployment = async () => {
     if (!selectedCluster || !deleteDeploymentConfirm) return;
+    const deploymentName = deleteDeploymentConfirm.name;
+    const namespace = deleteDeploymentConfirm.namespace;
+    const activityId = addMutationActivity({
+      deploymentName,
+      namespace,
+      action: "delete",
+      startedAt: Date.now(),
+      status: "pending",
+      message: "Deleting…",
+    });
+    setDeleteDeploymentConfirm(null);
     try {
       await deleteDeploymentMutation.mutateAsync({
         clusterId: selectedCluster.id,
-        namespace: deleteDeploymentConfirm.namespace,
-        name: deleteDeploymentConfirm.name,
+        namespace,
+        name: deploymentName,
       });
-      showToast(`Deleted deployment ${deleteDeploymentConfirm.name}`);
-      setDeleteDeploymentConfirm(null);
+      updateMutationActivity(activityId, { status: "deleted", message: "Deployment deleted" });
+      showToast(`Deleted deployment ${deploymentName}`);
     } catch (e: any) {
+      updateMutationActivity(activityId, { status: "failed", message: e?.response?.data?.detail || "Delete failed" });
       showToast(e?.response?.data?.detail || "Delete failed", "error");
     }
   };
@@ -972,35 +990,64 @@ const AKSOperationsPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [syncClustersMutation]);
 
-  // Scaling activity tracker
-  const [scalingActivity, setScalingActivity] = useState<{
+  // Multi-deployment mutation status tracker
+  type MutationActivity = {
+    id: string;
     deploymentName: string;
     namespace: string;
-    targetReplicas: number;
+    action: "scale_up" | "scale_down" | "delete";
+    targetReplicas?: number;
+    previousReplicas?: number;
     startedAt: number;
-  } | null>(null);
+    status: "pending" | "scaling" | "ready" | "deleted" | "failed";
+    message?: string;
+  };
+  const [mutationActivities, setMutationActivities] = useState<MutationActivity[]>([]);
 
-  // Poll deployment status during scaling
+  const addMutationActivity = useCallback((activity: Omit<MutationActivity, "id">) => {
+    const id = `${activity.namespace}/${activity.deploymentName}/${Date.now()}`;
+    setMutationActivities((prev) => [{ ...activity, id }, ...prev.slice(0, 9)]);
+    return id;
+  }, []);
+
+  const updateMutationActivity = useCallback((id: string, update: Partial<MutationActivity>) => {
+    setMutationActivities((prev) => prev.map((a) => (a.id === id ? { ...a, ...update } : a)));
+  }, []);
+
+  const dismissMutationActivity = useCallback((id: string) => {
+    setMutationActivities((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  // Poll deployment status for each active scaling activity
   useEffect(() => {
-    if (!scalingActivity || !selectedCluster) return;
+    const active = mutationActivities.filter((a) => a.status === "pending" || a.status === "scaling");
+    if (!active.length || !selectedCluster) return;
+
     const pollInterval = setInterval(() => {
-      const dep = allDeps.find(
-        d => d.name === scalingActivity.deploymentName && d.namespace === scalingActivity.namespace
+      setMutationActivities((prev) =>
+        prev.map((activity) => {
+          if (activity.status !== "pending" && activity.status !== "scaling") return activity;
+          if (activity.action === "delete") return activity;
+
+          const dep = allDeps.find(
+            (d) => d.name === activity.deploymentName && d.namespace === activity.namespace
+          );
+          if (!dep) return { ...activity, status: "scaling" as const };
+
+          if (dep.ready_replicas === activity.targetReplicas) {
+            return { ...activity, status: "ready" as const, message: `All ${dep.ready_replicas} pod(s) ready` };
+          }
+          // Timeout after 5 minutes
+          if (Date.now() - activity.startedAt > 5 * 60 * 1000) {
+            return { ...activity, status: "failed" as const, message: "Timeout — still waiting for pods" };
+          }
+          return { ...activity, status: "scaling" as const, message: `${dep.ready_replicas ?? 0}/${activity.targetReplicas} pods ready` };
+        })
       );
-      if (dep && dep.ready_replicas === scalingActivity.targetReplicas) {
-        showToast(`✅ ${dep.name} scaled to ${dep.ready_replicas}/${scalingActivity.targetReplicas} replicas — all pods ready`);
-        setScalingActivity(null);
-      }
     }, 2000);
-    // Timeout after 5 minutes
-    const timeout = setTimeout(() => {
-      if (scalingActivity) {
-        showToast(`⚠️ Scaling ${scalingActivity.deploymentName} is taking longer than expected`, "error");
-        setScalingActivity(null);
-      }
-    }, 5 * 60 * 1000);
-    return () => { clearInterval(pollInterval); clearTimeout(timeout); };
-  }, [scalingActivity, allDeps, selectedCluster, showToast]);
+
+    return () => clearInterval(pollInterval);
+  }, [mutationActivities, allDeps, selectedCluster]);
 
   // ── Render Tabs ─────────────────────────────────────────────────────
 
@@ -1333,13 +1380,64 @@ const AKSOperationsPage: React.FC = () => {
         <div className="text-center py-8 text-gray-500">Loading deployments...</div>
       ) : (
         <>
-        {/* Scaling Activity Banner */}
-        {scalingActivity && (
-          <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm">
-            <svg className="w-5 h-5 text-blue-600 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.49-8.49l2.83-2.83M2 12h4m12 0h4m-3.93 7.07l-2.83-2.83M7.76 7.76L4.93 4.93"/></svg>
-            <span className="text-blue-800">
-              <strong>Scaling in progress:</strong> {scalingActivity.deploymentName} → {scalingActivity.targetReplicas} replicas
-            </span>
+        {/* Mutation Activity Panel */}
+        {mutationActivities.length > 0 && (
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200">
+              <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Operation Status</span>
+              <button
+                onClick={() => setMutationActivities([])}
+                className="text-xs text-slate-400 hover:text-slate-600"
+                title="Clear all"
+              >
+                Clear all
+              </button>
+            </div>
+            <ul className="divide-y divide-slate-100">
+              {mutationActivities.map((activity) => {
+                const isScaling = activity.status === "pending" || activity.status === "scaling";
+                const isReady = activity.status === "ready" || activity.status === "deleted";
+                const isFailed = activity.status === "failed";
+                const actionLabel =
+                  activity.action === "scale_up" ? `Scale up → ${activity.targetReplicas}` :
+                  activity.action === "scale_down" ? `Scale down → ${activity.targetReplicas}` :
+                  "Delete";
+                const elapsed = Math.round((Date.now() - activity.startedAt) / 1000);
+                return (
+                  <li key={activity.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                    {isScaling && (
+                      <svg className="w-4 h-4 text-blue-500 animate-spin shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.49-8.49l2.83-2.83M2 12h4m12 0h4m-3.93 7.07l-2.83-2.83M7.76 7.76L4.93 4.93"/></svg>
+                    )}
+                    {isReady && (
+                      <svg className="w-4 h-4 text-green-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
+                    )}
+                    {isFailed && (
+                      <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    )}
+                    <span className="font-semibold text-slate-800 shrink-0">{activity.deploymentName}</span>
+                    <span className="text-slate-400 shrink-0 text-xs">{activity.namespace}</span>
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${
+                      activity.action === "delete" ? "bg-red-50 text-red-700" :
+                      activity.action === "scale_up" ? "bg-blue-50 text-blue-700" :
+                      "bg-yellow-50 text-yellow-700"
+                    }`}>{actionLabel}</span>
+                    <span className={`flex-1 text-xs ${isFailed ? "text-red-600" : isReady ? "text-green-600" : "text-slate-500"}`}>
+                      {activity.message || ""}
+                    </span>
+                    <span className="text-xs text-slate-300 shrink-0">{elapsed}s</span>
+                    {(isReady || isFailed) && (
+                      <button
+                        onClick={() => dismissMutationActivity(activity.id)}
+                        className="ml-1 text-slate-300 hover:text-slate-500 shrink-0"
+                        title="Dismiss"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={14} height={14}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         )}
         <div className={gridStyles.shell}>
@@ -1375,16 +1473,21 @@ const AKSOperationsPage: React.FC = () => {
                     </span>
                   </td>
                   <td className={gridStyles.centerCell}>
-                    {scalingActivity?.deploymentName === deployment.name && scalingActivity?.namespace === deployment.namespace ? (
-                      <span className="inline-flex items-center gap-1 font-mono text-blue-600">
-                        <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.49-8.49l2.83-2.83M2 12h4m12 0h4m-3.93 7.07l-2.83-2.83M7.76 7.76L4.93 4.93"/></svg>
-                        {deployment.ready_replicas}/{scalingActivity.targetReplicas}
-                      </span>
-                    ) : (
-                      <span className="font-mono">
-                        {deployment.ready_replicas}/{deployment.replicas}
-                      </span>
-                    )}
+                    {(() => {
+                      const activeScale = mutationActivities.find(
+                        (a) => a.deploymentName === deployment.name && a.namespace === deployment.namespace && (a.status === "pending" || a.status === "scaling")
+                      );
+                      return activeScale ? (
+                        <span className="inline-flex items-center gap-1 font-mono text-blue-600">
+                          <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.49-8.49l2.83-2.83M2 12h4m12 0h4m-3.93 7.07l-2.83-2.83M7.76 7.76L4.93 4.93"/></svg>
+                          {deployment.ready_replicas}/{activeScale.targetReplicas}
+                        </span>
+                      ) : (
+                        <span className="font-mono">
+                          {deployment.ready_replicas}/{deployment.replicas}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className={gridStyles.centerCell}>
                     {deployment.ready_replicas === deployment.replicas ? (

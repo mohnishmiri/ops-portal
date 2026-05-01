@@ -67,7 +67,6 @@ async def start_scheduler() -> None:
     _remove_legacy_alert_jobs(scheduler)
 
     scheduler.start()
-    await ensure_default_alert_schedule_configs()
     await sync_alert_schedule_jobs()
     logger.info("scheduler_started", jobs=len(scheduler.get_jobs()))
 

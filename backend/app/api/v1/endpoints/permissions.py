@@ -6,24 +6,36 @@ subject (role or user) a specific access level (view/edit) to a resource.
 
 All write operations require the ADMIN role.  Read operations are also
 admin-only since they expose the full permission matrix.
+
+Every mutating operation writes a row to the shared audit_logs table so
+admins have a queryable, tamper-evident trail of who changed what and when.
 """
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import UTC, datetime, timedelta
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
-from app.models.database import Permission, Resource
+from app.models.database import AuditLog, Permission, Resource
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+_AUDIT_ACTIONS = {
+    "permission_granted",
+    "permission_revoked",
+    "resource_created",
+    "resource_deleted",
+    "resource_updated",
+}
 
 
 # ── Request / response schemas ────────────────────────────────────────────────
@@ -63,10 +75,57 @@ def _resource_to_dict(r) -> dict:
     }
 
 
+def _permission_to_dict(p: Permission) -> dict:
+    return {
+        "id": p.id,
+        "subject_type": p.subject_type,
+        "subject_id": p.subject_id,
+        "resource_id": p.resource_id,
+        "resource_name": p.resource.resource_name if p.resource else None,
+        "resource_type": p.resource.resource_type if p.resource else None,
+        "permission_type": p.permission_type,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+async def _write_audit(
+    db: AsyncSession,
+    *,
+    request: Request,
+    user: UserContext,
+    action: str,
+    summary: str,
+    details: dict,
+) -> None:
+    """Write a single row to audit_logs in its own transaction.
+
+    Always called AFTER the main operation has been committed so an audit
+    failure can never roll back the operation itself.  Errors are logged
+    and swallowed — the session is always left in a clean state.
+    """
+    try:
+        entry = AuditLog(
+            user_id=user.user_id,
+            user_email=user.email,
+            action=action,
+            resource_type="access_management",
+            resource_id=None,
+            details={"summary": summary, **details},
+            ip_address=request.client.host if request.client else None,
+            status="success",
+        )
+        db.add(entry)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.warning("permissions_audit_log_failed", action=action, error=str(exc)[:200])
+
+
 # ── Resource endpoints ────────────────────────────────────────────────────────
 
 @router.post("/resources", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def create_resource(
+    request: Request,
     req: ResourceCreateRequest,
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
@@ -91,6 +150,13 @@ async def create_resource(
             return JSONResponse(content=jsonable_encoder(_resource_to_dict(existing)))
         raise
     logger.info("resource_created", resource_name=req.resource_name, by=user.user_id)
+    await _write_audit(
+        db, request=request, user=user,
+        action="resource_created",
+        summary=f"Created {req.resource_type} resource '{req.resource_name}'",
+        details={"resource_name": req.resource_name, "resource_type": req.resource_type,
+                 "route_path": req.route_path},
+    )
     return JSONResponse(content=jsonable_encoder(_resource_to_dict(resource)))
 
 
@@ -113,6 +179,7 @@ async def get_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
 @router.patch("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def update_resource(
     resource_id: int,
+    request: Request,
     req: ResourceUpdateRequest,
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
@@ -130,12 +197,19 @@ async def update_resource(
     await db.commit()
     await db.refresh(resource)
     logger.info("resource_updated", resource_id=resource_id, by=user.user_id)
+    await _write_audit(
+        db, request=request, user=user,
+        action="resource_updated",
+        summary=f"Updated resource '{resource.resource_name}'",
+        details={"resource_name": resource.resource_name, "resource_type": resource.resource_type},
+    )
     return JSONResponse(content=jsonable_encoder(_resource_to_dict(resource)))
 
 
 @router.delete("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def delete_resource(
     resource_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
@@ -148,40 +222,34 @@ async def delete_resource(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="System resources cannot be deleted. Remove permission records instead.",
         )
+    name = resource.resource_name
+    rtype = resource.resource_type
     await db.delete(resource)
     await db.commit()
-    logger.info("resource_deleted", resource_id=resource_id, resource_name=resource.resource_name, by=user.user_id)
+    logger.info("resource_deleted", resource_id=resource_id, resource_name=name, by=user.user_id)
+    await _write_audit(
+        db, request=request, user=user,
+        action="resource_deleted",
+        summary=f"Deleted {rtype} resource '{name}'",
+        details={"resource_name": name, "resource_type": rtype},
+    )
     return JSONResponse(content={"deleted": True, "resource_id": resource_id})
 
 
 # ── Permission endpoints ──────────────────────────────────────────────────────
 
-def _permission_to_dict(p: Permission) -> dict:
-    return {
-        "id": p.id,
-        "subject_type": p.subject_type,
-        "subject_id": p.subject_id,
-        "resource_id": p.resource_id,
-        "resource_name": p.resource.resource_name if p.resource else None,
-        "resource_type": p.resource.resource_type if p.resource else None,
-        "permission_type": p.permission_type,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-    }
-
-
 @router.post("/permissions", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def create_permission(
+    request: Request,
     req: PermissionCreateRequest,
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
-    # Validate subject_type and permission_type
     if req.subject_type not in ("user", "role"):
         raise HTTPException(status_code=400, detail="subject_type must be 'user' or 'role'")
     if req.permission_type not in ("view", "edit"):
         raise HTTPException(status_code=400, detail="permission_type must be 'view' or 'edit'")
 
-    # Verify resource exists
     res = await db.execute(select(Resource).where(Resource.id == req.resource_id))
     resource = res.scalar_one_or_none()
     if not resource:
@@ -208,8 +276,22 @@ async def create_permission(
         permission=req.permission_type,
         by=user.user_id,
     )
-    # Attach resource for the response (async sessions can't lazy-load)
     perm.resource = resource
+    await _write_audit(
+        db, request=request, user=user,
+        action="permission_granted",
+        summary=(
+            f"Granted {req.permission_type} on '{resource.resource_name}' "
+            f"to {req.subject_type}:{req.subject_id}"
+        ),
+        details={
+            "subject_type": req.subject_type,
+            "subject_id": req.subject_id,
+            "resource_name": resource.resource_name,
+            "resource_type": resource.resource_type,
+            "permission_type": req.permission_type,
+        },
+    )
     return JSONResponse(content=jsonable_encoder(_permission_to_dict(perm)))
 
 
@@ -223,7 +305,7 @@ async def list_permissions(db: AsyncSession = Depends(get_db)):
     rows = result.all()
     output = []
     for perm, resource in rows:
-        perm.resource = resource  # attach for _permission_to_dict
+        perm.resource = resource
         output.append(_permission_to_dict(perm))
     return JSONResponse(content=jsonable_encoder(output))
 
@@ -231,16 +313,85 @@ async def list_permissions(db: AsyncSession = Depends(get_db)):
 @router.delete("/permissions/{permission_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def delete_permission(
     permission_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
-    result = await db.execute(select(Permission).where(Permission.id == permission_id))
-    perm = result.scalar_one_or_none()
-    if not perm:
+    result = await db.execute(
+        select(Permission, Resource)
+        .outerjoin(Resource, Permission.resource_id == Resource.id)
+        .where(Permission.id == permission_id)
+    )
+    row = result.one_or_none()
+    if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission not found")
+    perm, resource = row
+
     subject = f"{perm.subject_type}:{perm.subject_id}"
-    resource_id = perm.resource_id
+    resource_name = resource.resource_name if resource else str(perm.resource_id)
+    resource_type = resource.resource_type if resource else "unknown"
+    perm_type = perm.permission_type
+    sub_type = perm.subject_type
+    sub_id = perm.subject_id
+
     await db.delete(perm)
     await db.commit()
-    logger.info("permission_revoked", permission_id=permission_id, subject=subject, resource_id=resource_id, by=user.user_id)
+    logger.info("permission_revoked", permission_id=permission_id, subject=subject, by=user.user_id)
+    await _write_audit(
+        db, request=request, user=user,
+        action="permission_revoked",
+        summary=f"Revoked {perm_type} on '{resource_name}' from {sub_type}:{sub_id}",
+        details={
+            "subject_type": sub_type,
+            "subject_id": sub_id,
+            "resource_name": resource_name,
+            "resource_type": resource_type,
+            "permission_type": perm_type,
+        },
+    )
     return JSONResponse(content={"deleted": True, "permission_id": permission_id})
+
+
+# ── Audit Log endpoint ────────────────────────────────────────────────────────
+
+def _audit_to_dict(entry: AuditLog) -> dict:
+    details = entry.details or {}
+    return {
+        "id": entry.id,
+        "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
+        "actor_user_id": entry.user_id,
+        "actor_email": entry.user_email or entry.user_id,
+        "action": entry.action,
+        "summary": details.get("summary", entry.action),
+        "subject_type": details.get("subject_type"),
+        "subject_id": details.get("subject_id"),
+        "resource_name": details.get("resource_name"),
+        "resource_type": details.get("resource_type"),
+        "permission_type": details.get("permission_type"),
+        "ip_address": entry.ip_address,
+    }
+
+
+@router.get("/audit-log", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def list_audit_log(
+    days: int = Query(default=30, ge=1, le=365, description="Days of history"),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max records"),
+    action: str | None = Query(default=None, description="Filter by action"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the access-management audit trail: permission grants/revokes and resource changes."""
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
+
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.action.in_(_AUDIT_ACTIONS))
+        .where(AuditLog.timestamp >= since)
+        .order_by(desc(AuditLog.timestamp))
+        .limit(limit)
+    )
+    if action and action in _AUDIT_ACTIONS:
+        stmt = stmt.where(AuditLog.action == action)
+
+    result = await db.execute(stmt)
+    entries = [_audit_to_dict(e) for e in result.scalars().all()]
+    return JSONResponse(content={"entries": entries, "total": len(entries)})

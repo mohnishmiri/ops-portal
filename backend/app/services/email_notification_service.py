@@ -457,6 +457,97 @@ class EmailNotificationService:
             "success": sum(1 for r in results if r["status"] == "sent"),
         }
 
+    async def send_alert_status_change(
+        self,
+        recipient_emails: list[str],
+        alert_type: str,
+        resource_name: str,
+        action: str,
+        action_by: str,
+        alert_id: int,
+        extra_details: dict | None = None,
+    ) -> dict[str, Any]:
+        """Send notification email when an alert is acknowledged or resolved."""
+        if not recipient_emails:
+            return {"status": "skipped", "reason": "no_recipients"}
+
+        action_label = "Acknowledged" if action == "acknowledged" else "Resolved"
+        action_color = "#2563eb" if action == "acknowledged" else "#16a34a"
+        icon = "✅" if action == "acknowledged" else "✔️"
+
+        extra_rows = "".join(
+            f"<tr><td>{k.replace('_', ' ').title()}</td><td>{v}</td></tr>"
+            for k, v in (extra_details or {}).items()
+        )
+
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }}
+    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+    .header {{ background: {action_color}; color: white; padding: 20px; border-radius: 8px 8px 0 0; }}
+    .header h1 {{ margin: 0; font-size: 22px; }}
+    .content {{ background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb; }}
+    .info-box {{ background: white; border-radius: 8px; padding: 16px; margin: 12px 0; border-left: 4px solid {action_color}; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
+    td {{ padding: 8px; border-bottom: 1px solid #e5e7eb; }}
+    td:first-child {{ font-weight: 600; width: 40%; }}
+    .footer {{ background: #f3f4f6; padding: 12px 16px; border-radius: 0 0 8px 8px; font-size: 12px; color: #6b7280; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>{icon} Alert {action_label}: {resource_name}</h1>
+    </div>
+    <div class="content">
+      <div class="info-box">
+        <p style="margin:0;font-size:15px;">
+          The following infrastructure alert has been <strong>{action_label.lower()}</strong>.
+        </p>
+      </div>
+      <table>
+        <tr><td>Resource</td><td>{resource_name}</td></tr>
+        <tr><td>Alert Type</td><td>{alert_type.replace('_', ' ').title()}</td></tr>
+        <tr><td>Action</td><td>{action_label}</td></tr>
+        <tr><td>Performed By</td><td>{action_by}</td></tr>
+        <tr><td>Time</td><td>{datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}</td></tr>
+        {extra_rows}
+      </table>
+      <a href="{self.portal_base_url}/infra-alerts"
+         style="display:inline-block;background:{action_color};color:white;padding:10px 22px;
+                text-decoration:none;border-radius:6px;margin-top:16px;">
+        View Infra Alerts
+      </a>
+    </div>
+    <div class="footer">
+      <p>This notification was sent by the ATTCC Infrastructure Alert System.</p>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+        subject = f"[{action_label.upper()}] Infra Alert: {resource_name}"
+
+        results = await self._send_email_batch(
+            recipient_emails=recipient_emails,
+            subject=subject,
+            html_body=html_body,
+            alert_type=alert_type,
+            alert_id=alert_id,
+        )
+
+        return {
+            "alert_id": alert_id,
+            "action": action,
+            "recipients": len(recipient_emails),
+            "success": sum(1 for r in results if r["status"] == "sent"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+        }
+
     async def _send_email_batch(
         self,
         recipient_emails: list[str],
