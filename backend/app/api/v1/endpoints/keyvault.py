@@ -465,14 +465,11 @@ async def extend_secret_expiry(
     sync_service: KeyVaultSyncService = Depends(_get_sync_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Fetch current secret value and update its expiry to current_expiry + 360 days."""
+    """Fetch current secret value and update its expiry to today + 360 days."""
     try:
         current = await service.get_secret_value(request.vault_uri, request.name)
         current_expires = current.get("expires")
-        if current_expires:
-            new_expiry = (datetime.fromisoformat(current_expires) + timedelta(days=360)).isoformat()
-        else:
-            new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
+        new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
 
         result = await service.create_or_update_secret(
             vault_uri=request.vault_uri,
@@ -520,10 +517,7 @@ async def bulk_extend_secret_expiry(
         try:
             current = await service.get_secret_value(item.vault_uri, item.name)
             current_expires = current.get("expires")
-            if current_expires:
-                new_expiry = (datetime.fromisoformat(current_expires) + timedelta(days=360)).isoformat()
-            else:
-                new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
+            new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
 
             await service.create_or_update_secret(
                 vault_uri=item.vault_uri,

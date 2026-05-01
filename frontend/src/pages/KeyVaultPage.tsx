@@ -343,9 +343,13 @@ const ExpiringItemsTable: React.FC<{
   const [sort, setSort] = React.useState<SortState<"name" | "vault_name" | "type" | "expires" | "days_remaining">>({ key: "days_remaining", direction: "asc" });
   const [fixingName, setFixingName] = React.useState<string | null>(null);
   const [bulkFixing, setBulkFixing] = React.useState(false);
+  // Track individually fixed secrets so bulk count drops immediately without waiting for server refresh
+  const [fixedKeys, setFixedKeys] = React.useState<Set<string>>(new Set());
 
   const extendMutation = useExtendSecretExpiry();
   const bulkExtendMutation = useBulkExtendSecretExpiry();
+
+  const _itemKey = (i: ExpiringItem) => `${i.vault_name}/${i.name}`;
 
   const filtered = items.filter(
     (item) =>
@@ -366,7 +370,10 @@ const ExpiringItemsTable: React.FC<{
   const safePage = Math.min(page, totalPages);
   const paginated = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
 
-  const expiring90Secrets = items.filter((i) => i.type === "secret" && i.days_remaining <= 90);
+  // Exclude already-fixed items so the count drops immediately after each individual fix
+  const expiring90Secrets = items.filter(
+    (i) => i.type === "secret" && i.days_remaining <= 90 && !fixedKeys.has(_itemKey(i))
+  );
 
   const handleFix = async (item: ExpiringItem) => {
     const vault_uri = vaultUriByName[item.vault_name];
@@ -377,7 +384,8 @@ const ExpiringItemsTable: React.FC<{
     setFixingName(item.name);
     try {
       await extendMutation.mutateAsync({ vault_uri, name: item.name });
-      onToast({ type: "success", message: `Extended expiry for ${item.name} by 360 days` });
+      setFixedKeys((prev) => new Set(prev).add(_itemKey(item)));
+      onToast({ type: "success", message: `Extended expiry for ${item.name} to today + 360 days` });
       onRefresh();
     } catch (e: unknown) {
       onToast({ type: "error", message: `Failed to extend ${item.name}: ${(e as Error).message}` });
@@ -392,10 +400,18 @@ const ExpiringItemsTable: React.FC<{
     try {
       const secrets = expiring90Secrets.map((i) => ({ vault_uri: vaultUriByName[i.vault_name] || "", name: i.name })).filter((s) => s.vault_uri);
       const result = await bulkExtendMutation.mutateAsync(secrets);
+      // Mark all successfully fixed secrets so count drops to 0 immediately
+      const successNames = new Set(
+        result.results.filter((r) => r.status === "success").map((r) => {
+          const item = expiring90Secrets.find((i) => i.name === r.name);
+          return item ? _itemKey(item) : null;
+        }).filter(Boolean) as string[]
+      );
+      setFixedKeys((prev) => new Set([...prev, ...successNames]));
       if (result.failed_count > 0) {
         onToast({ type: "error", message: `Bulk fix: ${result.success_count} succeeded, ${result.failed_count} failed` });
       } else {
-        onToast({ type: "success", message: `Extended expiry for ${result.success_count} secret(s) by 360 days` });
+        onToast({ type: "success", message: `Extended expiry for ${result.success_count} secret(s) to today + 360 days` });
       }
       onRefresh();
     } catch (e: unknown) {
