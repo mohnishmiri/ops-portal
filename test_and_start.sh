@@ -90,10 +90,12 @@ fi
 printf '\n'
 
 # ── Backend tests ──────────────────────────────────────────────────────────────
-# Use 'uv run pytest' rather than a hardcoded venv path so this works on all
-# platforms regardless of whether the venv uses bin/ (Unix) or Scripts/ (Windows).
+# Use 'uv run python -m pytest' rather than 'uv run pytest' to avoid the
+# "Failed to canonicalize script path" error on Windows (Git Bash / MINGW64)
+# where uv cannot resolve the pytest console-script entry point in the venv.
+# Running via '-m pytest' works identically on Linux, macOS, and Windows.
 yellow "► Running backend unit tests (pytest) …"
-if (cd "$BACKEND_DIR" && uv run pytest tests/ -v --tb=short -q 2>&1); then
+if (cd "$BACKEND_DIR" && uv run python -m pytest tests/ -v --tb=short -q 2>&1); then
   green "  ✓ Backend tests passed"
 else
   red   "  ✗ Backend tests FAILED — application will not start"
