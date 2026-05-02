@@ -538,10 +538,14 @@ async def bulk_extend_secret_expiry(
                 details={"extended_expiry": new_expiry, "previous_expiry": current_expires, "bulk": True},
             )
             vaults_touched.add(item.vault_uri)
-            results.append({"name": item.name, "vault_uri": item.vault_uri, "status": "success", "new_expiry": new_expiry})
+            results.append(
+                {"name": item.name, "vault_uri": item.vault_uri, "status": "success", "new_expiry": new_expiry}
+            )
         except Exception as e:
             logger.warning("bulk_extend_secret_error", vault_uri=item.vault_uri, name=item.name, error=str(e))
-            results.append({"name": item.name, "vault_uri": item.vault_uri, "status": "failed", "error": _friendly_error(e)})
+            results.append(
+                {"name": item.name, "vault_uri": item.vault_uri, "status": "failed", "error": _friendly_error(e)}
+            )
 
     for vault_uri in vaults_touched:
         background_tasks.add_task(sync_service.sync_vault, vault_uri, triggered_by="mutation")

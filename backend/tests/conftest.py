@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 # ── In-memory SQLite engine ────────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def db_engine():
     """Fresh in-memory SQLite engine — Resource, Permission, and audit_logs tables."""
@@ -71,6 +72,7 @@ async def db_session(db_engine):
 
 
 # ── User helpers ───────────────────────────────────────────────────────────────
+
 
 async def make_admin_user() -> UserContext:
     return UserContext(
@@ -99,6 +101,7 @@ async def make_read_user() -> UserContext:
 
 
 # ── FastAPI app + clients ──────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def app():

@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import case, delete, distinct, func, select
@@ -37,6 +38,9 @@ from app.models.database import (
     AmortizedCostWeeklySummary,
 )
 from app.services.cost_service import CostService
+
+if TYPE_CHECKING:
+    from app.schemas.cost import LeadershipDashboard
 
 logger = structlog.get_logger(__name__)
 
@@ -124,9 +128,7 @@ class AmortizedCostSyncService:
                 triggered_by=triggered_by,
             )
 
-    async def _fetch_subscription_metadata(
-        self, monitored_ids: list[str]
-    ) -> dict[str, dict]:
+    async def _fetch_subscription_metadata(self, monitored_ids: list[str]) -> dict[str, dict]:
         """Fetch subscription display name and environment from AdminSubscription table."""
         result = await self._db.execute(
             select(
@@ -135,10 +137,7 @@ class AmortizedCostSyncService:
                 AdminSubscription.environment,
             ).where(AdminSubscription.subscription_id.in_(monitored_ids))
         )
-        return {
-            sub_id: {"subscription_name": name, "environment": env}
-            for sub_id, name, env in result.all()
-        }
+        return {sub_id: {"subscription_name": name, "environment": env} for sub_id, name, env in result.all()}
 
     async def _compute_fetch_ranges(
         self,
@@ -212,6 +211,24 @@ class AmortizedCostSyncService:
                 continue
             dates_per_sub.setdefault(row.subscription_id, []).append(d)
 
+        def _add_gap(
+            gap_s: date,
+            gap_e: date,
+            missing_months_set: set[str],
+            ranges: list[tuple[date, date]],
+        ) -> None:
+            """Split [gap_s, gap_e] at month boundaries; add segments not
+            already covered by a full missing-month range."""
+            seg = gap_s
+            while seg <= gap_e:
+                sy, sm = seg.year, seg.month
+                seg_month = f"{sy:04d}-{sm:02d}"
+                seg_last = date(sy, 12, 31) if sm == 12 else date(sy, sm + 1, 1) - timedelta(days=1)
+                seg_end = min(seg_last, gap_e)
+                if seg_month not in missing_months_set:
+                    ranges.append((seg, seg_end))
+                seg = date(sy + 1, 1, 1) if sm == 12 else date(sy, sm + 1, 1)
+
         per_sub_ranges: dict[str, list[tuple[date, date]]] = {}
         for sub_id in monitored_ids:
             existing_months = months_per_sub.get(sub_id, set())
@@ -238,29 +255,17 @@ class AmortizedCostSyncService:
             # already queued as "missing" are skipped (already covered).
             existing_dates = dates_per_sub.get(sub_id, [])
 
-            def _add_gap(gap_s: date, gap_e: date) -> None:
-                """Split [gap_s, gap_e] at month boundaries; add segments not
-                already covered by a full missing-month range."""
-                seg = gap_s
-                while seg <= gap_e:
-                    sy, sm = seg.year, seg.month
-                    seg_month = f"{sy:04d}-{sm:02d}"
-                    seg_last = (
-                        date(sy, 12, 31)
-                        if sm == 12
-                        else date(sy, sm + 1, 1) - timedelta(days=1)
-                    )
-                    seg_end = min(seg_last, gap_e)
-                    if seg_month not in missing_months_set:
-                        ranges.append((seg, seg_end))
-                    seg = date(sy + 1, 1, 1) if sm == 12 else date(sy, sm + 1, 1)
-
             # 2a. Gaps between consecutive existing dates
             for i in range(len(existing_dates) - 1):
                 prev_d = existing_dates[i]
                 next_d = existing_dates[i + 1]
                 if (next_d - prev_d).days > 1:
-                    _add_gap(prev_d + timedelta(days=1), next_d - timedelta(days=1))
+                    _add_gap(
+                        prev_d + timedelta(days=1),
+                        next_d - timedelta(days=1),
+                        missing_months_set,
+                        ranges,
+                    )
 
             # 2b. Trailing gap — from the last existing date to the correction
             # window start.  Covers the case where a partial month's data ends
@@ -269,7 +274,12 @@ class AmortizedCostSyncService:
                 last_d = existing_dates[-1]
                 trail_end = correction_cutoff - timedelta(days=1)
                 if last_d + timedelta(days=1) <= trail_end:
-                    _add_gap(last_d + timedelta(days=1), trail_end)
+                    _add_gap(
+                        last_d + timedelta(days=1),
+                        trail_end,
+                        missing_months_set,
+                        ranges,
+                    )
 
             # ── 3. Correction window (always) ──────────────────────────
             ranges.append((correction_cutoff, end_date))
@@ -366,9 +376,7 @@ class AmortizedCostSyncService:
                     end_date=range_end.isoformat(),
                 )
                 try:
-                    rows = await self._cost_service.query_amortized_cost_rows(
-                        scope, range_start, range_end
-                    )
+                    rows = await self._cost_service.query_amortized_cost_rows(scope, range_start, range_end)
                     for row in rows:
                         row["subscription_name"] = str(row.get("subscription_name") or sub_name).strip()
                         row["subscription_id"] = str(row.get("subscription_id") or sub_id).strip()
@@ -520,9 +528,7 @@ class AmortizedCostSyncService:
             # Step 2: Compute specific fetch ranges per subscription.
             # Each range is either a missing calendar month or the correction
             # window — existing complete months are never included.
-            per_sub_ranges = await self._compute_fetch_ranges(
-                monitored_ids, full_start_date, end_date
-            )
+            per_sub_ranges = await self._compute_fetch_ranges(monitored_ids, full_start_date, end_date)
 
             # Step 3: Fetch from Azure FIRST — before any deletes.
             # Each range is fetched independently; a 429 on one range does not
@@ -534,8 +540,7 @@ class AmortizedCostSyncService:
 
             if not rows and failed_sub_ids:
                 raise RuntimeError(
-                    "Azure amortized sync failed for all monitored subscriptions: "
-                    + ", ".join(failed_sub_ids[:3])
+                    "Azure amortized sync failed for all monitored subscriptions: " + ", ".join(failed_sub_ids[:3])
                 )
 
             # Step 4: Delete ONLY the ranges that were successfully re-fetched.
@@ -765,10 +770,7 @@ class AmortizedCostSyncService:
             months_agg[month_key]["total"] += float(total or 0.0)
             months_agg[month_key]["prod"] += float(prod or 0.0)
             months_agg[month_key]["nonprod"] += float(nonprod or 0.0)
-        monthly_rows = [
-            (month_key, d["total"], d["prod"], d["nonprod"])
-            for month_key, d in sorted(months_agg.items())
-        ]
+        monthly_rows = [(month_key, d["total"], d["prod"], d["nonprod"]) for month_key, d in sorted(months_agg.items())]
 
         await self._db.execute(delete(AmortizedCostMonthlySummary))
         if monthly_rows:
@@ -962,7 +964,7 @@ class AmortizedCostSyncService:
 
     # ── Leadership dashboard builder ──────────────────────────────────
 
-    async def build_leadership_dashboard(self) -> "LeadershipDashboard | None":
+    async def build_leadership_dashboard(self) -> LeadershipDashboard | None:
         """Build a leadership dashboard payload from amortized_cost_records in DB.
 
         Returns None when the DB has no records for the recent trend window.
@@ -990,9 +992,7 @@ class AmortizedCostSyncService:
 
         # Return None if there are no records for the recent window
         count_result = await self._db.execute(
-            select(func.count(AmortizedCostRecord.id)).where(
-                AmortizedCostRecord.cost_date >= trend_start.isoformat()
-            )
+            select(func.count(AmortizedCostRecord.id)).where(AmortizedCostRecord.cost_date >= trend_start.isoformat())
         )
         if (count_result.scalar() or 0) == 0:
             return None

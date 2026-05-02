@@ -1080,7 +1080,7 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
           className="mt-3 px-3 py-1 text-xs font-medium rounded bg-white border border-gray-300 hover:bg-gray-50 flex items-center gap-1"
           disabled={refreshing}
         >
-          <span className={refreshing ? "animate-spin" : ""} dangerouslySetInnerHTML={{ __html: Icons.refresh }} />
+          <span className={refreshing ? "animate-spin" : ""}>{Icons.refresh()}</span>
           {refreshing ? "Retrying\u2026" : "Retry"}
         </button>
       </div>
@@ -1528,7 +1528,7 @@ const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
           className="mt-3 px-3 py-1 text-xs font-medium rounded bg-white border border-gray-300 hover:bg-gray-50 flex items-center gap-1"
           disabled={refreshing}
         >
-          <span className={refreshing ? "animate-spin" : ""} dangerouslySetInnerHTML={{ __html: Icons.refresh }} />
+          <span className={refreshing ? "animate-spin" : ""}>{Icons.refresh()}</span>
           {refreshing ? "Retrying\u2026" : "Retry"}
         </button>
       </div>
@@ -1849,7 +1849,7 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
           className="mt-3 px-3 py-1 text-xs font-medium rounded bg-white border border-gray-300 hover:bg-gray-50 flex items-center gap-1"
           disabled={refreshing}
         >
-          <span className={refreshing ? "animate-spin" : ""} dangerouslySetInnerHTML={{ __html: Icons.refresh }} />
+          <span className={refreshing ? "animate-spin" : ""}>{Icons.refresh()}</span>
           {refreshing ? "Retrying…" : "Retry"}
         </button>
       </div>

@@ -17,8 +17,8 @@ from app.services.amortized_cost_sync_service import (
     AmortizedCostSyncService,
 )
 
-
 # ── Fixture: SQLite engine with amortized_cost_records table ──────────────────
+
 
 @pytest.fixture
 async def amortized_db():
@@ -48,6 +48,7 @@ def _make_record(cost_date: str, subscription_id: str = "sub-a") -> AmortizedCos
 
 
 # ── _compute_fetch_ranges — per-range gap detection ───────────────────────────
+
 
 @pytest.mark.anyio
 async def test_compute_fetch_ranges_no_existing_data(amortized_db):
@@ -149,7 +150,7 @@ async def test_compute_fetch_ranges_mid_range_gap_has_isolated_range(amortized_d
     today = date.today()
     end_date = today
     m0 = (today.replace(day=1) - timedelta(days=62)).replace(day=1)
-    m1 = (m0.replace(day=28) + timedelta(days=4)).replace(day=1)   # missing month
+    m1 = (m0.replace(day=28) + timedelta(days=4)).replace(day=1)  # missing month
     m2 = (m1.replace(day=28) + timedelta(days=4)).replace(day=1)
     correction_cutoff = today - timedelta(days=CORRECTION_WINDOW_DAYS)
 
@@ -172,6 +173,7 @@ async def test_compute_fetch_ranges_mid_range_gap_has_isolated_range(amortized_d
 
 # ── _delete_fetch_ranges ──────────────────────────────────────────────────────
 
+
 @pytest.mark.anyio
 async def test_delete_fetch_ranges_removes_only_targeted_records(amortized_db):
     """Only records within the specified range are deleted."""
@@ -188,12 +190,14 @@ async def test_delete_fetch_ranges_removes_only_targeted_records(amortized_db):
     # Pass a range: [fetch_start, today] — only touches records in this window
     await svc._delete_fetch_ranges({"sub-a": [(fetch_start, today)]})
 
-    remaining = (await amortized_db.execute(
-        select(AmortizedCostRecord).where(AmortizedCostRecord.subscription_id == "sub-a")
-    )).scalars().all()
+    remaining = (
+        (await amortized_db.execute(select(AmortizedCostRecord).where(AmortizedCostRecord.subscription_id == "sub-a")))
+        .scalars()
+        .all()
+    )
 
     dates_remaining = {r.cost_date for r in remaining}
-    assert old_date in dates_remaining        # 30 days ago — outside range, untouched
+    assert old_date in dates_remaining  # 30 days ago — outside range, untouched
     assert recent_date not in dates_remaining  # 3 days ago — inside range, deleted
 
 
@@ -210,13 +214,16 @@ async def test_delete_fetch_ranges_leaves_other_subscription_intact(amortized_db
     fetch_start = date.today() - timedelta(days=7)
     await svc._delete_fetch_ranges({"sub-a": [(fetch_start, date.today())]})
 
-    sub_b_records = (await amortized_db.execute(
-        select(AmortizedCostRecord).where(AmortizedCostRecord.subscription_id == "sub-b")
-    )).scalars().all()
+    sub_b_records = (
+        (await amortized_db.execute(select(AmortizedCostRecord).where(AmortizedCostRecord.subscription_id == "sub-b")))
+        .scalars()
+        .all()
+    )
     assert len(sub_b_records) == 1  # sub-b untouched
 
 
 # ── Historical preservation ───────────────────────────────────────────────────
+
 
 @pytest.mark.anyio
 async def test_historical_records_outside_fetch_range_preserved(amortized_db):
@@ -233,9 +240,11 @@ async def test_historical_records_outside_fetch_range_preserved(amortized_db):
     fetch_start = today - timedelta(days=7)
     await svc._delete_fetch_ranges({"sub-x": [(fetch_start, today)]})
 
-    remaining = (await amortized_db.execute(
-        select(AmortizedCostRecord).where(AmortizedCostRecord.subscription_id == "sub-x")
-    )).scalars().all()
+    remaining = (
+        (await amortized_db.execute(select(AmortizedCostRecord).where(AmortizedCostRecord.subscription_id == "sub-x")))
+        .scalars()
+        .all()
+    )
 
     dates_remaining = {r.cost_date for r in remaining}
     assert very_old in dates_remaining  # outside range — preserved
@@ -243,6 +252,7 @@ async def test_historical_records_outside_fetch_range_preserved(amortized_db):
 
 
 # ── Intra-month gap detection ─────────────────────────────────────────────────
+
 
 @pytest.mark.anyio
 async def test_compute_fetch_ranges_detects_intra_month_gap(amortized_db):

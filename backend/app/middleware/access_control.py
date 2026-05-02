@@ -18,8 +18,6 @@ dependency.  Routes that do not set ``request.state.user`` (health checks,
 metrics, login) are skipped.
 """
 
-import re
-
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -57,19 +55,16 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
             from sqlalchemy import select
 
             # Find the best-matching resource for this path
-            result = await db.execute(
-                select(Resource).where(Resource.route_path.isnot(None))
-            )
+            result = await db.execute(select(Resource).where(Resource.route_path.isnot(None)))
             resources: list[Resource] = result.scalars().all()
 
             matched_resource: Resource | None = None
             best_match_len = -1
             for r in resources:
                 route = r.route_path or ""
-                if path == route or path.startswith(route.rstrip("/") + "/"):
-                    if len(route) > best_match_len:
-                        matched_resource = r
-                        best_match_len = len(route)
+                if (path == route or path.startswith(route.rstrip("/") + "/")) and len(route) > best_match_len:
+                    matched_resource = r
+                    best_match_len = len(route)
 
             if matched_resource is None:
                 # No registered resource for this path → open by default

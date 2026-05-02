@@ -203,9 +203,7 @@ async def seed_resources(db: AsyncSession) -> None:
             child_id = name_to_id.get(seed["resource_name"])
             if child_id:
                 await db.execute(
-                    update(Resource)
-                    .where(Resource.id == child_id)
-                    .values(parent_id=name_to_id[parent_name])
+                    update(Resource).where(Resource.id == child_id).values(parent_id=name_to_id[parent_name])
                 )
 
     await db.commit()
@@ -224,40 +222,40 @@ _ADMIN_SKIP = {"admin", "admin_dashboard", "admin_permissions"}
 
 DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     # read role — view-only on all non-admin resources
-    ("read", "cost_management",      "view"),
-    ("read", "aks_operations",       "view"),
-    ("read", "compliance",           "view"),
-    ("read", "keyvault",             "view"),
-    ("read", "infra_alerts",         "view"),
+    ("read", "cost_management", "view"),
+    ("read", "aks_operations", "view"),
+    ("read", "compliance", "view"),
+    ("read", "keyvault", "view"),
+    ("read", "infra_alerts", "view"),
     ("read", "leadership_dashboard", "view"),
-    ("read", "amortized_costs",      "view"),
-    ("read", "aks_main",             "view"),
-    ("read", "compliance_main",      "view"),
-    ("read", "keyvault_main",        "view"),
-    ("read", "infra_alerts_main",    "view"),
+    ("read", "amortized_costs", "view"),
+    ("read", "aks_main", "view"),
+    ("read", "compliance_main", "view"),
+    ("read", "keyvault_main", "view"),
+    ("read", "infra_alerts_main", "view"),
     # write role — view + edit on all non-admin resources
-    ("write", "cost_management",      "view"),
-    ("write", "cost_management",      "edit"),
-    ("write", "aks_operations",       "view"),
-    ("write", "aks_operations",       "edit"),
-    ("write", "compliance",           "view"),
-    ("write", "compliance",           "edit"),
-    ("write", "keyvault",             "view"),
-    ("write", "keyvault",             "edit"),
-    ("write", "infra_alerts",         "view"),
-    ("write", "infra_alerts",         "edit"),
+    ("write", "cost_management", "view"),
+    ("write", "cost_management", "edit"),
+    ("write", "aks_operations", "view"),
+    ("write", "aks_operations", "edit"),
+    ("write", "compliance", "view"),
+    ("write", "compliance", "edit"),
+    ("write", "keyvault", "view"),
+    ("write", "keyvault", "edit"),
+    ("write", "infra_alerts", "view"),
+    ("write", "infra_alerts", "edit"),
     ("write", "leadership_dashboard", "view"),
     ("write", "leadership_dashboard", "edit"),
-    ("write", "amortized_costs",      "view"),
-    ("write", "amortized_costs",      "edit"),
-    ("write", "aks_main",             "view"),
-    ("write", "aks_main",             "edit"),
-    ("write", "compliance_main",      "view"),
-    ("write", "compliance_main",      "edit"),
-    ("write", "keyvault_main",        "view"),
-    ("write", "keyvault_main",        "edit"),
-    ("write", "infra_alerts_main",    "view"),
-    ("write", "infra_alerts_main",    "edit"),
+    ("write", "amortized_costs", "view"),
+    ("write", "amortized_costs", "edit"),
+    ("write", "aks_main", "view"),
+    ("write", "aks_main", "edit"),
+    ("write", "compliance_main", "view"),
+    ("write", "compliance_main", "edit"),
+    ("write", "keyvault_main", "view"),
+    ("write", "keyvault_main", "edit"),
+    ("write", "infra_alerts_main", "view"),
+    ("write", "infra_alerts_main", "edit"),
 ]
 
 
@@ -277,8 +275,9 @@ async def seed_permissions(db: AsyncSession) -> None:
 
     # Build set of existing (subject_id, resource_id, permission_type) tuples
     perm_result = await db.execute(
-        select(Permission.subject_id, Permission.resource_id, Permission.permission_type)
-        .where(Permission.subject_type == "role")
+        select(Permission.subject_id, Permission.resource_id, Permission.permission_type).where(
+            Permission.subject_type == "role"
+        )
     )
     existing_perms: set[tuple[str, int, str]] = {
         (row.subject_id, row.resource_id, row.permission_type) for row in perm_result
@@ -292,12 +291,14 @@ async def seed_permissions(db: AsyncSession) -> None:
         key = (role, res_id, perm_type)
         if key in existing_perms:
             continue
-        db.add(Permission(
-            subject_type="role",
-            subject_id=role,
-            resource_id=res_id,
-            permission_type=perm_type,
-        ))
+        db.add(
+            Permission(
+                subject_type="role",
+                subject_id=role,
+                resource_id=res_id,
+                permission_type=perm_type,
+            )
+        )
         inserted += 1
 
     if inserted:

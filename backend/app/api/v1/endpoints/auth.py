@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.core.database import get_db
-from app.models.auth import UserContext, UserRole
+from app.models.auth import UserContext
 from app.models.database import Permission, Resource
 
 router = APIRouter()
@@ -69,20 +69,14 @@ async def get_my_permissions(
         return {"is_admin": True, "modules": modules, "pages": pages}
 
     # ── Collect direct permission records ─────────────────────────────────
-    subject_ids_for_user = [user.user_id]
     role_subject_ids = [role.value for role in user.roles]
 
     result = await db.execute(
         select(Permission, Resource)
         .join(Resource, Permission.resource_id == Resource.id)
         .where(
-            (
-                (Permission.subject_type == "user") & (Permission.subject_id == user.user_id)
-            )
-            | (
-                (Permission.subject_type == "role")
-                & Permission.subject_id.in_(role_subject_ids)
-            )
+            ((Permission.subject_type == "user") & (Permission.subject_id == user.user_id))
+            | ((Permission.subject_type == "role") & Permission.subject_id.in_(role_subject_ids))
         )
     )
     rows = result.all()

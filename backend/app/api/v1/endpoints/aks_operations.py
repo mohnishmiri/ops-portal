@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_role

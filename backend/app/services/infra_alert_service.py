@@ -18,7 +18,6 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.subscription_resolver import get_monitored_subscription_ids
-from app.services.email_notification_service import EmailNotificationService
 from app.models.database import (
     AlertScheduleConfig,
     CustomExpiryAlert,
@@ -29,6 +28,7 @@ from app.models.database import (
     VMThresholdAlert,
     VMThresholdAlertConfig,
 )
+from app.services.email_notification_service import EmailNotificationService
 
 logger = structlog.get_logger(__name__)
 

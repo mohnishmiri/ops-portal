@@ -16,8 +16,8 @@ from sqlalchemy import select
 from app.core.resource_registry import RESOURCE_SEEDS, seed_resources
 from app.models.database import Resource
 
-
 # ── Seed tests ─────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.anyio
 async def test_seed_creates_all_resources(db_session):
@@ -35,35 +35,25 @@ async def test_seed_all_resources_are_system(db_session):
 
     result = await db_session.execute(select(Resource))
     for res in result.scalars().all():
-        assert res.is_system is True, (
-            f"Resource '{res.resource_name}' should be is_system=True"
-        )
+        assert res.is_system is True, f"Resource '{res.resource_name}' should be is_system=True"
 
 
 @pytest.mark.anyio
 async def test_seed_modules_have_no_parent(db_session):
     await seed_resources(db_session)
 
-    result = await db_session.execute(
-        select(Resource).where(Resource.resource_type == "module")
-    )
+    result = await db_session.execute(select(Resource).where(Resource.resource_type == "module"))
     for mod in result.scalars().all():
-        assert mod.parent_id is None, (
-            f"Module '{mod.resource_name}' should have no parent"
-        )
+        assert mod.parent_id is None, f"Module '{mod.resource_name}' should have no parent"
 
 
 @pytest.mark.anyio
 async def test_seed_pages_have_parent_id(db_session):
     await seed_resources(db_session)
 
-    result = await db_session.execute(
-        select(Resource).where(Resource.resource_type == "page")
-    )
+    result = await db_session.execute(select(Resource).where(Resource.resource_type == "page"))
     for page in result.scalars().all():
-        assert page.parent_id is not None, (
-            f"Page '{page.resource_name}' should have a parent_id"
-        )
+        assert page.parent_id is not None, f"Page '{page.resource_name}' should have a parent_id"
 
 
 @pytest.mark.anyio
@@ -80,12 +70,8 @@ async def test_seed_parent_id_points_to_correct_module(db_session):
         if seed.get("parent_name"):
             res = next(r for r in resources if r.resource_name == seed["resource_name"])
             expected_parent_id = name_to_id[seed["parent_name"]]
-            assert res.parent_id == expected_parent_id, (
-                f"Page '{res.resource_name}' has wrong parent_id"
-            )
-            assert id_to_type[res.parent_id] == "module", (
-                f"Page '{res.resource_name}' parent must be a module"
-            )
+            assert res.parent_id == expected_parent_id, f"Page '{res.resource_name}' has wrong parent_id"
+            assert id_to_type[res.parent_id] == "module", f"Page '{res.resource_name}' parent must be a module"
 
 
 @pytest.mark.anyio
@@ -127,12 +113,9 @@ async def test_seed_known_modules_present(db_session):
     """Smoke test — assert the 5 known portal modules exist after seeding."""
     await seed_resources(db_session)
 
-    result = await db_session.execute(
-        select(Resource).where(Resource.resource_type == "module")
-    )
+    result = await db_session.execute(select(Resource).where(Resource.resource_type == "module"))
     module_names = {r.resource_name for r in result.scalars().all()}
-    assert {"cost_management", "aks_operations", "compliance",
-            "keyvault", "infra_alerts"} <= module_names
+    assert {"cost_management", "aks_operations", "compliance", "keyvault", "infra_alerts"} <= module_names
 
 
 @pytest.mark.anyio
@@ -140,9 +123,13 @@ async def test_seed_known_pages_present(db_session):
     """Smoke test — assert the 6 known portal pages exist after seeding."""
     await seed_resources(db_session)
 
-    result = await db_session.execute(
-        select(Resource).where(Resource.resource_type == "page")
-    )
+    result = await db_session.execute(select(Resource).where(Resource.resource_type == "page"))
     page_names = {r.resource_name for r in result.scalars().all()}
-    assert {"leadership_dashboard", "amortized_costs", "aks_main",
-            "compliance_main", "keyvault_main", "infra_alerts_main"} <= page_names
+    assert {
+        "leadership_dashboard",
+        "amortized_costs",
+        "aks_main",
+        "compliance_main",
+        "keyvault_main",
+        "infra_alerts_main",
+    } <= page_names

@@ -476,8 +476,7 @@ class EmailNotificationService:
         icon = "✅" if action == "acknowledged" else "✔️"
 
         extra_rows = "".join(
-            f"<tr><td>{k.replace('_', ' ').title()}</td><td>{v}</td></tr>"
-            for k, v in (extra_details or {}).items()
+            f"<tr><td>{k.replace('_', ' ').title()}</td><td>{v}</td></tr>" for k, v in (extra_details or {}).items()
         )
 
         html_body = f"""
@@ -510,7 +509,7 @@ class EmailNotificationService:
       </div>
       <table>
         <tr><td>Resource</td><td>{resource_name}</td></tr>
-        <tr><td>Alert Type</td><td>{alert_type.replace('_', ' ').title()}</td></tr>
+        <tr><td>Alert Type</td><td>{alert_type.replace("_", " ").title()}</td></tr>
         <tr><td>Action</td><td>{action_label}</td></tr>
         <tr><td>Performed By</td><td>{action_by}</td></tr>
         <tr><td>Time</td><td>{datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}</td></tr>

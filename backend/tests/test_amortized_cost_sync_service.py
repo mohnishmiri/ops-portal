@@ -55,7 +55,6 @@ async def test_full_sync_inserts_only_targeted_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """full_sync inserts the rows returned by _load_rows_incremental."""
-    from datetime import date as _date
 
     db = _FakeSession()
     service = AmortizedCostSyncService(db)
@@ -418,9 +417,7 @@ def test_build_analytics_returns_requested_window_when_rows_are_empty() -> None:
 
 
 def test_split_into_monthly_chunks_covers_all_months() -> None:
-    chunks = AmortizedCostSyncService._split_into_monthly_chunks(
-        date(2026, 1, 15), date(2026, 3, 31)
-    )
+    chunks = AmortizedCostSyncService._split_into_monthly_chunks(date(2026, 1, 15), date(2026, 3, 31))
     assert chunks == [
         (date(2026, 1, 15), date(2026, 1, 31)),
         (date(2026, 2, 1), date(2026, 2, 28)),
@@ -429,16 +426,12 @@ def test_split_into_monthly_chunks_covers_all_months() -> None:
 
 
 def test_split_into_monthly_chunks_single_month() -> None:
-    chunks = AmortizedCostSyncService._split_into_monthly_chunks(
-        date(2026, 4, 20), date(2026, 4, 27)
-    )
+    chunks = AmortizedCostSyncService._split_into_monthly_chunks(date(2026, 4, 20), date(2026, 4, 27))
     assert chunks == [(date(2026, 4, 20), date(2026, 4, 27))]
 
 
 def test_split_into_monthly_chunks_year_boundary() -> None:
-    chunks = AmortizedCostSyncService._split_into_monthly_chunks(
-        date(2025, 12, 15), date(2026, 1, 31)
-    )
+    chunks = AmortizedCostSyncService._split_into_monthly_chunks(date(2025, 12, 15), date(2026, 1, 31))
     assert chunks == [
         (date(2025, 12, 15), date(2025, 12, 31)),
         (date(2026, 1, 1), date(2026, 1, 31)),

@@ -11,8 +11,9 @@ Every mutating operation writes a row to the shared audit_logs table so
 admins have a queryable, tamper-evident trail of who changed what and when.
 """
 
-import structlog
 from datetime import UTC, datetime, timedelta
+
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -39,6 +40,7 @@ _AUDIT_ACTIONS = {
 
 
 # ── Request / response schemas ────────────────────────────────────────────────
+
 
 class ResourceCreateRequest(BaseModel):
     resource_type: str = Field(..., description="'module' or 'page'")
@@ -123,6 +125,7 @@ async def _write_audit(
 
 # ── Resource endpoints ────────────────────────────────────────────────────────
 
+
 @router.post("/resources", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def create_resource(
     request: Request,
@@ -151,11 +154,12 @@ async def create_resource(
         raise
     logger.info("resource_created", resource_name=req.resource_name, by=user.user_id)
     await _write_audit(
-        db, request=request, user=user,
+        db,
+        request=request,
+        user=user,
         action="resource_created",
         summary=f"Created {req.resource_type} resource '{req.resource_name}'",
-        details={"resource_name": req.resource_name, "resource_type": req.resource_type,
-                 "route_path": req.route_path},
+        details={"resource_name": req.resource_name, "resource_type": req.resource_type, "route_path": req.route_path},
     )
     return JSONResponse(content=jsonable_encoder(_resource_to_dict(resource)))
 
@@ -198,7 +202,9 @@ async def update_resource(
     await db.refresh(resource)
     logger.info("resource_updated", resource_id=resource_id, by=user.user_id)
     await _write_audit(
-        db, request=request, user=user,
+        db,
+        request=request,
+        user=user,
         action="resource_updated",
         summary=f"Updated resource '{resource.resource_name}'",
         details={"resource_name": resource.resource_name, "resource_type": resource.resource_type},
@@ -228,7 +234,9 @@ async def delete_resource(
     await db.commit()
     logger.info("resource_deleted", resource_id=resource_id, resource_name=name, by=user.user_id)
     await _write_audit(
-        db, request=request, user=user,
+        db,
+        request=request,
+        user=user,
         action="resource_deleted",
         summary=f"Deleted {rtype} resource '{name}'",
         details={"resource_name": name, "resource_type": rtype},
@@ -237,6 +245,7 @@ async def delete_resource(
 
 
 # ── Permission endpoints ──────────────────────────────────────────────────────
+
 
 @router.post("/permissions", dependencies=[Depends(require_role(UserRole.ADMIN))])
 async def create_permission(
@@ -278,12 +287,11 @@ async def create_permission(
     )
     perm.resource = resource
     await _write_audit(
-        db, request=request, user=user,
+        db,
+        request=request,
+        user=user,
         action="permission_granted",
-        summary=(
-            f"Granted {req.permission_type} on '{resource.resource_name}' "
-            f"to {req.subject_type}:{req.subject_id}"
-        ),
+        summary=(f"Granted {req.permission_type} on '{resource.resource_name}' to {req.subject_type}:{req.subject_id}"),
         details={
             "subject_type": req.subject_type,
             "subject_id": req.subject_id,
@@ -338,7 +346,9 @@ async def delete_permission(
     await db.commit()
     logger.info("permission_revoked", permission_id=permission_id, subject=subject, by=user.user_id)
     await _write_audit(
-        db, request=request, user=user,
+        db,
+        request=request,
+        user=user,
         action="permission_revoked",
         summary=f"Revoked {perm_type} on '{resource_name}' from {sub_type}:{sub_id}",
         details={
@@ -353,6 +363,7 @@ async def delete_permission(
 
 
 # ── Audit Log endpoint ────────────────────────────────────────────────────────
+
 
 def _audit_to_dict(entry: AuditLog) -> dict:
     details = entry.details or {}

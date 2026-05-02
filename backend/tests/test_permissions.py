@@ -15,8 +15,8 @@ Conventions:
 
 import pytest
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 async def _create_resource(client, name: str, rtype: str = "module", **kwargs) -> dict:
     resp = await client.post(
@@ -27,8 +27,9 @@ async def _create_resource(client, name: str, rtype: str = "module", **kwargs) -
     return resp.json()
 
 
-async def _create_permission(client, subject_type: str, subject_id: str,
-                             resource_id: int, permission_type: str) -> dict:
+async def _create_permission(
+    client, subject_type: str, subject_id: str, resource_id: int, permission_type: str
+) -> dict:
     resp = await client.post(
         "/api/v1/permissions/permissions",
         json={
@@ -44,10 +45,12 @@ async def _create_permission(client, subject_type: str, subject_id: str,
 
 # ── Resource CRUD ──────────────────────────────────────────────────────────────
 
+
 @pytest.mark.anyio
 async def test_create_resource_returns_correct_fields(admin_client):
-    res = await _create_resource(admin_client, "test_module", rtype="module",
-                                 description="A test module", route_path="/test")
+    res = await _create_resource(
+        admin_client, "test_module", rtype="module", description="A test module", route_path="/test"
+    )
     assert res["resource_name"] == "test_module"
     assert res["resource_type"] == "module"
     assert res["description"] == "A test module"
@@ -120,6 +123,7 @@ async def test_delete_unknown_resource_returns_404(admin_client):
 async def test_system_resource_cannot_be_deleted(admin_client, db_session):
     # Insert a system resource directly via the DB session
     from app.models.database import Resource as ResourceModel
+
     sys_res = ResourceModel(
         resource_type="module",
         resource_name="system_protected",
@@ -139,8 +143,7 @@ async def test_system_resource_cannot_be_deleted(admin_client, db_session):
 async def test_create_page_resource_with_parent(admin_client):
     module = await _create_resource(admin_client, "parent_mod", rtype="module")
     page = await _create_resource(
-        admin_client, "child_page", rtype="page",
-        parent_id=module["id"], route_path="/parent/child"
+        admin_client, "child_page", rtype="page", parent_id=module["id"], route_path="/parent/child"
     )
     assert page["parent_id"] == module["id"]
     assert page["route_path"] == "/parent/child"
@@ -149,6 +152,7 @@ async def test_create_page_resource_with_parent(admin_client):
 @pytest.mark.anyio
 async def test_non_admin_cannot_create_resource(reader_client, monkeypatch):
     import app.auth as auth_module
+
     monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
     resp = await reader_client.post(
         "/api/v1/permissions/resources",
@@ -158,6 +162,7 @@ async def test_non_admin_cannot_create_resource(reader_client, monkeypatch):
 
 
 # ── Permission CRUD ────────────────────────────────────────────────────────────
+
 
 @pytest.mark.anyio
 async def test_grant_role_view_permission(admin_client):
@@ -183,8 +188,7 @@ async def test_invalid_subject_type_returns_400(admin_client):
     res = await _create_resource(admin_client, "bad_subject_module")
     resp = await admin_client.post(
         "/api/v1/permissions/permissions",
-        json={"subject_type": "group", "subject_id": "grp1",
-              "resource_id": res["id"], "permission_type": "view"},
+        json={"subject_type": "group", "subject_id": "grp1", "resource_id": res["id"], "permission_type": "view"},
     )
     assert resp.status_code == 400
 
@@ -194,8 +198,7 @@ async def test_invalid_permission_type_returns_400(admin_client):
     res = await _create_resource(admin_client, "bad_perm_type_module")
     resp = await admin_client.post(
         "/api/v1/permissions/permissions",
-        json={"subject_type": "role", "subject_id": "read",
-              "resource_id": res["id"], "permission_type": "superadmin"},
+        json={"subject_type": "role", "subject_id": "read", "resource_id": res["id"], "permission_type": "superadmin"},
     )
     assert resp.status_code == 400
 
@@ -204,8 +207,7 @@ async def test_invalid_permission_type_returns_400(admin_client):
 async def test_grant_permission_unknown_resource_returns_404(admin_client):
     resp = await admin_client.post(
         "/api/v1/permissions/permissions",
-        json={"subject_type": "role", "subject_id": "read",
-              "resource_id": 99999, "permission_type": "view"},
+        json={"subject_type": "role", "subject_id": "read", "resource_id": 99999, "permission_type": "view"},
     )
     assert resp.status_code == 404
 
@@ -217,8 +219,7 @@ async def test_list_permissions(admin_client):
     resp = await admin_client.get("/api/v1/permissions/permissions")
     assert resp.status_code == 200
     perms = resp.json()
-    assert any(p["subject_id"] == "write" and p["resource_name"] == "list_perm_mod"
-               for p in perms)
+    assert any(p["subject_id"] == "write" and p["resource_name"] == "list_perm_mod" for p in perms)
 
 
 @pytest.mark.anyio
@@ -239,6 +240,7 @@ async def test_revoke_unknown_permission_returns_404(admin_client):
 @pytest.mark.anyio
 async def test_non_admin_cannot_list_permissions(reader_client, monkeypatch):
     import app.auth as auth_module
+
     monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
     resp = await reader_client.get("/api/v1/permissions/permissions")
     assert resp.status_code == 403
@@ -246,9 +248,11 @@ async def test_non_admin_cannot_list_permissions(reader_client, monkeypatch):
 
 # ── /auth/my-permissions ───────────────────────────────────────────────────────
 
+
 @pytest.mark.anyio
 async def test_my_permissions_admin_gets_all_resources(admin_client, db_session):
     from app.models.database import Resource as Res
+
     for name in ("admin_mod_x", "admin_page_y"):
         db_session.add(Res(resource_type="module", resource_name=name, is_system=False))
     await db_session.commit()
@@ -263,18 +267,19 @@ async def test_my_permissions_admin_gets_all_resources(admin_client, db_session)
 
 @pytest.mark.anyio
 async def test_my_permissions_reader_sees_granted_resources(app, db_session):
+    from httpx import ASGITransport, AsyncClient
+
     from app.auth import get_current_user
     from app.core.database import get_db
-    from app.models.database import Permission as Perm, Resource as Res
+    from app.models.database import Permission as Perm
+    from app.models.database import Resource as Res
     from tests.conftest import make_read_user
-    from httpx import AsyncClient, ASGITransport
 
     # Seed: one module + one role permission for 'read' role
     mod = Res(resource_type="module", resource_name="reader_accessible_mod", is_system=False)
     db_session.add(mod)
     await db_session.flush()
-    perm = Perm(subject_type="role", subject_id="read",
-                resource_id=mod.id, permission_type="view")
+    perm = Perm(subject_type="role", subject_id="read", resource_id=mod.id, permission_type="view")
     db_session.add(perm)
     await db_session.commit()
 
@@ -298,21 +303,21 @@ async def test_my_permissions_reader_sees_granted_resources(app, db_session):
 
 @pytest.mark.anyio
 async def test_my_permissions_reader_inherits_module_access_to_page(app, db_session):
+    from httpx import ASGITransport, AsyncClient
+
     from app.auth import get_current_user
     from app.core.database import get_db
-    from app.models.database import Permission as Perm, Resource as Res
+    from app.models.database import Permission as Perm
+    from app.models.database import Resource as Res
     from tests.conftest import make_read_user
-    from httpx import AsyncClient, ASGITransport
 
     # Seed: module → page hierarchy, permission only on module
     mod = Res(resource_type="module", resource_name="inherit_mod", is_system=False)
     db_session.add(mod)
     await db_session.flush()
-    page = Res(resource_type="page", resource_name="inherit_page",
-               parent_id=mod.id, is_system=False)
+    page = Res(resource_type="page", resource_name="inherit_page", parent_id=mod.id, is_system=False)
     db_session.add(page)
-    perm = Perm(subject_type="role", subject_id="read",
-                resource_id=mod.id, permission_type="view")
+    perm = Perm(subject_type="role", subject_id="read", resource_id=mod.id, permission_type="view")
     db_session.add(perm)
     await db_session.commit()
 
@@ -327,15 +332,14 @@ async def test_my_permissions_reader_inherits_module_access_to_page(app, db_sess
             resp = await ac.get("/api/v1/auth/my-permissions")
         data = resp.json()
         # Page should inherit access from parent module
-        assert "inherit_page" in data["pages"], (
-            f"Page inheritance failed. pages={data['pages']}"
-        )
+        assert "inherit_page" in data["pages"], f"Page inheritance failed. pages={data['pages']}"
         assert "view" in data["pages"]["inherit_page"]
     finally:
         app.dependency_overrides.clear()
 
 
 # ── Audit Log ──────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.anyio
 async def test_audit_log_records_permission_grant(admin_client):
@@ -347,10 +351,9 @@ async def test_audit_log_records_permission_grant(admin_client):
     assert resp.status_code == 200
     entries = resp.json()["entries"]
     grant_entries = [e for e in entries if e["action"] == "permission_granted"]
-    assert any(
-        e["resource_name"] == "audit_grant_mod" and e["subject_id"] == "read"
-        for e in grant_entries
-    ), f"Expected permission_granted entry not found in: {grant_entries}"
+    assert any(e["resource_name"] == "audit_grant_mod" and e["subject_id"] == "read" for e in grant_entries), (
+        f"Expected permission_granted entry not found in: {grant_entries}"
+    )
 
 
 @pytest.mark.anyio
@@ -364,26 +367,23 @@ async def test_audit_log_records_permission_revoke(admin_client):
     assert resp.status_code == 200
     entries = resp.json()["entries"]
     revoke_entries = [e for e in entries if e["action"] == "permission_revoked"]
-    assert any(
-        e["resource_name"] == "audit_revoke_mod" and e["subject_id"] == "write"
-        for e in revoke_entries
-    ), f"Expected permission_revoked entry not found in: {revoke_entries}"
+    assert any(e["resource_name"] == "audit_revoke_mod" and e["subject_id"] == "write" for e in revoke_entries), (
+        f"Expected permission_revoked entry not found in: {revoke_entries}"
+    )
 
 
 @pytest.mark.anyio
 async def test_audit_log_records_resource_creation(admin_client):
     """Creating a resource writes a resource_created audit entry."""
-    await _create_resource(admin_client, "audit_create_res", rtype="module",
-                           description="For audit test")
+    await _create_resource(admin_client, "audit_create_res", rtype="module", description="For audit test")
 
     resp = await admin_client.get("/api/v1/permissions/audit-log")
     assert resp.status_code == 200
     entries = resp.json()["entries"]
     created_entries = [e for e in entries if e["action"] == "resource_created"]
-    assert any(
-        e["resource_name"] == "audit_create_res"
-        for e in created_entries
-    ), f"Expected resource_created entry not found in: {created_entries}"
+    assert any(e["resource_name"] == "audit_create_res" for e in created_entries), (
+        f"Expected resource_created entry not found in: {created_entries}"
+    )
 
 
 @pytest.mark.anyio
@@ -396,10 +396,9 @@ async def test_audit_log_records_resource_deletion(admin_client):
     assert resp.status_code == 200
     entries = resp.json()["entries"]
     deleted_entries = [e for e in entries if e["action"] == "resource_deleted"]
-    assert any(
-        e["resource_name"] == "audit_delete_res"
-        for e in deleted_entries
-    ), f"Expected resource_deleted entry not found in: {deleted_entries}"
+    assert any(e["resource_name"] == "audit_delete_res" for e in deleted_entries), (
+        f"Expected resource_deleted entry not found in: {deleted_entries}"
+    )
 
 
 @pytest.mark.anyio
@@ -444,15 +443,14 @@ async def test_audit_log_returns_newest_first(admin_client):
     resp = await admin_client.get("/api/v1/permissions/audit-log")
     entries = resp.json()["entries"]
     timestamps = [e["timestamp"] for e in entries]
-    assert timestamps == sorted(timestamps, reverse=True), (
-        "Audit entries should be ordered newest-first"
-    )
+    assert timestamps == sorted(timestamps, reverse=True), "Audit entries should be ordered newest-first"
 
 
 @pytest.mark.anyio
 async def test_audit_log_non_admin_cannot_access(reader_client, monkeypatch):
     """Non-admin users cannot read the audit log."""
     import app.auth as auth_module
+
     monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
     resp = await reader_client.get("/api/v1/permissions/audit-log")
     assert resp.status_code == 403
