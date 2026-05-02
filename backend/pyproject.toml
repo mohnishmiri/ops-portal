@@ -1,6 +1,6 @@
 [project]
 name = "azure-ops-portal"
-version = "1.0.0"
+version = "1.1.0"
 description = "Azure Ops Intelligence & Optimization Portal - FastAPI Backend"
 requires-python = ">=3.11"
 license = {text = "Proprietary"}
