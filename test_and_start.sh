@@ -104,11 +104,26 @@ fi
 printf '\n'
 
 # ── Install frontend dependencies ──────────────────────────────────────────────
-yellow "► Installing frontend dependencies (npm ci) …"
-if (cd "$FRONTEND_DIR" && npm ci --silent 2>&1); then
+# Windows bug: 'npm ci' silently skips optional platform-specific packages
+# (e.g. @rollup/rollup-win32-x64-msvc), causing vitest/vite to crash at startup.
+# npm/cli#4828 — workaround is to wipe node_modules + package-lock and use
+# 'npm install' so npm re-evaluates optional deps for the current platform.
+# On Linux/macOS 'npm ci' is kept because it is faster and reproducible.
+yellow "► Installing frontend dependencies …"
+if [[ "$OS" == "windows" ]]; then
+  yellow "  (Windows: using 'npm install' to fix optional-dependency resolution)"
+  (
+    cd "$FRONTEND_DIR"
+    rm -rf node_modules package-lock.json
+    npm install --silent 2>&1
+  )
+else
+  (cd "$FRONTEND_DIR" && npm ci --silent 2>&1)
+fi
+if [[ $? -eq 0 ]]; then
   green "  ✓ Frontend dependencies ready"
 else
-  red "  ✗ npm ci failed"
+  red "  ✗ Frontend dependency install failed"
   exit 1
 fi
 printf '\n'
