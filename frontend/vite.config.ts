@@ -5,6 +5,15 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
+    // Windows environments in this repo can time out when booting multiple Vitest workers.
+    // Keep parallelism on non-Windows platforms.
+    maxWorkers: process.platform === "win32" ? 1 : undefined,
+    // On Windows (Git Bash / MINGW64), spawning a fresh worker_thread per test file is slow
+    // enough to trigger "Timeout waiting for worker to respond" errors.  The vmThreads pool
+    // runs all test files inside VM contexts within a SINGLE worker thread, completely
+    // eliminating per-file thread creation overhead while preserving per-file module and
+    // environment isolation (each file still gets its own jsdom instance).
+    pool: process.platform === "win32" ? "vmThreads" : "threads",
     setupFiles: ["./src/test/setup.ts"],
     css: false,
     coverage: {

@@ -129,3 +129,6 @@ docs/generate_ppt.py
 docs/ATTCC_OpsPortal_Leadership_Presentation.pptx
 docs/ATT_OpsPortal_Leadership_Presentation.pptx
 docs/~$ATT_OpsPortal_Leadership_Presentation.pptx
+backend/.env
+backend/uv.lock
+frontend/package-lock.json

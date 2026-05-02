@@ -114,8 +114,8 @@ if [[ "$OS" == "windows" ]]; then
   yellow "  (Windows: using 'npm install' to fix optional-dependency resolution)"
   (
     cd "$FRONTEND_DIR"
-    rm -rf node_modules package-lock.json
-    npm install --silent 2>&1
+    #rm -rf node_modules package-lock.json
+    npm install #--silent 2>&1
   )
 else
   (cd "$FRONTEND_DIR" && npm ci --silent 2>&1)
@@ -134,7 +134,7 @@ printf '\n'
 # (Node worker_threads) avoids the fork() issue entirely.
 yellow "► Running frontend unit tests (vitest) …"
 if [[ "$OS" == "windows" ]]; then
-  VITEST_CMD="npx vitest run --pool=threads"
+  VITEST_CMD="npx vitest run"
 else
   VITEST_CMD="npm test"
 fi
