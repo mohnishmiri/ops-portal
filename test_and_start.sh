@@ -129,8 +129,16 @@ fi
 printf '\n'
 
 # ── Frontend tests ─────────────────────────────────────────────────────────────
+# Windows bug: vitest's default 'forks' pool uses child_process.fork() which
+# frequently times out in MINGW64 / Git Bash.  Switching to '--pool=threads'
+# (Node worker_threads) avoids the fork() issue entirely.
 yellow "► Running frontend unit tests (vitest) …"
-if (cd "$FRONTEND_DIR" && npm test 2>&1); then
+if [[ "$OS" == "windows" ]]; then
+  VITEST_CMD="npx vitest run --pool=threads"
+else
+  VITEST_CMD="npm test"
+fi
+if (cd "$FRONTEND_DIR" && $VITEST_CMD 2>&1); then
   green "  ✓ Frontend tests passed"
 else
   red   "  ✗ Frontend tests FAILED — application will not start"
