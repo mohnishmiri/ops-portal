@@ -211,24 +211,6 @@ class AmortizedCostSyncService:
                 continue
             dates_per_sub.setdefault(row.subscription_id, []).append(d)
 
-        def _add_gap(
-            gap_s: date,
-            gap_e: date,
-            missing_months_set: set[str],
-            ranges: list[tuple[date, date]],
-        ) -> None:
-            """Split [gap_s, gap_e] at month boundaries; add segments not
-            already covered by a full missing-month range."""
-            seg = gap_s
-            while seg <= gap_e:
-                sy, sm = seg.year, seg.month
-                seg_month = f"{sy:04d}-{sm:02d}"
-                seg_last = date(sy, 12, 31) if sm == 12 else date(sy, sm + 1, 1) - timedelta(days=1)
-                seg_end = min(seg_last, gap_e)
-                if seg_month not in missing_months_set:
-                    ranges.append((seg, seg_end))
-                seg = date(sy + 1, 1, 1) if sm == 12 else date(sy, sm + 1, 1)
-
         per_sub_ranges: dict[str, list[tuple[date, date]]] = {}
         for sub_id in monitored_ids:
             existing_months = months_per_sub.get(sub_id, set())
@@ -255,17 +237,30 @@ class AmortizedCostSyncService:
             # already queued as "missing" are skipped (already covered).
             existing_dates = dates_per_sub.get(sub_id, [])
 
+            def _add_gap(
+                gap_s: date,
+                gap_e: date,
+                _mms: set = missing_months_set,
+                _rng: list = ranges,
+            ) -> None:
+                """Split [gap_s, gap_e] at month boundaries; add segments not
+                already covered by a full missing-month range."""
+                seg = gap_s
+                while seg <= gap_e:
+                    sy, sm = seg.year, seg.month
+                    seg_month = f"{sy:04d}-{sm:02d}"
+                    seg_last = date(sy, 12, 31) if sm == 12 else date(sy, sm + 1, 1) - timedelta(days=1)
+                    seg_end = min(seg_last, gap_e)
+                    if seg_month not in _mms:
+                        _rng.append((seg, seg_end))
+                    seg = date(sy + 1, 1, 1) if sm == 12 else date(sy, sm + 1, 1)
+
             # 2a. Gaps between consecutive existing dates
             for i in range(len(existing_dates) - 1):
                 prev_d = existing_dates[i]
                 next_d = existing_dates[i + 1]
                 if (next_d - prev_d).days > 1:
-                    _add_gap(
-                        prev_d + timedelta(days=1),
-                        next_d - timedelta(days=1),
-                        missing_months_set,
-                        ranges,
-                    )
+                    _add_gap(prev_d + timedelta(days=1), next_d - timedelta(days=1))
 
             # 2b. Trailing gap — from the last existing date to the correction
             # window start.  Covers the case where a partial month's data ends
@@ -274,12 +269,7 @@ class AmortizedCostSyncService:
                 last_d = existing_dates[-1]
                 trail_end = correction_cutoff - timedelta(days=1)
                 if last_d + timedelta(days=1) <= trail_end:
-                    _add_gap(
-                        last_d + timedelta(days=1),
-                        trail_end,
-                        missing_months_set,
-                        ranges,
-                    )
+                    _add_gap(last_d + timedelta(days=1), trail_end)
 
             # ── 3. Correction window (always) ──────────────────────────
             ranges.append((correction_cutoff, end_date))
