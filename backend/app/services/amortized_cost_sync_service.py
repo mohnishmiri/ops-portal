@@ -47,7 +47,7 @@ logger = structlog.get_logger(__name__)
 # Data older than this many hours triggers an automatic re-sync.
 # Azure Cost Management provides near real-time amortized cost data,
 # so we sync frequently to keep the dashboard current.
-STALE_HOURS = 4
+STALE_HOURS = 0.5
 RUNNING_SYNC_TIMEOUT_MINUTES = 180
 
 # Azure Cost Management can retroactively adjust costs for recent days.
@@ -439,12 +439,11 @@ class AmortizedCostSyncService:
                     return parts[-1]
             return normalized
 
-        for fallback in (meter_name, meter_category):
-            value = str(fallback or "").strip()
-            if value:
-                return value
+        value = str(meter_name or "").strip()
+        if value:
+            return value
 
-        return "Unknown"
+        return ""
 
     @staticmethod
     def _get_rolling_start_date(end_date: date, months: int) -> date:
@@ -892,12 +891,7 @@ class AmortizedCostSyncService:
         for r in filtered:
             rname = r["resource_name"]
             if not rname or rname == r["meter_category"]:
-                rname = r["meter_category"] or "Unknown"
-            # Include meter_category in the key so that different service types
-            # within the same resource group produce separate rows. Without this,
-            # a resource group containing both VMs and Synapse would merge into one
-            # row and the backfill could write a Synapse resource_type onto a row
-            # whose meter_category is "Virtual Machines", producing a TYPE/SERVICE mismatch.
+                rname = ""
             key = f"{rname}|{r['resource_group']}|{r['meter_category']}"
             if key not in res_agg:
                 res_agg[key] = {

@@ -107,7 +107,7 @@ def _register_platform_jobs(scheduler: AsyncIOScheduler) -> None:
 
     scheduler.add_job(
         sync_amortized_cost_job,
-        IntervalTrigger(hours=4),
+        IntervalTrigger(minutes=15),
         id="amortized_cost_sync",
         name="Amortized Cost Data Sync",
         replace_existing=True,
