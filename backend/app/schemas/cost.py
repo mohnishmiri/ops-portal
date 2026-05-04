@@ -31,6 +31,7 @@ class GroupByDimension(str, Enum):
     SERVICE_CATEGORY = "service_category"
     METER_CATEGORY = "meter_category"
     LOCATION = "location"
+    RESOURCE_ID = "resource_id"
 
 
 class CostTrendDirection(str, Enum):

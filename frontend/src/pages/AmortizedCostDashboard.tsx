@@ -1315,7 +1315,7 @@ const DrilldownTab: React.FC<{
             <thead className={`${gridStyles.head} ${gridStyles.stickyHead}`}>
               <tr>
                 <th className={gridStyles.headerCell}>#</th>
-                <th className={gridStyles.headerCell}>Resource</th>
+                <th className={gridStyles.headerCell}>Resource Name</th>
                 <th className={gridStyles.headerCell}>Resource Group</th>
                 <th className={gridStyles.headerCell}>Type</th>
                 <th className={gridStyles.headerCell}>Service</th>
@@ -1329,14 +1329,16 @@ const DrilldownTab: React.FC<{
                 <tr key={`${r.resource_name}-${i}`} className={gridStyles.row}>
                   <td className={gridStyles.cell}>{resourcePage * DEFAULT_GRID_PAGE_SIZE + i + 1}</td>
                   <td className={`${gridStyles.strongCell} max-w-xs truncate`} title={r.resource_name}>
-                    {r.resource_name}
+                    {r.resource_name || <span className="text-gray-400 italic">—</span>}
                   </td>
                   <td className={gridStyles.cell}>{r.resource_group}</td>
-                  <td className={`${gridStyles.cell} max-w-[160px] truncate`} title={r.resource_type}>
-                    {r.resource_type}
+                  <td className={`${gridStyles.cell} max-w-[160px] truncate`} title={r.resource_type || undefined}>
+                    {r.resource_type || <span className="text-gray-400">—</span>}
                   </td>
                   <td className={gridStyles.cell}>{r.meter_category}</td>
-                  <td className={gridStyles.cell}>{r.location}</td>
+                  <td className={gridStyles.cell}>
+                    {r.location || <span className="text-gray-400">—</span>}
+                  </td>
                   <td className={`${gridStyles.cell} text-right text-gray-600`}>{r.active_days}</td>
                   <td className={`${gridStyles.monoCell} text-right font-medium text-gray-900`}>{fmtUSD(r.cost)}</td>
                 </tr>

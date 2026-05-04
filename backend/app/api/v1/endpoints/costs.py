@@ -285,7 +285,7 @@ async def get_amortized_drilldown(
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Resource-level drill-down from DB-cached amortized cost data."""
+    """Resource-level drill-down served directly from the DB."""
     if db is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -310,13 +310,16 @@ async def get_amortized_drilldown(
     "/amortized/sync",
     summary="Trigger amortized cost sync from Azure Cost Management",
     description=(
-        "Runs a full sync of amortized cost data from Azure Cost Management API. "
-        "The sync runs to completion and returns the result with row count and total cost. "
+        "Runs a sync of amortized cost data from Azure Cost Management API. "
+        "Normal mode is incremental (missing months + correction window). "
+        "Use force=true to wipe and re-fetch ALL months in the window — required "
+        "after enrichment logic changes to repair existing DB records. "
         "For long-running syncs, the client should set an appropriate timeout."
     ),
 )
 async def trigger_amortized_cost_sync(
     months: int = Query(default=2, ge=1, le=12, description="Number of months to sync"),
+    force: bool = Query(default=False, description="Wipe and re-fetch all months (repairs stale resource_type values)"),
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -328,7 +331,7 @@ async def trigger_amortized_cost_sync(
         )
     svc = AmortizedCostSyncService(db)
     try:
-        result = await svc.full_sync(months=months, triggered_by="manual")
+        result = await svc.full_sync(months=months, triggered_by="manual", force=force)
         return result
     except Exception as exc:
         if _is_database_error(exc):

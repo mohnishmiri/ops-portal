@@ -93,6 +93,7 @@ _DIMENSION_MAP = {
     GroupByDimension.SERVICE_CATEGORY: "ServiceName",
     GroupByDimension.METER_CATEGORY: "MeterCategory",
     GroupByDimension.LOCATION: "ResourceLocation",
+    GroupByDimension.RESOURCE_ID: "ResourceId",
 }
 
 
@@ -211,6 +212,10 @@ class CostService:
                 return [], []
 
         # ── 1. Try preferred 2-dimension primary query ───────────────
+        # Group by [ResourceId, MeterCategory] so every row carries its
+        # own ARM resource ID.  From the ID we extract the human-readable
+        # resource_name (last path segment), resource_group, and
+        # resource_type — matching what Azure's cost-export CSV provides.
         primary_cols: list[str] = []
         primary_rows: list[list] = []
         used_fallback = False
@@ -220,7 +225,7 @@ class CostService:
                 start_date,
                 end_date,
                 TimeGranularity.DAILY,
-                [GroupByDimension.METER_CATEGORY, GroupByDimension.RESOURCE_GROUP],
+                [GroupByDimension.RESOURCE_ID, GroupByDimension.METER_CATEGORY],
                 cost_type="amortized",
             )
             primary_cols, primary_rows = await self._execute_cost_query(scope, two_dim_query)
@@ -250,7 +255,6 @@ class CostService:
                 [GroupByDimension.METER_CATEGORY],
                 cost_type="amortized",
             )
-            # This MUST succeed — let exceptions propagate to the sync.
             primary_cols, primary_rows = await self._execute_cost_query(scope, svc_query)
             logger.info(
                 "query_amortized_fallback_result",
@@ -259,7 +263,6 @@ class CostService:
                 row_count=len(primary_rows),
             )
 
-            # Fetch RG data for enrichment (best-effort).
             rg_cols, rg_rows = await _safe_query(
                 _build_cost_query(
                     start_date,
@@ -283,12 +286,14 @@ class CostService:
                     rg_name = str(row[rg_rg_i]) if rg_rg_i is not None and rg_rg_i < len(row) else ""
                     rg_lookup[row_date.isoformat()].append({"resource_group": rg_name, "cost": float(cost_val)})
 
-        # ── 3. Enrichment: ResourceType + ResourceLocation ───────────
+        # ── 3. Enrichment: ResourceLocation (best-effort) ────────────
+        # ResourceType is extracted from the ResourceId path when available;
+        # the MeterCategory-based lookup serves as a fallback.
         type_query = _build_cost_query(
             start_date,
             end_date,
             TimeGranularity.DAILY,
-            [GroupByDimension.RESOURCE_TYPE, GroupByDimension.RESOURCE_GROUP],
+            [GroupByDimension.RESOURCE_TYPE, GroupByDimension.METER_CATEGORY],
             cost_type="amortized",
         )
         location_query = _build_cost_query(
@@ -310,6 +315,7 @@ class CostService:
             cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
             date_i = col_idx.get("UsageDate", col_idx.get("BillingPeriod", -1))
             meter_i = col_idx.get("MeterCategory", col_idx.get("ServiceName"))
+            rid_i = col_idx.get("ResourceId")
             rg_i = col_idx.get("ResourceGroup")
 
             for row in primary_rows:
@@ -319,9 +325,16 @@ class CostService:
 
                 row_date = self._parse_query_row_date(row, date_i, start_date)
                 meter_cat = str(row[meter_i]) if meter_i is not None and meter_i < len(row) else "Unknown"
-                # In 2-dim mode, ResourceGroup is a column; in fallback, it's absent.
+
+                resource_name = ""
                 rg_name = ""
-                if rg_i is not None and rg_i < len(row):
+                resource_type = ""
+
+                rid_val = str(row[rid_i]) if rid_i is not None and rid_i < len(row) else ""
+                if rid_val:
+                    resource_name, rg_name, resource_type = self._parse_resource_id(rid_val)
+
+                if not rg_name and rg_i is not None and rg_i < len(row):
                     rg_name = str(row[rg_i])
 
                 parsed.append(
@@ -332,8 +345,8 @@ class CostService:
                         "meter_subcategory": "",
                         "meter_name": "",
                         "resource_group": rg_name,
-                        "resource_name": "",
-                        "resource_type": "",
+                        "resource_name": resource_name,
+                        "resource_type": resource_type,
                         "resource_location": "",
                         "subscription_name": "",
                         "subscription_id": "",
@@ -354,26 +367,26 @@ class CostService:
                     if rg_entries and len(rg_entries) == 1:
                         p["resource_group"] = rg_entries[0]["resource_group"]
 
-        # ── 6. Build resource-type lookup (RG → dominant type) ───────
-        rg_type_cost: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        # ── 6. Build resource-type fallback (MeterCategory → dominant type)
+        mc_type_cost: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         if type_cols and type_rows:
             col_idx = {name: i for i, name in enumerate(type_cols)}
             cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
             rtype_i = col_idx.get("ResourceType")
-            rg_i = col_idx.get("ResourceGroup")
+            mc_i = col_idx.get("MeterCategory", col_idx.get("ServiceName"))
 
             for row in type_rows:
                 cost_val = float(Decimal(str(row[cost_i])).quantize(Decimal("0.01")))
                 if cost_val == 0:
                     continue
                 rtype = str(row[rtype_i]) if rtype_i is not None and rtype_i < len(row) else ""
-                rg = str(row[rg_i]) if rg_i is not None and rg_i < len(row) else ""
-                if rg and rtype:
-                    rg_type_cost[rg][rtype] += cost_val
+                mc = str(row[mc_i]) if mc_i is not None and mc_i < len(row) else ""
+                if mc and rtype:
+                    mc_type_cost[mc][rtype] += cost_val
 
-        rg_type_map: dict[str, str] = {}
-        for rg, type_costs in rg_type_cost.items():
-            rg_type_map[rg] = max(type_costs, key=type_costs.get)
+        mc_type_map: dict[str, str] = {}
+        for mc, type_costs in mc_type_cost.items():
+            mc_type_map[mc] = max(type_costs, key=type_costs.get)
 
         # ── 7. Build resource-location lookup (RG → dominant loc) ────
         rg_loc_cost: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
@@ -396,11 +409,13 @@ class CostService:
         for rg, loc_costs in rg_loc_cost.items():
             rg_loc_map[rg] = max(loc_costs, key=loc_costs.get)
 
-        # ── 8. Enrich primary rows with type and location ────────────
+        # ── 8. Enrich rows with fallback type and location ───────────
         for p in parsed:
             rg = p["resource_group"]
-            if rg:
-                p["resource_type"] = rg_type_map.get(rg, "")
+            mc = p["meter_category"]
+            if not p["resource_type"]:
+                p["resource_type"] = mc_type_map.get(mc, "")
+            if rg and not p["resource_location"]:
                 p["resource_location"] = rg_loc_map.get(rg, "")
 
         logger.info(
@@ -412,6 +427,26 @@ class CostService:
             used_fallback=used_fallback,
         )
         return parsed
+
+    @staticmethod
+    def _parse_resource_id(resource_id: str) -> tuple[str, str, str]:
+        """Extract (resource_name, resource_group, resource_type) from an ARM resource ID.
+
+        Example input:
+          /subscriptions/.../resourceGroups/my-rg/providers/Microsoft.Compute/disks/my-disk
+        Returns:
+          ("my-disk", "my-rg", "Microsoft.Compute/disks")
+        """
+        parts = [p for p in resource_id.split("/") if p]
+        resource_name = parts[-1] if parts else ""
+        resource_group = ""
+        resource_type = ""
+        for i, segment in enumerate(parts):
+            if segment.lower() == "resourcegroups" and i + 1 < len(parts):
+                resource_group = parts[i + 1]
+            if segment.lower() == "providers" and i + 2 < len(parts):
+                resource_type = f"{parts[i + 1]}/{parts[i + 2]}"
+        return resource_name, resource_group, resource_type
 
     @staticmethod
     def _parse_query_row_date(row: list, date_index: int, fallback: date) -> date:

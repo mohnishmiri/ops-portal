@@ -439,7 +439,7 @@ class AmortizedCostSyncService:
                     return parts[-1]
             return normalized
 
-        for fallback in (meter_name, meter_category, resource_group):
+        for fallback in (meter_name, meter_category):
             value = str(fallback or "").strip()
             if value:
                 return value
@@ -468,16 +468,21 @@ class AmortizedCostSyncService:
         self,
         months: int = 2,
         triggered_by: str = "manual",
+        force: bool = False,
     ) -> dict:
         """Download Azure Cost API data, normalize it, and append into PostgreSQL.
 
-        Incremental — only fetches date ranges missing from the DB, plus
-        the last CORRECTION_WINDOW_DAYS days per subscription to capture
-        any retroactive Azure cost adjustments.  Historical records are
-        never deleted, so every sync is safe to run at any frequency.
+        Normal mode (force=False): incremental — only fetches date ranges
+        missing from the DB, plus the last CORRECTION_WINDOW_DAYS days per
+        subscription to capture retroactive Azure cost adjustments.
+
+        Force mode (force=True): wipes ALL records in the rolling window and
+        re-fetches every month from Azure. Use this after enrichment logic
+        changes (e.g. resource_type mapping) to repair historical records that
+        were written with the old logic.
         """
         sync_record = AmortizedCostSyncStatus(
-            sync_type="full",
+            sync_type="force" if force else "full",
             status="running",
             started_at=datetime.utcnow(),
             triggered_by=triggered_by,
@@ -515,10 +520,23 @@ class AmortizedCostSyncService:
             # Step 1: Subscription metadata (names, environments)
             sub_metadata = await self._fetch_subscription_metadata(monitored_ids)
 
-            # Step 2: Compute specific fetch ranges per subscription.
-            # Each range is either a missing calendar month or the correction
-            # window — existing complete months are never included.
-            per_sub_ranges = await self._compute_fetch_ranges(monitored_ids, full_start_date, end_date)
+            # Step 2: Compute fetch ranges.
+            # Force mode: every calendar month in the window for every
+            # subscription — bypasses the incremental gap-detection logic so
+            # that historical records written with stale enrichment are wiped
+            # and rewritten correctly.
+            # Normal mode: only missing months + correction window.
+            if force:
+                monthly_chunks = self._split_into_monthly_chunks(full_start_date, end_date)
+                per_sub_ranges = {sub_id: list(monthly_chunks) for sub_id in monitored_ids}
+                logger.info(
+                    "amortized_cost_sync_force_mode",
+                    months=months,
+                    chunks=len(monthly_chunks),
+                    subscriptions=len(monitored_ids),
+                )
+            else:
+                per_sub_ranges = await self._compute_fetch_ranges(monitored_ids, full_start_date, end_date)
 
             # Step 3: Fetch from Azure FIRST — before any deletes.
             # Each range is fetched independently; a 429 on one range does not
@@ -834,32 +852,8 @@ class AmortizedCostSyncService:
         meter_category: str | None = None,
         subscription: str | None = None,
     ) -> dict:
-        """Resource-level drill-down from DB-cached amortized cost rows."""
+        """Resource-level drill-down served directly from the DB on every request."""
         started = perf_counter()
-        cache_key = self._drilldown_cache_key(
-            env,
-            months,
-            resource_group=resource_group,
-            meter_category=meter_category,
-            subscription=subscription,
-        )
-        cached = await cache_manager.get_cached(cache_key)
-        if cached:
-            try:
-                payload = json.loads(cached)
-                logger.info(
-                    "amortized_drilldown_served",
-                    source="cache",
-                    environment=env,
-                    months=months,
-                    resource_group=resource_group,
-                    meter_category=meter_category,
-                    subscription=subscription,
-                    elapsed_ms=round((perf_counter() - started) * 1000, 2),
-                )
-                return payload
-            except (json.JSONDecodeError, TypeError):
-                pass
 
         rows = await self._load_rows_from_db(env, months)
 
@@ -896,8 +890,15 @@ class AmortizedCostSyncService:
         # Aggregate by resource
         res_agg: dict[str, dict] = {}
         for r in filtered:
-            rname = r["resource_name"] or "Unknown"
-            key = f"{rname}|{r['resource_group']}"
+            rname = r["resource_name"]
+            if not rname or rname == r["meter_category"]:
+                rname = r["meter_category"] or "Unknown"
+            # Include meter_category in the key so that different service types
+            # within the same resource group produce separate rows. Without this,
+            # a resource group containing both VMs and Synapse would merge into one
+            # row and the backfill could write a Synapse resource_type onto a row
+            # whose meter_category is "Virtual Machines", producing a TYPE/SERVICE mismatch.
+            key = f"{rname}|{r['resource_group']}|{r['meter_category']}"
             if key not in res_agg:
                 res_agg[key] = {
                     "resource_name": rname,
@@ -909,6 +910,14 @@ class AmortizedCostSyncService:
                     "cost": 0.0,
                     "days": set(),
                 }
+            else:
+                # Backfill resource_type and location from later rows for the same
+                # resource+service bucket. meter_category is fixed by the key so
+                # it never changes here — no risk of cross-service contamination.
+                if not res_agg[key]["resource_type"] and r["resource_type"]:
+                    res_agg[key]["resource_type"] = r["resource_type"]
+                if not res_agg[key]["location"] and r["resource_location"]:
+                    res_agg[key]["location"] = r["resource_location"]
             res_agg[key]["cost"] += r["cost"]
             if r["date"]:
                 res_agg[key]["days"].add(r["date"])
@@ -917,6 +926,11 @@ class AmortizedCostSyncService:
         for res in resources:
             res["cost"] = round(res["cost"], 2)
             res["active_days"] = len(res.pop("days"))
+            # Last-resort fallback: Azure Cost Management omits ResourceType for
+            # some charge types (AKS managed VMs, reservations). Use the meter
+            # category so the UI always has a meaningful value to display.
+            if not res["resource_type"] and res["meter_category"]:
+                res["resource_type"] = res["meter_category"]
 
         daily: dict[str, float] = defaultdict(float)
         for r in filtered:
@@ -937,8 +951,6 @@ class AmortizedCostSyncService:
             "daily_trend": daily_trend,
             "generated_at": datetime.utcnow().isoformat(),
         }
-        ttl = await get_effective_cache_ttl_seconds(self._db)
-        await cache_manager.set_cached(cache_key, json.dumps(payload, default=str), ttl=ttl)
         logger.info(
             "amortized_drilldown_served",
             source="database",

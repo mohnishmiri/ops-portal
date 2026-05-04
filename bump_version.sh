@@ -8,6 +8,7 @@
 # Files updated:
 #   backend/pyproject.toml
 #   frontend/package.json
+#   frontend/src/App.tsx         (APP_VERSION constant — shown in UI footer)
 #   helm/ops-portal/Chart.yaml  (both 'version' and 'appVersion')
 
 set -euo pipefail
@@ -15,6 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYPROJECT="$SCRIPT_DIR/backend/pyproject.toml"
 PACKAGE_JSON="$SCRIPT_DIR/frontend/package.json"
+APP_TSX="$SCRIPT_DIR/frontend/src/App.tsx"
 CHART_YAML="$SCRIPT_DIR/helm/ops-portal/Chart.yaml"
 
 # ---------------------------------------------------------------------------
@@ -111,6 +113,10 @@ echo "  [updated] backend/pyproject.toml"
 sed -i "s/\"version\": \"${CURRENT}\"/\"version\": \"${NEW_VERSION}\"/" "$PACKAGE_JSON"
 echo "  [updated] frontend/package.json"
 
+# frontend/src/App.tsx  (APP_VERSION constant rendered in the UI footer)
+sed -i "s/const APP_VERSION = \"${CURRENT}\"/const APP_VERSION = \"${NEW_VERSION}\"/" "$APP_TSX"
+echo "  [updated] frontend/src/App.tsx"
+
 # helm/ops-portal/Chart.yaml  (version + appVersion)
 sed -i "s/^version: ${CURRENT}$/version: ${NEW_VERSION}/" "$CHART_YAML"
 sed -i "s/^appVersion: \"${CURRENT}\"$/appVersion: \"${NEW_VERSION}\"/" "$CHART_YAML"
@@ -124,6 +130,7 @@ echo ""
 echo "Verification:"
 grep -E '^version\s*=' "$PYPROJECT"  | head -1 | sed 's/^/  pyproject.toml  : /'
 grep '"version"' "$PACKAGE_JSON"     | head -1 | sed 's/^/  package.json    : /'
+grep 'APP_VERSION' "$APP_TSX"        | head -1 | sed 's/^/  App.tsx         : /'
 grep -E '^version:|^appVersion:' "$CHART_YAML" | sed 's/^/  Chart.yaml      : /'
 
 echo ""

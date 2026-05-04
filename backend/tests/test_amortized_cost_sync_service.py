@@ -187,7 +187,7 @@ async def test_load_rows_incremental_uses_query_api_rows(
     assert len(failures) == 0
     assert rows[0]["subscription_id"] == "sub-a"
     assert rows[0]["subscription_name"] == "Subscription A"
-    assert rows[0]["resource_name"] == "Storage"  # normalized from meter_category fallback
+    assert rows[0]["resource_name"] == "Storage"  # falls back to meter_category (resource_group is never used as resource_name)
 
 
 @pytest.mark.anyio

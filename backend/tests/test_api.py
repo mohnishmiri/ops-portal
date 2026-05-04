@@ -79,7 +79,7 @@ async def test_amortized_sync_returns_502_on_failed_sync(app, client, monkeypatc
         )
 
     # Mock full_sync to return a completed result
-    async def fake_full_sync(self, months=2, triggered_by="manual"):
+    async def fake_full_sync(self, months=2, triggered_by="manual", force=False):
         return {
             "status": "completed",
             "months_synced": months,

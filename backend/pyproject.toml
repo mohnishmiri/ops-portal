@@ -91,3 +91,11 @@ native-tls = true
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[dependency-groups]
+dev = [
+    "anyio>=4.13.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "python-pptx>=1.0.2",
+]
