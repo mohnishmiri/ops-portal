@@ -17,13 +17,11 @@ import json
 from calendar import monthrange
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from functools import lru_cache
-from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import case, delete, distinct, func, select
+from sqlalchemy import case, delete, distinct, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.admin_config import get_effective_cache_ttl_seconds
@@ -45,9 +43,11 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # Data older than this many hours triggers an automatic re-sync.
-# Azure Cost Management provides near real-time amortized cost data,
-# so we sync frequently to keep the dashboard current.
-STALE_HOURS = 0.5
+# Set conservatively to avoid background syncs colliding with manual
+# syncs and overwhelming Azure Cost Management's per-subscription rate
+# limit (~10 req/min). The correction window still re-fetches the last
+# CORRECTION_WINDOW_DAYS days on every run, so freshness is preserved.
+STALE_HOURS = 2
 RUNNING_SYNC_TIMEOUT_MINUTES = 180
 
 # Azure Cost Management can retroactively adjust costs for recent days.
@@ -64,6 +64,32 @@ class AmortizedCostSyncService:
         self._cost_service = CostService(db)
 
     # ── Staleness check ───────────────────────────────────────────────
+
+    async def _expire_abandoned_running_rows(self) -> int:
+        """Flip orphaned 'running' rows to 'failed' once they exceed the timeout.
+
+        A row stays 'running' forever if the process is killed mid-sync or
+        the HTTP request is cancelled before the except handler fires. Without
+        this sweep the dashboard banner would stay on 'Syncing' indefinitely.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=RUNNING_SYNC_TIMEOUT_MINUTES)
+        result = await self._db.execute(
+            update(AmortizedCostSyncStatus)
+            .where(
+                AmortizedCostSyncStatus.status == "running",
+                AmortizedCostSyncStatus.started_at < cutoff,
+            )
+            .values(
+                status="failed",
+                completed_at=datetime.utcnow(),
+                error_message="abandoned: process restarted or timed out",
+            )
+        )
+        expired = getattr(result, "rowcount", 0) or 0
+        if expired:
+            await self._db.commit()
+            logger.warning("amortized_sync_expired_running_rows", count=expired)
+        return expired
 
     async def is_data_stale(self) -> bool:
         """Return True when the DB has no data or hasn't been refreshed recently."""
@@ -348,12 +374,16 @@ class AmortizedCostSyncService:
         normalized_rows: list[dict] = []
         failed_sub_ids: list[str] = []
         successful_ranges: dict[str, list[tuple[date, date]]] = {}
+        last_error_per_sub: dict[str, str] = {}
 
         for sub_id, ranges in per_sub_ranges.items():
             scope = f"/subscriptions/{sub_id}"
             metadata = sub_metadata.get(sub_id, {})
             sub_name = metadata.get("subscription_name") or sub_id
-            environment = metadata.get("environment")
+            # AdminSubscription.environment is preferred; when admin hasn't
+            # tagged the sub (very common after bulk discovery), fall back
+            # to the subscription name pattern (ACC-NPRD-… / ACC-PROD-…).
+            env_label = self.resolve_env_label(metadata.get("environment"), sub_name)
 
             sub_rows: list[dict] = []
             sub_successful_ranges: list[tuple[date, date]] = []
@@ -367,6 +397,37 @@ class AmortizedCostSyncService:
                 )
                 try:
                     rows = await self._cost_service.query_amortized_cost_rows(scope, range_start, range_end)
+
+                    # Safety: if Azure returned NO rows for a range that has
+                    # existing data in the DB, treat it as suspicious (likely
+                    # a partial 429, an Azure-side delay, or a transient
+                    # failure that returned an empty result instead of an
+                    # error). Skip the delete — keep the prior data — and
+                    # surface it as a chunk failure rather than silently
+                    # wiping the dashboard. Empty result is fine if the DB
+                    # also had no data for that range (legitimate gap).
+                    if not rows:
+                        existing_count = await self._db.scalar(
+                            select(func.count(AmortizedCostRecord.id)).where(
+                                AmortizedCostRecord.subscription_id == sub_id,
+                                AmortizedCostRecord.cost_date >= range_start.isoformat(),
+                                AmortizedCostRecord.cost_date <= range_end.isoformat(),
+                            )
+                        )
+                        if (existing_count or 0) > 0:
+                            last_error_per_sub[sub_id] = (
+                                f"Azure returned 0 rows for {range_start}..{range_end} "
+                                f"but DB has {existing_count} existing rows — keeping prior data"
+                            )
+                            logger.warning(
+                                "amortized_cost_chunk_zero_rows_protected",
+                                subscription_id=sub_id,
+                                chunk_start=range_start.isoformat(),
+                                chunk_end=range_end.isoformat(),
+                                existing_rows=int(existing_count or 0),
+                            )
+                            continue  # Do not mark as successful → no delete
+
                     for row in rows:
                         row["subscription_name"] = str(row.get("subscription_name") or sub_name).strip()
                         row["subscription_id"] = str(row.get("subscription_id") or sub_id).strip()
@@ -376,14 +437,7 @@ class AmortizedCostSyncService:
                             meter_category=row.get("meter_category"),
                             resource_group=row.get("resource_group"),
                         )
-                        row["env_label"] = self._derive_env_label(
-                            {
-                                "env_label": row.get("env_label"),
-                                "environment": environment,
-                                "subscription_name": sub_name,
-                                "subscription_id": sub_id,
-                            }
-                        )
+                        row["env_label"] = env_label
                         sub_rows.append(row)
                     sub_successful_ranges.append((range_start, range_end))
                     logger.info(
@@ -394,6 +448,7 @@ class AmortizedCostSyncService:
                         rows_fetched=len(rows),
                     )
                 except Exception as exc:
+                    last_error_per_sub[sub_id] = f"{type(exc).__name__}: {str(exc)[:300]}"
                     logger.error(
                         "amortized_cost_chunk_failed",
                         subscription_id=sub_id,
@@ -420,6 +475,8 @@ class AmortizedCostSyncService:
                     error=f"all {len(ranges)} ranges failed",
                 )
 
+        # Stash for surfacing in the caller's error message.
+        self._last_load_errors = last_error_per_sub
         return normalized_rows, failed_sub_ids, successful_ranges
 
     @staticmethod
@@ -480,6 +537,7 @@ class AmortizedCostSyncService:
         changes (e.g. resource_type mapping) to repair historical records that
         were written with the old logic.
         """
+        await self._expire_abandoned_running_rows()
         sync_record = AmortizedCostSyncStatus(
             sync_type="force" if force else "full",
             status="running",
@@ -546,9 +604,18 @@ class AmortizedCostSyncService:
             )
 
             if not rows and failed_sub_ids:
-                raise RuntimeError(
-                    "Azure amortized sync failed for all monitored subscriptions: " + ", ".join(failed_sub_ids[:3])
+                error_details = getattr(self, "_last_load_errors", {})
+                # Group subscriptions by their underlying error so the UI shows
+                # the real Azure failure (e.g. "HTTP 429 too many requests")
+                # instead of opaque subscription GUIDs.
+                reason_to_subs: dict[str, list[str]] = defaultdict(list)
+                for sub_id in failed_sub_ids:
+                    reason = error_details.get(sub_id, "unknown error")
+                    reason_to_subs[reason].append(sub_id)
+                reason_summary = "; ".join(
+                    f"{reason} (subs: {', '.join(subs[:3])})" for reason, subs in reason_to_subs.items()
                 )
+                raise RuntimeError(f"Azure amortized sync failed — {reason_summary}")
 
             # Step 4: Delete ONLY the ranges that were successfully re-fetched.
             # Failed ranges keep their existing DB records — no data is lost.
@@ -1018,15 +1085,14 @@ class AmortizedCostSyncService:
             else (CostTrendDirection.DOWN if change_pct < -5 else CostTrendDirection.STABLE)
         )
 
-        monitored_ids = await get_monitored_subscription_ids()
         kpis = [
             KPIMetric(
-                name="Total Monthly Spend",
+                name="Current Month So Far",
                 value=current_total,
                 unit="USD",
                 trend=trend,
                 change_pct=change_pct,
-                description="Current month Azure spend across all subscriptions",
+                description="Month-to-date Azure spend across all subscriptions",
             ),
             KPIMetric(
                 name="Month-over-Month Change",
@@ -1035,14 +1101,6 @@ class AmortizedCostSyncService:
                 trend=trend,
                 change_pct=change_pct,
                 description="Cost change compared to previous month",
-            ),
-            KPIMetric(
-                name="Subscriptions Monitored",
-                value=len(monitored_ids),
-                unit="count",
-                trend=CostTrendDirection.STABLE,
-                change_pct=0.0,
-                description="Number of Azure subscriptions under cost monitoring",
             ),
         ]
 
@@ -1104,10 +1162,15 @@ class AmortizedCostSyncService:
             for r in spender_rows
         ]
 
-        # 6-month trend (monthly prod vs non-prod)
+        # 6-month trend (monthly prod vs non-prod). Upper bound is the END
+        # of the previous full month — the partial current month was
+        # poisoning the Executive Forecast: ``last_prod`` was a single
+        # day's data and the May→Jun avg-delta of -$180k extrapolated all
+        # future months to $0. Excluding the current month gives the
+        # forecast a stable anchor.
         monthly_result = await self._db.execute(
             select(
-                func.substr(AmortizedCostRecord.cost_date, 1, 7).label("month_year"),
+                AmortizedCostRecord.cost_date,
                 AmortizedCostRecord.subscription_name,
                 AmortizedCostRecord.subscription_id,
                 AmortizedCostRecord.env_label,
@@ -1115,29 +1178,66 @@ class AmortizedCostSyncService:
             )
             .where(
                 AmortizedCostRecord.cost_date >= six_months_ago.isoformat(),
-                AmortizedCostRecord.cost_date <= today.isoformat(),
+                AmortizedCostRecord.cost_date <= prev_month_end.isoformat(),
             )
             .group_by(
-                func.substr(AmortizedCostRecord.cost_date, 1, 7),
+                AmortizedCostRecord.cost_date,
                 AmortizedCostRecord.subscription_name,
                 AmortizedCostRecord.subscription_id,
                 AmortizedCostRecord.env_label,
             )
-            .order_by(func.substr(AmortizedCostRecord.cost_date, 1, 7))
+            .order_by(AmortizedCostRecord.cost_date)
         )
 
+        # Build a sub_id → resolved Prod/Non-Prod map. Admin's Environment
+        # field wins when set; otherwise fall back to the subscription name
+        # (ACC-NPRD-… / ACC-PROD-… pattern). This reclassifies historical
+        # rows the moment an admin updates the field — no resync required —
+        # AND it works correctly when admin hasn't tagged the sub at all.
+        admin_env_result = await self._db.execute(
+            select(
+                AdminSubscription.subscription_id,
+                AdminSubscription.environment,
+                AdminSubscription.subscription_name,
+            )
+        )
+        admin_env_by_sub: dict[str, str] = {
+            sid: AmortizedCostSyncService.resolve_env_label(env, name)
+            for sid, env, name in admin_env_result.all()
+            if sid
+        }
+
         monthly_buckets: dict[str, dict] = {}
-        for month_year, sub_name, sub_id, env_label, total in monthly_result.all():
-            mk = str(month_year)
+        prod_total_check = 0.0
+        nonprod_total_check = 0.0
+        for cost_date, sub_name, sub_id, stored_env, total in monthly_result.all():
+            mk = str(cost_date)[:7]  # YYYY-MM
             if mk not in monthly_buckets:
                 monthly_buckets[mk] = {"prod": 0.0, "nonprod": 0.0, "subs": {}}
             cost_val = float(total or 0.0)
             label = sub_name or sub_id or "unknown"
             monthly_buckets[mk]["subs"][label] = monthly_buckets[mk]["subs"].get(label, 0.0) + cost_val
-            if env_label == "Prod":
+
+            # Prefer the current AdminSubscription.environment over the
+            # stored env_label, so changing a sub's environment in the
+            # Admin panel reclassifies historical data on the next
+            # dashboard load — no resync required.
+            current_env = admin_env_by_sub.get(str(sub_id or "").strip())
+            effective = current_env or (stored_env if stored_env in ("Prod", "Non-Prod") else "Prod")
+            if effective == "Prod":
                 monthly_buckets[mk]["prod"] += cost_val
+                prod_total_check += cost_val
             else:
                 monthly_buckets[mk]["nonprod"] += cost_val
+                nonprod_total_check += cost_val
+
+        logger.info(
+            "leadership_six_month_trend_built",
+            months=len(monthly_buckets),
+            prod_total=round(prod_total_check, 2),
+            non_prod_total=round(nonprod_total_check, 2),
+            admin_subs_mapped=len(admin_env_by_sub),
+        )
 
         six_month_trend: list[MonthlyCostPoint] = []
         for mk in sorted(monthly_buckets.keys()):
@@ -1170,6 +1270,7 @@ class AmortizedCostSyncService:
 
     async def get_sync_status(self) -> dict:
         """Return latest sync status for the dashboard header."""
+        await self._expire_abandoned_running_rows()
         monitored_subscription_ids = await get_monitored_subscription_ids()
         result = await self._db.execute(
             select(AmortizedCostSyncStatus).order_by(AmortizedCostSyncStatus.started_at.desc()).limit(1)
@@ -1276,69 +1377,101 @@ class AmortizedCostSyncService:
 
     # ── Analytics builder (legacy amortized payload shape) ────────────
 
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def _load_non_prod_subscription_ids() -> set[str]:
-        """Load non-prod subscription IDs from the shared budget config."""
-        cfg_path = Path(__file__).resolve().parents[2] / "config" / "budget_config.json"
-        if not cfg_path.exists():
-            return set()
-
-        try:
-            with cfg_path.open(encoding="utf-8") as handle:
-                cfg = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            logger.warning("amortized_budget_config_load_failed", path=str(cfg_path))
-            return set()
-
-        non_prod_ids: set[str] = set()
-        for app in cfg.get("applications", []):
-            for subscription_id in app.get("non_prod_subscription_ids", []):
-                if subscription_id:
-                    non_prod_ids.add(str(subscription_id).strip())
-        return non_prod_ids
-
-    @staticmethod
-    def _derive_env_label(row: dict) -> str:
-        """Derive Prod/Non-Prod from explicit environment metadata first."""
-        el = row.get("env_label", "")
-        if el in ("Prod", "Non-Prod"):
-            return el
-
-        explicit_environment = str(row.get("environment") or "").strip().lower()
-        if explicit_environment:
-            if explicit_environment in {"prod", "production"}:
-                return "Prod"
-            return "Non-Prod"
-
-        subscription_id = str(row.get("subscription_id") or "").strip()
-        if subscription_id and subscription_id in AmortizedCostSyncService._load_non_prod_subscription_ids():
-            return "Non-Prod"
-
-        # Fallback: derive from subscription name
-        sub = (row.get("subscription_name") or subscription_id or "").lower()
-        non_prod_keywords = (
-            "nprd",
-            "nprod",
+    # The legacy non-prod token list lives in this module so every consumer
+    # (sync writer, dashboard query, /nonprod-vs-prod) classifies the same way.
+    _NON_PROD_TOKENS: frozenset[str] = frozenset(
+        {
             "nonprod",
             "non-prod",
             "non_prod",
+            "nprd",
+            "nprod",
             "dev",
+            "development",
             "test",
+            "qa",
             "uat",
             "stg",
             "stage",
             "staging",
             "perf",
             "sandbox",
-        )
-        if any(kw in sub for kw in non_prod_keywords):
-            return "Non-Prod"
+        }
+    )
+    _PROD_TOKENS: frozenset[str] = frozenset({"prod", "prd", "production"})
 
-        prod_keywords = ("prod", "prd", "production")
-        if any(kw in sub for kw in prod_keywords):
+    @staticmethod
+    def resolve_env_label(environment: str | None, subscription_name: str | None) -> str:
+        """Best-effort Prod/Non-Prod for a subscription.
+
+        Preferred input: ``AdminSubscription.environment`` set in the Admin
+        panel. When that is empty (very common — ATT typically discovers
+        subscriptions in bulk and admins forget the Environment field), we
+        fall back to the subscription name. Names that follow the standard
+        ATT pattern (``ACC-NPRD-…``, ``ACC-PROD-…``) classify correctly
+        from the name alone, which is why this fallback exists.
+        """
+        env_value = (environment or "").strip()
+        if env_value:
+            return AmortizedCostSyncService.normalize_environment(env_value)
+        return AmortizedCostSyncService.normalize_environment(subscription_name)
+
+    @staticmethod
+    def normalize_environment(environment: str | None) -> str:
+        """Map a free-text ``environment`` value to ``Prod`` or ``Non-Prod``.
+
+        ``environment`` comes from ``AdminSubscription.environment`` — the
+        value an admin sets in the Admin panel. That is the single source
+        of truth for prod/non-prod classification (no budget_config.json,
+        no subscription-name guessing).
+
+        Returns ``Prod`` for unset/unknown values so leadership reports never
+        silently hide spend; admins who haven't tagged a subscription get
+        Prod with a default-safe interpretation.
+        """
+        raw = str(environment or "").strip().lower()
+        if not raw:
             return "Prod"
-        return "Non-Prod"
+
+        # Collapse separators so 'non-prod' / 'non_prod' / 'NON PROD' /
+        # 'non production' all normalise to 'nonprod' / 'nonproduction'.
+        flat = raw.replace(" ", "").replace("_", "").replace("-", "")
+
+        # Non-prod tokens MUST be checked first — 'nonproduction' contains
+        # both 'nonprod' (non-prod) and 'production' (prod). Whichever runs
+        # first wins; we want non-prod to win.
+        flat_non_prod = {t.replace("-", "").replace("_", "") for t in AmortizedCostSyncService._NON_PROD_TOKENS}
+        for token in flat_non_prod:
+            if token in flat:
+                return "Non-Prod"
+        for token in AmortizedCostSyncService._PROD_TOKENS:
+            if token in flat:
+                return "Prod"
+        return "Prod"
+
+    @staticmethod
+    def _derive_env_label(row: dict) -> str:
+        """Derive Prod/Non-Prod from the row's ``environment`` value.
+
+        ``environment`` is populated from ``AdminSubscription.environment``
+        at sync time (see ``_fetch_subscription_metadata``). That is the
+        sole input — no budget_config.json, no subscription-name guessing
+        when ``environment`` is set. The name keyword fallback only runs
+        when neither ``environment`` nor a previously stored ``env_label``
+        is available, e.g. live Azure responses that don't carry admin
+        metadata.
+        """
+        explicit_environment = str(row.get("environment") or "").strip()
+        if explicit_environment:
+            return AmortizedCostSyncService.normalize_environment(explicit_environment)
+
+        el = row.get("env_label", "")
+        if el in ("Prod", "Non-Prod"):
+            return el
+
+        # Last-resort: best-effort guess from the subscription name. Only
+        # reached when admin metadata is missing entirely.
+        return AmortizedCostSyncService.normalize_environment(row.get("subscription_name") or "")
 
     @staticmethod
     def _build_analytics(

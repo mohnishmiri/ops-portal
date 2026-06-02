@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.admin_config import get_cache_enabled, get_effective_cache_ttl_seconds
@@ -36,6 +36,32 @@ class LeadershipSyncService:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
         self._dashboard_svc = DashboardService()
+
+    async def _expire_abandoned_running_rows(self) -> int:
+        """Flip orphaned 'running' rows to 'failed' once they exceed the timeout.
+
+        A row stays 'running' forever if the process is killed mid-sync or
+        the HTTP request is cancelled before the except handler fires. Without
+        this sweep the dashboard badge would stay on 'Syncing' indefinitely.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=RUNNING_SYNC_TIMEOUT_MINUTES)
+        result = await self._db.execute(
+            update(LeadershipSyncStatus)
+            .where(
+                LeadershipSyncStatus.status == "running",
+                LeadershipSyncStatus.started_at < cutoff,
+            )
+            .values(
+                status="failed",
+                completed_at=datetime.utcnow(),
+                error_message="abandoned: process restarted or timed out",
+            )
+        )
+        expired = getattr(result, "rowcount", 0) or 0
+        if expired:
+            await self._db.commit()
+            logger.warning("leadership_sync_expired_running_rows", count=expired)
+        return expired
 
     async def is_data_stale(self) -> bool:
         """Return True when the DB has no data or hasn't been refreshed recently."""
@@ -109,6 +135,7 @@ class LeadershipSyncService:
         time-series history is preserved.  Records older than
         ``SNAPSHOT_RETENTION_DAYS`` are pruned to prevent unbounded growth.
         """
+        await self._expire_abandoned_running_rows()
         sync_record = LeadershipSyncStatus(
             sync_type="full",
             status="running",
@@ -138,6 +165,18 @@ class LeadershipSyncService:
                     "leadership_from_amortized_db_failed",
                     error=str(exc)[:300],
                 )
+                # A DB error inside build_leadership_dashboard leaves asyncpg's
+                # transaction in 'aborted' state. Without rollback, every
+                # subsequent statement on this session fails with
+                # InFailedSQLTransactionError — including the snapshot INSERT
+                # below. Roll back so the fallback path can use the session.
+                try:
+                    await self._db.rollback()
+                except Exception as rollback_exc:
+                    logger.warning(
+                        "leadership_rollback_failed",
+                        error=str(rollback_exc)[:200],
+                    )
 
             # Fall back to live Azure API when no amortized data exists
             if data is None:
@@ -201,6 +240,13 @@ class LeadershipSyncService:
             }
 
         except Exception as exc:
+            # If the failure left asyncpg in an aborted-transaction state,
+            # the subsequent UPDATE-via-commit on sync_record will itself
+            # fail. Roll back first so the failure can be recorded.
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                await self._db.rollback()
             sync_record.status = "failed"
             sync_record.completed_at = datetime.utcnow()
             sync_record.error_message = str(exc)[:2000]
@@ -233,6 +279,7 @@ class LeadershipSyncService:
 
     async def get_sync_status(self) -> dict:
         """Return latest sync status with enriched detail."""
+        await self._expire_abandoned_running_rows()
         monitored_ids = await get_monitored_subscription_ids()
         result = await self._db.execute(
             select(LeadershipSyncStatus).order_by(LeadershipSyncStatus.started_at.desc()).limit(1)

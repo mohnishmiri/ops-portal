@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -133,6 +134,171 @@ DISK_COST_ESTIMATES: dict[str, float] = {
 }
 
 
+_GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+# Azure region slugs that show up in Advisor's ``impacted_value`` for
+# reservation / savings-plan recs. Lower-cased; matched case-insensitively.
+_AZURE_REGION_TOKENS = frozenset(
+    {
+        "eastus",
+        "eastus2",
+        "eastus3",
+        "westus",
+        "westus2",
+        "westus3",
+        "centralus",
+        "northcentralus",
+        "southcentralus",
+        "westcentralus",
+        "canadacentral",
+        "canadaeast",
+        "brazilsouth",
+        "northeurope",
+        "westeurope",
+        "uksouth",
+        "ukwest",
+        "francecentral",
+        "francesouth",
+        "germanywestcentral",
+        "germanynorth",
+        "norwayeast",
+        "norwaywest",
+        "switzerlandnorth",
+        "switzerlandwest",
+        "swedencentral",
+        "swedensouth",
+        "polandcentral",
+        "italynorth",
+        "spaincentral",
+        "eastasia",
+        "southeastasia",
+        "japaneast",
+        "japanwest",
+        "australiaeast",
+        "australiasoutheast",
+        "australiacentral",
+        "australiacentral2",
+        "koreacentral",
+        "koreasouth",
+        "centralindia",
+        "southindia",
+        "westindia",
+        "jioindiawest",
+        "jioindiacentral",
+        "uaenorth",
+        "uaecentral",
+        "qatarcentral",
+        "southafricanorth",
+        "southafricawest",
+        "israelcentral",
+        "mexicocentral",
+        "newzealandnorth",
+    }
+)
+
+
+def _looks_like_region(value: str) -> bool:
+    return bool(value) and value.strip().lower() in _AZURE_REGION_TOKENS
+
+
+def _parse_resource_id(resource_id: str) -> dict[str, str]:
+    """Pull resource_group / resource_name / resource_type out of an ARM ID.
+
+    Reservation and Savings Plan Advisor recs use the subscription GUID as
+    ``impacted_value``, so the resource_id is our only reliable source for
+    a human-meaningful name.
+    """
+    out = {"resource_group": "", "resource_name": "", "resource_type": ""}
+    if not resource_id:
+        return out
+    parts = resource_id.split("/")
+    try:
+        if "resourceGroups" in parts:
+            i = parts.index("resourceGroups")
+            if i + 1 < len(parts):
+                out["resource_group"] = parts[i + 1]
+        if "providers" in parts:
+            i = parts.index("providers")
+            if i + 2 < len(parts):
+                out["resource_type"] = f"{parts[i + 1]}/{parts[i + 2]}"
+            if i + 3 < len(parts) and parts[-1]:
+                out["resource_name"] = parts[-1]
+    except (ValueError, IndexError):
+        pass
+    return out
+
+
+def _looks_like_guid(value: str) -> bool:
+    return bool(value) and bool(_GUID_RE.match(value.strip()))
+
+
+def _iso_duration_label(term: str) -> str:
+    """Convert an ISO 8601 duration to a compact label, e.g. 'P3Y' → '3yr'."""
+    term = (term or "").strip().upper()
+    if not term.startswith("P"):
+        return term
+    body = term[1:]
+    if body.endswith("Y"):
+        return f"{body[:-1]}yr"
+    if body.endswith("M"):
+        return f"{body[:-1]}mo"
+    return term
+
+
+def _advisor_display_name(
+    impacted_value: str,
+    parsed: dict[str, str],
+    extended: dict,
+) -> str:
+    """Best-effort human-readable name for an Advisor recommendation.
+
+    Priority:
+      1. ``parsed.resource_name`` — real ARM resource name (right-size-a-specific-VM
+         type recs, unattached disks, etc.). Most authoritative.
+      2. SKU + term label for aggregate reserved-instance / capacity recs
+         (BuyVirtualMachineReservedInstances, BuyCachesReservedCapacity, etc.).
+         Azure Advisor exposes these at subscription scope, not per-resource —
+         there is no named VM to show. Format: "Standard_D64s_v3 · 3yr RI"
+         or "3× Standard_D64s_v3 · 3yr RI" when qty > 1.
+      3. ``impacted_value`` when it's neither a GUID nor a region slug.
+      4. ``"Recommendation"`` as absolute last resort.
+
+    Note: the Azure Advisor SDK ResourceMetadata has only ``resource_id``
+    and ``source`` — no ``resource_name`` field exists in the model.
+    """
+    # 1. Real resource name from ARM ID (most authoritative)
+    if parsed.get("resource_name"):
+        return parsed["resource_name"]
+
+    # 2. SKU-based label for aggregate reservation / capacity purchase recs.
+    #    Azure Advisor uses "sku" key for most reservation types.
+    #    Append the reservation term (P1Y/P3Y) so rows with the same SKU but
+    #    different terms are visually distinct and clearly marked as RI recs.
+    sku = (
+        extended.get("sku")  # primary: BuyCachesReservedCapacity, BuyVMs
+        or extended.get("targetSku")  # older rec shapes
+        or extended.get("target")
+        or ""
+    ).strip()
+    if sku:
+        qty_raw = extended.get("recommendedQuantity") or extended.get("qty") or ""
+        try:
+            qty = int(float(qty_raw)) if qty_raw else 1
+        except (ValueError, TypeError):
+            qty = 1
+        term_label = _iso_duration_label(extended.get("term", ""))
+        suffix = f" · {term_label} RI" if term_label else " RI"
+        base = f"{qty}× {sku}" if qty > 1 else sku
+        return f"{base}{suffix}"
+
+    # 3. impacted_value if meaningful (not a bare GUID or region slug)
+    impacted = (impacted_value or "").strip()
+    if impacted and not _looks_like_guid(impacted) and not _looks_like_region(impacted):
+        return impacted
+
+    return "Recommendation"
+
+
 class OptimizationService:
     """FinOps recommendation engine with multi-source analysis."""
 
@@ -190,6 +356,36 @@ class OptimizationService:
                     annual_savings = Decimal(str(extended.get("annualSavingsAmount", 0)))
                     monthly_savings = (annual_savings / 12).quantize(Decimal("0.01"))
 
+                    resource_id = rec.resource_metadata.resource_id if rec.resource_metadata else ""
+                    parsed = _parse_resource_id(resource_id)
+                    display_name = _advisor_display_name(rec.impacted_value or "", parsed, extended)
+                    # Reservation/right-sizing recs leak the subscription GUID into
+                    # impacted_value; log when we had to fall back so backend
+                    # response gaps stay visible without spamming.
+                    if _looks_like_guid(rec.impacted_value or "") or _looks_like_region(rec.impacted_value or ""):
+                        logger.info(
+                            "advisor_impacted_value_no_real_name",
+                            impacted_value=rec.impacted_value,
+                            category=str(rec.category),
+                            resource_id=resource_id[:120],
+                            extended_keys=list(extended.keys()),
+                            extended_preview={k: str(v)[:60] for k, v in list(extended.items())[:10]},
+                            display_name_resolved=display_name,
+                        )
+                    location = extended.get("region") or extended.get("location") or ""
+                    # For aggregate reservation recs there is no resource group in the
+                    # ARM ID (resource_id points to the subscription root). Fall back to
+                    # the region so the Resource Group column isn't always "—".
+                    resource_group = parsed["resource_group"] or location
+
+                    # current_sku: for resource-specific recs this is the resource's own
+                    # SKU; for aggregate reservation recs the "sku" key is the target SKU
+                    # (already used in display_name), so omit it here to avoid duplication.
+                    current_sku: str | None = extended.get("currentSku") or extended.get("vmSize") or None
+                    if not current_sku and parsed.get("resource_name"):
+                        # Only fall back to extended["sku"] when there's a real resource
+                        current_sku = extended.get("sku") or None
+
                     recommendations.append(
                         CostRecommendation(
                             id=rec.id or str(uuid.uuid4()),
@@ -198,13 +394,14 @@ class OptimizationService:
                             title=(rec.short_description.problem if rec.short_description else "Azure Advisor"),
                             description=(rec.short_description.solution if rec.short_description else ""),
                             resource=ResourceInfo(
-                                resource_id=(rec.resource_metadata.resource_id if rec.resource_metadata else ""),
-                                resource_name=rec.impacted_value or "",
-                                resource_type=rec.impacted_field or "",
-                                resource_group="",
+                                resource_id=resource_id,
+                                resource_name=display_name,
+                                resource_type=(rec.impacted_field or parsed["resource_type"] or ""),
+                                resource_group=resource_group,
                                 subscription_id=sub_id,
                                 subscription_name=sub_id,
-                                location="",
+                                location=location,
+                                sku=current_sku,
                             ),
                             current_monthly_cost=Decimal("0"),
                             estimated_monthly_savings=monthly_savings,
@@ -213,7 +410,7 @@ class OptimizationService:
                             confidence_score=90.0,
                             action_required=(rec.short_description.solution if rec.short_description else "Review"),
                             risk_level="low",
-                            recommended_sku=extended.get("targetSku"),
+                            recommended_sku=extended.get("targetSku") or extended.get("sku") or None,
                             source="azure_advisor",
                             created_at=datetime.now(UTC),
                         )

@@ -75,7 +75,7 @@ interface NavItem {
 }
 
 const ALL_NAV_ITEMS: NavItem[] = [
-  { to: "/",           label: "Leadership Dashboard", module: "cost_management",  page: "leadership_dashboard" },
+  { to: "/",           label: "Cost Forecast", module: "cost_management",  page: "leadership_dashboard" },
   { to: "/env-costs",  label: "Amortized Costs",      module: "cost_management",  page: "amortized_costs" },
   { to: "/keyvault",   label: "Key Vault",             module: "keyvault",         page: "keyvault_main" },
   { to: "/aks",        label: "AKS Operations",        module: "aks_operations",   page: "aks_main" },
@@ -273,7 +273,7 @@ const MainContent: React.FC = () => (
           <Route
             path="/"
             element={
-              <ProtectedRoute module="cost_management" page="leadership_dashboard" label="Leadership Dashboard">
+              <ProtectedRoute module="cost_management" page="leadership_dashboard" label="Cost Forecast">
                 <LeadershipDashboard />
               </ProtectedRoute>
             }

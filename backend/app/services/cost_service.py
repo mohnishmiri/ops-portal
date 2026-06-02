@@ -11,18 +11,18 @@ import asyncio
 import hashlib
 import json
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.admin_config import get_effective_cache_ttl_seconds
 from app.core.azure_auth import get_azure_credential
-from app.core.azure_throttle import AZURE_API_SEMAPHORE
+from app.core.azure_throttle import AZURE_API_SEMAPHORE, acquire_for_scope
 from app.core.config import settings
 from app.core.db_cache import cache_manager
 from app.core.subscription_resolver import get_monitored_subscription_ids
@@ -123,8 +123,9 @@ class CostService:
         return (params.get("$skiptoken") or params.get("skiptoken") or [None])[0]
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=90),
+        retry=retry_if_exception(lambda exc: not isinstance(exc, ValueError)),
         reraise=True,
     )
     async def _execute_cost_query(
@@ -137,13 +138,35 @@ class CostService:
         Returns (column_names, rows) so callers can parse by column name.
         Uses asyncio.to_thread so multiple queries can run truly in parallel.
         Guarded by a semaphore to prevent Azure API throttling.
-        Retries up to 3 times with exponential backoff on transient failures.
+        On HTTP 429, honors Azure's Retry-After header (capped at 90s) so
+        Cost Management's per-subscription rate limit (~10/min) is respected
+        rather than burning through retries in the first 10 seconds.
         """
+        from azure.core.exceptions import HttpResponseError
 
         def _sync_query():
             client = self._get_client()
             try:
-                result = client.query.usage(scope=scope, parameters=query)
+                try:
+                    result = client.query.usage(scope=scope, parameters=query)
+                except HttpResponseError as exc:
+                    if getattr(exc, "status_code", None) == 429:
+                        retry_after = 30
+                        try:
+                            header_val = exc.response.headers.get("Retry-After") if exc.response else None
+                            if header_val:
+                                retry_after = min(int(header_val), 90)
+                        except (ValueError, AttributeError):
+                            pass
+                        logger.warning(
+                            "azure_cost_throttled_429",
+                            scope=scope,
+                            retry_after_seconds=retry_after,
+                        )
+                        import time
+
+                        time.sleep(retry_after)
+                    raise
                 col_names = [c.name for c in result.columns] if result.columns else []
                 rows = []
                 if result.rows:
@@ -174,6 +197,10 @@ class CostService:
             finally:
                 client.close()
 
+        # Per-subscription rate limit (8 req/min) gates first so one sub's
+        # burst can't starve another. Then the global concurrency cap keeps
+        # process-wide parallelism bounded.
+        await acquire_for_scope(scope)
         async with AZURE_API_SEMAPHORE:
             col_names, rows = await asyncio.to_thread(_sync_query)
         logger.debug("cost_query_result", scope=scope, columns=col_names, row_count=len(rows))
@@ -187,16 +214,19 @@ class CostService:
     ) -> list[dict]:
         """Query near-real-time amortized cost data via the Cost Management Query API.
 
-        Preferred strategy: a single query grouped by both MeterCategory and
-        ResourceGroup (2-dimension).  This gives every row both service and
-        resource-group attribution in a single call.
+        Strategy: one 2-dim primary query grouped by [ResourceId, MeterCategory]
+        — every row carries its own ARM resource ID, from which we extract
+        resource_name, resource_group, and resource_type. Plus one enrichment
+        query for ResourceLocation grouped by [Location, ResourceGroup].
 
-        Fallback: if the 2-dimension query fails or returns no data, we
-        revert to two 1-dimension queries (MeterCategory only + ResourceGroup
-        only) and merge them — this is slower but proven reliable.
-
-        Enrichment queries for ResourceType and ResourceLocation run in
-        parallel (best-effort); failures are logged but non-fatal.
+        That's 2 Azure calls per chunk total. The previous implementation
+        issued up to 4 calls per chunk (primary + 2-query 1-dim fallback +
+        2 enrichments), which made hitting Azure's ~10/min per-subscription
+        rate limit nearly automatic on a 12-month sync. If the 2-dim primary
+        fails, the chunk fails — the retry/429-aware logic in
+        ``_execute_cost_query`` handles transient errors, and the
+        per-range failure handling in ``_load_rows_incremental`` keeps
+        other ranges from being blocked.
         """
 
         async def _safe_query(query, label: str):
@@ -211,91 +241,27 @@ class CostService:
                 )
                 return [], []
 
-        # ── 1. Try preferred 2-dimension primary query ───────────────
-        # Group by [ResourceId, MeterCategory] so every row carries its
-        # own ARM resource ID.  From the ID we extract the human-readable
-        # resource_name (last path segment), resource_group, and
-        # resource_type — matching what Azure's cost-export CSV provides.
-        primary_cols: list[str] = []
-        primary_rows: list[list] = []
-        used_fallback = False
-
-        try:
-            two_dim_query = _build_cost_query(
-                start_date,
-                end_date,
-                TimeGranularity.DAILY,
-                [GroupByDimension.RESOURCE_ID, GroupByDimension.METER_CATEGORY],
-                cost_type="amortized",
-            )
-            primary_cols, primary_rows = await self._execute_cost_query(scope, two_dim_query)
-            logger.debug(
-                "query_amortized_2dim_result",
-                scope=scope,
-                columns=primary_cols,
-                row_count=len(primary_rows),
-            )
-        except Exception as two_dim_exc:
-            logger.warning(
-                "query_amortized_2dim_failed_trying_fallback",
-                scope=scope,
-                error=str(two_dim_exc)[:300],
-            )
-            primary_cols, primary_rows = [], []
-
-        # ── 2. Fallback: separate 1-dimension queries ────────────────
-        rg_lookup: dict[str, list[dict]] = defaultdict(list)
-
-        if not primary_rows:
-            used_fallback = True
-            svc_query = _build_cost_query(
-                start_date,
-                end_date,
-                TimeGranularity.DAILY,
-                [GroupByDimension.METER_CATEGORY],
-                cost_type="amortized",
-            )
-            primary_cols, primary_rows = await self._execute_cost_query(scope, svc_query)
-            logger.info(
-                "query_amortized_fallback_result",
-                scope=scope,
-                columns=primary_cols,
-                row_count=len(primary_rows),
-            )
-
-            rg_cols, rg_rows = await _safe_query(
-                _build_cost_query(
-                    start_date,
-                    end_date,
-                    TimeGranularity.DAILY,
-                    [GroupByDimension.RESOURCE_GROUP],
-                    cost_type="amortized",
-                ),
-                "fallback_rg",
-            )
-            if rg_cols and rg_rows:
-                rg_col_idx = {name: i for i, name in enumerate(rg_cols)}
-                rg_cost_i = rg_col_idx.get("Cost", rg_col_idx.get("PreTaxCost", 0))
-                rg_date_i = rg_col_idx.get("UsageDate", rg_col_idx.get("BillingPeriod", -1))
-                rg_rg_i = rg_col_idx.get("ResourceGroup")
-                for row in rg_rows:
-                    cost_val = Decimal(str(row[rg_cost_i])).quantize(Decimal("0.01"))
-                    if cost_val == 0:
-                        continue
-                    row_date = self._parse_query_row_date(row, rg_date_i, start_date)
-                    rg_name = str(row[rg_rg_i]) if rg_rg_i is not None and rg_rg_i < len(row) else ""
-                    rg_lookup[row_date.isoformat()].append({"resource_group": rg_name, "cost": float(cost_val)})
-
-        # ── 3. Enrichment: ResourceLocation (best-effort) ────────────
-        # ResourceType is extracted from the ResourceId path when available;
-        # the MeterCategory-based lookup serves as a fallback.
-        type_query = _build_cost_query(
+        # ── 1. Primary 2-dim query ───────────────────────────────────
+        two_dim_query = _build_cost_query(
             start_date,
             end_date,
             TimeGranularity.DAILY,
-            [GroupByDimension.RESOURCE_TYPE, GroupByDimension.METER_CATEGORY],
+            [GroupByDimension.RESOURCE_ID, GroupByDimension.METER_CATEGORY],
             cost_type="amortized",
         )
+        primary_cols, primary_rows = await self._execute_cost_query(scope, two_dim_query)
+        logger.debug(
+            "query_amortized_2dim_result",
+            scope=scope,
+            columns=primary_cols,
+            row_count=len(primary_rows),
+        )
+
+        # ── 2. ResourceLocation enrichment (best-effort, parallel) ───
+        # ResourceType is already extracted from the ResourceId path in the
+        # primary rows below; no separate type query needed. When ResourceType
+        # is missing (e.g. some reservation charges), the drilldown UI falls
+        # back to MeterCategory.
         location_query = _build_cost_query(
             start_date,
             end_date,
@@ -303,12 +269,9 @@ class CostService:
             [GroupByDimension.LOCATION, GroupByDimension.RESOURCE_GROUP],
             cost_type="amortized",
         )
-        (type_cols, type_rows), (loc_cols, loc_rows) = await asyncio.gather(
-            _safe_query(type_query, "type"),
-            _safe_query(location_query, "location"),
-        )
+        loc_cols, loc_rows = await _safe_query(location_query, "location")
 
-        # ── 4. Parse primary rows ────────────────────────────────────
+        # ── 2. Parse primary rows ────────────────────────────────────
         parsed: list[dict] = []
         if primary_cols and primary_rows:
             col_idx = {name: i for i, name in enumerate(primary_cols)}
@@ -359,36 +322,7 @@ class CostService:
                     }
                 )
 
-        # ── 5. Fallback RG enrichment (only in 1-dim mode) ──────────
-        if used_fallback and rg_lookup:
-            for p in parsed:
-                if not p["resource_group"]:
-                    rg_entries = rg_lookup.get(p["date"])
-                    if rg_entries and len(rg_entries) == 1:
-                        p["resource_group"] = rg_entries[0]["resource_group"]
-
-        # ── 6. Build resource-type fallback (MeterCategory → dominant type)
-        mc_type_cost: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        if type_cols and type_rows:
-            col_idx = {name: i for i, name in enumerate(type_cols)}
-            cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
-            rtype_i = col_idx.get("ResourceType")
-            mc_i = col_idx.get("MeterCategory", col_idx.get("ServiceName"))
-
-            for row in type_rows:
-                cost_val = float(Decimal(str(row[cost_i])).quantize(Decimal("0.01")))
-                if cost_val == 0:
-                    continue
-                rtype = str(row[rtype_i]) if rtype_i is not None and rtype_i < len(row) else ""
-                mc = str(row[mc_i]) if mc_i is not None and mc_i < len(row) else ""
-                if mc and rtype:
-                    mc_type_cost[mc][rtype] += cost_val
-
-        mc_type_map: dict[str, str] = {}
-        for mc, type_costs in mc_type_cost.items():
-            mc_type_map[mc] = max(type_costs, key=type_costs.get)
-
-        # ── 7. Build resource-location lookup (RG → dominant loc) ────
+        # ── 3. Build resource-location lookup (RG → dominant loc) ────
         rg_loc_cost: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         if loc_cols and loc_rows:
             col_idx = {name: i for i, name in enumerate(loc_cols)}
@@ -409,12 +343,9 @@ class CostService:
         for rg, loc_costs in rg_loc_cost.items():
             rg_loc_map[rg] = max(loc_costs, key=loc_costs.get)
 
-        # ── 8. Enrich rows with fallback type and location ───────────
+        # ── 4. Enrich rows with location ─────────────────────────────
         for p in parsed:
             rg = p["resource_group"]
-            mc = p["meter_category"]
-            if not p["resource_type"]:
-                p["resource_type"] = mc_type_map.get(mc, "")
             if rg and not p["resource_location"]:
                 p["resource_location"] = rg_loc_map.get(rg, "")
 
@@ -424,7 +355,7 @@ class CostService:
             start=start_date.isoformat(),
             end=end_date.isoformat(),
             row_count=len(parsed),
-            used_fallback=used_fallback,
+            azure_calls=2,
         )
         return parsed
 
@@ -983,82 +914,109 @@ class CostService:
         num_months: int = 6,
     ) -> dict:
         """
-        Monthly cost trend: Non-Prod vs Prod.
+        Monthly cost trend: Non-Prod vs Prod, served from amortized_cost_records.
 
-        Returns a list of monthly data-points, each containing:
-        non_prod, prod, total, and a human-readable month label.
-        Uses budget_config.json to determine which subscription IDs
-        belong to non-prod vs prod.
+        Previously this issued one live Azure Cost Management query per
+        subscription, which (a) cost minutes per call, (b) frequently 429'd
+        when bursting, and (c) silently dropped a whole sub's contribution
+        if its query failed — which is why the Executive Forecast and the
+        Prod Spend Share card kept losing the Non-Prod stream.
+
+        Classification uses ``AdminSubscription.environment`` (the value
+        an admin sets in the Admin panel) — the single source of truth.
+        Same DB table that powers the main dashboard, so figures stay
+        consistent and we're immune to Azure throttling at request time.
         """
-        import json as _json
-        from pathlib import Path as _Path
+        # Same normaliser the leadership dashboard uses, so the Prod Spend
+        # Share card / Executive Forecast and the trend endpoint never
+        # disagree about which subs are prod vs non-prod.
+        from app.models.database import AdminSubscription
+        from app.services.amortized_cost_sync_service import AmortizedCostSyncService
 
-        _cfg_path = _Path(__file__).resolve().parents[2] / "config" / "budget_config.json"
-        non_prod_sub_ids: set[str] = set()
-        all_sub_ids: list[str] = list(await get_monitored_subscription_ids())
-        if _cfg_path.exists():
-            with open(_cfg_path, encoding="utf-8") as _f:
-                _cfg = _json.load(_f)
-            for app in _cfg.get("applications", []):
-                for sid in app.get("non_prod_subscription_ids", []):
-                    non_prod_sub_ids.add(sid)
-
-        prod_subs = [s for s in all_sub_ids if s not in non_prod_sub_ids]
-        np_subs = [s for s in all_sub_ids if s in non_prod_sub_ids]
-
-        # Date range
+        # Calendar-month window ending on the LAST FULL month. We deliberately
+        # exclude the current (partial) month — including a single day of
+        # data as a "complete" month produced a fake -98% drop on the
+        # leadership dashboard and zeroed the Executive Forecast.
         today = date.today()
-        end = today
-        m = today.month - num_months
-        y = today.year
+        current_month_start = today.replace(day=1)
+        end = current_month_start - timedelta(days=1)  # last day of previous month
+        m = end.month - (num_months - 1)
+        y = end.year
         while m < 1:
             m += 12
             y -= 1
         start = date(y, m, 1)
 
-        query_def = _build_cost_query(start, end, TimeGranularity.DAILY, [])
+        if self._db is None:
+            logger.warning("nonprod_vs_prod_no_db_session")
+            return {"months": 0, "data": [], "generated_at": datetime.utcnow().isoformat()}
 
-        # Accumulate per-subscription totals per month
-        sub_monthly: dict[str, dict[str, Decimal]] = {}  # sub_id → {"YYYY-MM": cost}
+        from sqlalchemy import func as _func
+        from sqlalchemy import select as _select
 
-        for sub_id in all_sub_ids:
-            scope = f"/subscriptions/{sub_id}"
-            try:
-                col_names, rows = await self._execute_cost_query(scope, query_def)
-                col_idx = {name: i for i, name in enumerate(col_names)}
-                cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
-                date_i = col_idx.get("UsageDate", col_idx.get("BillingPeriod", -1))
+        from app.models.database import AmortizedCostRecord
 
-                for row in rows:
-                    cost = Decimal(str(row[cost_i])).quantize(Decimal("0.01"))
-                    if cost == 0:
-                        continue
-                    raw_date = row[date_i] if date_i >= 0 else None
-                    if raw_date is not None:
-                        ds = str(raw_date)
-                        if ds.isdigit() and len(ds) == 8:
-                            row_date = date(int(ds[:4]), int(ds[4:6]), int(ds[6:8]))
-                        else:
-                            row_date = date.fromisoformat(ds[:10])
-                    else:
-                        row_date = start
-                    mk = row_date.strftime("%Y-%m")
-                    sub_monthly.setdefault(sub_id, {})
-                    sub_monthly[sub_id][mk] = sub_monthly[sub_id].get(mk, Decimal("0")) + cost
-            except Exception as e:
-                logger.error("nonprod_prod_query_failed", sub_id=sub_id, error=str(e))
+        # Per-sub env map. Admin's Environment field is preferred; falls
+        # back to subscription name pattern (ACC-NPRD-… / ACC-PROD-…) when
+        # admin hasn't tagged the sub. Same logic the leadership dashboard
+        # uses so the two endpoints agree.
+        admin_env_result = await self._db.execute(
+            _select(
+                AdminSubscription.subscription_id,
+                AdminSubscription.environment,
+                AdminSubscription.subscription_name,
+            )
+        )
+        admin_env_by_sub: dict[str, str] = {
+            sid: AmortizedCostSyncService.resolve_env_label(env, name)
+            for sid, env, name in admin_env_result.all()
+            if sid
+        }
 
-        # Collect all month keys
-        all_months: set[str] = set()
-        for sm in sub_monthly.values():
-            all_months.update(sm.keys())
-        months_sorted = sorted(all_months)
+        # Group by full cost_date + sub_id + env_label and aggregate by month
+        # in Python. asyncpg rejects ``func.substr(...)`` reused between SELECT
+        # and GROUP BY because the expression objects aren't equal-text and it
+        # complains "column ... must appear in GROUP BY". The row count is
+        # bounded (≤ months * 31 * subs * 2 envs) so this is cheap.
+        result = await self._db.execute(
+            _select(
+                AmortizedCostRecord.cost_date,
+                AmortizedCostRecord.subscription_id,
+                AmortizedCostRecord.env_label,
+                _func.sum(AmortizedCostRecord.cost_amount).label("total"),
+            )
+            .where(
+                AmortizedCostRecord.cost_date >= start.isoformat(),
+                AmortizedCostRecord.cost_date <= end.isoformat(),
+            )
+            .group_by(
+                AmortizedCostRecord.cost_date,
+                AmortizedCostRecord.subscription_id,
+                AmortizedCostRecord.env_label,
+            )
+        )
 
-        # Build response
+        # Aggregate: {month_key: {"np": Decimal, "prod": Decimal}}
+        by_month: dict[str, dict[str, Decimal]] = {}
+        np_total_seen = Decimal("0")
+        prod_total_seen = Decimal("0")
+        for cost_date, sub_id, stored_env, total in result.all():
+            mk = str(cost_date)[:7]  # YYYY-MM
+            cost = Decimal(str(round(float(total or 0), 2)))
+            bucket = by_month.setdefault(mk, {"np": Decimal("0"), "prod": Decimal("0")})
+            current_env = admin_env_by_sub.get(str(sub_id or "").strip())
+            effective = current_env or (stored_env if stored_env in ("Prod", "Non-Prod") else "Prod")
+            if effective == "Non-Prod":
+                bucket["np"] += cost
+                np_total_seen += cost
+            else:
+                bucket["prod"] += cost
+                prod_total_seen += cost
+
         data_points: list[dict] = []
-        for mk in months_sorted:
-            np_cost = sum(sub_monthly.get(sid, {}).get(mk, Decimal("0")) for sid in np_subs)
-            prod_cost = sum(sub_monthly.get(sid, {}).get(mk, Decimal("0")) for sid in prod_subs)
+        for mk in sorted(by_month.keys()):
+            np_cost = by_month[mk]["np"]
+            prod_cost = by_month[mk]["prod"]
             total = np_cost + prod_cost
             parts = mk.split("-")
             label = date(int(parts[0]), int(parts[1]), 1).strftime("%b %Y")
@@ -1071,6 +1029,15 @@ class CostService:
                     "total": str(total),
                 }
             )
+
+        logger.info(
+            "nonprod_vs_prod_trend_served",
+            source="amortized_db",
+            months=len(data_points),
+            np_total=float(np_total_seen),
+            prod_total=float(prod_total_seen),
+            admin_subs_mapped=len(admin_env_by_sub),
+        )
 
         return {
             "months": len(data_points),

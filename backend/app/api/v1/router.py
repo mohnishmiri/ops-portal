@@ -18,6 +18,7 @@ from app.api.v1.endpoints import (
     optimization,
     permissions,
     reports,
+    sync_jobs,
 )
 
 api_router = APIRouter()
@@ -48,3 +49,6 @@ api_router.include_router(infra_alerts.router, prefix="/infra-alerts", tags=["in
 
 # Module 5: Checksum Schedule Management
 api_router.include_router(checksum_schedules.router, prefix="/checksum-schedules", tags=["checksum-schedules"])
+
+# Background sync job queue — non-blocking refresh + polling
+api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])

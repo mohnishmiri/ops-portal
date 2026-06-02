@@ -1073,8 +1073,32 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
   const cards = React.useMemo(() => {
     const result: { title: string; value: string; subtitle: string; icon: React.ReactNode; tone: "att" | "blue" | "green" | "amber" | "orange" | "red" | "purple" }[] = [];
 
-    // Prod vs Non-Prod split from the latest trend month
-    if (trendData?.data?.length) {
+    // Stable baseline for percentage tiles. KPI[0] is the current partial
+    // month's spend — using it as a denominator early in a month inflated
+    // waste/savings ratios above 200%. Prefer the last full month from
+    // six_month_trend; fall back to KPI[0] if no history is available.
+    const sortedTrend = [...dashboard.six_month_trend].sort((a, b) =>
+      a.month.localeCompare(b.month)
+    );
+    const lastFullMonth = sortedTrend.length ? sortedTrend[sortedTrend.length - 1] : null;
+    const lastFullMonthSpend = lastFullMonth ? Number(lastFullMonth.total_cost) : 0;
+    const baselineSpend = lastFullMonthSpend > 0 ? lastFullMonthSpend : Number(dashboard.kpis[0]?.value || 0);
+
+    // Prod vs Non-Prod split — prefer the last full month from the
+    // amortized DB (carries env_label set from AdminSubscription); fall
+    // back to /costs/nonprod-vs-prod if not yet loaded.
+    if (lastFullMonth && Number(lastFullMonth.total_cost) > 0) {
+      const prod = Number(lastFullMonth.prod_cost);
+      const total = Number(lastFullMonth.total_cost);
+      const prodPct = total > 0 ? (prod / total) * 100 : 0;
+      result.push({
+        title: "Prod Spend Share",
+        value: fmtPercent(prodPct),
+        subtitle: `${fmtCompact(prod)} of ${fmtCompact(total)} (${lastFullMonth.month_label})`,
+        icon: MetricCardIcons.shield(),
+        tone: "blue",
+      });
+    } else if (trendData?.data?.length) {
       const latest = trendData.data[trendData.data.length - 1];
       const prodPct = latest.total > 0 ? (latest.prod / latest.total) * 100 : 0;
       result.push({
@@ -1086,10 +1110,9 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
       });
     }
 
-    // Monthly waste rate vs spend
-    if (optimization && dashboard.kpis.length) {
-      const monthlySpend = dashboard.kpis[0]?.value || 1;
-      const wastePct = (optimization.wastage.total_monthly_waste / monthlySpend) * 100;
+    // Monthly waste rate vs last full month's spend (stable denominator).
+    if (optimization && baselineSpend > 0) {
+      const wastePct = (optimization.wastage.total_monthly_waste / baselineSpend) * 100;
       result.push({
         title: "Waste Rate",
         value: fmtPercent(wastePct),
@@ -1099,44 +1122,20 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
       });
     }
 
-    // Monthly savings vs spend
-    if (optimization && dashboard.kpis.length) {
-      const monthlySpend = dashboard.kpis[0]?.value || 1;
-      const savPct = (optimization.total_estimated_monthly_savings / monthlySpend) * 100;
-      result.push({
-        title: "Savings Potential",
-        value: fmtPercent(savPct),
-        subtitle: `${fmtCompact(optimization.total_estimated_monthly_savings)}/mo recoverable`,
-        icon: MetricCardIcons.chart(),
-        tone: "green",
-      });
-    }
-
-    // 6-month trend direction
-    if (dashboard.six_month_trend.length >= 2) {
-      const sorted = [...dashboard.six_month_trend].sort((a, b) => a.month.localeCompare(b.month));
-      const first = sorted[0];
-      const last = sorted[sorted.length - 1];
-      const delta = first.total_cost > 0 ? ((last.total_cost - first.total_cost) / first.total_cost) * 100 : 0;
+    // 6-month trend direction — also based on six_month_trend (which now
+    // excludes the partial current month, so no fake "-98%" drop).
+    if (sortedTrend.length >= 2) {
+      const first = sortedTrend[0];
+      const last = sortedTrend[sortedTrend.length - 1];
+      const firstCost = Number(first.total_cost);
+      const lastCost = Number(last.total_cost);
+      const delta = firstCost > 0 ? ((lastCost - firstCost) / firstCost) * 100 : 0;
       result.push({
         title: "6-Month Trend",
         value: `${delta >= 0 ? "+" : ""}${fmtPercent(delta)}`,
-        subtitle: `${fmtCompact(first.total_cost)} → ${fmtCompact(last.total_cost)}`,
+        subtitle: `${fmtCompact(firstCost)} → ${fmtCompact(lastCost)}`,
         icon: MetricCardIcons.activity(),
         tone: delta > 5 ? "red" : delta < -5 ? "green" : "att",
-      });
-    }
-
-    // Cost per subscription
-    if (dashboard.kpis.length >= 3) {
-      const subCount = dashboard.kpis[2]?.value || 1;
-      const monthlySpend = dashboard.kpis[0]?.value || 0;
-      result.push({
-        title: "Cost / Subscription",
-        value: fmtCompact(monthlySpend / subCount),
-        subtitle: `Across ${subCount} subscription${subCount !== 1 ? "s" : ""}`,
-        icon: MetricCardIcons.currency(),
-        tone: "purple",
       });
     }
 
@@ -1146,7 +1145,7 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
   if (!cards.length) return null;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       {cards.map((card) => (
         <MetricCard
           key={card.title}
@@ -1199,16 +1198,28 @@ const LeadershipDashboard: React.FC = () => {
   const forecast = useLeadershipCostForecast(forecastInput, ollamaEnabled && Boolean(dashboard));
   const autoAdvisorReportRef = React.useRef<string | null>(null);
   const [dashRefreshing, setDashRefreshing] = React.useState(false);
+  const [refreshError, setRefreshError] = React.useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const handleDashRefresh = async () => {
     setDashRefreshing(true);
+    setRefreshError(null);
     try {
       await Promise.all([
         refreshLeadershipDashboard(queryClient),
         refreshOptimizationSummary(queryClient),
       ]);
-    } catch { /* ignore */ }
+      queryClient.invalidateQueries({ queryKey: ["dashboard", "leadership-sync-status"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", "leadership", "forecast"] });
+      autoAdvisorReportRef.current = null;
+    } catch (err) {
+      const detail =
+        (err as { response?: { data?: { detail?: string; error?: string } } })?.response?.data?.detail ??
+        (err as { response?: { data?: { detail?: string; error?: string } } })?.response?.data?.error ??
+        (err as Error)?.message ??
+        "Unknown error";
+      setRefreshError(`Refresh failed — ${detail}`);
+    }
     setDashRefreshing(false);
   };
 
@@ -1249,27 +1260,18 @@ const LeadershipDashboard: React.FC = () => {
     );
   }
 
-  // Merge optimization KPIs into the dashboard KPIs
+  // Merge the single optimization-driven KPI that earns its place on the
+  // forecast view — the dollar opportunity, not the count of items.
   const allKpis = [...dashboard.kpis];
   if (optimization) {
-    allKpis.push(
-      {
-        name: "Total Savings Opportunities",
-        value: optimization.total_estimated_annual_savings,
-        unit: "USD/year",
-        trend: "down" as const,
-        change_pct: 0,
-        description: "Estimated annual savings from all recommendations",
-      },
-      {
-        name: "Active Recommendations",
-        value: optimization.total_recommendations,
-        unit: "count",
-        trend: "stable" as const,
-        change_pct: 0,
-        description: "Number of actionable cost optimization recommendations",
-      }
-    );
+    allKpis.push({
+      name: "Total Savings Opportunities",
+      value: optimization.total_estimated_annual_savings,
+      unit: "USD/year",
+      trend: "down" as const,
+      change_pct: 0,
+      description: "Estimated annual savings from all recommendations",
+    });
   }
 
   return (
@@ -1278,12 +1280,46 @@ const LeadershipDashboard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">
-            Azure Cost Intelligence
+            Cost Forecast
           </h1>
           <p className="text-sm text-gray-500">
-            Leadership Dashboard — Updated{" "}
+            Cost Forecast — Updated{" "}
             {formatDate(dashboard.report_date)}
           </p>
+          <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-gray-400">
+            {dashboard.cost_trend.length > 0 && (
+              <span>
+                Data through{" "}
+                {new Date(
+                  [...dashboard.cost_trend].sort((a, b) => b.date.localeCompare(a.date))[0].date
+                ).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+              </span>
+            )}
+            {syncStatus?.last_sync && (
+              <span>Last sync: {formatDate(syncStatus.last_sync)}</span>
+            )}
+            {syncStatus?.duration_seconds != null && (
+              <span>({syncStatus.duration_seconds.toFixed(1)}s)</span>
+            )}
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                syncStatus?.status === "running"
+                  ? "bg-amber-50 text-amber-600 ring-1 ring-amber-200"
+                  : syncStatus?.status === "failed"
+                    ? "bg-red-50 text-red-600 ring-1 ring-red-200"
+                    : "bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200"
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${
+                syncStatus?.status === "running"
+                  ? "bg-amber-500 animate-pulse"
+                  : syncStatus?.status === "failed"
+                    ? "bg-red-500"
+                    : "bg-emerald-500"
+              }`} />
+              {syncStatus?.status === "running" ? "Syncing" : syncStatus?.status === "failed" ? "Sync Failed" : "Live"}
+            </span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1307,8 +1343,28 @@ const LeadershipDashboard: React.FC = () => {
         </div>
       </div>
 
+      {/* Refresh error banner — surfaces the real backend error so the user
+          knows why the dashboard didn't update (was previously swallowed). */}
+      {refreshError && (
+        <div className="flex items-start justify-between rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <div className="flex items-start gap-2">
+            <svg className="mt-0.5 h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            </svg>
+            <span>{refreshError}</span>
+          </div>
+          <button
+            onClick={() => setRefreshError(null)}
+            className="ml-4 text-red-500 hover:text-red-700"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* KPI Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {allKpis.map((kpi, i) => (
           <KPICard key={i} metric={kpi} />
         ))}

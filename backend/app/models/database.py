@@ -1314,6 +1314,34 @@ class LeadershipSyncStatus(Base):
     triggered_by = Column(String(100), nullable=True)
 
 
+class SyncJob(Base):
+    """Generic queue row driving the SyncWorker background loop.
+
+    Replaces the request-blocking pattern (``POST /sync`` runs the sync
+    synchronously) with a queue: callers insert a row, the worker picks it
+    up, the UI polls status by ``id``. Idempotency: the worker treats a
+    ``(job_type, idempotency_key)`` already in ``queued`` or ``running`` as
+    the same job, so a frenzied "Refresh Data" click won't pile up jobs.
+    """
+
+    __tablename__ = "sync_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_type = Column(String(50), nullable=False, index=True)  # 'amortized' | 'leadership'
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    idempotency_key = Column(String(120), nullable=True, index=True)
+    payload = Column(Text, nullable=True)  # JSON-encoded job params (months, force, etc.)
+    triggered_by = Column(String(100), nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    result = Column(Text, nullable=True)  # JSON-encoded final result payload
+    enqueued_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_sync_jobs_type_status", "job_type", "status"),)
+
+
 class ComplianceDashboardSnapshot(Base):
     """Stores pre-computed compliance dashboard data for fast loading."""
 

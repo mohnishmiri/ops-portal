@@ -232,6 +232,16 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("alert_scheduler_start_failed", error=str(exc)[:200])
 
+    # Start the sync job worker (drains queued sync_jobs rows)
+    try:
+        if not skip_background:
+            from app.services.sync_worker import start_sync_worker
+
+            await start_sync_worker()
+            logger.info("sync_worker_launched")
+    except Exception as exc:
+        logger.warning("sync_worker_launch_failed", error=str(exc)[:200])
+
     # Auto-sync KeyVault data on startup if DB is empty or stale
     try:
         if not skip_background:
@@ -357,6 +367,15 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("rate_limit_seed_failed", error=str(exc)[:200])
 
     yield
+
+    # Stop the sync job worker
+    try:
+        from app.services.sync_worker import stop_sync_worker
+
+        await stop_sync_worker()
+        logger.info("sync_worker_stopped")
+    except Exception as exc:
+        logger.warning("sync_worker_stop_failed", error=str(exc)[:200])
 
     # Shutdown scheduler
     try:

@@ -424,14 +424,88 @@ export function useLeadershipDashboard() {
   });
 }
 
+// ── Sync job queue (non-blocking refresh) ──────────────────────────
+
+export interface SyncJobDetail {
+  id: number;
+  job_type: string;
+  status: "queued" | "running" | "completed" | "failed";
+  idempotency_key: string | null;
+  triggered_by: string | null;
+  attempts: number;
+  last_error: string | null;
+  result: Record<string, unknown> | null;
+  enqueued_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface EnqueueSyncJobResponse {
+  job_id: number;
+  status: string;
+  job_type: string;
+  idempotency_key: string | null;
+  reused: boolean;
+}
+
 /**
- * Force-refresh the leadership dashboard by bypassing the backend cache.
- * backend.  Invalidates the React Query cache entry afterwards so the UI
- * immediately re‑renders with fresh data.
+ * Enqueue a background sync job and poll until it finishes (or until the
+ * cap is hit). Returns the final job state. Throws if the job ends in
+ * a failed status — the caller can show ``job.last_error`` in a banner.
+ *
+ * The amortized + leadership syncs can take 5-10+ minutes; doing them via
+ * a blocking POST exceeds axios/browser/proxy timeouts and surfaces as
+ * "Network Error". The queue + poll pattern avoids that entirely.
+ */
+export async function enqueueAndAwaitSyncJob(
+  jobType: "amortized" | "leadership",
+  options: {
+    months?: number;
+    force?: boolean;
+    idempotencyKey?: string;
+    maxWaitMs?: number;
+    pollIntervalMs?: number;
+  } = {}
+): Promise<SyncJobDetail> {
+  const maxWait = options.maxWaitMs ?? 15 * 60 * 1000; // 15 min ceiling
+  const pollInterval = options.pollIntervalMs ?? 3000;
+
+  const { data: enqueued } = await apiClient.post<EnqueueSyncJobResponse>("/sync-jobs", {
+    job_type: jobType,
+    months: options.months,
+    force: options.force ?? false,
+    idempotency_key: options.idempotencyKey,
+  });
+
+  const deadline = Date.now() + maxWait;
+  while (Date.now() < deadline) {
+    const { data: job } = await apiClient.get<SyncJobDetail>(`/sync-jobs/${enqueued.job_id}`);
+    if (job.status === "completed" || job.status === "failed") {
+      if (job.status === "failed") {
+        throw new Error(job.last_error || "Sync job failed");
+      }
+      return job;
+    }
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+  throw new Error("Sync still running after timeout — check Admin > Sync Jobs for progress.");
+}
+
+/**
+ * Force-refresh the leadership dashboard via the sync-jobs queue.
+ *
+ * Enqueues a leadership sync job and polls until it finishes, then fetches
+ * the fresh dashboard payload. Idempotent at the queue level — a double
+ * click reuses the in-flight job instead of stacking duplicates.
  */
 export async function refreshLeadershipDashboard(queryClient: QueryClient): Promise<void> {
-  await apiClient.post("/dashboards/leadership/sync");
-  const { data } = await apiClient.get("/dashboards/leadership");
+  // Use a stable per-minute idempotency key so rapid double-clicks dedupe
+  // but distinct user-initiated refreshes a minute apart still trigger.
+  const minuteBucket = Math.floor(Date.now() / 60_000);
+  await enqueueAndAwaitSyncJob("leadership", {
+    idempotencyKey: `leadership-refresh-${minuteBucket}`,
+  });
+  const { data } = await apiClient.get("/dashboards/leadership?refresh=true");
   // Apply the same numeric coercion as the hook
   if (data.kpis) {
     data.kpis = data.kpis.map((k: KPIMetric) => ({ ...k, value: Number(k.value) }));
@@ -458,6 +532,19 @@ export async function refreshLeadershipDashboard(queryClient: QueryClient): Prom
   }
   // Update the query cache in-place so the UI re-renders immediately
   queryClient.setQueryData(["dashboard", "leadership"], data);
+
+  // The wastage / "Breakdown by Category" grid on the Leadership Dashboard
+  // is fed by /optimize/summary, which has its own server-side cache keyed
+  // by subscription IDs. Without this refresh, the grid keeps serving the
+  // pre-fix snapshot for hours after a backend deploy — even though the
+  // dashboard KPIs above it are fresh. Failures here shouldn't block the
+  // primary refresh, so swallow the error after logging.
+  try {
+    await refreshOptimizationSummary(queryClient);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("optimization_summary_refresh_failed", err);
+  }
 }
 
 export async function refreshOptimizationSummary(queryClient: QueryClient): Promise<void> {

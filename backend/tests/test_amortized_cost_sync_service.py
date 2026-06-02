@@ -204,7 +204,9 @@ async def test_get_sync_status_includes_monitored_subscription_scope(
         triggered_by = "manual"
         error_message = None
 
-    db = _FakeSession(execute_results=[_SyncRecord()])
+    # First execute is the UPDATE that expires abandoned 'running' rows
+    # (consumes its slot with no scalars), second is the SELECT for status.
+    db = _FakeSession(execute_results=[None, _SyncRecord()])
     service = AmortizedCostSyncService(db)
 
     async def fake_get_monitored_subscription_ids() -> list[str]:
@@ -222,28 +224,69 @@ async def test_get_sync_status_includes_monitored_subscription_scope(
     assert payload["monitored_subscription_ids"] == ["sub-a", "sub-b"]
 
 
-def test_derive_env_label_prefers_admin_environment_metadata() -> None:
+def test_derive_env_label_uses_admin_environment_value() -> None:
+    """AdminSubscription.environment (passed via the row's 'environment' key)
+    is the source of truth. No budget_config.json lookup, no subscription_id
+    list — just normalise whatever the admin tagged the sub with."""
     assert (
         AmortizedCostSyncService._derive_env_label(
             {
                 "environment": "non-production",
                 "subscription_name": "ATTCC Production Shared",
-                "subscription_id": "sub-nonprod",
+                "subscription_id": "any-sub-id",
             }
         )
         == "Non-Prod"
     )
-
     assert (
         AmortizedCostSyncService._derive_env_label(
             {
                 "environment": "production",
                 "subscription_name": "ATTCC Sandbox",
-                "subscription_id": "sub-prod",
+                "subscription_id": "any-sub-id",
             }
         )
         == "Prod"
     )
+
+
+def test_resolve_env_label_uses_name_when_admin_env_empty() -> None:
+    """When AdminSubscription.environment is empty (very common after bulk
+    Discover-from-Azure), fall back to the subscription name pattern.
+    This is the contract that lets ACC-NPRD-… subs classify as Non-Prod
+    even without an admin manually tagging them."""
+    r = AmortizedCostSyncService.resolve_env_label
+
+    # Admin env empty → name decides.
+    assert r("", "ACC-NPRD-31599-ATTCC") == "Non-Prod"
+    assert r(None, "ACC-PROD-31599-ATTCC") == "Prod"
+    assert r("   ", "ACC-NPRD-17805-DWS") == "Non-Prod"
+
+    # Admin env set → wins over name.
+    assert r("production", "ACC-NPRD-31599-ATTCC") == "Prod"
+    assert r("non-production", "ACC-PROD-31599-ATTCC") == "Non-Prod"
+
+    # Both empty → defaults to Prod (never hide spend).
+    assert r(None, None) == "Prod"
+    assert r("", "") == "Prod"
+
+
+def test_normalize_environment_recognises_common_aliases() -> None:
+    n = AmortizedCostSyncService.normalize_environment
+    assert n("prod") == "Prod"
+    assert n("Production") == "Prod"
+    assert n("PRD") == "Prod"
+    assert n("non-prod") == "Non-Prod"
+    assert n("Non Production") == "Non-Prod"
+    assert n("nprd") == "Non-Prod"
+    assert n("Development") == "Non-Prod"
+    assert n("staging") == "Non-Prod"
+    assert n("UAT") == "Non-Prod"
+    # Unknown / empty → default to Prod so spend is never hidden.
+    assert n(None) == "Prod"
+    assert n("") == "Prod"
+    assert n("   ") == "Prod"
+    assert n("something-completely-different") == "Prod"
 
 
 def test_get_rolling_start_date_uses_today_aligned_calendar_months() -> None:
@@ -256,21 +299,16 @@ def test_get_rolling_start_date_clamps_day_for_shorter_month() -> None:
     assert AmortizedCostSyncService._get_rolling_start_date(date(2026, 1, 31), 2) == date(2025, 11, 30)
 
 
-def test_derive_env_label_uses_budget_config_non_prod_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        AmortizedCostSyncService,
-        "_load_non_prod_subscription_ids",
-        staticmethod(lambda: {"sub-nonprod"}),
-    )
-
+def test_derive_env_label_falls_back_to_name_when_environment_missing() -> None:
+    """When AdminSubscription.environment is empty and no prior env_label is
+    set, fall back to the subscription name. Used for live Azure responses
+    that don't carry admin metadata yet."""
     assert (
         AmortizedCostSyncService._derive_env_label(
             {
                 "environment": "",
-                "subscription_name": "ATTCC Production Shared",
-                "subscription_id": "sub-nonprod",
+                "subscription_name": "ATTCC NPRD Shared",
+                "subscription_id": "any-sub-id",
             }
         )
         == "Non-Prod"
@@ -309,35 +347,31 @@ async def test_load_rows_from_db_compares_cost_date_as_string_not_date() -> None
     assert "'>=" in sql_text or ">= '" in sql_text, f"Expected string comparison in WHERE clause, got: {sql_text}"
 
 
-def test_derive_env_label_treats_nprd_subscription_name_as_non_prod(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        AmortizedCostSyncService,
-        "_load_non_prod_subscription_ids",
-        staticmethod(lambda: set()),
-    )
-
+def test_derive_env_label_admin_environment_wins_over_name() -> None:
+    """If admin tagged a sub as 'production' in the Admin panel, that beats
+    a 'NPRD' substring in the name. AdminSubscription.environment is the
+    source of truth."""
     assert (
         AmortizedCostSyncService._derive_env_label(
             {
-                "environment": "",
+                "environment": "production",
                 "subscription_name": "ACC-NPRD-17805-DWS",
-                "subscription_id": "sub-dws-nprd",
-            }
-        )
-        == "Non-Prod"
-    )
-
-    assert (
-        AmortizedCostSyncService._derive_env_label(
-            {
-                "environment": "",
-                "subscription_name": "ACC-PROD-17805-DWS",
-                "subscription_id": "sub-dws-prod",
+                "subscription_id": "any-sub-id",
             }
         )
         == "Prod"
+    )
+
+    # Conversely, admin tagging as 'non-production' beats a 'PROD' name.
+    assert (
+        AmortizedCostSyncService._derive_env_label(
+            {
+                "environment": "non-production",
+                "subscription_name": "ACC-PROD-17805-DWS",
+                "subscription_id": "any-sub-id",
+            }
+        )
+        == "Non-Prod"
     )
 
 
