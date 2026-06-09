@@ -26,15 +26,15 @@ This keeps actual application secrets out of GitHub.
 
 Per environment:
 
-- backend AKV secrets to create: `18`
+- backend AKV secrets to create: `23`
 - frontend AKV secrets to create: `4`
-- total AKV secrets to create: `22`
+- total AKV secrets to create: `27`
 - `AzureKeyVaultSecret` objects created in AKS: `22`
 - Kubernetes `Secret` objects created in AKS: `22`
 
 Across both `dev` and `prod`:
 
-- total AKV secrets to create: `44`
+- total AKV secrets to create: `54`
 - if `dev` and `prod` are separate AKS clusters, total `AzureKeyVaultSecret` objects: `44`
 - if `dev` and `prod` are separate AKS clusters, total Kubernetes `Secret` objects: `44`
 
@@ -88,6 +88,11 @@ Notes:
 | `KEYVAULT_URL` | `opsportal-backend-keyvault-url` | `ops-portal-backend-keyvault-url` |
 | `CORS_ORIGINS` | `opsportal-backend-cors-origins` | `ops-portal-backend-cors-origins` |
 | `RATE_LIMIT_RPM` | `opsportal-backend-rate-limit-rpm` | `ops-portal-backend-rate-limit-rpm` |
+| `OLLAMA_BASE_URL` | `opsportal-backend-ollama-base-url` | `ops-portal-backend-ollama-base-url` |
+| `OLLAMA_MODEL` | `opsportal-backend-ollama-model` | `ops-portal-backend-ollama-model` |
+| `OLLAMA_TIMEOUT_SECONDS` | `opsportal-backend-ollama-timeout-seconds` | `ops-portal-backend-ollama-timeout-seconds` |
+| `OLLAMA_AUTH_HEADER_NAME` | `opsportal-backend-ollama-auth-header-name` | `ops-portal-backend-ollama-auth-header-name` |
+| `OLLAMA_AUTH_HEADER_VALUE` | `opsportal-backend-ollama-auth-header-value` | `ops-portal-backend-ollama-auth-header-value` |
 
 ## Frontend Secret Mapping
 

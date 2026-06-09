@@ -994,15 +994,27 @@ const ResourcesTab: React.FC<{
                     {r.resource_name}
                   </td>
                   <td className={gridStyles.cell}>
-                    <button
-                      onClick={() => onDrilldown("resource_group", r.resource_group)}
-                      className="text-att-700 hover:underline"
-                    >
-                      {r.resource_group}
-                    </button>
+                    {r.resource_group ? (
+                      <button
+                        onClick={() => onDrilldown("resource_group", r.resource_group)}
+                        className="text-att-700 hover:underline"
+                      >
+                        {r.resource_group}
+                      </button>
+                    ) : (
+                      <span className="text-gray-400" title="Azure did not attribute this charge to a resource group">
+                        —
+                      </span>
+                    )}
                   </td>
                   <td className={gridStyles.cell}>{r.meter_category}</td>
-                  <td className={gridStyles.cell}>{r.location}</td>
+                  <td className={gridStyles.cell}>
+                    {r.location || (
+                      <span className="text-gray-400" title="Location unavailable for subscription-level or partially enriched charges">
+                        —
+                      </span>
+                    )}
+                  </td>
                   <td className={`${gridStyles.cell} max-w-[160px] truncate`} title={r.subscription}>
                     {r.subscription}
                   </td>

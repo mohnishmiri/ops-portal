@@ -31,3 +31,11 @@ See `app/core/config.py` for full configuration. Key variables:
 | REDIS_URL | Redis connection string | Yes |
 | SMTP_HOST | SMTP relay host | Yes |
 | KEYVAULT_URL | Azure Key Vault URL | Yes |
+| OLLAMA_BASE_URL | Ollama-compatible LLM base URL (no trailing slash) | No |
+| OLLAMA_MODEL | Model name for leadership advisor/forecast prompts | No |
+| OLLAMA_TIMEOUT_SECONDS | Timeout for LLM requests | No |
+| OLLAMA_AUTH_HEADER_NAME | Optional auth header name for the LLM proxy | No |
+| OLLAMA_AUTH_HEADER_VALUE | Optional auth header value for the LLM proxy | No |
+
+Copy `backend/.env.example` to `backend/.env` and set `OLLAMA_BASE_URL` for your environment
+(e.g. `http://localhost:11434` for local Ollama, or your team's LLM proxy URL).

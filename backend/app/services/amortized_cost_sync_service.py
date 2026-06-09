@@ -1657,7 +1657,12 @@ class AmortizedCostSyncService:
         # ── 7. Top resources by cost ──────────────────────────────────
         res_cost: dict[str, dict] = {}
         for r in rows:
-            rname = r["resource_name"] or "Unknown"
+            if r["resource_name"]:
+                rname = r["resource_name"]
+            elif r.get("meter_category"):
+                rname = f"Subscription-level ({r['meter_category']})"
+            else:
+                rname = "Subscription-level"
             key = f"{rname}|{r['resource_group']}|{r['meter_category']}"
             if key not in res_cost:
                 res_cost[key] = {
@@ -1669,6 +1674,11 @@ class AmortizedCostSyncService:
                     "subscription": r["subscription_name"] or r["subscription_id"],
                     "cost": 0.0,
                 }
+            else:
+                if not res_cost[key]["resource_type"] and r["resource_type"]:
+                    res_cost[key]["resource_type"] = r["resource_type"]
+                if not res_cost[key]["location"] and r["resource_location"]:
+                    res_cost[key]["location"] = r["resource_location"]
             res_cost[key]["cost"] += r["cost"]
         top_resources = sorted(res_cost.values(), key=lambda x: x["cost"], reverse=True)[:50]
         for tr in top_resources:

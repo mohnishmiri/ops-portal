@@ -5,8 +5,12 @@ All sensitive values are loaded from environment variables or Azure Key Vault.
 Never hardcode secrets in this file.
 """
 
-from pydantic import Field
+from pathlib import Path
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -75,10 +79,16 @@ class Settings(BaseSettings):
     NOTIFICATION_RECIPIENTS: list[str] = Field(default=["ARISTOS-AO-EUGENE-COMM-INFRA@accenture.com"])
 
     # ── LLM / Ollama Advisor ─────────────────────────────────────────
+    # Override in backend/.env (OLLAMA_BASE_URL) or via deployment env vars.
     OLLAMA_BASE_URL: str = Field(
-        default="https://customeraccountanalyser.test.att.com",
+        default="http://localhost:11434",
         description="Base URL for the Ollama-compatible generation endpoint",
     )
+
+    @field_validator("OLLAMA_BASE_URL")
+    @classmethod
+    def _strip_ollama_base_url(cls, value: str) -> str:
+        return value.strip().rstrip("/")
     OLLAMA_MODEL: str = Field(
         default="llama3.1",
         description="Default model name for leadership advisor prompts",
@@ -111,7 +121,7 @@ class Settings(BaseSettings):
     ROLE_READ: str = "OpsPortal.Read"
 
     model_config = {
-        "env_file": ".env",
+        "env_file": str(_BACKEND_DIR / ".env"),
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
         "extra": "ignore",

@@ -98,6 +98,21 @@ backend:
       - envName: RATE_LIMIT_RPM
         akvSecretName: opsportal-backend-rate-limit-rpm
         kubernetesSecretName: ops-portal-backend-rate-limit-rpm
+      - envName: OLLAMA_BASE_URL
+        akvSecretName: opsportal-backend-ollama-base-url
+        kubernetesSecretName: ops-portal-backend-ollama-base-url
+      - envName: OLLAMA_MODEL
+        akvSecretName: opsportal-backend-ollama-model
+        kubernetesSecretName: ops-portal-backend-ollama-model
+      - envName: OLLAMA_TIMEOUT_SECONDS
+        akvSecretName: opsportal-backend-ollama-timeout-seconds
+        kubernetesSecretName: ops-portal-backend-ollama-timeout-seconds
+      - envName: OLLAMA_AUTH_HEADER_NAME
+        akvSecretName: opsportal-backend-ollama-auth-header-name
+        kubernetesSecretName: ops-portal-backend-ollama-auth-header-name
+      - envName: OLLAMA_AUTH_HEADER_VALUE
+        akvSecretName: opsportal-backend-ollama-auth-header-value
+        kubernetesSecretName: ops-portal-backend-ollama-auth-header-value
 
   # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.
   secretProvider:
