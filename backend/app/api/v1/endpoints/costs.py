@@ -7,12 +7,13 @@ time-series analysis, and drill-down capabilities.
 
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
+from app.core.subscription_scope import subscription_ids_for_manual_amortized_sync
 from app.models.auth import UserContext, UserRole
 from app.models.cost import (
     CostBreakdownResponse,
@@ -317,6 +318,7 @@ async def get_amortized_drilldown(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def trigger_amortized_cost_sync(
+    request: Request,
     months: int = Query(default=2, ge=1, le=12, description="Number of months to sync"),
     force: bool = Query(default=False, description="Wipe and re-fetch all months (repairs stale resource_type values)"),
     user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
@@ -330,10 +332,15 @@ async def trigger_amortized_cost_sync(
         )
     from app.services.sync_worker import enqueue_job
 
+    payload: dict = {"months": months, "force": force}
+    scoped_ids = await subscription_ids_for_manual_amortized_sync(request)
+    if scoped_ids:
+        payload["subscription_ids"] = scoped_ids
+
     try:
         job_id = await enqueue_job(
             "amortized",
-            payload={"months": months, "force": force},
+            payload=payload,
             triggered_by=user.email or "manual",
         )
         return {"status": "queued", "job_id": job_id, "job_type": "amortized"}

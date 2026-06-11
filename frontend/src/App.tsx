@@ -32,6 +32,8 @@ import AmortizedCostDashboard from "./pages/AmortizedCostDashboard";
 import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
+import { SubscriptionProvider } from "./contexts/SubscriptionContext";
+import SubscriptionScopePicker from "./components/SubscriptionScopePicker";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 const queryClient = new QueryClient({
@@ -144,6 +146,7 @@ const Navigation: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-4">
+            <SubscriptionScopePicker />
             {isDevMode && (
               <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full font-medium">
                 DEV MODE
@@ -369,11 +372,13 @@ const App: React.FC = () => {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <PermissionsProvider>
-            <TimezoneProvider>
-              <ErrorBoundary>
-                <MainContent />
-              </ErrorBoundary>
-            </TimezoneProvider>
+            <SubscriptionProvider>
+              <TimezoneProvider>
+                <ErrorBoundary>
+                  <MainContent />
+                </ErrorBoundary>
+              </TimezoneProvider>
+            </SubscriptionProvider>
           </PermissionsProvider>
         </AuthProvider>
       </QueryClientProvider>
@@ -390,11 +395,13 @@ const App: React.FC = () => {
         <AuthenticatedTemplate>
           <AuthProvider>
             <PermissionsProvider>
-              <TimezoneProvider>
-                <ErrorBoundary>
-                  <MainContent />
-                </ErrorBoundary>
-              </TimezoneProvider>
+              <SubscriptionProvider>
+                <TimezoneProvider>
+                  <ErrorBoundary>
+                    <MainContent />
+                  </ErrorBoundary>
+                </TimezoneProvider>
+              </SubscriptionProvider>
             </PermissionsProvider>
           </AuthProvider>
         </AuthenticatedTemplate>

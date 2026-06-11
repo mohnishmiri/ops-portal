@@ -25,7 +25,7 @@ from app.core.azure_auth import get_azure_credential
 from app.core.azure_throttle import AZURE_API_SEMAPHORE, acquire_for_scope
 from app.core.config import settings
 from app.core.db_cache import cache_manager
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.cost import (
     CostBreakdownResponse,
     CostByGroup,
@@ -405,7 +405,7 @@ class CostService:
 
         Uses Azure Cost Management Query API with caching.
         """
-        subs = subscription_ids or await get_monitored_subscription_ids()
+        subs = subscription_ids or await get_scoped_subscription_ids()
         group_dims = group_by or [GroupByDimension.SUBSCRIPTION]
         end = end_date or date.today()
         start = start_date or end.replace(day=1)
@@ -605,7 +605,7 @@ class CostService:
 
         _cfg_path = _Path(__file__).resolve().parents[2] / "config" / "budget_config.json"
         non_prod_sub_ids: set[str] = set()
-        all_sub_ids: list[str] = list(await get_monitored_subscription_ids())
+        all_sub_ids: list[str] = list(await get_scoped_subscription_ids())
         if _cfg_path.exists():
             with open(_cfg_path, encoding="utf-8") as _f:
                 _cfg = _json.load(_f)
@@ -1050,7 +1050,7 @@ class CostService:
         subscription_ids: list[str] | None = None,
     ) -> MultiSubscriptionOverview:
         """Get overview across all subscriptions with top resource groups & services."""
-        subs = subscription_ids or await get_monitored_subscription_ids()
+        subs = subscription_ids or await get_scoped_subscription_ids()
         today = date.today()
         month_start = today.replace(day=1)
 

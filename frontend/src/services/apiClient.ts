@@ -61,9 +61,22 @@ export async function initializeMsal(): Promise<void> {
   });
 }
 
+let subscriptionScopeIds: string[] | null = null;
+
+export function setSubscriptionScopeParam(ids: string[] | null): void {
+  subscriptionScopeIds = ids && ids.length > 0 ? [...ids] : null;
+}
+
+export function getSubscriptionScopeParam(): string[] | null {
+  return subscriptionScopeIds ? [...subscriptionScopeIds] : null;
+}
+
 const apiClient: AxiosInstance = axios.create({
   baseURL: apiConfig.baseUrl,
   headers: { "Content-Type": "application/json" },
+  paramsSerializer: {
+    indexes: null,
+  },
 });
 
 // Intercept requests to add Bearer token (skip in dev mode).
@@ -73,6 +86,24 @@ const apiClient: AxiosInstance = axios.create({
 // Graph (aud = https://graph.microsoft.com), which won't pass the
 // backend's audience check.  The ID token always has aud = clientId.
 apiClient.interceptors.request.use(async (config) => {
+  const scopeIds = getSubscriptionScopeParam();
+  const method = (config.method ?? "get").toLowerCase();
+  const url = config.url ?? "";
+  const isScopedSyncPost =
+    method === "post" &&
+    (url.includes("/sync-jobs") || url.includes("/costs/amortized/sync"));
+  if (scopeIds && scopeIds.length > 0 && (method === "get" || isScopedSyncPost)) {
+    const existing = config.params;
+    if (existing instanceof URLSearchParams) {
+      scopeIds.forEach((id) => existing.append("subscription_ids", id));
+    } else {
+      config.params = {
+        ...(existing && typeof existing === "object" ? existing : {}),
+        subscription_ids: scopeIds,
+      };
+    }
+  }
+
   if (isDevMode) return config;
 
   const account = msalInstance.getActiveAccount();

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.admin_config import get_effective_cache_ttl_seconds
 from app.core.db_cache import cache_manager
 from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AdminSubscription,
     AmortizedCostDailySummary,
@@ -525,6 +526,7 @@ class AmortizedCostSyncService:
         months: int = 2,
         triggered_by: str = "manual",
         force: bool = False,
+        subscription_ids: list[str] | None = None,
     ) -> dict:
         """Download Azure Cost API data, normalize it, and append into PostgreSQL.
 
@@ -536,6 +538,10 @@ class AmortizedCostSyncService:
         re-fetches every month from Azure. Use this after enrichment logic
         changes (e.g. resource_type mapping) to repair historical records that
         were written with the old logic.
+
+        When ``subscription_ids`` is set (manual user sync with narrowed scope),
+        only those subscriptions are fetched/updated. Scheduler and startup jobs
+        omit this parameter and sync the full admin-monitored set.
         """
         from app.core.sync_lock import release_advisory_lock, try_acquire_advisory_lock
 
@@ -567,8 +573,21 @@ class AmortizedCostSyncService:
             full_start_date = self._get_rolling_start_date(end_date, months)
 
             monitored_ids = await get_monitored_subscription_ids()
-            if not monitored_ids:
-                logger.info("amortized_cost_sync_skipped_no_monitored_subscriptions")
+            if subscription_ids is not None:
+                monitored_set = set(monitored_ids)
+                sync_ids = [sub_id for sub_id in subscription_ids if sub_id in monitored_set]
+                ignored = sorted(set(subscription_ids) - monitored_set)
+                if ignored:
+                    logger.warning(
+                        "amortized_sync_ignored_unmonitored_subscription_ids",
+                        ignored=ignored,
+                    )
+            else:
+                sync_ids = list(monitored_ids)
+
+            partial_scope = subscription_ids is not None
+            if not sync_ids:
+                logger.info("amortized_cost_sync_skipped_no_target_subscriptions")
                 sync_record.status = "completed"
                 sync_record.completed_at = datetime.utcnow()
                 sync_record.months_synced = months
@@ -585,11 +604,13 @@ class AmortizedCostSyncService:
                     "started_at": started_at.isoformat(),
                     "completed_at": sync_record.completed_at.isoformat(),
                     "duration_seconds": round(duration_seconds, 2),
-                    "note": "no_monitored_subscriptions",
+                    "note": "no_target_subscriptions",
+                    "subscription_ids": [],
+                    "sync_scope": "partial" if partial_scope else "full_monitored",
                 }
 
             # Step 1: Subscription metadata (names, environments)
-            sub_metadata = await self._fetch_subscription_metadata(monitored_ids)
+            sub_metadata = await self._fetch_subscription_metadata(sync_ids)
 
             # Step 2: Compute fetch ranges.
             # Force mode: every calendar month in the window for every
@@ -599,15 +620,16 @@ class AmortizedCostSyncService:
             # Normal mode: only missing months + correction window.
             if force:
                 monthly_chunks = self._split_into_monthly_chunks(full_start_date, end_date)
-                per_sub_ranges = {sub_id: list(monthly_chunks) for sub_id in monitored_ids}
+                per_sub_ranges = {sub_id: list(monthly_chunks) for sub_id in sync_ids}
                 logger.info(
                     "amortized_cost_sync_force_mode",
                     months=months,
                     chunks=len(monthly_chunks),
-                    subscriptions=len(monitored_ids),
+                    subscriptions=len(sync_ids),
+                    partial_scope=partial_scope,
                 )
             else:
-                per_sub_ranges = await self._compute_fetch_ranges(monitored_ids, full_start_date, end_date)
+                per_sub_ranges = await self._compute_fetch_ranges(sync_ids, full_start_date, end_date)
 
             # Step 3: Fetch from Azure FIRST — before any deletes.
             # Each range is fetched independently; a 429 on one range does not
@@ -652,6 +674,8 @@ class AmortizedCostSyncService:
                     "started_at": started_at.isoformat(),
                     "completed_at": sync_record.completed_at.isoformat(),
                     "duration_seconds": round(duration_seconds, 2),
+                    "subscription_ids": sync_ids,
+                    "sync_scope": "partial" if partial_scope else "full_monitored",
                 }
 
             # Step 5: Insert new rows in batches of 5 000 to limit memory pressure
@@ -710,6 +734,8 @@ class AmortizedCostSyncService:
                 total_cost=round(total_cost, 2),
                 triggered_by=triggered_by,
                 partial_failures=len(failed_sub_ids),
+                subscription_count=len(sync_ids),
+                partial_scope=partial_scope,
             )
 
             await cache_manager.invalidate("pagecache:amortized:*")
@@ -732,6 +758,8 @@ class AmortizedCostSyncService:
                 "completed_at": sync_record.completed_at.isoformat(),
                 "duration_seconds": round(duration_seconds, 2),
                 "partial_failures": len(failed_sub_ids),
+                "subscription_ids": sync_ids,
+                "sync_scope": "partial" if partial_scope else "full_monitored",
             }
 
         except Exception as exc:
@@ -896,7 +924,8 @@ class AmortizedCostSyncService:
         """Build the existing amortized analytics payload,
         but sourced entirely from the PostgreSQL cache."""
         started = perf_counter()
-        cache_key = self._summary_cache_key(env, months)
+        scoped_ids = await get_scoped_subscription_ids()
+        cache_key = self._summary_cache_key(env, months, scoped_ids)
         cached = await cache_manager.get_cached(cache_key)
         if cached:
             try:
@@ -912,7 +941,7 @@ class AmortizedCostSyncService:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        rows = await self._load_rows_from_db(env, months)
+        rows = await self._load_rows_from_db(env, months, scoped_ids)
         payload = self._build_analytics(rows, env, months=months, as_of=date.today())
         ttl = await get_effective_cache_ttl_seconds(self._db)
         await cache_manager.set_cached(cache_key, json.dumps(payload, default=str), ttl=ttl)
@@ -1043,12 +1072,23 @@ class AmortizedCostSyncService:
 
     # ── Leadership dashboard builder ──────────────────────────────────
 
-    async def build_leadership_dashboard(self) -> LeadershipDashboard | None:
+    def _apply_leadership_subscription_scope(self, stmt, subscription_ids: list[str] | None):
+        if subscription_ids:
+            return stmt.where(AmortizedCostRecord.subscription_id.in_(subscription_ids))
+        return stmt
+
+    async def build_leadership_dashboard(
+        self,
+        subscription_ids: list[str] | None = None,
+    ) -> LeadershipDashboard | None:
         """Build a leadership dashboard payload from amortized_cost_records in DB.
 
         Returns None when the DB has no records for the recent trend window.
         Used by LeadershipSyncService to produce consistent data from the
         same underlying source as the amortized cost page.
+
+        When ``subscription_ids`` is set, aggregates only those subscriptions
+        (per-user picker scope).
         """
         from decimal import Decimal
 
@@ -1069,28 +1109,39 @@ class AmortizedCostSyncService:
         prev_month_start = prev_month_end.replace(day=1)
         six_months_ago = (month_start - timedelta(days=180)).replace(day=1)
 
+        scope_suffix = (
+            f" across {len(subscription_ids)} selected subscription(s)"
+            if subscription_ids
+            else " across all subscriptions"
+        )
+
         # Return None if there are no records for the recent window
+        count_stmt = select(func.count(AmortizedCostRecord.id)).where(
+            AmortizedCostRecord.cost_date >= trend_start.isoformat()
+        )
         count_result = await self._db.execute(
-            select(func.count(AmortizedCostRecord.id)).where(AmortizedCostRecord.cost_date >= trend_start.isoformat())
+            self._apply_leadership_subscription_scope(count_stmt, subscription_ids)
         )
         if (count_result.scalar() or 0) == 0:
             return None
 
         # Current month total
+        current_stmt = select(func.sum(AmortizedCostRecord.cost_amount)).where(
+            AmortizedCostRecord.cost_date >= month_start.isoformat(),
+            AmortizedCostRecord.cost_date <= today.isoformat(),
+        )
         current_scalar = await self._db.scalar(
-            select(func.sum(AmortizedCostRecord.cost_amount)).where(
-                AmortizedCostRecord.cost_date >= month_start.isoformat(),
-                AmortizedCostRecord.cost_date <= today.isoformat(),
-            )
+            self._apply_leadership_subscription_scope(current_stmt, subscription_ids)
         )
         current_total = Decimal(str(round(current_scalar or 0.0, 2)))
 
         # Previous month total
+        prev_stmt = select(func.sum(AmortizedCostRecord.cost_amount)).where(
+            AmortizedCostRecord.cost_date >= prev_month_start.isoformat(),
+            AmortizedCostRecord.cost_date <= prev_month_end.isoformat(),
+        )
         prev_scalar = await self._db.scalar(
-            select(func.sum(AmortizedCostRecord.cost_amount)).where(
-                AmortizedCostRecord.cost_date >= prev_month_start.isoformat(),
-                AmortizedCostRecord.cost_date <= prev_month_end.isoformat(),
-            )
+            self._apply_leadership_subscription_scope(prev_stmt, subscription_ids)
         )
         prev_total = Decimal(str(round(prev_scalar or 0.0, 2)))
 
@@ -1108,7 +1159,7 @@ class AmortizedCostSyncService:
                 unit="USD",
                 trend=trend,
                 change_pct=change_pct,
-                description="Month-to-date Azure spend across all subscriptions",
+                description=f"Month-to-date Azure spend{scope_suffix}",
             ),
             KPIMetric(
                 name="Month-over-Month Change",
@@ -1116,12 +1167,12 @@ class AmortizedCostSyncService:
                 unit="%",
                 trend=trend,
                 change_pct=change_pct,
-                description="Cost change compared to previous month",
+                description=f"Cost change compared to previous month{scope_suffix}",
             ),
         ]
 
         # Daily cost trend (last 16 days, grouped by subscription)
-        daily_result = await self._db.execute(
+        daily_stmt = (
             select(
                 AmortizedCostRecord.cost_date,
                 AmortizedCostRecord.subscription_name,
@@ -1139,6 +1190,9 @@ class AmortizedCostSyncService:
             )
             .order_by(AmortizedCostRecord.cost_date)
         )
+        daily_result = await self._db.execute(
+            self._apply_leadership_subscription_scope(daily_stmt, subscription_ids)
+        )
         cost_trend: list[CostDataPoint] = [
             CostDataPoint(
                 date=date.fromisoformat(str(cost_date)),
@@ -1151,7 +1205,7 @@ class AmortizedCostSyncService:
         ]
 
         # Top spenders by subscription (current month)
-        spender_result = await self._db.execute(
+        spender_stmt = (
             select(
                 AmortizedCostRecord.subscription_name,
                 AmortizedCostRecord.subscription_id,
@@ -1164,6 +1218,9 @@ class AmortizedCostSyncService:
             .group_by(AmortizedCostRecord.subscription_name, AmortizedCostRecord.subscription_id)
             .order_by(func.sum(AmortizedCostRecord.cost_amount).desc())
             .limit(10)
+        )
+        spender_result = await self._db.execute(
+            self._apply_leadership_subscription_scope(spender_stmt, subscription_ids)
         )
         spender_rows = spender_result.all()
         grand_total = sum(float(r.total or 0) for r in spender_rows) or 1.0
@@ -1184,7 +1241,7 @@ class AmortizedCostSyncService:
         # day's data and the May→Jun avg-delta of -$180k extrapolated all
         # future months to $0. Excluding the current month gives the
         # forecast a stable anchor.
-        monthly_result = await self._db.execute(
+        monthly_stmt = (
             select(
                 AmortizedCostRecord.cost_date,
                 AmortizedCostRecord.subscription_name,
@@ -1203,6 +1260,9 @@ class AmortizedCostSyncService:
                 AmortizedCostRecord.env_label,
             )
             .order_by(AmortizedCostRecord.cost_date)
+        )
+        monthly_result = await self._db.execute(
+            self._apply_leadership_subscription_scope(monthly_stmt, subscription_ids)
         )
 
         # Build a sub_id → resolved Prod/Non-Prod map. Admin's Environment
@@ -1288,6 +1348,7 @@ class AmortizedCostSyncService:
         """Return latest sync status for the dashboard header."""
         await self._expire_abandoned_running_rows()
         monitored_subscription_ids = await get_monitored_subscription_ids()
+        scoped_subscription_ids = await get_scoped_subscription_ids()
         result = await self._db.execute(
             select(AmortizedCostSyncStatus).order_by(AmortizedCostSyncStatus.started_at.desc()).limit(1)
         )
@@ -1299,6 +1360,8 @@ class AmortizedCostSyncService:
                 "status": None,
                 "monitored_subscription_ids": monitored_subscription_ids,
                 "monitored_subscription_count": len(monitored_subscription_ids),
+                "scoped_subscription_ids": scoped_subscription_ids,
+                "scoped_subscription_count": len(scoped_subscription_ids),
             }
 
         duration_seconds: float | None = None
@@ -1317,12 +1380,16 @@ class AmortizedCostSyncService:
             "error_message": rec.error_message,
             "monitored_subscription_ids": monitored_subscription_ids,
             "monitored_subscription_count": len(monitored_subscription_ids),
+            "scoped_subscription_ids": scoped_subscription_ids,
+            "scoped_subscription_count": len(scoped_subscription_ids),
         }
 
     # ── Private helpers ───────────────────────────────────────────────
 
-    def _summary_cache_key(self, env: str, months: int) -> str:
-        return f"pagecache:amortized:summary:{env.upper()}:{months}"
+    def _summary_cache_key(self, env: str, months: int, subscription_scope: list[str] | None = None) -> str:
+        scope = ",".join(sorted(subscription_scope or []))
+        digest = hashlib.md5(scope.encode()).hexdigest()[:8] if scope else "all"
+        return f"pagecache:amortized:summary:{env.upper()}:{months}:{digest}"
 
     def _drilldown_cache_key(
         self,
@@ -1346,9 +1413,15 @@ class AmortizedCostSyncService:
         digest = hashlib.md5(raw.encode()).hexdigest()[:16]
         return f"pagecache:amortized:drilldown:{digest}"
 
-    async def _load_rows_from_db(self, env: str, months: int) -> list[dict]:
-        """Load amortized cost rows from PostgreSQL, optionally filtered by env."""
+    async def _load_rows_from_db(
+        self,
+        env: str,
+        months: int,
+        subscription_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Load amortized cost rows from PostgreSQL, filtered by env and subscription scope."""
         env = env.upper()
+        scoped_ids = subscription_ids or await get_scoped_subscription_ids()
 
         # Use exact rolling calendar months anchored to today.
         start_date = self._get_rolling_start_date(date.today(), months)
@@ -1363,6 +1436,9 @@ class AmortizedCostSyncService:
         elif env == "NONPROD":
             stmt = stmt.where(AmortizedCostRecord.env_label == "Non-Prod")
         # else ALL — no filter
+
+        if scoped_ids:
+            stmt = stmt.where(AmortizedCostRecord.subscription_id.in_(scoped_ids))
 
         result = await self._db.execute(stmt)
         records = result.scalars().all()

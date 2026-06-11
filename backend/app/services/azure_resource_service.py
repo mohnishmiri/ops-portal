@@ -14,7 +14,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import AzureResourceInventory
 
 logger = structlog.get_logger(__name__)
@@ -79,7 +79,7 @@ class AzureResourceService:
         """Resolve subscription from admin DB (once) then validate Azure."""
         if not self._subscription_resolved:
             try:
-                monitored = await get_monitored_subscription_ids()
+                monitored = await get_scoped_subscription_ids()
                 if monitored:
                     self.subscription_id = monitored[0]
             except Exception:
@@ -88,7 +88,7 @@ class AzureResourceService:
         self._ensure_azure_available()
 
     async def _resolve_scoped_subscription_ids(self) -> list[str]:
-        return await get_monitored_subscription_ids()
+        return await get_scoped_subscription_ids()
 
     async def _get_target_subscription_ids(self) -> list[str]:
         await self._ensure_ready()

@@ -47,6 +47,9 @@ class _FakeScalars:
     def first(self):
         return self._value
 
+    def scalar_one_or_none(self):
+        return self._value
+
     def all(self):
         if self._value is None:
             return []
@@ -134,6 +137,54 @@ async def test_enqueue_amortized_returns_202_with_job_id(app, client, monkeypatc
 
 
 @pytest.mark.anyio
+async def test_enqueue_amortized_includes_scoped_subscription_ids(app, client, monkeypatch):
+    """When the request scope is narrower than monitored, payload carries subscription_ids."""
+    captured: dict = {}
+
+    async def fake_enqueue(job_type, *, payload=None, triggered_by=None, idempotency_key=None, dedup_session=None):
+        captured["payload"] = payload
+        return 8
+
+    async def fake_monitored():
+        return ["sub-a", "sub-b"]
+
+    async def fake_get_db():
+        yield _FakeSession(
+            execute_results=[
+                SyncJob(
+                    id=8,
+                    job_type="amortized",
+                    status="queued",
+                    idempotency_key=None,
+                    payload="{}",
+                    triggered_by="test@example.com",
+                    attempts=0,
+                    enqueued_at=datetime.utcnow(),
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(
+        "app.core.subscription_scope.get_monitored_subscription_ids",
+        fake_monitored,
+    )
+    app.dependency_overrides[get_current_user] = lambda: _user()
+    app.dependency_overrides[get_db] = fake_get_db
+    monkeypatch.setattr("app.api.v1.endpoints.sync_jobs.enqueue_job", fake_enqueue)
+
+    resp = await client.post(
+        "/api/v1/sync-jobs?subscription_ids=sub-a",
+        json={"job_type": "amortized", "months": 2},
+    )
+
+    assert resp.status_code == 202
+    assert captured["payload"]["subscription_ids"] == ["sub-a"]
+    assert "months" in captured["payload"]
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
 async def test_enqueue_rejects_unknown_job_type(app, client):
     async def fake_get_db():
         yield _FakeSession()
@@ -165,7 +216,8 @@ async def test_get_sync_job_returns_detail(app, client):
         completed_at=datetime.utcnow(),
     )
 
-    fake_db = _FakeSession(execute_results=[job])
+    # First execute: user subscription preference lookup in bind_subscription_scope.
+    fake_db = _FakeSession(execute_results=[None, job])
 
     async def fake_get_db():
         yield fake_db
@@ -186,7 +238,7 @@ async def test_get_sync_job_returns_detail(app, client):
 
 @pytest.mark.anyio
 async def test_get_sync_job_404_when_missing(app, client):
-    fake_db = _FakeSession(execute_results=[None])
+    fake_db = _FakeSession(execute_results=[None, None])
 
     async def fake_get_db():
         yield fake_db

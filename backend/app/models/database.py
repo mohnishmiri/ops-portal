@@ -1157,6 +1157,16 @@ class AdminSubscription(Base):
     __table_args__ = (Index("ix_admin_sub_enabled", "enabled"),)
 
 
+class UserSubscriptionPreference(Base):
+    """Per-user subscription picker scope (does not affect other users)."""
+
+    __tablename__ = "user_subscription_preferences"
+
+    user_id = Column(String(255), primary_key=True)
+    selected_subscription_ids = Column(Text, nullable=False, default="[]")
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class AdminConfig(Base):
     """Key-value admin configuration stored in DB so it can be
     managed through the Admin panel without redeploying."""

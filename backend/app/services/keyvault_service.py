@@ -18,7 +18,7 @@ import structlog
 
 from app.core.azure_auth import get_azure_credential
 from app.core.db_cache import cache_manager
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -128,7 +128,7 @@ class KeyVaultService:
                 return cached
 
         vaults = []
-        for sub_id in await get_monitored_subscription_ids():
+        for sub_id in await get_scoped_subscription_ids():
             try:
                 url: str | None = (
                     f"{ARM_API}/subscriptions/{sub_id}"

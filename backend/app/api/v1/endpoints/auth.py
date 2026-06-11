@@ -1,15 +1,25 @@
 """Auth API — authenticated user context, roles, and effective permissions."""
 
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.core.database import get_db
+from app.core.subscription_scope import resolve_effective_subscription_ids
 from app.models.auth import UserContext
 from app.models.database import Permission, Resource
+from app.services.user_preference_service import UserPreferenceService
 
 router = APIRouter()
+
+
+class SubscriptionScopePreferenceRequest(BaseModel):
+    selected_subscription_ids: list[str] = Field(
+        default_factory=list,
+        description="Empty list means all monitored subscriptions",
+    )
 
 
 @router.get(
@@ -118,4 +128,67 @@ async def get_my_permissions(
         "is_admin": False,
         "modules": modules_out,
         "pages": pages_out,
+    }
+
+
+@router.get(
+    "/available-subscriptions",
+    summary="List monitored subscriptions for the scope picker",
+)
+async def list_available_subscriptions(
+    user: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    svc = UserPreferenceService(db)
+    available = await svc.list_available_subscriptions(user.user_id)
+    selected = await svc.get_selected_subscription_ids(user.user_id)
+    effective = await resolve_effective_subscription_ids(
+        allowed_subscriptions=user.allowed_subscriptions or None,
+        selected_subscription_ids=selected or None,
+    )
+    return {
+        "subscriptions": available,
+        "selected_subscription_ids": selected,
+        "effective_subscription_ids": effective,
+    }
+
+
+@router.get(
+    "/subscription-scope",
+    summary="Get current user subscription scope preference",
+)
+async def get_subscription_scope(
+    user: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    svc = UserPreferenceService(db)
+    selected = await svc.get_selected_subscription_ids(user.user_id)
+    effective = await resolve_effective_subscription_ids(
+        allowed_subscriptions=user.allowed_subscriptions or None,
+        selected_subscription_ids=selected or None,
+    )
+    return {
+        "selected_subscription_ids": selected,
+        "effective_subscription_ids": effective,
+    }
+
+
+@router.put(
+    "/subscription-scope",
+    summary="Save per-user subscription scope preference",
+)
+async def save_subscription_scope(
+    body: SubscriptionScopePreferenceRequest,
+    user: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    svc = UserPreferenceService(db)
+    saved = await svc.save_selected_subscription_ids(user.user_id, body.selected_subscription_ids)
+    effective = await resolve_effective_subscription_ids(
+        allowed_subscriptions=user.allowed_subscriptions or None,
+        selected_subscription_ids=saved or None,
+    )
+    return {
+        "selected_subscription_ids": saved,
+        "effective_subscription_ids": effective,
     }

@@ -30,7 +30,7 @@ from app.core.azure_auth import get_azure_credential
 from app.core.azure_throttle import AZURE_API_SEMAPHORE
 from app.core.config import settings
 from app.core.db_cache import cache_manager
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.optimization import (
     ConfidenceLevel,
     CostRecommendation,
@@ -330,7 +330,7 @@ class OptimizationService:
         subscription_ids: list[str] | None = None,
     ) -> list[dict]:
         """Execute an Azure Resource Graph query."""
-        subs = subscription_ids or await get_monitored_subscription_ids()
+        subs = subscription_ids or await get_scoped_subscription_ids()
         client = _get_resource_graph_client(self._credential)
 
         try:
@@ -354,7 +354,7 @@ class OptimizationService:
         subscription_ids: list[str] | None = None,
     ) -> list[CostRecommendation]:
         """Fetch Azure Advisor cost recommendations."""
-        subs = subscription_ids or await get_monitored_subscription_ids()
+        subs = subscription_ids or await get_scoped_subscription_ids()
         recommendations: list[CostRecommendation] = []
 
         for sub_id in subs:
@@ -620,7 +620,7 @@ class OptimizationService:
         APIs are unreachable.
         """
         started = perf_counter()
-        subs = subscription_ids or await get_monitored_subscription_ids()
+        subs = subscription_ids or await get_scoped_subscription_ids()
         cache_key = self._summary_cache_key(subs)
         if refresh:
             await cache_manager.invalidate(cache_key)
@@ -800,7 +800,7 @@ class OptimizationService:
             recommendations_by_priority=by_priority,
             top_recommendations=sorted(all_recs, key=lambda r: r.estimated_annual_savings, reverse=True)[:10],
             generated_at=datetime.now(UTC),
-            subscriptions_analyzed=len(subscription_ids or await get_monitored_subscription_ids()),
+            subscriptions_analyzed=len(subscription_ids or await get_scoped_subscription_ids()),
         )
 
     async def get_full_dashboard(

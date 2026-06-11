@@ -23,7 +23,7 @@ from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AKSClusterSnapshot,
     AKSNodePoolSnapshot,
@@ -2411,7 +2411,7 @@ class AKSOperationsService:
         cache_key = CacheKeys.subscriptions(subscription_ids)
 
         async def _fetch_subs_live() -> list[dict[str, str]]:
-            target_ids = subscription_ids or await get_monitored_subscription_ids()
+            target_ids = subscription_ids or await get_scoped_subscription_ids()
             if not target_ids:
                 logger.warning("No subscriptions configured.")
                 return []
@@ -2706,7 +2706,7 @@ class AKSOperationsService:
             return []
 
         try:
-            subscription_ids = await get_monitored_subscription_ids()
+            subscription_ids = await get_scoped_subscription_ids()
             if not subscription_ids:
                 return []
 
@@ -2737,7 +2737,7 @@ class AKSOperationsService:
         try:
             from sqlalchemy import func as sa_func
 
-            subscription_ids = await get_monitored_subscription_ids()
+            subscription_ids = await get_scoped_subscription_ids()
             if not subscription_ids:
                 return None
 

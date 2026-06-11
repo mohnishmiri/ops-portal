@@ -19,6 +19,7 @@ export type UserRole = "admin" | "write" | "read";
 // ── Context shape ─────────────────────────────────────────────────────
 
 interface AuthCtx {
+  userId: string;
   displayName: string;
   email: string;
   roles: UserRole[];
@@ -28,6 +29,7 @@ interface AuthCtx {
 }
 
 const defaultCtx: AuthCtx = {
+  userId: "dev-user",
   displayName: "Local Developer",
   email: "dev@localhost",
   roles: ["admin"],
@@ -80,6 +82,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const canWrite = isAdmin || roles.includes("write");
 
     return {
+      userId: String(claims?.sub ?? account.localAccountId ?? account.homeAccountId ?? "unknown-user"),
       displayName: account.name ?? account.username ?? "",
       email: account.username ?? "",
       roles,

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.azure_auth import get_azure_credential
 from app.core.config import settings
 from app.core.db_cache import cache_manager
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.cost import (
     CostByGroup,
     CostDataPoint,
@@ -337,7 +337,7 @@ class DashboardService:
             ),
             KPIMetric(
                 name="Subscriptions Monitored",
-                value=len(subscription_ids or await get_monitored_subscription_ids()),
+                value=len(subscription_ids or await get_scoped_subscription_ids()),
                 unit="count",
                 trend=CostTrendDirection.STABLE,
                 change_pct=0.0,
@@ -347,7 +347,7 @@ class DashboardService:
 
         # ── Resolve subscription IDs → display names ─────────────────
         sub_name_map = await self._resolve_subscription_names(
-            subscription_ids or await get_monitored_subscription_ids()
+            subscription_ids or await get_scoped_subscription_ids()
         )
         for spender in breakdown.breakdown:
             if spender.group_value in sub_name_map:
@@ -523,7 +523,7 @@ class DashboardService:
             "prev_month_daily_avg": str(round(prev_avg_daily, 2)),
             "anomalies": anomalies,
             "subscription_costs": subscription_costs,
-            "subscriptions_monitored": len(subscription_ids or await get_monitored_subscription_ids()),
+            "subscriptions_monitored": len(subscription_ids or await get_scoped_subscription_ids()),
             "generated_at": datetime.utcnow().isoformat(),
         }
 

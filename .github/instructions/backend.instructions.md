@@ -58,5 +58,8 @@ After **every** backend code change, run the following from `backend/` and fix a
 - `backend/app/api/v1/router.py`
 - `backend/app/auth/__init__.py`
 - `backend/app/core/database.py`
+- `backend/app/core/subscription_resolver.py` (admin monitored set; sync jobs)
+- `backend/app/core/subscription_scope.py` (per-request read scope)
 - `backend/README.md`
+- `docs/ARCHITECTURE.md` (§2.4 subscription scoping, §8 cost cleanup)
 - `.github/workflows/ci-cd.yaml`

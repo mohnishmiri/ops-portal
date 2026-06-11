@@ -40,6 +40,8 @@ logger = structlog.get_logger(__name__)
 POLL_INTERVAL_SECONDS = 5
 MAX_ATTEMPTS = 3
 ABANDONED_RUNNING_TIMEOUT_MINUTES = 120
+_ALREADY_RUNNING_WAIT_SECONDS = 30
+_ALREADY_RUNNING_MAX_WAITS = 24  # up to ~12 minutes waiting for an in-flight sync
 
 _worker_task: asyncio.Task | None = None
 _shutdown_event: asyncio.Event | None = None
@@ -101,6 +103,37 @@ async def _claim_next_job() -> SyncJob | None:
         return job
 
 
+def _result_error_message(result: dict | None) -> str | None:
+    if not result:
+        return None
+    return result.get("error") or result.get("message")
+
+
+async def _await_full_sync_result(
+    job: SyncJob,
+    run_sync,
+) -> tuple[str, str | None, dict | None]:
+    """Run a sync callable, waiting when another sync already holds the lock."""
+    for wait_round in range(_ALREADY_RUNNING_MAX_WAITS + 1):
+        result = await run_sync()
+        status = result.get("status", "failed")
+        if status == "completed":
+            return "completed", None, result
+        if status == "already_running" and wait_round < _ALREADY_RUNNING_MAX_WAITS:
+            logger.info(
+                "sync_worker_waiting_for_inflight_sync",
+                job_id=job.id,
+                job_type=job.job_type,
+                wait_seconds=_ALREADY_RUNNING_WAIT_SECONDS,
+                attempt=wait_round + 1,
+                detail=_result_error_message(result),
+            )
+            await asyncio.sleep(_ALREADY_RUNNING_WAIT_SECONDS)
+            continue
+        return "failed", _result_error_message(result), result
+    return "failed", "Timed out waiting for another sync to finish", None
+
+
 async def _run_job(job: SyncJob) -> tuple[str, str | None, dict | None]:
     """Dispatch a job to the right service. Returns (status, error, result)."""
     payload = json.loads(job.payload or "{}")
@@ -115,24 +148,33 @@ async def _run_job(job: SyncJob) -> tuple[str, str | None, dict | None]:
 
         async with session_factory() as session:
             svc = AmortizedCostSyncService(session)
-            result = await svc.full_sync(
-                months=int(payload.get("months", 2)),
-                triggered_by=triggered_by,
-                force=bool(payload.get("force", False)),
+            raw_sub_ids = payload.get("subscription_ids")
+            subscription_ids = (
+                [str(item) for item in raw_sub_ids]
+                if isinstance(raw_sub_ids, list) and raw_sub_ids
+                else None
             )
-            status = result.get("status", "failed")
-            err = result.get("error") if status != "completed" else None
-            return ("completed" if status == "completed" else "failed", err, result)
+
+            async def _run_amortized() -> dict:
+                return await svc.full_sync(
+                    months=int(payload.get("months", 2)),
+                    triggered_by=triggered_by,
+                    force=bool(payload.get("force", False)),
+                    subscription_ids=subscription_ids,
+                )
+
+            return await _await_full_sync_result(job, _run_amortized)
 
     if job.job_type == "leadership":
         from app.services.leadership_sync_service import LeadershipSyncService
 
         async with session_factory() as session:
             svc = LeadershipSyncService(session)
-            result = await svc.full_sync(triggered_by=triggered_by)
-            status = result.get("status", "failed")
-            err = result.get("error") if status != "completed" else None
-            return ("completed" if status == "completed" else "failed", err, result)
+
+            async def _run_leadership() -> dict:
+                return await svc.full_sync(triggered_by=triggered_by)
+
+            return await _await_full_sync_result(job, _run_leadership)
 
     return "failed", f"unknown job_type: {job.job_type}", None
 

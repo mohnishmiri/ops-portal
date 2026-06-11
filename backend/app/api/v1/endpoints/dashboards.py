@@ -8,13 +8,15 @@ plus the Budget vs RunRate tracking view.
 from time import perf_counter
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.admin_config import get_effective_cache_ttl_seconds
 from app.core.database import get_db
 from app.core.db_cache import cache_manager, refresh_cache_enabled_flag
+from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.auth import UserContext, UserRole
 from app.models.cost import (
     LeadershipAdvisorRequest,
@@ -28,6 +30,7 @@ from app.services.leadership_advisor_service import LeadershipAdvisorService
 from app.services.leadership_sync_service import (
     LEADERSHIP_DASHBOARD_CACHE_KEY,
     LeadershipSyncService,
+    leadership_dashboard_cache_key,
 )
 
 router = APIRouter()
@@ -48,6 +51,38 @@ def _get_leadership_advisor_service(
     return LeadershipAdvisorService(db)
 
 
+async def _leadership_scope_is_full(scoped_ids: list[str]) -> bool:
+    monitored_ids = await get_monitored_subscription_ids()
+    if not monitored_ids:
+        return True
+    return set(scoped_ids) == set(monitored_ids)
+
+
+async def _cache_and_return_leadership_dashboard(
+    *,
+    dashboard: LeadershipDashboard,
+    cache_key: str,
+    db: AsyncSession | None,
+    cache_enabled: bool,
+    source: str,
+    refresh: bool,
+    started: float,
+    scoped_count: int | None = None,
+) -> LeadershipDashboard:
+    if cache_enabled and db is not None:
+        ttl = await get_effective_cache_ttl_seconds(db)
+        await cache_manager.set_cached(cache_key, dashboard.model_dump_json(), ttl=ttl)
+    logger.info(
+        "leadership_dashboard_served",
+        source=source,
+        refresh=refresh,
+        cache_enabled=cache_enabled,
+        scoped_subscription_count=scoped_count,
+        elapsed_ms=round((perf_counter() - started) * 1000, 2),
+    )
+    return dashboard
+
+
 @router.get(
     "/leadership",
     response_model=LeadershipDashboard,
@@ -60,77 +95,91 @@ async def leadership_dashboard(
     service: DashboardService = Depends(_get_dashboard_service),
     db: AsyncSession = Depends(get_db),
 ) -> LeadershipDashboard:
-    """Leadership dashboard — loads from cache → DB → live Azure API."""
+    """Leadership dashboard — scoped cache → scoped amortized DB → snapshot/live."""
     started = perf_counter()
+    scoped_ids = await get_scoped_subscription_ids()
+    full_scope = await _leadership_scope_is_full(scoped_ids)
+    partial_scope_ids = None if full_scope else list(scoped_ids)
+    cache_key = leadership_dashboard_cache_key(partial_scope_ids)
 
-    # Refresh the admin cache-enabled flag so the toggle takes effect
     cache_enabled = await refresh_cache_enabled_flag(db)
 
     if refresh:
-        await cache_manager.invalidate(LEADERSHIP_DASHBOARD_CACHE_KEY)
+        await cache_manager.invalidate(cache_key)
+        if full_scope:
+            await cache_manager.invalidate(LEADERSHIP_DASHBOARD_CACHE_KEY)
 
-    # 1) Try cache (unless refresh requested or cache disabled via admin)
     if not refresh and cache_enabled:
-        cached_payload = await cache_manager.get_cached(LEADERSHIP_DASHBOARD_CACHE_KEY)
+        cached_payload = await cache_manager.get_cached(cache_key)
         if cached_payload:
             try:
-                dashboard = LeadershipDashboard.model_validate_json(cached_payload)
-                logger.info(
-                    "leadership_dashboard_served",
+                return await _cache_and_return_leadership_dashboard(
+                    dashboard=LeadershipDashboard.model_validate_json(cached_payload),
+                    cache_key=cache_key,
+                    db=None,
+                    cache_enabled=False,
                     source="cache",
                     refresh=refresh,
-                    elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                    started=started,
+                    scoped_count=len(scoped_ids),
                 )
-                return dashboard
             except Exception:
                 pass
 
-    # 2) Try DB — always attempt DB even during refresh so that the
-    #    just-completed sync result is served instead of a redundant
-    #    live Azure call.
     if db is not None:
         sync_svc = LeadershipSyncService(db)
-        cached = await sync_svc.get_dashboard_from_db()
-        if cached:
-            dashboard = LeadershipDashboard.model_validate(cached)
-            if cache_enabled:
-                ttl = await get_effective_cache_ttl_seconds(db)
-                await cache_manager.set_cached(
-                    LEADERSHIP_DASHBOARD_CACHE_KEY,
-                    dashboard.model_dump_json(),
-                    ttl=ttl,
+
+        if partial_scope_ids:
+            amortized_payload = await sync_svc.get_dashboard_from_amortized(partial_scope_ids)
+            if amortized_payload:
+                amortized_payload.pop("_source", None)
+                amortized_payload.pop("_scope", None)
+                dashboard = LeadershipDashboard.model_validate(amortized_payload)
+                return await _cache_and_return_leadership_dashboard(
+                    dashboard=dashboard,
+                    cache_key=cache_key,
+                    db=db,
+                    cache_enabled=cache_enabled,
+                    source="amortized_database",
+                    refresh=refresh,
+                    started=started,
+                    scoped_count=len(partial_scope_ids),
                 )
+
+        cached = await sync_svc.get_dashboard_from_db(subscription_ids=partial_scope_ids)
+        if cached:
+            cached.pop("_source", None)
+            cached.pop("_scope", None)
+            cached.pop("_synced_at", None)
+            dashboard = LeadershipDashboard.model_validate(cached)
             if not refresh and await sync_svc.is_data_stale() and not await sync_svc.is_sync_running():
                 LeadershipSyncService.schedule_background_sync(triggered_by="request-stale")
-            logger.info(
-                "leadership_dashboard_served",
+            return await _cache_and_return_leadership_dashboard(
+                dashboard=dashboard,
+                cache_key=cache_key,
+                db=db,
+                cache_enabled=cache_enabled,
                 source="database",
                 refresh=refresh,
-                cache_enabled=cache_enabled,
-                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                started=started,
+                scoped_count=len(scoped_ids),
             )
-            return dashboard
 
-    # 3) Fall back to live Azure API
+    subscription_ids = scoped_ids or user.allowed_subscriptions or None
     dashboard = await service.get_leadership_dashboard(
-        subscription_ids=user.allowed_subscriptions or None,
+        subscription_ids=subscription_ids,
         refresh=refresh,
     )
-    if cache_enabled:
-        ttl = await get_effective_cache_ttl_seconds(db)
-        await cache_manager.set_cached(
-            LEADERSHIP_DASHBOARD_CACHE_KEY,
-            dashboard.model_dump_json(),
-            ttl=ttl,
-        )
-    logger.info(
-        "leadership_dashboard_served",
+    return await _cache_and_return_leadership_dashboard(
+        dashboard=dashboard,
+        cache_key=cache_key,
+        db=db,
+        cache_enabled=cache_enabled,
         source="live",
         refresh=refresh,
-        cache_enabled=cache_enabled,
-        elapsed_ms=round((perf_counter() - started) * 1000, 2),
+        started=started,
+        scoped_count=len(scoped_ids),
     )
-    return dashboard
 
 
 @router.get(
@@ -179,11 +228,12 @@ async def trigger_leadership_sync(
     user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Enqueue a leadership dashboard sync."""
+    """Enqueue a leadership dashboard sync (always full admin-monitored scope)."""
     if db is None:
         return {"error": "Database unavailable"}
     from app.services.sync_worker import enqueue_job
 
+    # Leadership snapshots are global; per-user scope applies at read time only.
     job_id = await enqueue_job("leadership", triggered_by=user.email or "manual")
     return {"status": "queued", "job_id": job_id, "job_type": "leadership"}
 

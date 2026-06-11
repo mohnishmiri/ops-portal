@@ -29,7 +29,7 @@ from kubernetes.client.rest import ApiException
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AKSPodChecksum,
     AKSPodDrift,
@@ -88,7 +88,7 @@ class ComplianceService:
         returns all distinct subscription IDs found in the checksum tables so
         the dashboard can still show existing data.
         """
-        monitored_subscription_ids = await get_monitored_subscription_ids()
+        monitored_subscription_ids = await get_scoped_subscription_ids()
         if not subscription_ids:
             if monitored_subscription_ids:
                 return monitored_subscription_ids
@@ -3663,7 +3663,7 @@ class ComplianceService:
     ) -> list[dict[str, str]]:
         """Get list of subscriptions."""
         # Use provided subscription IDs or fall back to admin-enabled subscriptions
-        subs = subscription_ids or await get_monitored_subscription_ids()
+        subs = subscription_ids or await get_scoped_subscription_ids()
         if not subs:
             logger.warning("No subscriptions configured. Set SUBSCRIPTION_IDS environment variable.")
             return []

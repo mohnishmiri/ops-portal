@@ -3,6 +3,7 @@
  */
 
 import { useQuery, useMutation, useQueryClient, QueryClient } from "@tanstack/react-query";
+import { useSubscriptionScope } from "../contexts/SubscriptionContext";
 import apiClient from "./apiClient";
 
 const GRID_POLL_INTERVAL = 120_000;
@@ -389,9 +390,17 @@ export function useLeadershipCostForecast(
 
 // ── React Query Hooks ─────────────────────────────────────────────────
 
+function leadershipScopeQueryKey(scopeIds: string[]): string {
+  if (!scopeIds.length) return "all";
+  return [...scopeIds].sort().join(",");
+}
+
 export function useLeadershipDashboard() {
+  const { effectiveSubscriptionIds } = useSubscriptionScope();
+  const scopeKey = leadershipScopeQueryKey(effectiveSubscriptionIds);
+
   return useQuery<LeadershipDashboard>({
-    queryKey: ["dashboard", "leadership"],
+    queryKey: ["dashboard", "leadership", scopeKey],
     queryFn: async () => {
       const { data } = await apiClient.get("/dashboards/leadership");
       // Backend returns Decimal fields as strings — coerce to numbers
@@ -484,7 +493,13 @@ export async function enqueueAndAwaitSyncJob(
     const { data: job } = await apiClient.get<SyncJobDetail>(`/sync-jobs/${enqueued.job_id}`);
     if (job.status === "completed" || job.status === "failed") {
       if (job.status === "failed") {
-        throw new Error(job.last_error || "Sync job failed");
+        const result = job.result as { message?: string; error?: string; status?: string } | null;
+        const detail =
+          job.last_error ||
+          result?.error ||
+          result?.message ||
+          "Sync job failed";
+        throw new Error(detail);
       }
       return job;
     }
@@ -653,8 +668,11 @@ export async function refreshBudgetRunRate(): Promise<BudgetRunRateResponse> {
 }
 
 export function useOptimizationSummary() {
+  const { effectiveSubscriptionIds } = useSubscriptionScope();
+  const scopeKey = leadershipScopeQueryKey(effectiveSubscriptionIds);
+
   return useQuery<OptimizationSummary>({
-    queryKey: ["optimization", "summary"],
+    queryKey: ["optimization", "summary", scopeKey],
     queryFn: async () => {
       const { data } = await apiClient.get("/optimize/summary");
       return normalizeOptimizationSummary(data);

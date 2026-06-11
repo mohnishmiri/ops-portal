@@ -58,7 +58,7 @@
 |--------------------|---------------------|--------------------------------------------|
 | UI Framework       | React 18 + TypeScript | Core SPA                                 |
 | Charts             | Recharts / Chart.js | Bar, Pie, Trend visualizations            |
-| State Management   | React Query + Zustand | API caching & local state               |
+| State Management   | React Query + Context | API caching; `SubscriptionProvider` for per-user scope |
 | Auth               | MSAL.js (@azure/msal-react) | Azure AD SSO                     |
 | PDF Generation     | react-pdf / jsPDF   | Client-side report rendering              |
 | Styling            | Tailwind CSS        | Enterprise-grade responsive UI            |
@@ -67,8 +67,8 @@
 | Service                  | Path Prefix           | Responsibility                           |
 |--------------------------|-----------------------|------------------------------------------|
 | Cost Service             | /api/v1/costs         | Cost data ingestion & aggregation        |
-| Optimization Service     | /api/v1/optimize      | FinOps recommendations & wastage         |
-| Auth Service             | /api/v1/auth          | Token validation, RBAC enforcement       |
+| Optimization Service     | /api/v1/optimize      | FinOps recommendations, wastage, cost cleanup deletes |
+| Auth Service             | /api/v1/auth          | Token validation, RBAC, per-user subscription scope   |
 | Notification Service     | /api/v1/notifications | SMTP alerts, budget notifications        |
 | Report Service           | /api/v1/reports       | PDF generation, scheduling               |
 | Admin Service            | /api/v1/admin         | Subscription & user management           |
@@ -81,14 +81,82 @@
 4. **Optimization**: Advisor API + custom heuristics produce recommendations
 5. **Presentation**: React frontend renders dashboards via REST API
 
+### 2.4 Subscription Data Scoping (v1.2.0+)
+
+Portal data is scoped in **two independent layers**:
+
+| Layer | Who controls it | Scope formula | Affects |
+|-------|-----------------|---------------|---------|
+| **Admin monitored set** | Admin panel (`enabled` + `monitored` toggles on `admin_subscriptions`) | `enabled AND monitored` | Sync jobs, background ingestion, global portal ceiling |
+| **Per-user selection** | Each user via nav **Subscription scope** picker | `monitored ∩ RBAC-allowed ∩ selected` | That user's dashboard/API reads only |
+
+```
+Admin Panel                    User Session (nav picker)
+  enabled + monitored    →     optional subset (persisted per user_id)
+         │                              │
+         └──────────┬───────────────────┘
+                    ▼
+         bind_subscription_scope (every /api/v1 request)
+                    │
+                    ▼
+         get_scoped_subscription_ids() in read-path services
+```
+
+**Resolution modules**
+
+| Module | Path | Role |
+|--------|------|------|
+| `subscription_resolver.py` | `app/core/` | Admin monitored list; used by sync jobs via `get_monitored_subscription_ids()` |
+| `subscription_scope.py` | `app/core/` | Per-request effective scope via `bind_subscription_scope` + `get_scoped_subscription_ids()` |
+| `user_preference_service.py` | `app/services/` | Persists `UserSubscriptionPreference` (per `user_id`) |
+
+**Auth scope APIs** (`/api/v1/auth`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/available-subscriptions` | GET | Monitored subs for picker + current user's saved/effective scope |
+| `/subscription-scope` | GET | Current user's saved selection and effective IDs |
+| `/subscription-scope` | PUT | Save per-user `selected_subscription_ids` (empty = all monitored) |
+
+**Frontend wiring**: `SubscriptionProvider` loads scope on login; `apiClient` appends `subscription_ids` query params on GET requests when the user has narrowed their selection. Selection is stored server-side and does not affect other users.
+
+**Admin toggle semantics**
+
+| Column | Meaning |
+|--------|---------|
+| `enabled` | Subscription is registered and eligible for admin operations |
+| `monitored` | Included in sync jobs and available in the per-user picker |
+| `environment` | Optional Prod/Non-Prod tag; amortized cost classification falls back to subscription name when empty |
+
+**Sync job scoping**
+
+| Trigger | Amortized cost sync | Leadership sync |
+|---------|---------------------|-----------------|
+| Scheduler / startup | Full admin-monitored set | Full admin-monitored set |
+| Manual (user Refresh) | User's effective scope when narrower than monitored; otherwise full set | Always full monitored (shared snapshot) |
+
+Manual amortized jobs store optional `subscription_ids` in the sync job payload. Only those subscriptions are fetched and updated in `amortized_cost_records`; other subscriptions keep their existing rows until the next full sync.
+
+Background jobs (scheduler, startup, compliance collection) call `get_monitored_subscription_ids()` with no `subscription_ids` override.
+
+**Leadership dashboard reads (v1.2.0+)** respect per-user subscription scope:
+
+| Scope | Data source | Page cache key |
+|-------|-------------|----------------|
+| Full monitored | `leadership_dashboard_snapshots` (`environment=ALL`) or live Azure | `pagecache:leadership:dashboard:all` |
+| Narrowed picker | `build_leadership_dashboard(subscription_ids)` from `amortized_cost_records` | `pagecache:leadership:dashboard:{scope_hash}` |
+
+Scoped views never fall back to the global snapshot (which would show unfiltered totals). The `environment` column on snapshots supports future per-scope snapshot rows (`scope:{hash}`); scheduled sync continues to write `ALL` only.
+
 ## 3. Security Architecture
 
 - **Authentication**: Azure AD (Entra ID) via MSAL — OIDC/OAuth2 code flow
 - **Authorization**: Claims-based RBAC (Admin / Write / Read) via FastAPI middleware
+- **Subscription scope**: Router-level `bind_subscription_scope` on `/api/v1`; optional `UserContext.allowed_subscriptions` for future RBAC (empty = all monitored today)
 - **Secrets**: Azure Key Vault + Workload Identity — zero secrets in config
 - **Network**: AKS Network Policy, private ingress options, TLS termination
-- **Audit**: All API calls logged with user identity, action, timestamp
-- **Least Privilege**: Managed Identity scoped to `Cost Management Reader` + `Reader`
+- **Audit**: All API calls logged with user identity, action, timestamp; cost cleanup deletes write to `audit_logs`
+- **Least Privilege**: Managed Identity scoped to `Cost Management Reader` + `Reader`; delete APIs require portal `ADMIN` plus Azure RBAC on target resources
 
 ## 4. AKS Cluster Architecture
 
@@ -248,9 +316,36 @@ Scores are calculated using a weighted formula:
 
 ---
 
-## 8. Database Schema
+## 8. FinOps Cost Cleanup (v1.2.0)
 
-### 8.1 Core Model: AuditLog
+Detects wasteful Azure resources via Resource Graph and exposes guarded delete APIs for high-confidence savings.
+
+### 8.1 Detection (Optimization Service)
+
+| Signal | Detection | Leadership KPI |
+|--------|-----------|----------------|
+| Unattached managed disks | `diskState == Unattached` | Unattached Disks |
+| Disconnected private endpoints | All connections `Disconnected` | Disconnected PEs |
+| Orphaned snapshots | Custom heuristics | Orphaned Snapshots |
+
+Resource Waste Signals on the Leadership Dashboard surface counts and drill-down tiles. Idle VM and Overprovisioned KPI cards were removed in v1.2.0 to focus on actionable delete targets.
+
+### 8.2 Cleanup API Endpoints
+
+| Endpoint | Method | Role | Azure RBAC required |
+|----------|--------|------|---------------------|
+| `/api/v1/optimize/cleanup/disks` | POST | ADMIN | `Microsoft.Compute/disks/delete` |
+| `/api/v1/optimize/cleanup/private-endpoints` | POST | ADMIN | `Microsoft.Network/privateEndpoints/delete` |
+
+Pre-delete validation runs in `azure_resource_service.py` (disk must be unattached; PE must have only disconnected connections). Each attempt is recorded in `audit_logs` with `feature: cost_cleanup`.
+
+Delete actions are available from Leadership Dashboard wastage tiles and Infra Alerts (unattached disks table).
+
+---
+
+## 9. Database Schema
+
+### 9.1 Core Model: AuditLog
 ```python
 class AuditLog(Base):
     id: UUID (PK)
@@ -264,7 +359,23 @@ class AuditLog(Base):
     timestamp: DateTime
 ```
 
-### 8.2 ER Diagram Summary
+### 9.2 Subscription & Preference Models
+
+```python
+class AdminSubscription(Base):
+    subscription_id: String (PK)
+    subscription_name: String
+    enabled: Boolean          # registered in portal
+    monitored: Boolean        # included in sync + user picker
+    environment: String       # optional Prod/Non-Prod tag
+
+class UserSubscriptionPreference(Base):
+    user_id: String (PK)      # Entra ID sub / dev-user
+    selected_subscription_ids: Text  # JSON array; empty = all monitored
+    updated_at: DateTime
+```
+
+### 9.3 ER Diagram Summary
 ```
 ┌─────────────────────┐     ┌─────────────────────┐
 │  AKSClusterSnapshot │◄───│ AKSNodePoolSnapshot │
@@ -296,9 +407,9 @@ class AuditLog(Base):
 
 ---
 
-## 9. Technology Stack Summary
+## 10. Technology Stack Summary
 
-### 9.1 Backend Dependencies
+### 10.1 Backend Dependencies
 | Package                      | Version   | Purpose                            |
 |------------------------------|-----------|-------------------------------------|
 | fastapi                      | ≥0.100.0  | REST API framework                  |
@@ -311,7 +422,7 @@ class AuditLog(Base):
 | asyncpg                      | ≥0.29.0   | Async PostgreSQL driver             |
 | alembic                      | ≥1.13.0   | Database migrations                 |
 
-### 9.2 Frontend Dependencies
+### 10.2 Frontend Dependencies
 | Package                      | Purpose                            |
 |------------------------------|------------------------------------|
 | react                        | Core UI framework (v18)            |
@@ -322,9 +433,9 @@ class AuditLog(Base):
 
 ---
 
-## 10. Deployment Architecture
+## 11. Deployment Architecture
 
-### 10.1 Helm Values (Key)
+### 11.1 Helm Values (Key)
 ```yaml
 backend:
   replicas: 2
@@ -347,17 +458,19 @@ frontend:
       memory: 128Mi
 ```
 
-### 10.2 Required Azure RBAC Roles
+### 11.2 Required Azure RBAC Roles
 | Role                          | Scope                    | Purpose                          |
 |-------------------------------|--------------------------|----------------------------------|
 | Cost Management Reader        | Subscription(s)          | Cost data access                 |
 | Reader                        | Subscription(s)          | Resource enumeration             |
+| Disk Contributor (or custom)  | Subscription(s)          | Cost cleanup — delete unattached disks |
+| Network Contributor (or custom) | Subscription(s)        | Cost cleanup — delete disconnected PEs |
 | Azure Kubernetes Service RBAC Reader | AKS Clusters      | Cluster operations               |
 | Synapse Contributor           | Synapse Workspaces       | Pipeline metadata access         |
 
 ---
 
-## 11. Future Enhancements
+## 12. Future Enhancements
 
 1. **Multi-AKS Federation**: Support for multiple AKS clusters in single view
 2. **GitOps Integration**: ArgoCD/Flux drift detection and remediation

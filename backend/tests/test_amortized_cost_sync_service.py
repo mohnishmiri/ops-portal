@@ -126,6 +126,63 @@ async def test_full_sync_inserts_only_targeted_rows(
 
 
 @pytest.mark.anyio
+async def test_full_sync_honors_subscription_ids_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """full_sync with subscription_ids only fetches the requested subscriptions."""
+    db = _FakeSession()
+    service = AmortizedCostSyncService(db)
+    seen_ids: list[list[str]] = []
+
+    async def fake_get_monitored_ids():
+        return ["sub-a", "sub-b", "sub-c"]
+
+    async def fake_fetch_metadata(ids):
+        seen_ids.append(list(ids))
+        return {sub_id: {"subscription_name": sub_id, "environment": "nonprod"} for sub_id in ids}
+
+    async def fake_compute_fetch_ranges(ids, full_start, end_date):
+        return {sub_id: [(full_start, end_date)] for sub_id in ids}
+
+    async def fake_delete_fetch_ranges(per_sub):
+        pass
+
+    async def fake_load_rows_incremental(sub_meta, per_sub, end_date):
+        return [], [], per_sub
+
+    async def fake_invalidate(_pattern):
+        pass
+
+    async def fake_aggregate():
+        pass
+
+    monkeypatch.setattr(
+        "app.services.amortized_cost_sync_service.get_monitored_subscription_ids",
+        fake_get_monitored_ids,
+    )
+    monkeypatch.setattr(service, "_fetch_subscription_metadata", fake_fetch_metadata)
+    monkeypatch.setattr(service, "_compute_fetch_ranges", fake_compute_fetch_ranges)
+    monkeypatch.setattr(service, "_delete_fetch_ranges", fake_delete_fetch_ranges)
+    monkeypatch.setattr(service, "_load_rows_incremental", fake_load_rows_incremental)
+    monkeypatch.setattr(
+        "app.services.amortized_cost_sync_service.cache_manager.invalidate",
+        fake_invalidate,
+    )
+    monkeypatch.setattr(service, "_aggregate_cost_summaries", fake_aggregate)
+
+    result = await service.full_sync(
+        months=2,
+        triggered_by="manual",
+        subscription_ids=["sub-b"],
+    )
+
+    assert result["status"] == "completed"
+    assert result["sync_scope"] == "partial"
+    assert result["subscription_ids"] == ["sub-b"]
+    assert seen_ids == [["sub-b"]]
+
+
+@pytest.mark.anyio
 async def test_load_rows_incremental_uses_query_api_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

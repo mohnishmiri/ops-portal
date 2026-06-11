@@ -16,7 +16,7 @@ This skill standardizes page work across frontend and backend so every new or up
 - adds pagination below every grid
 - preserves or adds auditability through the existing database audit log model
 - prefers the repo's backend-mediated Ollama integration where AI-generated summaries or recommendations are useful
-- sources subscription-scoped data only from the Admin-selected monitored subscriptions, enforced in backend services rather than frontend-only filtering
+- sources subscription-scoped data via `get_scoped_subscription_ids()` (admin monitored set ∩ per-user picker), enforced in backend services rather than frontend-only filtering
 
 ## Non-Negotiable Rules
 
@@ -30,7 +30,7 @@ This skill standardizes page work across frontend and backend so every new or up
 5. If AI assistance is useful, prefer the backend Ollama integration pattern already used in the repo. Do not call the LLM directly from the browser.
 6. Do not hardcode secrets, auth headers, or tokens.
 7. Keep changes aligned with the existing React, FastAPI, SQLAlchemy, React Query, Tailwind, and ATT component patterns.
-8. For any new page or existing page modification that shows Azure subscription-scoped data, resolve scope from the Admin panel's monitored subscriptions and enforce that scope in backend services/endpoints. Do not default to global data or rely on frontend-only filtering.
+8. For subscription-scoped pages, use `get_scoped_subscription_ids()` in backend services (not `get_monitored_subscription_ids()` for reads). Sync jobs keep `get_monitored_subscription_ids()`. Frontend `SubscriptionContext` sends `subscription_ids` on GET via `apiClient`. See `docs/ARCHITECTURE.md` §2.4.
 
 ## Required References
 

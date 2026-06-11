@@ -161,7 +161,7 @@ async def test_vm_threshold_configs_use_monitored_subscription_scope(monkeypatch
         return ["sub-1", "sub-2"]
 
     monkeypatch.setattr(
-        "app.services.infra_alert_service.get_monitored_subscription_ids",
+        "app.services.infra_alert_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 
@@ -184,7 +184,7 @@ async def test_vm_threshold_alerts_join_config_scope(monkeypatch):
         return ["sub-1"]
 
     monkeypatch.setattr(
-        "app.services.infra_alert_service.get_monitored_subscription_ids",
+        "app.services.infra_alert_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 
@@ -205,7 +205,7 @@ async def test_inventory_reads_use_monitored_subscription_scope(monkeypatch):
         return ["sub-1"]
 
     monkeypatch.setattr(
-        "app.services.azure_resource_service.get_monitored_subscription_ids",
+        "app.services.azure_resource_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 
@@ -239,7 +239,7 @@ async def test_inventory_summary_matches_frontend_shape(monkeypatch):
         return ["sub-1"]
 
     monkeypatch.setattr(
-        "app.services.azure_resource_service.get_monitored_subscription_ids",
+        "app.services.azure_resource_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 
@@ -273,7 +273,7 @@ async def test_cached_aks_clusters_use_monitored_subscription_scope(monkeypatch)
         return ["sub-1"]
 
     monkeypatch.setattr(
-        "app.services.aks_operations_service.get_monitored_subscription_ids",
+        "app.services.aks_operations_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 
@@ -350,7 +350,7 @@ async def test_alert_summary_aggregates_all_statuses_and_types(monkeypatch):
         return ["sub-1"]
 
     monkeypatch.setattr(
-        "app.services.infra_alert_service.get_monitored_subscription_ids",
+        "app.services.infra_alert_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 

@@ -8,6 +8,11 @@ GET  ``/sync-jobs`` — list recent jobs (newest first), filterable by type.
 Legacy ``/costs/amortized/sync`` and ``/dashboards/leadership/sync`` enqueue
 jobs and return ``202`` with a ``job_id``. Prefer ``POST /sync-jobs`` and poll
 ``GET /sync-jobs/{id}`` for long-running Azure sync work.
+
+Manual **amortized** jobs include ``subscription_ids`` in the payload when the
+user's subscription picker is narrower than the full admin-monitored set.
+**Leadership** manual jobs always sync the full monitored set (shared snapshot).
+Scheduled/startup jobs never pass ``subscription_ids``.
 """
 
 from __future__ import annotations
@@ -16,13 +21,14 @@ import json
 from datetime import datetime, timedelta
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
+from app.core.subscription_scope import subscription_ids_for_manual_amortized_sync
 from app.models.auth import UserContext, UserRole
 from app.models.database import SyncJob
 from app.services.sync_worker import enqueue_job
@@ -104,6 +110,7 @@ def _job_to_detail(job: SyncJob) -> SyncJobDetail:
 )
 async def enqueue_sync_job(
     body: EnqueueRequest,
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> EnqueueResponse:
@@ -116,6 +123,9 @@ async def enqueue_sync_job(
     payload: dict = {}
     if body.job_type == "amortized":
         payload = {"months": body.months or 2, "force": body.force}
+        scoped_ids = await subscription_ids_for_manual_amortized_sync(request)
+        if scoped_ids:
+            payload["subscription_ids"] = scoped_ids
 
     # Detect whether we reused an existing job by checking the DB before/after.
     pre_existing_id: int | None = None

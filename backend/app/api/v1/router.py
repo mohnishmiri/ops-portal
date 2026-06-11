@@ -2,7 +2,7 @@
 API v1 Router — aggregates all endpoint routers.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.v1.endpoints import (
     admin,
@@ -20,8 +20,9 @@ from app.api.v1.endpoints import (
     reports,
     sync_jobs,
 )
+from app.core.subscription_scope import bind_subscription_scope
 
-api_router = APIRouter()
+api_router = APIRouter(dependencies=[Depends(bind_subscription_scope)])
 
 # Auth — user context & role introspection
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])

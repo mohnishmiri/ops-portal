@@ -9,6 +9,7 @@ subsequent requests from DB instead of live Azure queries.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta
 
@@ -28,6 +29,27 @@ STALE_HOURS = 6
 RUNNING_SYNC_TIMEOUT_MINUTES = 90
 LEADERSHIP_DASHBOARD_CACHE_KEY = "pagecache:leadership:dashboard:all"
 SNAPSHOT_RETENTION_DAYS = 90
+
+
+def leadership_dashboard_cache_key(subscription_ids: list[str] | None = None) -> str:
+    """Page-cache key for a leadership dashboard payload.
+
+    Full admin-monitored scope uses the legacy ``:all`` key. Narrowed per-user
+    scopes get a stable hash suffix so each selection caches independently.
+    """
+    if not subscription_ids:
+        return LEADERSHIP_DASHBOARD_CACHE_KEY
+    scope = ",".join(sorted(subscription_ids))
+    digest = hashlib.md5(scope.encode()).hexdigest()[:12]
+    return f"pagecache:leadership:dashboard:{digest}"
+
+
+def leadership_snapshot_scope_key(subscription_ids: list[str] | None) -> str:
+    """Value stored in ``LeadershipDashboardSnapshot.environment`` for scoped rows."""
+    if not subscription_ids:
+        return "ALL"
+    scope = ",".join(sorted(subscription_ids))
+    return f"scope:{hashlib.md5(scope.encode()).hexdigest()[:12]}"
 
 
 class LeadershipSyncService:
@@ -274,11 +296,16 @@ class LeadershipSyncService:
         finally:
             await release_advisory_lock(self._db, "sync:leadership")
 
-    async def get_dashboard_from_db(self) -> dict | None:
-        """Load the latest leadership dashboard snapshot from DB."""
+    async def get_dashboard_from_db(
+        self,
+        *,
+        subscription_ids: list[str] | None = None,
+    ) -> dict | None:
+        """Load the latest leadership dashboard snapshot for the given scope."""
+        scope_env = leadership_snapshot_scope_key(subscription_ids)
         result = await self._db.execute(
             select(LeadershipDashboardSnapshot)
-            .where(LeadershipDashboardSnapshot.environment == "ALL")
+            .where(LeadershipDashboardSnapshot.environment == scope_env)
             .order_by(LeadershipDashboardSnapshot.snapshot_date.desc())
             .limit(1)
         )
@@ -289,9 +316,27 @@ class LeadershipSyncService:
             data = json.loads(snapshot.payload)
             data["_source"] = "database"
             data["_synced_at"] = snapshot.synced_at.isoformat()
+            data["_scope"] = scope_env
             return data
         except (json.JSONDecodeError, TypeError):
             return None
+
+    async def get_dashboard_from_amortized(
+        self,
+        subscription_ids: list[str],
+    ) -> dict | None:
+        """Build leadership dashboard from amortized_cost_records for a subscription scope."""
+        from app.services.amortized_cost_sync_service import AmortizedCostSyncService
+
+        built = await AmortizedCostSyncService(self._db).build_leadership_dashboard(
+            subscription_ids=subscription_ids,
+        )
+        if built is None:
+            return None
+        data = built.model_dump(mode="json")
+        data["_source"] = "amortized_database"
+        data["_scope"] = leadership_snapshot_scope_key(subscription_ids)
+        return data
 
     async def get_sync_status(self) -> dict:
         """Return latest sync status with enriched detail."""

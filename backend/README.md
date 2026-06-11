@@ -42,6 +42,41 @@ See `app/core/config.py` for full configuration. Key variables:
 
 Page/API caching uses PostgreSQL (`page_cache` table), not Redis.
 
-Cost cleanup delete APIs (`POST /api/v1/optimize/cleanup/*`) require portal `ADMIN` role and Azure RBAC for `Microsoft.Compute/disks/delete` and `Microsoft.Network/privateEndpoints/delete` on target subscriptions.
+## Subscription scoping
+
+Portal data is limited to subscriptions marked **enabled** and **monitored** in the Admin panel (`admin_subscriptions` table). Resolution lives in `app/core/subscription_resolver.py` (`get_monitored_subscription_ids()`).
+
+**Read paths** (dashboards, costs, AKS, compliance, Key Vault, optimization) call `get_scoped_subscription_ids()` from `app/core/subscription_scope.py`. Every `/api/v1` route runs `bind_subscription_scope`, which intersects:
+
+```
+monitored subscriptions ∩ user.allowed_subscriptions (RBAC, optional) ∩ subscription_ids query param
+```
+
+**Background sync jobs** (scheduler, startup) use `get_monitored_subscription_ids()` with no override.
+
+**Manual amortized sync** (`POST /sync-jobs`, `POST /costs/amortized/sync`): when the user's subscription picker is narrower than the full monitored set, the job payload includes `subscription_ids` and only those subscriptions are refreshed. Leadership manual sync always uses the full monitored set (shared dashboard snapshot).
+
+### Per-user subscription picker
+
+Each user can narrow their view without affecting others. Preferences are stored in `user_subscription_preferences` (keyed by Entra `sub`).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/auth/available-subscriptions` | GET | Monitored subs + saved/effective scope for current user |
+| `/api/v1/auth/subscription-scope` | GET | Current user's selection |
+| `/api/v1/auth/subscription-scope` | PUT | Save `selected_subscription_ids` (empty array = all monitored) |
+
+The React frontend sends `subscription_ids` as repeated query parameters on GET requests when the user has narrowed scope.
+
+## Cost cleanup (v1.2.0)
+
+FinOps delete APIs remove high-confidence waste after pre-delete validation:
+
+| Endpoint | Validates | Portal role | Azure RBAC |
+|----------|-----------|-------------|------------|
+| `POST /api/v1/optimize/cleanup/disks` | Disk `Unattached` | ADMIN | `Microsoft.Compute/disks/delete` |
+| `POST /api/v1/optimize/cleanup/private-endpoints` | All connections `Disconnected` | ADMIN | `Microsoft.Network/privateEndpoints/delete` |
+
+Attempts are written to `audit_logs` with `feature: cost_cleanup`.
 
 Copy `backend/.env.example` to `backend/.env` and adjust values for your environment.

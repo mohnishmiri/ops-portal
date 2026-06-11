@@ -1,8 +1,11 @@
 """
 Centralised subscription resolver.
 
-All pages / services MUST call ``get_monitored_subscription_ids()`` instead of
-reading ``settings.subscription_ids`` directly.  The resolver:
+All read paths MUST call ``get_scoped_subscription_ids()`` (from
+``app.core.subscription_scope``) so per-user subscription selection applies.
+Background sync jobs use ``get_monitored_subscription_ids()`` directly.
+
+The resolver:
 
 1. Queries the ``admin_subscriptions`` table for rows with
    ``enabled = True AND monitored = True``.

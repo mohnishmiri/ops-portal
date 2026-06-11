@@ -12,7 +12,7 @@
 |---|---|
 | Backend API | **FastAPI** (Python 3.11+), async, Pydantic v2 |
 | Database | **PostgreSQL** via SQLAlchemy 2 async + asyncpg, Alembic migrations |
-| Cache | **Redis** 5+ |
+| Cache | **PostgreSQL** `page_cache` table (`app/core/db_cache.py`); legacy Redis references may exist in compose/env |
 | Frontend | **React 18** + TypeScript, Vite 5, TailwindCSS 3.4 |
 | State Management | **Zustand** 4.5 + **React Query** (@tanstack/react-query 5.50) |
 | Auth | **Azure AD (Entra ID)** — MSAL.js (frontend), OIDC/JWT middleware (backend) |
@@ -43,11 +43,12 @@ azure-ops-portal/
 │   │   ├── core/               # App-wide config & infra
 │   │   │   ├── config.py       # Pydantic Settings (env-based)
 │   │   │   ├── database.py     # Async SQLAlchemy engine + session factory
-│   │   │   ├── redis.py        # Async Redis client
+│   │   │   ├── db_cache.py     # PostgreSQL page_cache layer
 │   │   │   ├── azure_auth.py   # Token verification, RBAC helpers
 │   │   │   ├── azure_throttle.py # Azure API rate-limit handling
 │   │   │   ├── logging.py      # structlog configuration
-│   │   │   └── subscription_resolver.py
+│   │   │   ├── subscription_resolver.py  # Admin monitored subs (sync jobs)
+│   │   │   └── subscription_scope.py     # Per-request user scope (reads)
 │   │   ├── middleware/
 │   │   │   ├── audit.py        # Request/response audit logging
 │   │   │   └── rate_limit.py   # Per-endpoint rate limiting
@@ -134,7 +135,8 @@ Each file lives under `backend/app/services/` and exposes async functions consum
 | `keyvault_service.py` | Azure Key Vault secret read/write |
 | `keyvault_sync_service.py` | Periodic Key Vault sync to DB |
 | `notification_service.py` | In-app notification CRUD |
-| `optimization_service.py` | Azure Advisor recommendations & custom rules |
+| `optimization_service.py` | Azure Advisor recommendations, wastage detection, disconnected PEs |
+| `user_preference_service.py` | Per-user subscription scope preferences |
 | `report_service.py` | PDF/Excel report generation (WeasyPrint + jsPDF) |
 | `scheduler_service.py` | APScheduler job management |
 | `synapse_checksum_bash_service.py` | Run Synapse pipeline checksum scripts |
@@ -155,17 +157,18 @@ Each TSX file lives under `frontend/src/components/`.
 | `ChecksumScheduleList.tsx` | List & manage schedules |
 | `ChecksumScheduleManagement.tsx` | Schedule admin wrapper |
 | `CompliancePage.tsx` | Drift detection & compliance score |
-| `EnvCostDetailsPage.tsx` | Per-environment cost details |
 | `EnvDailyCostPage.tsx` | Daily cost trend per environment |
-| `InfraAlertPage.tsx` | Infrastructure alert viewer |
+| `InfraAlertPage.tsx` | Infrastructure alert viewer + unattached disk delete |
 | `KeyVaultPage.tsx` | Key Vault secret browser |
-| `LeadershipDashboard.tsx` | Exec-level cost summary |
-| `OperationsDashboard.tsx` | Day-to-day ops cost dashboard |
-| `OptimizationPage.tsx` | Advisor recommendations & savings |
+| `LeadershipDashboard.tsx` | Exec cost summary, wastage signals, cost cleanup deletes |
+| `SubscriptionScopePicker.tsx` | Per-user subscription scope (nav bar) |
 | `Toast.tsx` | Global toast notification component |
 
+**Frontend contexts** (`frontend/src/contexts/`):
+`AuthContext.tsx`, `PermissionsContext.tsx`, `SubscriptionContext.tsx` (per-user scope + `apiClient` query params)
+
 **Frontend API Services** (`frontend/src/services/`):
-`aksApi.ts`, `apiClient.ts` (Axios instance + MSAL interceptor), `checksumScheduleApi.ts`, `complianceApi.ts`, `costApi.ts`, `infraAlertApi.ts`
+`aksApi.ts`, `apiClient.ts` (Axios + MSAL + `subscription_ids` on GET), `checksumScheduleApi.ts`, `complianceApi.ts`, `costApi.ts`, `infraAlertApi.ts`
 
 ---
 
@@ -176,8 +179,8 @@ Each TSX file lives under `frontend/src/components/`.
 | Prefix | Description |
 |---|---|
 | `/costs` | Cost queries, daily/monthly aggregation, forecasting |
-| `/optimize` | Optimization recommendations, savings tracking |
-| `/auth` | Current user, roles, token refresh |
+| `/optimize` | Optimization recommendations, wastage; `POST /cleanup/disks`, `POST /cleanup/private-endpoints` (ADMIN) |
+| `/auth` | Current user, roles, per-user subscription scope (`/subscription-scope`, `/available-subscriptions`) |
 | `/notifications` | Notification CRUD & preferences |
 | `/reports` | Generate & download PDF/Excel reports |
 | `/admin` | User management, system settings |
@@ -232,16 +235,20 @@ class PluginBase:
 
 ---
 
-## 8. Authentication & RBAC
+## 8. Authentication, RBAC & Subscription Scope
 
 | Layer | Mechanism |
 |---|---|
 | Frontend | `@azure/msal-react` 2.0 — authorization-code + PKCE flow |
 | Backend | OIDC JWT validation via `python-jose` + Azure AD JWKS |
 | RBAC | Claims-based roles: **Admin**, **Write**, **Read** |
+| Admin monitored set | `admin_subscriptions.enabled AND monitored` → `get_monitored_subscription_ids()` |
+| Per-user read scope | `UserSubscriptionPreference` + `bind_subscription_scope` on `/api/v1` |
 | Workload Identity | AKS → Azure APIs via Workload Identity Federation (no static secrets) |
 
-Config is in `frontend/src/config/authConfig.ts` and `backend/app/core/azure_auth.py`.
+**Effective read scope:** `monitored ∩ allowed_subscriptions (optional) ∩ selected_subscription_ids`.
+
+Config is in `frontend/src/config/authConfig.ts` and `backend/app/auth/__init__.py`. See `docs/ARCHITECTURE.md` §2.4 and `docs/access-control-design.md` Gap 4.
 
 ---
 

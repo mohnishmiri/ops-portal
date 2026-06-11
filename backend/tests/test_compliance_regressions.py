@@ -158,7 +158,7 @@ async def test_resolve_scoped_subscription_ids_intersects_requested_ids(monkeypa
         return ["sub-1", "sub-2"]
 
     monkeypatch.setattr(
-        "app.services.compliance_service.get_monitored_subscription_ids",
+        "app.services.compliance_service.get_scoped_subscription_ids",
         _mock_monitored_ids,
     )
 

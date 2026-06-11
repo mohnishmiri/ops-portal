@@ -17,7 +17,7 @@ from azure.mgmt.monitor import MonitorManagementClient
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AlertScheduleConfig,
     CustomExpiryAlert,
@@ -93,7 +93,7 @@ class InfraAlertService:
         self,
         subscription_id: str | None = None,
     ) -> list[str]:
-        monitored_subscription_ids = await get_monitored_subscription_ids()
+        monitored_subscription_ids = await get_scoped_subscription_ids()
         if subscription_id is None:
             return monitored_subscription_ids
 
