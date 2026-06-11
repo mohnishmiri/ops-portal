@@ -106,6 +106,19 @@ Resources
 | project id, name, resourceGroup, subscriptionId, location, tags
 """
 
+QUERY_DISCONNECTED_PRIVATE_ENDPOINTS = """
+Resources
+| where type =~ 'microsoft.network/privateendpoints'
+| extend connections = array_concat(
+    coalesce(properties.privateLinkServiceConnections, dynamic([])),
+    coalesce(properties.manualPrivateLinkServiceConnections, dynamic([]))
+  )
+| mv-expand connection = connections
+| extend connectionStatus = tostring(connection.properties.privateLinkServiceConnectionState.status)
+| where connectionStatus =~ 'Disconnected'
+| project id, name, resourceGroup, subscriptionId, location, connectionStatus, tags
+"""
+
 QUERY_ORPHANED_SNAPSHOTS = """
 Resources
 | where type =~ 'microsoft.compute/snapshots'
@@ -132,6 +145,9 @@ DISK_COST_ESTIMATES: dict[str, float] = {
     "Premium_ZRS": 0.17,
     "UltraSSD_LRS": 0.22,
 }
+
+# Private endpoint NIC hourly charge (~$0.01/hr)
+PRIVATE_ENDPOINT_MONTHLY_COST = Decimal("7.00")
 
 
 _GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -514,6 +530,49 @@ class OptimizationService:
                 )
             )
 
+        # Disconnected private endpoints
+        private_endpoints = await self._run_resource_graph_query(
+            QUERY_DISCONNECTED_PRIVATE_ENDPOINTS, subscription_ids
+        )
+        seen_pe_ids: set[str] = set()
+        for pe in private_endpoints:
+            pe_id = pe.get("id", "")
+            if not pe_id or pe_id in seen_pe_ids:
+                continue
+            seen_pe_ids.add(pe_id)
+            monthly_cost = PRIVATE_ENDPOINT_MONTHLY_COST
+            recommendations.append(
+                CostRecommendation(
+                    id=f"pe-{uuid.uuid4().hex[:12]}",
+                    category=RecommendationCategory.NETWORK_OPTIMIZATION,
+                    priority=RecommendationPriority.MEDIUM,
+                    title=f"Disconnected private endpoint: {pe.get('name', 'unknown')}",
+                    description=(
+                        f"Private endpoint '{pe.get('name')}' has a disconnected private link "
+                        "connection and should be deleted for cleanup."
+                    ),
+                    resource=ResourceInfo(
+                        resource_id=pe_id,
+                        resource_name=pe.get("name", ""),
+                        resource_type="Microsoft.Network/privateEndpoints",
+                        resource_group=pe.get("resourceGroup", ""),
+                        subscription_id=pe.get("subscriptionId", ""),
+                        subscription_name=pe.get("subscriptionId", ""),
+                        location=pe.get("location", ""),
+                        tags=pe.get("tags", {}),
+                    ),
+                    current_monthly_cost=monthly_cost,
+                    estimated_monthly_savings=monthly_cost,
+                    estimated_annual_savings=(monthly_cost * 12).quantize(Decimal("0.01")),
+                    confidence=ConfidenceLevel.HIGH,
+                    confidence_score=95.0,
+                    action_required="Delete disconnected private endpoint to stop ongoing NIC charges",
+                    risk_level="low",
+                    source="resource_graph",
+                    created_at=datetime.now(UTC),
+                )
+            )
+
         # Orphaned NICs
         nics = await self._run_resource_graph_query(QUERY_ORPHANED_NICS, subscription_ids)
         for nic in nics:
@@ -618,6 +677,7 @@ class OptimizationService:
                 total_annual_waste=Decimal("14250.00"),
                 idle_vms_count=3,
                 unattached_disks_count=5,
+                disconnected_private_endpoints_count=2,
                 orphaned_snapshots_count=4,
                 overprovisioned_count=5,
             ),
@@ -678,6 +738,8 @@ class OptimizationService:
                 wastage.idle_vms_count += 1
             elif rec.category == RecommendationCategory.UNATTACHED_DISKS:
                 wastage.unattached_disks_count += 1
+            elif rec.category == RecommendationCategory.NETWORK_OPTIMIZATION:
+                wastage.disconnected_private_endpoints_count += 1
             elif rec.category == RecommendationCategory.ORPHANED_SNAPSHOTS:
                 wastage.orphaned_snapshots_count += 1
             elif rec.category == RecommendationCategory.OVERPROVISIONED_SKUS:
@@ -699,6 +761,7 @@ class OptimizationService:
             bucket["resources"].append(
                 {
                     "name": rec.resource.resource_name,
+                    "resource_id": rec.resource.resource_id,
                     "resource_group": rec.resource.resource_group,
                     "subscription_id": rec.resource.subscription_id,
                     "monthly_cost": str(rec.estimated_monthly_savings),

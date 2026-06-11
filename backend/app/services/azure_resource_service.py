@@ -660,6 +660,132 @@ class AzureResourceService:
             logger.error("get_disk_details_failed", disk=disk_name, error=str(e))
             return None
 
+    def _get_compute_client_for_subscription(self, subscription_id: str):
+        """Create a Compute client scoped to a specific subscription."""
+        return ComputeManagementClient(
+            credential=self._get_credential(),
+            subscription_id=subscription_id,
+        )
+
+    def _get_network_client_for_subscription(self, subscription_id: str):
+        """Create a Network client scoped to a specific subscription."""
+        return NetworkManagementClient(
+            credential=self._get_credential(),
+            subscription_id=subscription_id,
+        )
+
+    async def delete_unattached_disk(
+        self,
+        subscription_id: str,
+        resource_group: str,
+        disk_name: str,
+    ) -> dict[str, Any]:
+        """Delete a managed disk only when it is unattached."""
+        self._ensure_azure_available()
+        compute = self._get_compute_client_for_subscription(subscription_id)
+
+        def _delete() -> dict[str, Any]:
+            disk = compute.disks.get(resource_group, disk_name)
+            disk_state = str(disk.disk_state) if disk.disk_state else ""
+            managed_by = disk.managed_by or ""
+            if disk_state != "Unattached" or managed_by:
+                raise ValueError(
+                    f"Disk '{disk_name}' is not unattached (state={disk_state or 'unknown'}). "
+                    "Only unattached disks can be deleted."
+                )
+            poller = compute.disks.begin_delete(resource_group, disk_name)
+            poller.wait()
+            return {
+                "status": "success",
+                "action": "delete",
+                "resource_name": disk_name,
+                "resource_group": resource_group,
+                "subscription_id": subscription_id,
+            }
+
+        try:
+            result = await asyncio.to_thread(_delete)
+            logger.info(
+                "disk_deleted",
+                disk=disk_name,
+                resource_group=resource_group,
+                subscription_id=subscription_id,
+            )
+            return result
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error("delete_unattached_disk_failed", disk=disk_name, error=str(e))
+            raise
+
+    async def delete_disconnected_private_endpoint(
+        self,
+        subscription_id: str,
+        resource_group: str,
+        endpoint_name: str,
+    ) -> dict[str, Any]:
+        """Delete a private endpoint only when all connections are disconnected."""
+        self._ensure_azure_available()
+        network = self._get_network_client_for_subscription(subscription_id)
+
+        def _connection_statuses(endpoint) -> list[str]:
+            statuses: list[str] = []
+            for conn in endpoint.private_link_service_connections or []:
+                state = conn.private_link_service_connection_state
+                if state and state.status:
+                    statuses.append(str(state.status))
+            for conn in endpoint.manual_private_link_service_connections or []:
+                state = conn.private_link_service_connection_state
+                if state and state.status:
+                    statuses.append(str(state.status))
+            return statuses
+
+        def _delete() -> dict[str, Any]:
+            endpoint = network.private_endpoints.get(resource_group, endpoint_name)
+            statuses = _connection_statuses(endpoint)
+            if not statuses:
+                raise ValueError(
+                    f"Private endpoint '{endpoint_name}' has no private link connections to evaluate."
+                )
+            active = {s for s in statuses if s.lower() not in ("disconnected", "rejected")}
+            if active:
+                raise ValueError(
+                    f"Private endpoint '{endpoint_name}' has active connections ({', '.join(sorted(active))}). "
+                    "Only fully disconnected endpoints can be deleted."
+                )
+            if not any(s.lower() == "disconnected" for s in statuses):
+                raise ValueError(
+                    f"Private endpoint '{endpoint_name}' has no disconnected connections."
+                )
+            poller = network.private_endpoints.begin_delete(resource_group, endpoint_name)
+            poller.wait()
+            return {
+                "status": "success",
+                "action": "delete",
+                "resource_name": endpoint_name,
+                "resource_group": resource_group,
+                "subscription_id": subscription_id,
+            }
+
+        try:
+            result = await asyncio.to_thread(_delete)
+            logger.info(
+                "private_endpoint_deleted",
+                endpoint=endpoint_name,
+                resource_group=resource_group,
+                subscription_id=subscription_id,
+            )
+            return result
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(
+                "delete_disconnected_private_endpoint_failed",
+                endpoint=endpoint_name,
+                error=str(e),
+            )
+            raise
+
     # ── PostgreSQL Flexible Servers ──────────────────────────────────────
 
     async def list_pg_flex_servers(

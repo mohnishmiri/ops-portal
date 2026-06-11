@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ── Application ───────────────────────────────────────────────────
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "1.2.0"
     ENVIRONMENT: str = Field(default="development", description="development | staging | production")
     LOG_LEVEL: str = "INFO"
     DEBUG: bool = False

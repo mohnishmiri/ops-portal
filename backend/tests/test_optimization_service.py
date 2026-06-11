@@ -159,6 +159,25 @@ async def _fake_resource_graph(self, query: str, subscription_ids=None):
         ]
     if "microsoft.compute/disks" in query:
         return []
+    if "microsoft.network/privateendpoints" in query:
+        return [
+            {
+                "id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Network/privateEndpoints/pe-disconnected",
+                "name": "pe-disconnected",
+                "resourceGroup": "rg",
+                "subscriptionId": "sub-1",
+                "location": "eastus2",
+                "connectionStatus": "Disconnected",
+            },
+            {
+                "id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.Network/privateEndpoints/pe-disconnected",
+                "name": "pe-disconnected",
+                "resourceGroup": "rg",
+                "subscriptionId": "sub-1",
+                "location": "eastus2",
+                "connectionStatus": "Disconnected",
+            },
+        ]
     if "microsoft.network/networkinterfaces" in query:
         return []
     return []
@@ -179,3 +198,19 @@ async def test_detect_idle_resources_filters_non_orphaned_snapshots(
     assert len(orphaned) == 1
     assert orphaned[0].resource.resource_name == "orphaned-snap"
     assert orphaned[0].title == "Orphaned snapshot: orphaned-snap"
+
+
+@pytest.mark.anyio
+async def test_detect_idle_resources_maps_disconnected_private_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OptimizationService()
+    monkeypatch.setattr(OptimizationService, "_run_resource_graph_query", _fake_resource_graph)
+
+    recommendations = await service.detect_idle_resources(["sub-1"])
+
+    disconnected = [r for r in recommendations if r.category == RecommendationCategory.NETWORK_OPTIMIZATION]
+
+    assert len(disconnected) == 1
+    assert disconnected[0].resource.resource_name == "pe-disconnected"
+    assert disconnected[0].action_required.startswith("Delete disconnected private endpoint")

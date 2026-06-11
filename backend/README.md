@@ -42,4 +42,6 @@ See `app/core/config.py` for full configuration. Key variables:
 
 Page/API caching uses PostgreSQL (`page_cache` table), not Redis.
 
+Cost cleanup delete APIs (`POST /api/v1/optimize/cleanup/*`) require portal `ADMIN` role and Azure RBAC for `Microsoft.Compute/disks/delete` and `Microsoft.Network/privateEndpoints/delete` on target subscriptions.
+
 Copy `backend/.env.example` to `backend/.env` and adjust values for your environment.

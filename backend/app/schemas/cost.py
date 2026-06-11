@@ -274,6 +274,7 @@ class LeadershipAdvisorWastage(BaseModel):
     total_monthly_waste: Decimal | float
     idle_vms_count: int
     unattached_disks_count: int
+    disconnected_private_endpoints_count: int = 0
     orphaned_snapshots_count: int
     overprovisioned_count: int
     details: list[LeadershipAdvisorWastageDetail] = Field(default_factory=list)

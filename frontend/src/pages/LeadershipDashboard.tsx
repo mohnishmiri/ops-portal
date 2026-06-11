@@ -30,11 +30,14 @@ import {
   useLeadershipCostAdvisor,
   useLeadershipCostForecast,
   useOllamaStatus,
+  useDeleteUnattachedDisk,
+  useDeleteDisconnectedPrivateEndpoint,
   KPIMetric,
   MonthlyCostPoint,
   NonProdVsProdPoint,
   WastageDetailItem,
 } from "../services/costApi";
+import { useAuth } from "../contexts/AuthContext";
 import type {
   LeadershipDashboard as LeadershipDashboardData,
   OptimizationSummary,
@@ -317,12 +320,21 @@ interface WastageDetailTileProps {
     total_monthly_waste: number;
     idle_vms_count: number;
     unattached_disks_count: number;
+    disconnected_private_endpoints_count: number;
     orphaned_snapshots_count: number;
     overprovisioned_count: number;
     details: WastageDetailItem[];
   };
   totalAnnualSavings: number;
 }
+
+const DELETABLE_WASTAGE_CATEGORIES = new Set([
+  "Unattached Disks",
+  "Network Optimization",
+]);
+
+const isDiskCategory = (category: string) => category === "Unattached Disks";
+const isPrivateEndpointCategory = (category: string) => category === "Network Optimization";
 
 const PRIORITY_COLORS: Record<string, string> = {
   critical: "bg-red-100 text-red-700",
@@ -337,12 +349,31 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
   wastage,
   totalAnnualSavings,
 }) => {
+  const { canWrite } = useAuth();
+  const deleteDiskMut = useDeleteUnattachedDisk();
+  const deletePeMut = useDeleteDisconnectedPrivateEndpoint();
   const [expandedCat, setExpandedCat] = React.useState<string | null>(null);
   const [categorySearch, setCategorySearch] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = React.useState<{
+    text: string;
+    tone: "success" | "error";
+  } | null>(null);
+  const [confirmDialog, setConfirmDialog] = React.useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
   // Per-category resource search + pagination state
   const [resourceSearch, setResourceSearch] = React.useState<Record<string, string>>({});
   const [currentPage, setCurrentPage] = React.useState<Record<string, number>>({});
   const [pageSize, setPageSize] = React.useState<Record<string, number>>({});
+
+  const showStatus = React.useCallback((text: string, tone: "success" | "error") => {
+    setStatusMessage({ text, tone });
+    window.setTimeout(() => setStatusMessage(null), 5000);
+  }, []);
 
   const getResourceSearch = (cat: string) => resourceSearch[cat] || "";
   const getCurrentPage = (cat: string) => currentPage[cat] || 1;
@@ -401,13 +432,6 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
 
   const wastageCards = [
     {
-      title: "Idle VMs",
-      value: wastage.idle_vms_count.toLocaleString(),
-      subtitle: "No meaningful utilization",
-      icon: MetricCardIcons.server(),
-      tone: "orange" as const,
-    },
-    {
       title: "Unattached Disks",
       value: wastage.unattached_disks_count.toLocaleString(),
       subtitle: "Detached from workloads",
@@ -415,18 +439,18 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
       tone: "amber" as const,
     },
     {
+      title: "Disconnected PEs",
+      value: (wastage.disconnected_private_endpoints_count ?? 0).toLocaleString(),
+      subtitle: "Private link disconnected",
+      icon: MetricCardIcons.layers(),
+      tone: "red" as const,
+    },
+    {
       title: "Orphaned Snapshots",
       value: wastage.orphaned_snapshots_count.toLocaleString(),
       subtitle: "Likely retirable",
       icon: MetricCardIcons.layers(),
       tone: "red" as const,
-    },
-    {
-      title: "Overprovisioned",
-      value: wastage.overprovisioned_count.toLocaleString(),
-      subtitle: "Sized above observed demand",
-      icon: MetricCardIcons.alert(),
-      tone: "amber" as const,
     },
     {
       title: "Annual Savings Potential",
@@ -456,7 +480,19 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
         </div>
       </div>
 
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      {statusMessage && (
+        <div
+          className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
+            statusMessage.tone === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : "border-red-200 bg-red-50 text-red-800"
+          }`}
+        >
+          {statusMessage.text}
+        </div>
+      )}
+
+      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {wastageCards.map((card) => (
           <MetricCard
             key={card.title}
@@ -621,13 +657,14 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
                               <th className="text-left py-1.5 pr-2">Recommendation</th>
                               <th className="text-left py-1.5 pr-2">SKU</th>
                               <th className="text-center py-1.5 pr-2">Priority</th>
-                              <th className="text-right py-1.5">Monthly Cost</th>
+                              <th className="text-right py-1.5 pr-2">Monthly Cost</th>
+                              {canWrite && <th className="text-center py-1.5">Actions</th>}
                             </tr>
                           </thead>
                           <tbody>
                             {paginatedResources.length === 0 && (
                               <tr>
-                                <td colSpan={6} className="py-4 text-center text-gray-400">
+                                <td colSpan={canWrite ? 7 : 6} className="py-4 text-center text-gray-400">
                                   No resources match your search.
                                 </td>
                               </tr>
@@ -664,9 +701,92 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
                                     </span>
                                   )}
                                 </td>
-                                <td className="py-1.5 text-right text-orange-600 font-medium whitespace-nowrap">
+                                <td className="py-1.5 pr-2 text-right text-orange-600 font-medium whitespace-nowrap">
                                   ${Number(res.monthly_cost).toLocaleString()}
                                 </td>
+                                {canWrite && (
+                                  <td className="py-1.5 text-center">
+                                    {DELETABLE_WASTAGE_CATEGORIES.has(detail.category) &&
+                                      res.resource_group &&
+                                      res.subscription_id &&
+                                      (res.resource_id || res.name) && (
+                                      <button
+                                        type="button"
+                                        title="Delete resource"
+                                        disabled={deleteTarget === (res.resource_id || res.name)}
+                                        onClick={() => {
+                                          const resourceName = res.name || res.title;
+                                          const monthly = Number(res.monthly_cost || 0);
+                                          setConfirmDialog({
+                                            title: isDiskCategory(detail.category)
+                                              ? "Delete unattached disk?"
+                                              : "Delete disconnected private endpoint?",
+                                            message: `Permanently delete "${resourceName}" in ${res.resource_group}? This cannot be undone.${
+                                              monthly > 0
+                                                ? ` Estimated savings: $${monthly.toLocaleString()}/mo.`
+                                                : ""
+                                            }`,
+                                            confirmLabel: "Delete",
+                                            onConfirm: () => {
+                                              const targetKey = res.resource_id || res.name || "";
+                                              setDeleteTarget(targetKey);
+                                              if (isDiskCategory(detail.category)) {
+                                                deleteDiskMut.mutate(
+                                                  {
+                                                    subscription_id: res.subscription_id,
+                                                    resource_group: res.resource_group,
+                                                    disk_name: res.name,
+                                                  },
+                                                  {
+                                                    onSuccess: () =>
+                                                      showStatus(
+                                                        `Disk '${resourceName}' deleted successfully.`,
+                                                        "success"
+                                                      ),
+                                                    onError: (err: unknown) => {
+                                                      const detail =
+                                                        (err as { response?: { data?: { detail?: string } } })
+                                                          ?.response?.data?.detail ||
+                                                        `Failed to delete disk '${resourceName}'.`;
+                                                      showStatus(detail, "error");
+                                                    },
+                                                    onSettled: () => setDeleteTarget(null),
+                                                  }
+                                                );
+                                              } else if (isPrivateEndpointCategory(detail.category)) {
+                                                deletePeMut.mutate(
+                                                  {
+                                                    subscription_id: res.subscription_id,
+                                                    resource_group: res.resource_group,
+                                                    endpoint_name: res.name,
+                                                  },
+                                                  {
+                                                    onSuccess: () =>
+                                                      showStatus(
+                                                        `Private endpoint '${resourceName}' deleted successfully.`,
+                                                        "success"
+                                                      ),
+                                                    onError: (err: unknown) => {
+                                                      const detail =
+                                                        (err as { response?: { data?: { detail?: string } } })
+                                                          ?.response?.data?.detail ||
+                                                        `Failed to delete private endpoint '${resourceName}'.`;
+                                                      showStatus(detail, "error");
+                                                    },
+                                                    onSettled: () => setDeleteTarget(null),
+                                                  }
+                                                );
+                                              }
+                                            },
+                                          });
+                                        }}
+                                        className="rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-semibold text-red-700 transition hover:bg-red-100 disabled:opacity-40"
+                                      >
+                                        {deleteTarget === (res.resource_id || res.name) ? "..." : "Delete"}
+                                      </button>
+                                    )}
+                                  </td>
+                                )}
                               </tr>
                             ))}
                           </tbody>
@@ -738,6 +858,40 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {confirmDialog && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={() => setConfirmDialog(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-gray-900">{confirmDialog.title}</h3>
+            <p className="mt-2 text-sm leading-relaxed text-gray-600">{confirmDialog.message}</p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmDialog(null)}
+                className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  confirmDialog.onConfirm();
+                  setConfirmDialog(null);
+                }}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>

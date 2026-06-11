@@ -103,6 +103,7 @@ export interface WastageDetailItem {
   annual_waste: number;
   resources: Array<{
     name: string;
+    resource_id?: string;
     resource_group: string;
     subscription_id: string;
     monthly_cost: string;
@@ -124,6 +125,7 @@ export interface OptimizationSummary {
     total_monthly_waste: number;
     idle_vms_count: number;
     unattached_disks_count: number;
+    disconnected_private_endpoints_count: number;
     orphaned_snapshots_count: number;
     overprovisioned_count: number;
     details: WastageDetailItem[];
@@ -659,6 +661,51 @@ export function useOptimizationSummary() {
     },
     staleTime: 30 * 60 * 1000,
     gcTime: 60 * 60 * 1000,
+  });
+}
+
+export interface DiskCleanupRequest {
+  subscription_id: string;
+  resource_group: string;
+  disk_name: string;
+}
+
+export interface PrivateEndpointCleanupRequest {
+  subscription_id: string;
+  resource_group: string;
+  endpoint_name: string;
+}
+
+export async function deleteUnattachedDisk(body: DiskCleanupRequest): Promise<Record<string, unknown>> {
+  const { data } = await apiClient.post("/optimize/cleanup/disks", body);
+  return data;
+}
+
+export async function deleteDisconnectedPrivateEndpoint(
+  body: PrivateEndpointCleanupRequest
+): Promise<Record<string, unknown>> {
+  const { data } = await apiClient.post("/optimize/cleanup/private-endpoints", body);
+  return data;
+}
+
+export function useDeleteUnattachedDisk() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteUnattachedDisk,
+    onSuccess: async () => {
+      await refreshOptimizationSummary(qc);
+      qc.invalidateQueries({ queryKey: ["azure-resources"] });
+    },
+  });
+}
+
+export function useDeleteDisconnectedPrivateEndpoint() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteDisconnectedPrivateEndpoint,
+    onSuccess: async () => {
+      await refreshOptimizationSummary(qc);
+    },
   });
 }
 

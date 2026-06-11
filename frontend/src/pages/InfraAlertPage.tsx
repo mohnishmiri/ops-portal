@@ -93,6 +93,7 @@ import {
   useVMThresholdAlerts,
   useVMThresholdConfigs,
 } from "../services/infraAlertApi";
+import { useDeleteUnattachedDisk } from "../services/costApi";
 import {
   PieChart,
   Pie,
@@ -731,6 +732,14 @@ const InfraAlertPage: React.FC = () => {
   const restartPGServerMut = useRestartPGServer();
   const [vmActionTarget, setVMActionTarget] = useState<string | null>(null);
   const [pgActionTarget, setPGActionTarget] = useState<string | null>(null);
+  const [diskActionTarget, setDiskActionTarget] = useState<string | null>(null);
+  const deleteDiskMut = useDeleteUnattachedDisk();
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Toast notification (consistent with AKS Operations page)
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -2701,6 +2710,40 @@ const InfraAlertPage: React.FC = () => {
         </div>
       )}
 
+      {confirmDialog && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={() => setConfirmDialog(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-gray-900">{confirmDialog.title}</h3>
+            <p className="mt-2 text-sm leading-relaxed text-gray-600">{confirmDialog.message}</p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmDialog(null)}
+                className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  confirmDialog.onConfirm();
+                  setConfirmDialog(null);
+                }}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {toast && (
         <Toast
@@ -3066,6 +3109,7 @@ const InfraAlertPage: React.FC = () => {
                     <th className={gridStyles.headerCell}><SortableHeader label="SKU" active={diskSort.key === "sku"} direction={diskSort.direction} onClick={() => setTblSort("disks", "sku", "asc")} /></th>
                     <th className={gridStyles.headerCell}><SortableHeader label="OS Type" active={diskSort.key === "os_type"} direction={diskSort.direction} onClick={() => setTblSort("disks", "os_type", "asc")} /></th>
                     <th className={gridStyles.headerCell}><SortableHeader label="State" active={diskSort.key === "disk_state"} direction={diskSort.direction} onClick={() => setTblSort("disks", "disk_state", "asc")} /></th>
+                    {canWrite && <th className={gridStyles.headerCellCenter}>Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -3107,6 +3151,52 @@ const InfraAlertPage: React.FC = () => {
                             {disk.disk_state || "Unknown"}
                           </span>
                         </td>
+                        {canWrite && (
+                          <td className={gridStyles.centerCell}>
+                            {disk.disk_state === "Unattached" && (
+                              <GridActionButton
+                                onClick={() => {
+                                  setConfirmDialog({
+                                    title: "Delete unattached disk?",
+                                    message: `Permanently delete "${disk.name}" in ${disk.resource_group}? This cannot be undone.`,
+                                    confirmLabel: "Delete",
+                                    onConfirm: () => {
+                                      setDiskActionTarget(disk.name);
+                                      deleteDiskMut.mutate(
+                                        {
+                                          subscription_id: disk.subscription_id,
+                                          resource_group: disk.resource_group,
+                                          disk_name: disk.name,
+                                        },
+                                        {
+                                          onSuccess: () => {
+                                            showToast(`Disk '${disk.name}' deleted successfully`);
+                                            syncResources.mutate("disk");
+                                          },
+                                          onError: (e: unknown) => {
+                                            const detail =
+                                              (e as { response?: { data?: { detail?: string } } })
+                                                ?.response?.data?.detail ||
+                                              `Failed to delete disk '${disk.name}'`;
+                                            showToast(detail, "error");
+                                          },
+                                          onSettled: () => setDiskActionTarget(null),
+                                        }
+                                      );
+                                    },
+                                  });
+                                }}
+                                disabled={diskActionTarget === disk.name}
+                                title="Delete unattached disk"
+                                tone="red"
+                              >
+                                {diskActionTarget === disk.name && deleteDiskMut.isPending
+                                  ? Icons.refresh("animate-spin")
+                                  : Icons.trash()}
+                              </GridActionButton>
+                            )}
+                          </td>
+                        )}
                       </tr>
                     );
                   })}

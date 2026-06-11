@@ -129,6 +129,7 @@ class WastageSummary(BaseModel):
     total_annual_waste: Decimal = Field(ge=0)
     idle_vms_count: int = 0
     unattached_disks_count: int = 0
+    disconnected_private_endpoints_count: int = 0
     orphaned_snapshots_count: int = 0
     overprovisioned_count: int = 0
     details: list["WastageDetailItem"] = Field(

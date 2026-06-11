@@ -156,3 +156,78 @@ async def test_claim_startup_task_lock_returns_false_when_lock_exists(monkeypatc
     claimed = await main_module._claim_startup_task_lock("amortized-cost")
 
     assert claimed is False
+
+
+@pytest.mark.anyio
+async def test_delete_unattached_disk_requires_admin(reader_client, monkeypatch):
+    monkeypatch.setattr("app.auth._dev_auth_enabled", lambda: False)
+
+    resp = await reader_client.post(
+        "/api/v1/optimize/cleanup/disks",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg",
+            "disk_name": "disk-01",
+        },
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_delete_unattached_disk_rejects_attached_disk(admin_client, monkeypatch):
+    class FakeAzureResourceService:
+        def __init__(self, db_session=None):
+            pass
+
+        async def delete_unattached_disk(self, subscription_id, resource_group, disk_name):
+            raise ValueError("Disk 'disk-01' is not unattached (state=Attached). Only unattached disks can be deleted.")
+
+    monkeypatch.setattr(
+        "app.services.azure_resource_service.AzureResourceService",
+        FakeAzureResourceService,
+    )
+
+    resp = await admin_client.post(
+        "/api/v1/optimize/cleanup/disks",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg",
+            "disk_name": "disk-01",
+        },
+    )
+    assert resp.status_code == 400
+    assert "not unattached" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_delete_unattached_disk_succeeds_for_admin(admin_client, monkeypatch):
+    class FakeAzureResourceService:
+        def __init__(self, db_session=None):
+            pass
+
+        async def delete_unattached_disk(self, subscription_id, resource_group, disk_name):
+            return {
+                "status": "success",
+                "action": "delete",
+                "resource_name": disk_name,
+                "resource_group": resource_group,
+                "subscription_id": subscription_id,
+            }
+
+    monkeypatch.setattr(
+        "app.services.azure_resource_service.AzureResourceService",
+        FakeAzureResourceService,
+    )
+
+    resp = await admin_client.post(
+        "/api/v1/optimize/cleanup/disks",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg",
+            "disk_name": "disk-01",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["resource_name"] == "disk-01"
