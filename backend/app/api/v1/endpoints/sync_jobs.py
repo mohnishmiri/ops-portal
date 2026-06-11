@@ -5,10 +5,9 @@ GET  ``/sync-jobs/{id}`` — fetch a job's current status, last_error,
                           and result payload.
 GET  ``/sync-jobs`` — list recent jobs (newest first), filterable by type.
 
-The existing ``/costs/amortized/sync`` and ``/dashboards/leadership/sync``
-endpoints remain synchronous (running the job inline) so existing clients
-keep working. Newer clients should use ``/sync-jobs`` to submit and poll
-without blocking the request thread.
+Legacy ``/costs/amortized/sync`` and ``/dashboards/leadership/sync`` enqueue
+jobs and return ``202`` with a ``job_id``. Prefer ``POST /sync-jobs`` and poll
+``GET /sync-jobs/{id}`` for long-running Azure sync work.
 """
 
 from __future__ import annotations
@@ -22,9 +21,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_role
 from app.core.database import get_db
-from app.models.auth import UserContext
+from app.models.auth import UserContext, UserRole
 from app.models.database import SyncJob
 from app.services.sync_worker import enqueue_job
 
@@ -105,7 +104,7 @@ def _job_to_detail(job: SyncJob) -> SyncJobDetail:
 )
 async def enqueue_sync_job(
     body: EnqueueRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> EnqueueResponse:
     if body.job_type not in _ALLOWED_JOB_TYPES:

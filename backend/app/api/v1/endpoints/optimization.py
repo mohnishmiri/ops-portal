@@ -36,7 +36,7 @@ def _get_optimization_service() -> OptimizationService:
 async def get_optimization_summary(
     refresh: bool = Query(
         default=False,
-        description="Bypass Redis cache and fetch fresh optimization data",
+        description="Bypass page cache and fetch fresh optimization data",
     ),
     user: UserContext = Depends(get_current_user),
     service: OptimizationService = Depends(_get_optimization_service),

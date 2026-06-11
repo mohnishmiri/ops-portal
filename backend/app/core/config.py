@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = Field(default="development", description="development | staging | production")
     LOG_LEVEL: str = "INFO"
     DEBUG: bool = False
+    DEV_AUTH_BYPASS: bool = Field(
+        default=False,
+        description="When true in development, allow synthetic admin without a Bearer token",
+    )
 
     # ── Azure AD / Entra ID ───────────────────────────────────────────
     AZURE_TENANT_ID: str = Field(default="", description="Azure AD tenant ID")
@@ -89,6 +93,7 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_ollama_base_url(cls, value: str) -> str:
         return value.strip().rstrip("/")
+
     OLLAMA_MODEL: str = Field(
         default="llama3.1",
         description="Default model name for leadership advisor prompts",
@@ -102,6 +107,34 @@ class Settings(BaseSettings):
         default="",
         description="Optional outbound auth header value for Ollama requests",
     )
+
+    # ── Agent LLM (future agentic layer — separate from Leadership Ollama) ──
+    AGENT_LLM_BASE_URL: str = Field(
+        default="http://localhost:11434",
+        description="Base URL for the agentic assistant LLM endpoint",
+    )
+    AGENT_LLM_MODEL: str = Field(
+        default="llama3.1",
+        description="Default model for agent chat / tool orchestration",
+    )
+    AGENT_LLM_TIMEOUT_SECONDS: int = Field(
+        default=120,
+        description="Timeout for agent LLM requests",
+    )
+    AGENT_LLM_AUTH_HEADER_NAME: str = Field(
+        default="",
+        description="Optional outbound auth header name for the agent LLM proxy",
+    )
+    AGENT_LLM_AUTH_HEADER_VALUE: str = Field(
+        default="",
+        description="Optional outbound auth header value for the agent LLM proxy",
+    )
+
+    @field_validator("AGENT_LLM_BASE_URL")
+    @classmethod
+    def _strip_agent_llm_base_url(cls, value: str) -> str:
+        return value.strip().rstrip("/")
+
     AZURE_PRICING_API_URL: str = Field(
         default="https://prices.azure.com/api/retail/prices",
         description="Official Azure Retail Prices API endpoint used for pricing enrichment",

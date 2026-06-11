@@ -78,22 +78,11 @@ async def test_amortized_sync_returns_502_on_failed_sync(app, client, monkeypatc
             allowed_subscriptions=[],
         )
 
-    # Mock full_sync to return a completed result
-    async def fake_full_sync(self, months=2, triggered_by="manual", force=False):
-        return {
-            "status": "completed",
-            "months_synced": months,
-            "rows_synced": 42,
-            "total_cost": 1234.56,
-            "started_at": "2026-04-20T00:00:00",
-            "completed_at": "2026-04-20T00:00:05",
-            "duration_seconds": 5.0,
-        }
+    async def fake_enqueue_job(job_type, *, payload=None, triggered_by=None, idempotency_key=None, dedup_session=None):
+        assert job_type == "amortized"
+        return 99
 
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.costs.AmortizedCostSyncService.full_sync",
-        fake_full_sync,
-    )
+    monkeypatch.setattr("app.services.sync_worker.enqueue_job", fake_enqueue_job)
     app.dependency_overrides[get_db] = fake_get_db
     app.dependency_overrides[get_current_user] = fake_get_current_user
 
@@ -102,11 +91,10 @@ async def test_amortized_sync_returns_502_on_failed_sync(app, client, monkeypatc
     finally:
         app.dependency_overrides.clear()
 
-    # Endpoint now awaits full_sync and returns the result directly
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     data = resp.json()
-    assert data["status"] == "completed"
-    assert data["rows_synced"] == 42
+    assert data["status"] == "queued"
+    assert data["job_id"] == 99
 
 
 @pytest.mark.anyio

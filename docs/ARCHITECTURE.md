@@ -21,7 +21,7 @@
 │  │         (Managed Identity → Azure AD Token)              │ │           │
 │  └──────────────────────────────────────────────────────────┘ │           │
 │                                                    ┌─────────┴────────┐ │
-│                                                    │  Redis Cache     │ │
+│                                                    │  page_cache (PG) │ │
 │                                                    │  (session/cache) │ │
 │                                                    └──────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -76,7 +76,7 @@
 
 ### 2.3 Data Flow
 1. **Ingestion**: Backend polls Azure Cost Management API (Usage/Query) daily
-2. **Caching**: Results cached in Redis (TTL: 1hr for dashboards, 24hr for reports)
+2. **Caching**: Results cached in PostgreSQL `page_cache` (TTL: 1hr for dashboards, 24hr for reports)
 3. **Aggregation**: Backend aggregates by subscription, resource group, type, category
 4. **Optimization**: Advisor API + custom heuristics produce recommendations
 5. **Presentation**: React frontend renders dashboards via REST API

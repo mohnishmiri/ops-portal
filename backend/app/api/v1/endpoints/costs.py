@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_role
 from app.core.database import get_db
-from app.models.auth import UserContext
+from app.models.auth import UserContext, UserRole
 from app.models.cost import (
     CostBreakdownResponse,
     CostQueryRequest,
@@ -308,31 +308,35 @@ async def get_amortized_drilldown(
 
 @router.post(
     "/amortized/sync",
-    summary="Trigger amortized cost sync from Azure Cost Management",
+    summary="Enqueue amortized cost sync (prefer POST /sync-jobs)",
     description=(
-        "Runs a sync of amortized cost data from Azure Cost Management API. "
-        "Normal mode is incremental (missing months + correction window). "
-        "Use force=true to wipe and re-fetch ALL months in the window — required "
-        "after enrichment logic changes to repair existing DB records. "
-        "For long-running syncs, the client should set an appropriate timeout."
+        "Queues a background amortized cost sync. Poll GET /sync-jobs/{id} "
+        "or use POST /sync-jobs directly. Normal mode is incremental; "
+        "force=true wipes and re-fetches the selected month window."
     ),
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def trigger_amortized_cost_sync(
     months: int = Query(default=2, ge=1, le=12, description="Number of months to sync"),
     force: bool = Query(default=False, description="Wipe and re-fetch all months (repairs stale resource_type values)"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Run amortized cost sync and return the result."""
+    """Enqueue amortized cost sync and return the job id."""
     if db is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database unavailable",
         )
-    svc = AmortizedCostSyncService(db)
+    from app.services.sync_worker import enqueue_job
+
     try:
-        result = await svc.full_sync(months=months, triggered_by="manual", force=force)
-        return result
+        job_id = await enqueue_job(
+            "amortized",
+            payload={"months": months, "force": force},
+            triggered_by=user.email or "manual",
+        )
+        return {"status": "queued", "job_id": job_id, "job_type": "amortized"}
     except Exception as exc:
         if _is_database_error(exc):
             _raise_database_unavailable(exc)

@@ -73,17 +73,19 @@ async def _expire_abandoned_jobs() -> None:
 async def _claim_next_job() -> SyncJob | None:
     """Pick the oldest queued job and atomically flip it to 'running'.
 
-    Uses a single UPDATE ... WHERE id = (SELECT ... ORDER BY enqueued_at ...
-    LIMIT 1) RETURNING * pattern via two-step select-then-update with a
-    status check, which is sufficient because we only run one worker per
-    process (no contention).
+    Uses SELECT ... FOR UPDATE SKIP LOCKED so multiple replicas can run
+    workers without claiming the same queued job.
     """
     session_factory = _get_session_factory()
     if session_factory is None:
         return None
     async with session_factory() as session:
         result = await session.execute(
-            select(SyncJob).where(SyncJob.status == "queued").order_by(SyncJob.enqueued_at.asc()).limit(1)
+            select(SyncJob)
+            .where(SyncJob.status == "queued")
+            .order_by(SyncJob.enqueued_at.asc())
+            .limit(1)
+            .with_for_update(skip_locked=True)
         )
         job = result.scalars().first()
         if job is None:

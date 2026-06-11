@@ -537,7 +537,21 @@ class AmortizedCostSyncService:
         changes (e.g. resource_type mapping) to repair historical records that
         were written with the old logic.
         """
+        from app.core.sync_lock import release_advisory_lock, try_acquire_advisory_lock
+
         await self._expire_abandoned_running_rows()
+        if not await try_acquire_advisory_lock(self._db, "sync:amortized"):
+            return {
+                "status": "already_running",
+                "message": "Another amortized cost sync is in progress",
+            }
+        if await self.is_sync_running():
+            await release_advisory_lock(self._db, "sync:amortized")
+            return {
+                "status": "already_running",
+                "message": "An amortized cost sync is already marked running",
+            }
+
         sync_record = AmortizedCostSyncStatus(
             sync_type="force" if force else "full",
             status="running",
@@ -738,6 +752,8 @@ class AmortizedCostSyncService:
                 "completed_at": sync_record.completed_at.isoformat(),
                 "duration_seconds": round(duration_seconds, 2),
             }
+        finally:
+            await release_advisory_lock(self._db, "sync:amortized")
 
     # ── Time-Series Aggregation ──────────────────────────────────────
 

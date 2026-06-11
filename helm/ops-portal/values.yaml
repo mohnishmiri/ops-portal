@@ -62,9 +62,6 @@ backend:
       - envName: AZURE_SUBSCRIPTION_IDS
         akvSecretName: opsportal-backend-azure-subscription-ids
         kubernetesSecretName: ops-portal-backend-azure-subscription-ids
-      - envName: REDIS_URL
-        akvSecretName: opsportal-backend-redis-url
-        kubernetesSecretName: ops-portal-backend-redis-url
       - envName: DATABASE_URL
         akvSecretName: opsportal-backend-database-url
         kubernetesSecretName: ops-portal-backend-database-url
@@ -113,6 +110,21 @@ backend:
       - envName: OLLAMA_AUTH_HEADER_VALUE
         akvSecretName: opsportal-backend-ollama-auth-header-value
         kubernetesSecretName: ops-portal-backend-ollama-auth-header-value
+      - envName: AGENT_LLM_BASE_URL
+        akvSecretName: opsportal-backend-agent-llm-base-url
+        kubernetesSecretName: ops-portal-backend-agent-llm-base-url
+      - envName: AGENT_LLM_MODEL
+        akvSecretName: opsportal-backend-agent-llm-model
+        kubernetesSecretName: ops-portal-backend-agent-llm-model
+      - envName: AGENT_LLM_TIMEOUT_SECONDS
+        akvSecretName: opsportal-backend-agent-llm-timeout-seconds
+        kubernetesSecretName: ops-portal-backend-agent-llm-timeout-seconds
+      - envName: AGENT_LLM_AUTH_HEADER_NAME
+        akvSecretName: opsportal-backend-agent-llm-auth-header-name
+        kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-name
+      - envName: AGENT_LLM_AUTH_HEADER_VALUE
+        akvSecretName: opsportal-backend-agent-llm-auth-header-value
+        kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-value
 
   # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.
   secretProvider:
@@ -231,22 +243,6 @@ ingress:
     - secretName: ops-portal-tls
       hosts:
         - attccopsportal.stage.att.com
-
-# ── Redis ──────────────────────────────────────────────────────
-
-redis:
-  enabled: true
-  architecture: standalone
-  auth:
-    enabled: false
-  master:
-    resources:
-      requests:
-        cpu: 100m
-        memory: 128Mi
-      limits:
-        cpu: 250m
-        memory: 256Mi
 
 # ── Network Policy ─────────────────────────────────────────────
 

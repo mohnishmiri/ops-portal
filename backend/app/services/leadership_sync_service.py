@@ -135,7 +135,21 @@ class LeadershipSyncService:
         time-series history is preserved.  Records older than
         ``SNAPSHOT_RETENTION_DAYS`` are pruned to prevent unbounded growth.
         """
+        from app.core.sync_lock import release_advisory_lock, try_acquire_advisory_lock
+
         await self._expire_abandoned_running_rows()
+        if not await try_acquire_advisory_lock(self._db, "sync:leadership"):
+            return {
+                "status": "already_running",
+                "message": "Another leadership sync is in progress",
+            }
+        if await self.is_sync_running():
+            await release_advisory_lock(self._db, "sync:leadership")
+            return {
+                "status": "already_running",
+                "message": "A leadership sync is already marked running",
+            }
+
         sync_record = LeadershipSyncStatus(
             sync_type="full",
             status="running",
@@ -257,6 +271,8 @@ class LeadershipSyncService:
                 triggered_by=triggered_by,
             )
             return {"status": "failed", "error": str(exc)[:500]}
+        finally:
+            await release_advisory_lock(self._db, "sync:leadership")
 
     async def get_dashboard_from_db(self) -> dict | None:
         """Load the latest leadership dashboard snapshot from DB."""

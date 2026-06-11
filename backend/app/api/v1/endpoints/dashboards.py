@@ -134,20 +134,6 @@ async def leadership_dashboard(
 
 
 @router.get(
-    "/ops",
-    summary="Operations / Infrastructure dashboard",
-)
-async def ops_dashboard(
-    user: UserContext = Depends(get_current_user),
-    service: DashboardService = Depends(_get_dashboard_service),
-) -> dict:
-    """Operations dashboard with deep resource cost insights."""
-    return await service.get_ops_dashboard(
-        subscription_ids=user.allowed_subscriptions or None,
-    )
-
-
-@router.get(
     "/admin",
     summary="Admin dashboard (subscriptions, users, roles)",
 )
@@ -172,7 +158,7 @@ async def admin_dashboard(
     ),
 )
 async def budget_runrate(
-    refresh: bool = Query(default=False, description="Bypass Redis cache"),
+    refresh: bool = Query(default=False, description="Bypass page cache"),
     user: UserContext = Depends(get_current_user),
     service: BudgetService = Depends(_get_budget_service),
 ) -> dict:
@@ -185,21 +171,21 @@ async def budget_runrate(
 
 @router.post(
     "/leadership/sync",
-    summary="Trigger leadership dashboard data sync from Azure",
-    description=(
-        "Pulls latest cost data from Azure Cost Management APIs, "
-        "computes dashboard metrics, and stores the snapshot in the database."
-    ),
+    summary="Enqueue leadership dashboard sync (prefer POST /sync-jobs)",
+    description="Queues a background leadership dashboard sync. Poll GET /sync-jobs/{id}.",
+    status_code=202,
 )
 async def trigger_leadership_sync(
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Manually trigger a leadership dashboard sync."""
+    """Enqueue a leadership dashboard sync."""
     if db is None:
         return {"error": "Database unavailable"}
-    svc = LeadershipSyncService(db)
-    return await svc.full_sync(triggered_by="manual")
+    from app.services.sync_worker import enqueue_job
+
+    job_id = await enqueue_job("leadership", triggered_by=user.email or "manual")
+    return {"status": "queued", "job_id": job_id, "job_type": "leadership"}
 
 
 @router.get(

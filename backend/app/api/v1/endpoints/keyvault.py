@@ -322,10 +322,10 @@ async def list_secrets(
 async def get_secret(
     name: str,
     vault_uri: str = Query(description="Key Vault URI"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     service: KeyVaultService = Depends(_get_kv_service),
 ) -> dict:
-    """Get a secret value. Any authenticated user."""
+    """Get a secret value. Requires Admin or Write role."""
     try:
         return await service.get_secret_value(vault_uri, name)
     except Exception as e:

@@ -281,9 +281,12 @@ const AmortizedCostDashboard: React.FC = () => {
     return max;
   }, [data?.daily_trend]);
 
-  const handleSync = useCallback(() => {
-    syncMutation.mutate({ months });
-  }, [months, syncMutation]);
+  const handleSync = useCallback(
+    (force = false) => {
+      syncMutation.mutate({ months, force });
+    },
+    [months, syncMutation],
+  );
 
   const handleDrilldown = (type: string, value: string) => {
     const filter: typeof drilldownFilter = {};
@@ -394,28 +397,38 @@ const AmortizedCostDashboard: React.FC = () => {
             Refresh
           </button>
           {canWrite && (
-          <button
-            onClick={handleSync}
-            disabled={syncMutation.isPending}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-60 shadow-sm transition"
-          >
-            {syncMutation.isPending ? (
-              <>
-                <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Syncing…
-              </>
-            ) : (
-              <>
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
-                </svg>
-                Sync from Azure
-              </>
-            )}
-          </button>
+          <>
+            <button
+              onClick={() => handleSync(false)}
+              disabled={syncMutation.isPending}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-60 shadow-sm transition"
+            >
+              {syncMutation.isPending ? (
+                <>
+                  <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Syncing…
+                </>
+              ) : (
+                <>
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+                  </svg>
+                  Sync from Azure
+                </>
+              )}
+            </button>
+            <button
+              onClick={() => handleSync(true)}
+              disabled={syncMutation.isPending}
+              title="Wipe and re-fetch all months in the window (repairs location and resource metadata)"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 disabled:opacity-60 shadow-sm transition"
+            >
+              Force sync
+            </button>
+          </>
           )}
         </div>
       </div>

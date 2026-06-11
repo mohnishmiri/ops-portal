@@ -42,14 +42,6 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-    # Allow Redis
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: redis
-      ports:
-        - port: 6379
-          protocol: TCP
     # Allow PostgreSQL
     - to: []
       ports:

@@ -476,15 +476,13 @@ Legend: ✅ Pass | ⚠️ Warning (partial) | ❌ Fail | N/A (rule not applicabl
 | Page | File | Key UI Elements |
 |------|------|----------------|
 | LeadershipDashboard | `pages/LeadershipDashboard.tsx` | Cards, KPI charts, cost trends |
-| OperationsDashboard | `pages/OperationsDashboard.tsx` | Daily spend chart, anomaly table |
+| AmortizedCostDashboard | `pages/AmortizedCostDashboard.tsx` | Amortized cost analytics, drill-down |
 | AmortizedCostDashboard | `pages/AmortizedCostDashboard.tsx` | Cost query grid, export buttons |
-| OptimizationPage | `pages/OptimizationPage.tsx` | Recommendations grid, idle resource cards |
 | AKSOperationsPage | `pages/AKSOperationsPage.tsx` | Cluster grids, deployment tables, pod logs |
 | KeyVaultPage | `pages/KeyVaultPage.tsx` | Vault browser grid, secret management |
 | CompliancePage | `pages/CompliancePage.tsx` | Drift detection grids, checksum results |
 | InfraAlertPage | `pages/InfraAlertPage.tsx` | Alert grids, threshold configs |
 | AdminDashboard | `pages/AdminDashboard.tsx` | Subscription management grid |
-| EnvCostDetailsPage | `pages/EnvCostDetailsPage.tsx` | Environment cost breakdown charts |
 
 ---
 

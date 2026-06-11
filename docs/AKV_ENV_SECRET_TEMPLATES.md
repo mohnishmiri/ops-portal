@@ -26,15 +26,15 @@ This keeps actual application secrets out of GitHub.
 
 Per environment:
 
-- backend AKV secrets to create: `23`
+- backend AKV secrets to create: `27`
 - frontend AKV secrets to create: `4`
-- total AKV secrets to create: `27`
+- total AKV secrets to create: `31`
 - `AzureKeyVaultSecret` objects created in AKS: `22`
 - Kubernetes `Secret` objects created in AKS: `22`
 
 Across both `dev` and `prod`:
 
-- total AKV secrets to create: `54`
+- total AKV secrets to create: `62`
 - if `dev` and `prod` are separate AKS clusters, total `AzureKeyVaultSecret` objects: `44`
 - if `dev` and `prod` are separate AKS clusters, total Kubernetes `Secret` objects: `44`
 
@@ -76,7 +76,6 @@ Notes:
 | `AZURE_CLIENT_ID` | `opsportal-backend-azure-client-id` | `ops-portal-backend-azure-client-id` |
 | `AZURE_CLIENT_SECRET` | `opsportal-backend-azure-client-secret` | `ops-portal-backend-azure-client-secret` |
 | `AZURE_SUBSCRIPTION_IDS` | `opsportal-backend-azure-subscription-ids` | `ops-portal-backend-azure-subscription-ids` |
-| `REDIS_URL` | `opsportal-backend-redis-url` | `ops-portal-backend-redis-url` |
 | `DATABASE_URL` | `opsportal-backend-database-url` | `ops-portal-backend-database-url` |
 | `DB_ECHO` | `opsportal-backend-db-echo` | `ops-portal-backend-db-echo` |
 | `SMTP_HOST` | `opsportal-backend-smtp-host` | `ops-portal-backend-smtp-host` |
@@ -93,6 +92,11 @@ Notes:
 | `OLLAMA_TIMEOUT_SECONDS` | `opsportal-backend-ollama-timeout-seconds` | `ops-portal-backend-ollama-timeout-seconds` |
 | `OLLAMA_AUTH_HEADER_NAME` | `opsportal-backend-ollama-auth-header-name` | `ops-portal-backend-ollama-auth-header-name` |
 | `OLLAMA_AUTH_HEADER_VALUE` | `opsportal-backend-ollama-auth-header-value` | `ops-portal-backend-ollama-auth-header-value` |
+| `AGENT_LLM_BASE_URL` | `opsportal-backend-agent-llm-base-url` | `ops-portal-backend-agent-llm-base-url` |
+| `AGENT_LLM_MODEL` | `opsportal-backend-agent-llm-model` | `ops-portal-backend-agent-llm-model` |
+| `AGENT_LLM_TIMEOUT_SECONDS` | `opsportal-backend-agent-llm-timeout-seconds` | `ops-portal-backend-agent-llm-timeout-seconds` |
+| `AGENT_LLM_AUTH_HEADER_NAME` | `opsportal-backend-agent-llm-auth-header-name` | `ops-portal-backend-agent-llm-auth-header-name` |
+| `AGENT_LLM_AUTH_HEADER_VALUE` | `opsportal-backend-agent-llm-auth-header-value` | `ops-portal-backend-agent-llm-auth-header-value` |
 
 ## Frontend Secret Mapping
 

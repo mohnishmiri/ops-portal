@@ -21,8 +21,12 @@ from app.models.auth import TokenClaims, UserContext, UserRole
 
 logger = structlog.get_logger(__name__)
 
-# In development mode, allow requests without a Bearer token.
-_bearer_scheme = HTTPBearer(auto_error=(settings.ENVIRONMENT != "development"))
+def _dev_auth_enabled() -> bool:
+    return settings.ENVIRONMENT == "development" and settings.DEV_AUTH_BYPASS
+
+
+# In local dev (explicit opt-in), allow requests without a Bearer token.
+_bearer_scheme = HTTPBearer(auto_error=not _dev_auth_enabled())
 
 
 def _dev_user() -> UserContext:
@@ -186,7 +190,7 @@ async def get_current_user(
             ...
     """
     if credentials is None:
-        if settings.ENVIRONMENT == "development":
+        if _dev_auth_enabled():
             user = _dev_user()
             request.state.user = user
             logger.debug("dev_mode_auth_bypass", user_id=user.user_id)
@@ -223,7 +227,7 @@ async def get_current_user(
             tenant_id=claims.tenant_id,
         )
     except HTTPException:
-        if settings.ENVIRONMENT == "development":
+        if _dev_auth_enabled():
             logger.warning(
                 "dev_mode_token_validation_failed_fallback",
                 detail="Token validation failed, extracting claims without signature verification",
@@ -267,8 +271,8 @@ def require_role(*roles: UserRole):  # noqa: ANN201
     async def _role_checker(
         user: UserContext = Depends(get_current_user),
     ) -> UserContext:
-        # Development mode — skip role checks entirely
-        if settings.ENVIRONMENT == "development":
+        # Local dev opt-in — skip role checks entirely
+        if _dev_auth_enabled():
             return user
         # ADMIN implicitly satisfies any role requirement
         if user.is_admin:

@@ -577,20 +577,6 @@ export function useLeadershipSyncStatus() {
   });
 }
 
-export function useLeadershipSync() {
-  const qc = useQueryClient();
-  return useMutation<{ status: string }, Error, void>({
-    mutationFn: async () => {
-      const { data } = await apiClient.post("/dashboards/leadership/sync");
-      return data;
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["dashboard", "leadership"] });
-      qc.invalidateQueries({ queryKey: ["dashboard", "leadership-sync-status"] });
-    },
-  });
-}
-
 export function useDailyCosts(days: number = 30) {
   return useQuery<CostTimeSeriesResponse>({
     queryKey: ["costs", "daily", days],
@@ -673,88 +659,6 @@ export function useOptimizationSummary() {
     },
     staleTime: 30 * 60 * 1000,
     gcTime: 60 * 60 * 1000,
-  });
-}
-
-export function useRecommendations(category?: string) {
-  return useQuery<CostRecommendation[]>({
-    queryKey: ["optimization", "recommendations", category],
-    queryFn: async () => {
-      const params = category ? `?category=${category}` : "";
-      const { data } = await apiClient.get(`/optimize/recommendations${params}`);
-      return data;
-    },
-    staleTime: 15 * 60 * 1000,
-    refetchInterval: SLOW_GRID_POLL_INTERVAL,
-  });
-}
-
-// ── Operations Dashboard ──────────────────────────────────────────────
-
-export interface DailySpendPoint {
-  date: string;
-  cost: number;
-}
-
-export interface Anomaly {
-  date: string;
-  cost: number;
-  avg: number;
-}
-
-export interface SubscriptionCost {
-  subscription_id: string;
-  cost: number;
-}
-
-export interface OpsDashboard {
-  cost_by_resource_type: {
-    breakdown: CostByGroup[];
-    summary: CostSummary;
-  };
-  cost_by_resource_group: {
-    breakdown: CostByGroup[];
-    summary: CostSummary;
-  };
-  cost_by_location: {
-    breakdown: CostByGroup[];
-    summary: CostSummary;
-  };
-  daily_spend: DailySpendPoint[];
-  daily_avg: number;
-  prev_month_daily_avg: number;
-  anomalies: Anomaly[];
-  subscription_costs: SubscriptionCost[];
-  subscriptions_monitored: number;
-  generated_at: string;
-}
-
-export function useOpsDashboard() {
-  return useQuery<OpsDashboard>({
-    queryKey: ["dashboard", "ops"],
-    queryFn: async () => {
-      const { data } = await apiClient.get("/dashboards/ops");
-      // Coerce Decimal strings → numbers
-      const coerceBreakdown = (b: CostByGroup[]) =>
-        b.map((x: CostByGroup) => ({ ...x, total_cost: Number(x.total_cost) }));
-      if (data.cost_by_resource_type?.breakdown)
-        data.cost_by_resource_type.breakdown = coerceBreakdown(data.cost_by_resource_type.breakdown);
-      if (data.cost_by_resource_group?.breakdown)
-        data.cost_by_resource_group.breakdown = coerceBreakdown(data.cost_by_resource_group.breakdown);
-      if (data.cost_by_location?.breakdown)
-        data.cost_by_location.breakdown = coerceBreakdown(data.cost_by_location.breakdown);
-      if (data.daily_spend)
-        data.daily_spend = data.daily_spend.map((d: DailySpendPoint) => ({ ...d, cost: Number(d.cost) }));
-      data.daily_avg = Number(data.daily_avg ?? 0);
-      data.prev_month_daily_avg = Number(data.prev_month_daily_avg ?? 0);
-      if (data.anomalies)
-        data.anomalies = data.anomalies.map((a: Anomaly) => ({ ...a, cost: Number(a.cost), avg: Number(a.avg) }));
-      if (data.subscription_costs)
-        data.subscription_costs = data.subscription_costs.map((s: SubscriptionCost) => ({ ...s, cost: Number(s.cost) }));
-      return data;
-    },
-    staleTime: 5 * 60 * 1000,
-    refetchInterval: DASHBOARD_POLL_INTERVAL,
   });
 }
 
@@ -1538,55 +1442,6 @@ export async function triggerKeyVaultSync() {
   return data;
 }
 
-// ── Environment Cost Details ──────────────────────────────────────────
-
-export interface EnvCostService {
-  service_name: string;
-  monthly_costs: Record<string, number>;
-  total: number;
-}
-
-export interface EnvCostDetails {
-  environment: string;
-  months: string[];
-  month_labels: Record<string, string>;
-  services: EnvCostService[];
-  monthly_totals: Record<string, number>;
-  grand_total: number;
-  available_environments: string[];
-  generated_at: string;
-}
-
-export function useEnvCostDetails(environment: string, months: number = 3) {
-  return useQuery<EnvCostDetails>({
-    queryKey: ["costs", "env-breakdown", environment, months],
-    queryFn: async () => {
-      const { data } = await apiClient.get(
-        `/costs/env-breakdown?environment=${encodeURIComponent(environment)}&months=${months}`
-      );
-      // Coerce Decimal strings → numbers
-      if (data.services) {
-        data.services = data.services.map((s: EnvCostService) => ({
-          ...s,
-          total: Number(s.total),
-          monthly_costs: Object.fromEntries(
-            Object.entries(s.monthly_costs || {}).map(([k, v]) => [k, Number(v)])
-          ),
-        }));
-      }
-      if (data.monthly_totals) {
-        data.monthly_totals = Object.fromEntries(
-          Object.entries(data.monthly_totals).map(([k, v]) => [k, Number(v)])
-        );
-      }
-      data.grand_total = Number(data.grand_total ?? 0);
-      return data;
-    },
-    staleTime: 5 * 60 * 1000,
-    refetchInterval: SLOW_GRID_POLL_INTERVAL,
-  });
-}
-
 // ── Non-Prod vs Prod Trend ────────────────────────────────────────────
 
 export interface NonProdVsProdPoint {
@@ -1778,20 +1633,14 @@ export function useAmortizedCostSyncStatus() {
 
 export function useAmortizedCostSync() {
   const qc = useQueryClient();
-  return useMutation<AmortizedCostSyncResult, Error, { months?: number }>({
-    mutationFn: async ({ months = 2 }) => {
-      const { data } = await apiClient.post(`/costs/amortized/sync?months=${months}`);
-      if (!data || data.status !== "completed") {
-        throw new Error(data?.error || data?.detail || "Amortized cost sync failed");
-      }
-
-      return {
-        ...data,
-        months_synced: Number(data.months_synced ?? months),
-        rows_synced: Number(data.rows_synced ?? 0),
-        total_cost: Number(data.total_cost ?? 0),
-        duration_seconds: Number(data.duration_seconds ?? 0),
-      };
+  return useMutation<SyncJobDetail, Error, { months?: number; force?: boolean }>({
+    mutationFn: async ({ months = 2, force = false }) => {
+      const minuteBucket = Math.floor(Date.now() / 60_000);
+      return enqueueAndAwaitSyncJob("amortized", {
+        months,
+        force,
+        idempotencyKey: `amortized-${force ? "force" : "sync"}-${minuteBucket}`,
+      });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["costs", "amortized-summary"] });

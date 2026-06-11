@@ -1,33 +1,39 @@
-"""One-time migration: add subject column to alert_notification_history."""
+"""One-time migration: add subject column to alert_notification_history.
+
+Usage:
+  DATABASE_URL=postgresql+asyncpg://... uv run python scripts/migrate_subject.py
+"""
 
 import asyncio
-import ssl
+import os
 
 import asyncpg
 
 
-async def migrate():
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    conn = await asyncpg.connect(
-        host="attcc-eastus2-prf1-db-psqlfs.postgres.database.azure.com",
-        port=5432,
-        user="psqladmin",
-        password="Accenture@123",
-        database="opsportal",
-        ssl=ctx,
-    )
-    row = await conn.fetchrow(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_name='alert_notification_history' AND column_name='subject'"
-    )
-    if row:
-        print("subject column already exists")
-    else:
-        await conn.execute("ALTER TABLE alert_notification_history ADD COLUMN subject VARCHAR(500)")
-        print("Added subject column to alert_notification_history")
-    await conn.close()
+def _asyncpg_url() -> str:
+    raw = os.environ.get("DATABASE_URL", "").strip()
+    if not raw:
+        raise SystemExit("Set DATABASE_URL before running this migration.")
+    return raw.replace("postgresql+asyncpg://", "postgresql://")
 
 
-asyncio.run(migrate())
+async def migrate() -> None:
+    conn = await asyncpg.connect(_asyncpg_url())
+    try:
+        row = await conn.fetchrow(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='alert_notification_history' AND column_name='subject'"
+        )
+        if row:
+            print("subject column already exists")
+        else:
+            await conn.execute(
+                "ALTER TABLE alert_notification_history ADD COLUMN subject VARCHAR(500)"
+            )
+            print("Added subject column to alert_notification_history")
+    finally:
+        await conn.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(migrate())

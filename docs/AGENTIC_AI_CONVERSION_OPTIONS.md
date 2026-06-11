@@ -15,7 +15,7 @@ Convert the existing FastAPI-based Azure Ops Portal into an Agentic AI solution 
 
 ### Architectural strengths that make conversion feasible
 - Strong service-layer separation in backend
-- Redis + PostgreSQL caching and persistence
+- PostgreSQL caching (`page_cache`) and persistence
 - Existing scheduler (APScheduler)
 - Existing auth and RBAC controls
 - Existing audit logging model
@@ -29,12 +29,12 @@ Convert the existing FastAPI-based Azure Ops Portal into an Agentic AI solution 
 Add a single LangGraph/LangChain agent endpoint and expose existing backend services as tools. Keep all current services intact.
 
 ### High-level flow
-Frontend -> /api/v1/agent/chat -> LangGraph ReAct Agent -> Tool wrappers -> Existing services -> Azure/DB/Redis
+Frontend -> /api/v1/agent/chat -> LangGraph ReAct Agent -> Tool wrappers -> Existing services -> Azure/DB
 
 ### Pros
 - Fastest implementation path
 - Minimal regression risk (existing services unchanged)
-- Reuses current auth/RBAC, Redis, PostgreSQL, and Ollama proxy
+- Reuses current auth/RBAC, PostgreSQL, Leadership Ollama proxy, and separate `AGENT_LLM_*` config
 - Easiest to pilot and demo quickly
 
 ### Cons
