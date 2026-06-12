@@ -224,7 +224,7 @@ const GridPager: React.FC<{
 
 const AmortizedCostDashboard: React.FC = () => {
   const { formatDate } = usePortalTimezone();
-  const { canWrite } = useAuth();
+  const { canWrite, isAdmin } = useAuth();
   const [env, setEnv] = useState("ALL");
   const [months, setMonths] = useState(3);
   const [activeTab, setActiveTab] = useState<"overview" | "services" | "resources" | "pivot" | "drilldown">("overview");
@@ -397,7 +397,6 @@ const AmortizedCostDashboard: React.FC = () => {
             Refresh
           </button>
           {canWrite && (
-          <>
             <button
               onClick={() => handleSync(false)}
               disabled={syncMutation.isPending}
@@ -420,6 +419,8 @@ const AmortizedCostDashboard: React.FC = () => {
                 </>
               )}
             </button>
+          )}
+          {isAdmin && (
             <button
               onClick={() => handleSync(true)}
               disabled={syncMutation.isPending}
@@ -428,7 +429,6 @@ const AmortizedCostDashboard: React.FC = () => {
             >
               Force sync
             </button>
-          </>
           )}
         </div>
       </div>

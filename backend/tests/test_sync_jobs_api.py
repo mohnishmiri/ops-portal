@@ -27,14 +27,14 @@ async def client(app):
         yield ac
 
 
-def _user() -> UserContext:
+def _user(*, admin: bool = True) -> UserContext:
     return UserContext(
         user_id="test-user",
         object_id="test-object",
         display_name="Test User",
         email="test@example.com",
-        roles=[UserRole.ADMIN],
-        raw_roles=["admin"],
+        roles=[UserRole.ADMIN] if admin else [UserRole.WRITE],
+        raw_roles=["admin"] if admin else ["write"],
         tenant_id="tenant-id",
         allowed_subscriptions=[],
     )
@@ -132,6 +132,22 @@ async def test_enqueue_amortized_returns_202_with_job_id(app, client, monkeypatc
     assert body["reused"] is False
     assert captured["payload"] == {"months": 3, "force": True}
     assert captured["triggered_by"] == "test@example.com"
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_enqueue_amortized_force_sync_requires_admin(app, client):
+    async def fake_get_db():
+        yield _FakeSession()
+
+    app.dependency_overrides[get_current_user] = lambda: _user(admin=False)
+    app.dependency_overrides[get_db] = fake_get_db
+
+    resp = await client.post("/api/v1/sync-jobs", json={"job_type": "amortized", "months": 2, "force": True})
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Force sync requires Admin role"
 
     app.dependency_overrides.clear()
 

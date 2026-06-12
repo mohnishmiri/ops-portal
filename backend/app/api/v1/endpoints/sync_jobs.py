@@ -119,6 +119,11 @@ async def enqueue_sync_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported job_type. Allowed: {sorted(_ALLOWED_JOB_TYPES)}",
         )
+    if body.force and not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Force sync requires Admin role",
+        )
 
     payload: dict = {}
     if body.job_type == "amortized":

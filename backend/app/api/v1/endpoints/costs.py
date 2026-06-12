@@ -325,6 +325,11 @@ async def trigger_amortized_cost_sync(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Enqueue amortized cost sync and return the job id."""
+    if force and not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Force sync requires Admin role",
+        )
     if db is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
