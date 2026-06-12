@@ -4,8 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app.main as main_module
-from app.auth import get_current_user
-from app.core.config import settings
+from app.auth import _dev_auth_enabled, get_current_user
 from app.core.database import get_db
 from app.main import create_application
 from app.schemas.auth import UserContext, UserRole
@@ -46,7 +45,7 @@ async def test_readyz(client):
 async def test_unauthenticated_api_returns_401(client):
     """Protected endpoints require authentication."""
     resp = await client.get("/api/v1/costs/daily")
-    if settings.ENVIRONMENT == "development":
+    if _dev_auth_enabled():
         assert resp.status_code == 200
     else:
         assert resp.status_code in (401, 403)
@@ -55,7 +54,7 @@ async def test_unauthenticated_api_returns_401(client):
 @pytest.mark.anyio
 async def test_unauthenticated_dashboard_returns_401(client):
     resp = await client.get("/api/v1/dashboards/leadership")
-    if settings.ENVIRONMENT == "development":
+    if _dev_auth_enabled():
         assert resp.status_code == 200
     else:
         assert resp.status_code in (401, 403)
