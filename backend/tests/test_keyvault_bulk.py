@@ -118,9 +118,7 @@ def test_normalize_vault_uri_adds_trailing_slash():
 
 
 def test_certificate_conflict_kind_detects_deleted_and_pending():
-    deleted_msg = (
-        "HTTP Error 409: Conflict — Certificate test is currently in a deleted but recoverable state"
-    )
+    deleted_msg = "HTTP Error 409: Conflict — Certificate test is currently in a deleted but recoverable state"
     pending_msg = (
         "HTTP Error 409: Conflict — A new key vault certificate can not be created or imported "
         "while a pending key vault certificate's status is inProgress."

@@ -1194,7 +1194,9 @@ def _friendly_error(exc: Exception) -> str:
         if "pending" in msg.lower():
             return "A pending certificate operation is blocking import. Retry after it completes, or use a different certificate name."
         if "deleted" in msg.lower():
-            return "A soft-deleted certificate with this name exists. Recover or purge it in Azure Key Vault, then retry."
+            return (
+                "A soft-deleted certificate with this name exists. Recover or purge it in Azure Key Vault, then retry."
+            )
         return f"Certificate import conflict: {msg.split(' — ', 1)[-1] if ' — ' in msg else msg[:200]}"
     if "timeout" in msg.lower() or "timed out" in msg.lower():
         return "Request timed out. Vault may be behind a private endpoint."

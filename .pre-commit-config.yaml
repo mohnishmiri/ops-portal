@@ -1,0 +1,10 @@
+# Auto-format and lint backend Python before each commit (matches CI).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff-format
+        files: ^backend/
+      - id: ruff
+        args: [--fix]
+        files: ^backend/
