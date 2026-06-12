@@ -150,9 +150,7 @@ async def _run_job(job: SyncJob) -> tuple[str, str | None, dict | None]:
             svc = AmortizedCostSyncService(session)
             raw_sub_ids = payload.get("subscription_ids")
             subscription_ids = (
-                [str(item) for item in raw_sub_ids]
-                if isinstance(raw_sub_ids, list) and raw_sub_ids
-                else None
+                [str(item) for item in raw_sub_ids] if isinstance(raw_sub_ids, list) and raw_sub_ids else None
             )
 
             async def _run_amortized() -> dict:

@@ -1401,6 +1401,122 @@ export function useBulkExtendSecretExpiry() {
   });
 }
 
+// ── Bulk Secret Upload ────────────────────────────────────────────────
+
+export interface BulkSecretItem {
+  name: string;
+  value: string;
+  content_type?: string;
+  tags?: Record<string, string>;
+  encode_base64?: boolean;
+  expires?: string;
+}
+
+export interface BulkSecretValidationResult {
+  valid: boolean;
+  total: number;
+  valid_count: number;
+  invalid_count: number;
+  errors: { row: number; name: string; error: string }[];
+  items: { row: number; name: string; status: string; errors: string[] }[];
+}
+
+export interface BulkSecretUploadResult {
+  results: { name: string; status: string; error?: string }[];
+  total: number;
+  success_count: number;
+  failed_count: number;
+}
+
+const BULK_SECRET_BATCH_SIZE = 50;
+
+export function useBulkValidateSecrets() {
+  return useMutation({
+    mutationFn: async (payload: { vault_uri: string; secrets: BulkSecretItem[] }) => {
+      const { data } = await apiClient.post("/keyvault/secrets/bulk-validate", payload);
+      return data as BulkSecretValidationResult;
+    },
+  });
+}
+
+export function useBulkParseSecretsFile() {
+  return useMutation({
+    mutationFn: async (file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      const { data } = await apiClient.post("/keyvault/secrets/bulk-parse", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      return data as { secrets: BulkSecretItem[]; count: number };
+    },
+  });
+}
+
+export function useBulkCreateSecrets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: { vault_uri: string; secrets: BulkSecretItem[] }) => {
+      const { vault_uri, secrets } = payload;
+      const aggregated: BulkSecretUploadResult = {
+        results: [],
+        total: secrets.length,
+        success_count: 0,
+        failed_count: 0,
+      };
+
+      for (let i = 0; i < secrets.length; i += BULK_SECRET_BATCH_SIZE) {
+        const batch = secrets.slice(i, i + BULK_SECRET_BATCH_SIZE);
+        const { data } = await apiClient.post("/keyvault/secrets/bulk", {
+          vault_uri,
+          secrets: batch,
+        });
+        const batchResult = data as BulkSecretUploadResult;
+        aggregated.results.push(...batchResult.results);
+        aggregated.success_count += batchResult.success_count;
+        aggregated.failed_count += batchResult.failed_count;
+      }
+
+      return aggregated;
+    },
+    onSettled: async (_d, _e, vars) => {
+      await new Promise((r) => setTimeout(r, 600));
+      await qc.invalidateQueries({ queryKey: ["keyvault", "secrets", vars.vault_uri] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+    },
+  });
+}
+
+// ── Create Certificate ───────────────────────────────────────────────
+
+export interface CreateCertificatePayload {
+  vault_uri: string;
+  name: string;
+  certificate_base64: string;
+  file_type: string;
+  password?: string;
+  tags?: Record<string, string>;
+  not_before?: string;
+  expires?: string;
+}
+
+export function useCreateCertificate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: CreateCertificatePayload) => {
+      const { data } = await apiClient.post("/keyvault/certificates", payload);
+      return data;
+    },
+    onSettled: async (_d, _e, vars) => {
+      await new Promise((r) => setTimeout(r, 600));
+      await qc.invalidateQueries({ queryKey: ["keyvault", "certificates", vars.vault_uri] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "cert-detail"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+    },
+  });
+}
+
 export function useKeyVaultAuditHistory(vaultUri: string | null, limit: number = 200, days: number = 90) {
   return useQuery<KeyVaultAuditHistoryResponse>({
     queryKey: ["keyvault", "history", vaultUri, limit, days],

@@ -1119,9 +1119,7 @@ class AmortizedCostSyncService:
         count_stmt = select(func.count(AmortizedCostRecord.id)).where(
             AmortizedCostRecord.cost_date >= trend_start.isoformat()
         )
-        count_result = await self._db.execute(
-            self._apply_leadership_subscription_scope(count_stmt, subscription_ids)
-        )
+        count_result = await self._db.execute(self._apply_leadership_subscription_scope(count_stmt, subscription_ids))
         if (count_result.scalar() or 0) == 0:
             return None
 
@@ -1140,9 +1138,7 @@ class AmortizedCostSyncService:
             AmortizedCostRecord.cost_date >= prev_month_start.isoformat(),
             AmortizedCostRecord.cost_date <= prev_month_end.isoformat(),
         )
-        prev_scalar = await self._db.scalar(
-            self._apply_leadership_subscription_scope(prev_stmt, subscription_ids)
-        )
+        prev_scalar = await self._db.scalar(self._apply_leadership_subscription_scope(prev_stmt, subscription_ids))
         prev_total = Decimal(str(round(prev_scalar or 0.0, 2)))
 
         change_pct = float((current_total - prev_total) / prev_total * 100) if prev_total else 0.0
@@ -1190,9 +1186,7 @@ class AmortizedCostSyncService:
             )
             .order_by(AmortizedCostRecord.cost_date)
         )
-        daily_result = await self._db.execute(
-            self._apply_leadership_subscription_scope(daily_stmt, subscription_ids)
-        )
+        daily_result = await self._db.execute(self._apply_leadership_subscription_scope(daily_stmt, subscription_ids))
         cost_trend: list[CostDataPoint] = [
             CostDataPoint(
                 date=date.fromisoformat(str(cost_date)),

@@ -21,6 +21,7 @@ from app.models.auth import TokenClaims, UserContext, UserRole
 
 logger = structlog.get_logger(__name__)
 
+
 def _dev_auth_enabled() -> bool:
     return settings.ENVIRONMENT == "development" and settings.DEV_AUTH_BYPASS
 

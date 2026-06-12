@@ -610,6 +610,135 @@ class KeyVaultService:
 
     # ── Certificates ───────────────────────────────────────────────────
 
+    @staticmethod
+    def validate_certificate_content(
+        cert_bytes: bytes,
+        file_type: str,
+        password: str | None = None,
+    ) -> dict:
+        """Validate certificate bytes before Azure import. Does not log content."""
+        from cryptography import x509 as crypto_x509
+        from cryptography.hazmat.primitives.serialization import pkcs12
+
+        ext = file_type.lower().lstrip(".")
+        if ext not in {"pfx", "pem", "cer", "crt"}:
+            raise ValueError("Unsupported certificate format. Use .pfx, .pem, .cer, or .crt")
+
+        if ext == "pfx":
+            if not password:
+                raise ValueError("Password is required for PFX certificates")
+            try:
+                _, cert, _ = pkcs12.load_key_and_certificates(cert_bytes, password.encode("utf-8"))
+            except Exception as exc:
+                raise ValueError("Invalid PFX certificate or incorrect password") from exc
+            if cert is None:
+                raise ValueError("PFX file does not contain a certificate")
+            subject = cert.subject.rfc4514_string()
+            not_after = cert.not_valid_after_utc.isoformat() if cert.not_valid_after_utc else None
+            return {"format": "pfx", "subject": subject, "expires": not_after}
+
+        if ext == "pem":
+            try:
+                if b"-----BEGIN" in cert_bytes:
+                    cert = crypto_x509.load_pem_x509_certificate(cert_bytes)
+                else:
+                    cert = crypto_x509.load_der_x509_certificate(cert_bytes)
+            except Exception as exc:
+                raise ValueError("Invalid PEM certificate") from exc
+            subject = cert.subject.rfc4514_string()
+            not_after = cert.not_valid_after_utc.isoformat() if cert.not_valid_after_utc else None
+            return {"format": "pem", "subject": subject, "expires": not_after}
+
+        # .cer / .crt — DER or PEM encoded X.509
+        try:
+            if b"-----BEGIN" in cert_bytes:
+                cert = crypto_x509.load_pem_x509_certificate(cert_bytes)
+            else:
+                cert = crypto_x509.load_der_x509_certificate(cert_bytes)
+        except Exception as exc:
+            raise ValueError(f"Invalid {ext.upper()} certificate") from exc
+        subject = cert.subject.rfc4514_string()
+        not_after = cert.not_valid_after_utc.isoformat() if cert.not_valid_after_utc else None
+        return {"format": ext, "subject": subject, "expires": not_after}
+
+    async def import_certificate(
+        self,
+        vault_uri: str,
+        name: str,
+        cert_bytes: bytes,
+        *,
+        password: str | None = None,
+        tags: dict | None = None,
+        not_before: str | None = None,
+        expires: str | None = None,
+    ) -> dict:
+        """Import a certificate into Key Vault via REST import API."""
+        from datetime import timedelta
+
+        now = datetime.utcnow()
+        nbf_dt = datetime.fromisoformat(not_before) if not_before else now
+        exp_dt = datetime.fromisoformat(expires) if expires else now + timedelta(days=360)
+
+        url = f"{vault_uri}certificates/{name}/import?api-version=7.4"
+        token = await self._get_vault_token()
+        payload_dict: dict = {
+            "value": base64.b64encode(cert_bytes).decode("ascii"),
+            "tags": tags or {},
+            "attributes": {
+                "enabled": True,
+                "nbf": int(nbf_dt.timestamp()),
+                "exp": int(exp_dt.timestamp()),
+            },
+        }
+        if password:
+            payload_dict["pwd"] = password
+
+        payload = _json.dumps(payload_dict).encode("utf-8")
+
+        def _post(tok: str) -> dict:
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {tok}",
+                    "Content-Type": "application/json",
+                },
+            )
+            no_proxy_handler = urllib.request.ProxyHandler({})
+            opener = urllib.request.build_opener(no_proxy_handler)
+            with opener.open(req, timeout=30) as resp:
+                return _json.loads(resp.read())
+
+        try:
+            body = await asyncio.to_thread(_post, token)
+        except urllib.error.HTTPError as he:
+            if he.code == 409:
+                logger.info("certificate_conflict_recovering", name=name, vault_uri=vault_uri)
+                await self._recover_deleted_item(vault_uri, "certificates", name)
+                token = await self._get_vault_token()
+                body = await asyncio.to_thread(_post, token)
+            else:
+                raise
+
+        attrs = body.get("attributes", {})
+        vault_name = vault_uri.rstrip("/").split("//")[1].split(".")[0]
+        await self._invalidate_cache(
+            f"kv:certs:{vault_name}",
+            f"kv:cert-detail:{vault_name}:{name}",
+            "kv:dashboard",
+        )
+
+        return {
+            "name": name,
+            "id": body.get("id", ""),
+            "enabled": attrs.get("enabled", True),
+            "created": _epoch_to_iso(attrs.get("created")),
+            "updated": _epoch_to_iso(attrs.get("updated")),
+            "expires": _epoch_to_iso(attrs.get("exp")),
+            "not_before": _epoch_to_iso(attrs.get("nbf")),
+        }
+
     async def list_certificates(self, vault_uri: str, *, refresh: bool = False) -> list[dict]:
         """List certificates in a Key Vault with thumbprint and derived CN. Handles pagination."""
         vault_name = vault_uri.rstrip("/").split("//")[1].split(".")[0]

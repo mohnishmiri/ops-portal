@@ -29,6 +29,13 @@ import {
   useKeyVaultSyncVault,
   useExtendSecretExpiry,
   useBulkExtendSecretExpiry,
+  useBulkValidateSecrets,
+  useBulkParseSecretsFile,
+  useBulkCreateSecrets,
+  useCreateCertificate,
+  BulkSecretItem,
+  BulkSecretValidationResult,
+  BulkSecretUploadResult,
   refreshVaultSecrets,
   refreshVaultKeys,
   refreshVaultCertificates,
@@ -203,6 +210,7 @@ const GridToolbar: React.FC<{
   onRefresh?: () => void;
   refreshing?: boolean;
   primaryAction?: React.ReactNode;
+  secondaryAction?: React.ReactNode;
 }> = ({
   search,
   onSearch,
@@ -213,6 +221,7 @@ const GridToolbar: React.FC<{
   onRefresh,
   refreshing = false,
   primaryAction,
+  secondaryAction,
 }) => (
   <div className={gridStyles.panelHeader}>
     <div className="flex flex-wrap items-center gap-3">
@@ -246,10 +255,54 @@ const GridToolbar: React.FC<{
           {refreshing ? "Refreshing..." : "Refresh"}
         </button>
       )}
+      {secondaryAction}
       {primaryAction}
     </div>
   </div>
 );
+
+const readFileAsBase64 = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.includes(",") ? result.split(",")[1] : result);
+    };
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+
+const downloadBulkSecretTemplate = (format: "csv" | "json") => {
+  const csv = "secret_name,secret_value,content_type,expires,tags\nexample-secret,example-value,text/plain,,\n";
+  const json = JSON.stringify(
+    { secrets: [{ name: "example-secret", value: "example-value", content_type: "text/plain" }] },
+    null,
+    2
+  );
+  const blob = new Blob([format === "csv" ? csv : json], { type: "text/plain" });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = format === "csv" ? "keyvault-bulk-secrets-template.csv" : "keyvault-bulk-secrets-template.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+};
+
+const downloadFailureReport = (results: BulkSecretUploadResult["results"]) => {
+  const failed = results.filter((r) => r.status === "failed");
+  const lines = ["secret_name,error", ...failed.map((r) => `"${r.name}","${(r.error || "").replace(/"/g, '""')}"`)];
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `keyvault-bulk-failures-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+};
 
 const GridPagination: React.FC<{
   page: number;
@@ -1005,6 +1058,325 @@ const SecretFormDialog: React.FC<{
   );
 };
 
+// ── Certificate Upload Dialog ─────────────────────────────────────────
+
+const CertificateFormDialog: React.FC<{
+  vaultUri: string;
+  onClose: () => void;
+  onSuccess: () => void;
+}> = ({ vaultUri, onClose, onSuccess }) => {
+  const createMutation = useCreateCertificate();
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [tagsText, setTagsText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const defaultExpiry = new Date(Date.now() + 360 * 86400000).toISOString().slice(0, 10);
+  const [notBefore, setNotBefore] = useState(todayStr);
+  const [expiresDate, setExpiresDate] = useState(defaultExpiry);
+
+  const fileType = file?.name.split(".").pop()?.toLowerCase() || "";
+  const acceptedTypes = ["pfx", "pem", "cer", "crt"];
+
+  const parseTags = (): Record<string, string> => {
+    const tags: Record<string, string> = {};
+    tagsText.split(",").forEach((pair) => {
+      const [k, v] = pair.split("=").map((s) => s.trim());
+      if (k && v) tags[k] = v;
+    });
+    return tags;
+  };
+
+  const handleSubmit = async () => {
+    if (!file || !name.trim()) return;
+    if (!acceptedTypes.includes(fileType)) {
+      setFileError("Unsupported file type. Use .pfx, .pem, .cer, or .crt");
+      return;
+    }
+    if (fileType === "pfx" && !password.trim()) {
+      setFileError("Password is required for PFX files");
+      return;
+    }
+    setFileError(null);
+    try {
+      const certificate_base64 = await readFileAsBase64(file);
+      createMutation.mutate(
+        {
+          vault_uri: vaultUri,
+          name: name.trim(),
+          certificate_base64,
+          file_type: fileType,
+          password: password.trim() || undefined,
+          tags: parseTags(),
+          not_before: notBefore || undefined,
+          expires: expiresDate || undefined,
+        },
+        {
+          onSuccess: () => {
+            onSuccess();
+            onClose();
+          },
+        }
+      );
+    } catch {
+      setFileError("Failed to read certificate file");
+    }
+  };
+
+  return (
+    <Modal title="Add Certificate" onClose={onClose}>
+      <div className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Certificate Name</label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="my-certificate"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">Alphanumeric and hyphens only (1-127 chars)</p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Certificate File</label>
+          <input
+            type="file"
+            accept=".pfx,.pem,.cer,.crt"
+            onChange={(e) => {
+              setFile(e.target.files?.[0] || null);
+              setFileError(null);
+            }}
+            className="w-full text-sm"
+          />
+          {file && <p className="text-xs text-gray-500 mt-1">{file.name} ({Math.round(file.size / 1024)} KB)</p>}
+        </div>
+
+        {fileType === "pfx" && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">PFX Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Not Before</label>
+            <input type="date" value={notBefore} onChange={(e) => setNotBefore(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Expiry Date</label>
+            <input type="date" value={expiresDate} onChange={(e) => setExpiresDate(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Tags (optional)</label>
+          <input
+            type="text"
+            value={tagsText}
+            onChange={(e) => setTagsText(e.target.value)}
+            placeholder="env=prod,owner=team-a"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        {(fileError || createMutation.isError) && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+            <p className="text-sm text-red-700">
+              {fileError || (createMutation.error as any)?.response?.data?.detail || "Failed to import certificate"}
+            </p>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition">Cancel</button>
+          <button
+            onClick={() => setConfirmOpen(true)}
+            disabled={!name.trim() || !file || createMutation.isPending}
+            className="px-4 py-2 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            {createMutation.isPending ? "Uploading..." : "Review Upload"}
+          </button>
+        </div>
+      </div>
+
+      {confirmOpen && (
+        <Modal title="Confirm Certificate Upload" onClose={() => setConfirmOpen(false)}>
+          <p className="text-sm text-gray-600 mb-4">
+            Import certificate <span className="font-mono font-semibold">{name}</span> into the selected vault?
+          </p>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setConfirmOpen(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Cancel</button>
+            <button
+              onClick={() => { setConfirmOpen(false); void handleSubmit(); }}
+              disabled={createMutation.isPending}
+              className="px-4 py-2 text-sm text-white bg-att-600 rounded-lg hover:bg-att-700 disabled:opacity-50"
+            >
+              {createMutation.isPending ? "Uploading..." : "Confirm Upload"}
+            </button>
+          </div>
+        </Modal>
+      )}
+    </Modal>
+  );
+};
+
+// ── Bulk Secret Upload Dialog ───────────────────────────────────────────
+
+const BulkSecretUploadDialog: React.FC<{
+  vaultUri: string;
+  onClose: () => void;
+  onSuccess: (summary: string) => void;
+}> = ({ vaultUri, onClose, onSuccess }) => {
+  const parseMutation = useBulkParseSecretsFile();
+  const validateMutation = useBulkValidateSecrets();
+  const uploadMutation = useBulkCreateSecrets();
+  const [secrets, setSecrets] = useState<BulkSecretItem[]>([]);
+  const [validation, setValidation] = useState<BulkSecretValidationResult | null>(null);
+  const [uploadResult, setUploadResult] = useState<BulkSecretUploadResult | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  const handleFile = async (file: File) => {
+    setValidation(null);
+    setUploadResult(null);
+    const parsed = await parseMutation.mutateAsync(file);
+    setSecrets(parsed.secrets);
+    const result = await validateMutation.mutateAsync({ vault_uri: vaultUri, secrets: parsed.secrets });
+    setValidation(result);
+  };
+
+  const handleUpload = async () => {
+    if (!validation?.valid || secrets.length === 0) return;
+    setConfirmOpen(false);
+    setProgress(10);
+    try {
+      const aggregated = await uploadMutation.mutateAsync({ vault_uri: vaultUri, secrets });
+      setProgress(100);
+      setUploadResult(aggregated);
+      onSuccess(`Uploaded ${aggregated.success_count} of ${aggregated.total} secrets`);
+    } catch {
+      setProgress(0);
+    }
+  };
+
+  const busy = parseMutation.isPending || validateMutation.isPending || uploadMutation.isPending;
+
+  return (
+    <Modal title="Bulk Secret Upload" onClose={onClose}>
+      <div className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => downloadBulkSecretTemplate("csv")} className="px-3 py-1.5 text-xs rounded-lg border border-att-200 bg-white hover:bg-att-50">Download CSV Template</button>
+          <button type="button" onClick={() => downloadBulkSecretTemplate("json")} className="px-3 py-1.5 text-xs rounded-lg border border-att-200 bg-white hover:bg-att-50">Download JSON Template</button>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Upload File (CSV, JSON, or XLSX)</label>
+          <input
+            type="file"
+            accept=".csv,.json,.xlsx"
+            disabled={busy}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleFile(file).catch(() => setValidation(null));
+            }}
+            className="w-full text-sm"
+          />
+        </div>
+
+        {busy && (
+          <div className="flex items-center gap-2 text-sm text-gray-600">
+            <span className="animate-spin">{Icons.refresh()}</span>
+            {uploadMutation.isPending ? `Uploading... ${progress}%` : "Validating..."}
+          </div>
+        )}
+
+        {validation && (
+          <div className={`rounded-lg border p-3 ${validation.valid ? "bg-green-50 border-green-200" : "bg-amber-50 border-amber-200"}`}>
+            <p className="text-sm font-medium">{validation.valid ? "Validation passed" : "Validation failed"}</p>
+            <p className="text-xs mt-1">{validation.valid_count} valid, {validation.invalid_count} invalid of {validation.total} rows</p>
+            {!validation.valid && (
+              <ul className="mt-2 max-h-32 overflow-auto text-xs text-amber-800 space-y-1">
+                {validation.errors.slice(0, 20).map((err, idx) => (
+                  <li key={idx}>Row {err.row} ({err.name}): {err.error}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {validation?.valid && secrets.length > 0 && !uploadResult && (
+          <div className="overflow-auto max-h-40 border border-att-100 rounded-lg">
+            <table className="w-full text-xs">
+              <thead className="bg-att-50"><tr><th className="px-2 py-1 text-left">Name</th><th className="px-2 py-1 text-left">Content Type</th></tr></thead>
+              <tbody>
+                {secrets.slice(0, 10).map((s) => (
+                  <tr key={s.name} className="border-t border-att-100"><td className="px-2 py-1 font-mono">{s.name}</td><td className="px-2 py-1">{s.content_type || "—"}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            {secrets.length > 10 && <p className="text-xs text-gray-500 p-2">...and {secrets.length - 10} more</p>}
+          </div>
+        )}
+
+        {uploadResult && (
+          <div className="rounded-lg border border-att-100 p-3 bg-att-50/40">
+            <p className="text-sm font-medium">Upload complete</p>
+            <p className="text-xs text-gray-600 mt-1">
+              {uploadResult.success_count} succeeded, {uploadResult.failed_count} failed (total {uploadResult.total})
+            </p>
+            {uploadResult.failed_count > 0 && (
+              <button type="button" onClick={() => downloadFailureReport(uploadResult.results)} className="mt-2 px-3 py-1.5 text-xs rounded-lg bg-white border border-att-200 hover:bg-att-50">
+                Download Failure Report
+              </button>
+            )}
+          </div>
+        )}
+
+        {(parseMutation.isError || validateMutation.isError || uploadMutation.isError) && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+            {(parseMutation.error as any)?.response?.data?.detail
+              || (validateMutation.error as any)?.response?.data?.detail
+              || (uploadMutation.error as any)?.response?.data?.detail
+              || "Bulk upload failed"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition">Close</button>
+          {!uploadResult && (
+            <button
+              onClick={() => setConfirmOpen(true)}
+              disabled={!validation?.valid || secrets.length === 0 || busy}
+              className="px-4 py-2 text-sm text-white bg-att-600 rounded-lg hover:bg-att-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              Upload {secrets.length > 0 ? `${secrets.length} Secrets` : ""}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {confirmOpen && (
+        <Modal title="Confirm Bulk Upload" onClose={() => setConfirmOpen(false)}>
+          <p className="text-sm text-gray-600 mb-4">Upload {secrets.length} secrets to this vault?</p>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setConfirmOpen(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Cancel</button>
+            <button onClick={() => void handleUpload()} className="px-4 py-2 text-sm text-white bg-att-600 rounded-lg hover:bg-att-700">Confirm</button>
+          </div>
+        </Modal>
+      )}
+    </Modal>
+  );
+};
+
 // ── Secrets Tab ───────────────────────────────────────────────────────
 
 const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
@@ -1018,6 +1390,7 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const [viewingSecret, setViewingSecret] = useState<string | null>(null);
   const [editingSecret, setEditingSecret] = useState<SecretInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
@@ -1121,14 +1494,22 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
         onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
         onRefresh={handleRefresh}
         refreshing={refreshing}
-        primaryAction={canWrite ?
+        secondaryAction={canWrite ? (
+          <button
+            onClick={() => setShowBulkUpload(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-att-300 bg-white px-3 py-2 text-sm font-semibold text-att-700 transition hover:bg-att-50"
+          >
+            Bulk Upload
+          </button>
+        ) : undefined}
+        primaryAction={canWrite ? (
           <button
             onClick={() => { setShowCreate(true); setEditingSecret(null); }}
             className="inline-flex items-center gap-2 rounded-xl bg-att-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-att-700"
           >
             {Icons.plus()} Add Secret
           </button>
-        : undefined}
+        ) : undefined}
       />
 
       <div className="overflow-auto max-h-[500px]">
@@ -1187,6 +1568,14 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
           vaultUri={vaultUri}
           onClose={() => setShowCreate(false)}
           onSuccess={() => showToast("Secret created successfully")}
+        />
+      )}
+
+      {showBulkUpload && vaultUri && (
+        <BulkSecretUploadDialog
+          vaultUri={vaultUri}
+          onClose={() => setShowBulkUpload(false)}
+          onSuccess={(summary) => showToast(summary, "success")}
         />
       )}
 
@@ -1785,11 +2174,15 @@ const CertificateDetailViewer: React.FC<{
 
 const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const { timezone } = usePortalTimezone();
+  const { canWrite } = useAuth();
   const fmt = (iso: string | null) => fmtDate(iso, timezone);
   const queryClient = useQueryClient();
   const { data: certs, isLoading, isError, error } = useVaultCertificates(vaultUri);
   const [search, setSearch] = useState("");
   const [viewingCert, setViewingCert] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const showToast = useCallback((message: string, type: ToastState["type"] = "success") => setToast({ message, type }), []);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -1876,6 +2269,14 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
         onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
         onRefresh={handleRefresh}
         refreshing={refreshing}
+        primaryAction={canWrite ? (
+          <button
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-2 rounded-xl bg-att-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-att-700"
+          >
+            {Icons.plus()} Add Certificate
+          </button>
+        ) : undefined}
       />
 
       <div className="overflow-auto max-h-[500px]">
@@ -1931,6 +2332,16 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
       {viewingCert && vaultUri && (
         <CertificateDetailViewer vaultUri={vaultUri} certName={viewingCert} onClose={() => setViewingCert(null)} />
       )}
+
+      {showCreate && vaultUri && (
+        <CertificateFormDialog
+          vaultUri={vaultUri}
+          onClose={() => setShowCreate(false)}
+          onSuccess={() => showToast("Certificate imported successfully")}
+        />
+      )}
+
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
     </div>
   );
 };

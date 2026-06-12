@@ -12,7 +12,7 @@ post-mutation updates.
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,11 @@ from app.auth import get_current_user, require_role
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
+from app.services.keyvault_bulk_service import (
+    BULK_SECRET_MAX_COUNT,
+    parse_bulk_secrets_file,
+    validate_bulk_secrets,
+)
 from app.services.keyvault_service import KeyVaultService
 from app.services.keyvault_sync_service import KeyVaultSyncService
 
@@ -52,7 +57,13 @@ def _audit_summary(action: str, resource_type: str, resource_name: str) -> str:
         "create_key": "Created",
         "update_key": "Updated",
         "delete_key": "Deleted",
+        "create_certificate": "Imported",
+        "update_certificate": "Updated",
+        "delete_certificate": "Deleted",
+        "bulk_create_secrets": "Bulk uploaded",
     }.get(action, "Changed")
+    if action == "bulk_create_secrets":
+        return f"{verb} secrets ({resource_name})"
     return f"{verb} {resource_type} {resource_name}"
 
 
@@ -152,6 +163,8 @@ async def _item_exists_in_cache(
             items = await sync_service.get_secrets_from_db(vault_uri)
         elif resource_type == "key":
             items = await sync_service.get_keys_from_db(vault_uri)
+        elif resource_type == "certificate":
+            items = await sync_service.get_certificates_from_db(vault_uri)
         else:
             items = []
     except Exception:
@@ -206,6 +219,44 @@ class BulkExtendSecretExpiryRequest(BaseModel):
     """Extend expiry for multiple secrets (each +360 days from current expiry)."""
 
     secrets: list[ExtendSecretExpiryRequest]
+
+
+class BulkSecretItem(BaseModel):
+    """Single secret in a bulk upload batch."""
+
+    name: str = Field(min_length=1, max_length=127, pattern=r"^[a-zA-Z0-9-]+$")
+    value: str
+    content_type: str | None = None
+    tags: dict[str, str] = Field(default_factory=dict)
+    encode_base64: bool = False
+    expires: str | None = None
+
+
+class BulkCreateSecretsRequest(BaseModel):
+    """Bulk create or update secrets in a single vault."""
+
+    vault_uri: str
+    secrets: list[BulkSecretItem] = Field(min_length=1, max_length=BULK_SECRET_MAX_COUNT)
+
+
+class BulkValidateSecretsRequest(BaseModel):
+    """Validate secrets before bulk upload without writing to Azure."""
+
+    vault_uri: str
+    secrets: list[BulkSecretItem] = Field(min_length=1, max_length=BULK_SECRET_MAX_COUNT)
+
+
+class CreateCertificateRequest(BaseModel):
+    """Import a certificate into Key Vault."""
+
+    vault_uri: str
+    name: str = Field(min_length=1, max_length=127, pattern=r"^[a-zA-Z0-9-]+$")
+    certificate_base64: str = Field(description="Base64-encoded certificate file bytes")
+    file_type: str = Field(description="pfx, pem, cer, or crt")
+    password: str | None = None
+    tags: dict[str, str] = Field(default_factory=dict)
+    not_before: str | None = None
+    expires: str | None = None
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────
@@ -554,6 +605,156 @@ async def bulk_extend_secret_expiry(
     return {"results": results, "success_count": success_count, "failed_count": len(results) - success_count}
 
 
+@router.post(
+    "/secrets/bulk-parse",
+    summary="Parse bulk secret upload file (Write)",
+)
+async def bulk_parse_secrets_file(
+    file: UploadFile = File(...),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+) -> dict:
+    """Parse CSV, JSON, or XLSX into secret rows for preview. Does not write to Azure."""
+    content = await file.read()
+    filename = file.filename or "upload.csv"
+    try:
+        secrets = parse_bulk_secrets_file(filename, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("bulk_parse_secrets_file_error", filename=filename, error=str(exc))
+        raise HTTPException(status_code=400, detail="Failed to parse upload file") from exc
+
+    if len(secrets) > BULK_SECRET_MAX_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File contains more than {BULK_SECRET_MAX_COUNT} secrets",
+        )
+    return {"secrets": secrets, "count": len(secrets)}
+
+
+@router.post(
+    "/secrets/bulk-validate",
+    summary="Validate secrets before bulk upload (Write)",
+)
+async def bulk_validate_secrets(
+    request: BulkValidateSecretsRequest,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+) -> dict:
+    """Pre-validate bulk secret payload. Does not write to Azure or log secret values."""
+    payload = [item.model_dump() for item in request.secrets]
+    return validate_bulk_secrets(payload, vault_uri=request.vault_uri)
+
+
+@router.post(
+    "/secrets/bulk",
+    summary="Bulk create or update secrets (Write)",
+)
+async def bulk_create_secrets(
+    request: BulkCreateSecretsRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Create or update multiple secrets in one vault. Returns per-secret results."""
+    validation = validate_bulk_secrets(
+        [item.model_dump() for item in request.secrets],
+        vault_uri=request.vault_uri,
+    )
+    if not validation["valid"]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Bulk validation failed",
+                "validation": validation,
+            },
+        )
+
+    results: list[dict] = []
+    vaults_touched: set[str] = set()
+
+    for item in request.secrets:
+        existing = await _item_exists_in_cache(sync_service, request.vault_uri, "secret", item.name)
+        action = "update_secret" if existing else "create_secret"
+        try:
+            await service.create_or_update_secret(
+                vault_uri=request.vault_uri,
+                name=item.name,
+                value=item.value,
+                content_type=item.content_type,
+                tags=item.tags,
+                encode_base64=item.encode_base64,
+                expires=item.expires,
+            )
+            await _write_keyvault_audit_log(
+                db,
+                request=http_request,
+                user=user,
+                action=action,
+                resource_type="secret",
+                resource_name=item.name,
+                vault_uri=request.vault_uri,
+                status="success",
+                details={
+                    "bulk": True,
+                    "content_type": item.content_type,
+                    "tag_keys": sorted((item.tags or {}).keys()),
+                    "expires": item.expires,
+                },
+            )
+            vaults_touched.add(request.vault_uri)
+            results.append({"name": item.name, "status": "success"})
+        except Exception as e:
+            logger.warning(
+                "bulk_create_secret_error",
+                vault_uri=request.vault_uri,
+                name=item.name,
+                error=str(e),
+            )
+            await _write_keyvault_audit_log(
+                db,
+                request=http_request,
+                user=user,
+                action=action,
+                resource_type="secret",
+                resource_name=item.name,
+                vault_uri=request.vault_uri,
+                status="failed",
+                details={"bulk": True, "error": str(e)},
+            )
+            results.append({"name": item.name, "status": "failed", "error": _friendly_error(e)})
+
+    await _write_keyvault_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="bulk_create_secrets",
+        resource_type="secret",
+        resource_name=f"{len(request.secrets)} items",
+        vault_uri=request.vault_uri,
+        status="success" if all(r["status"] == "success" for r in results) else "failed",
+        details={
+            "bulk": True,
+            "total": len(request.secrets),
+            "success_count": sum(1 for r in results if r["status"] == "success"),
+            "failed_count": sum(1 for r in results if r["status"] == "failed"),
+        },
+    )
+
+    for vault_uri in vaults_touched:
+        background_tasks.add_task(sync_service.sync_vault, vault_uri, triggered_by="mutation")
+
+    success_count = sum(1 for r in results if r["status"] == "success")
+    return {
+        "results": results,
+        "total": len(results),
+        "success_count": success_count,
+        "failed_count": len(results) - success_count,
+    }
+
+
 # ── Keys ───────────────────────────────────────────────────────────────
 
 
@@ -777,10 +978,92 @@ async def get_certificate(
         raise HTTPException(status_code=502, detail=f"Cannot retrieve certificate: {_friendly_error(e)}")
 
 
+@router.post(
+    "/certificates",
+    summary="Import a certificate (Write)",
+)
+async def create_certificate(
+    request: CreateCertificateRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Import a certificate into Key Vault. Write role required."""
+    import base64 as b64_module
+
+    existing = await _item_exists_in_cache(sync_service, request.vault_uri, "certificate", request.name)
+    action = "update_certificate" if existing else "create_certificate"
+
+    try:
+        cert_bytes = b64_module.b64decode(request.certificate_base64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid base64 certificate content") from exc
+
+    try:
+        cert_meta = service.validate_certificate_content(
+            cert_bytes,
+            request.file_type,
+            request.password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = await service.import_certificate(
+            vault_uri=request.vault_uri,
+            name=request.name,
+            cert_bytes=cert_bytes,
+            password=request.password,
+            tags=request.tags,
+            not_before=request.not_before,
+            expires=request.expires,
+        )
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action=action,
+            resource_type="certificate",
+            resource_name=request.name,
+            vault_uri=request.vault_uri,
+            status="success",
+            details={
+                "file_type": request.file_type,
+                "tag_keys": sorted((request.tags or {}).keys()),
+                "not_before": request.not_before,
+                "expires": request.expires or cert_meta.get("expires"),
+                "subject": cert_meta.get("subject"),
+            },
+        )
+        background_tasks.add_task(sync_service.sync_vault, request.vault_uri, triggered_by="mutation")
+        return result
+    except Exception as e:
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action=action,
+            resource_type="certificate",
+            resource_name=request.name,
+            vault_uri=request.vault_uri,
+            status="failed",
+            details={
+                "file_type": request.file_type,
+                "tag_keys": sorted((request.tags or {}).keys()),
+                "error": str(e),
+            },
+        )
+        logger.warning("create_certificate_error", vault_uri=request.vault_uri, name=request.name, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot import certificate: {_friendly_error(e)}")
+
+
 @router.get(
     "/history",
     summary="Get Key Vault CRUD audit history",
-    description="Returns create, update, and delete history for Key Vault secrets and keys from the shared audit log.",
+    description="Returns create, update, and delete history for Key Vault secrets, keys, and certificates.",
 )
 async def get_audit_history(
     vault_uri: str | None = Query(default=None, description="Filter by Key Vault URI"),
@@ -797,9 +1080,13 @@ async def get_audit_history(
         "create_secret",
         "update_secret",
         "delete_secret",
+        "bulk_create_secrets",
         "create_key",
         "update_key",
         "delete_key",
+        "create_certificate",
+        "update_certificate",
+        "delete_certificate",
     )
     since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
 

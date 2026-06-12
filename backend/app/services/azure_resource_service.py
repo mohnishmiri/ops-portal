@@ -744,9 +744,7 @@ class AzureResourceService:
             endpoint = network.private_endpoints.get(resource_group, endpoint_name)
             statuses = _connection_statuses(endpoint)
             if not statuses:
-                raise ValueError(
-                    f"Private endpoint '{endpoint_name}' has no private link connections to evaluate."
-                )
+                raise ValueError(f"Private endpoint '{endpoint_name}' has no private link connections to evaluate.")
             active = {s for s in statuses if s.lower() not in ("disconnected", "rejected")}
             if active:
                 raise ValueError(
@@ -754,9 +752,7 @@ class AzureResourceService:
                     "Only fully disconnected endpoints can be deleted."
                 )
             if not any(s.lower() == "disconnected" for s in statuses):
-                raise ValueError(
-                    f"Private endpoint '{endpoint_name}' has no disconnected connections."
-                )
+                raise ValueError(f"Private endpoint '{endpoint_name}' has no disconnected connections.")
             poller = network.private_endpoints.begin_delete(resource_group, endpoint_name)
             poller.wait()
             return {

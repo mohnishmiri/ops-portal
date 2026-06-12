@@ -63,10 +63,7 @@ async def resolve_effective_subscription_ids(
         if invalid:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "One or more subscription IDs are not in the monitored set: "
-                    f"{', '.join(sorted(invalid))}"
-                ),
+                detail=(f"One or more subscription IDs are not in the monitored set: {', '.join(sorted(invalid))}"),
             )
         if allowed_subscriptions:
             rbac_invalid = selected_set - set(allowed_subscriptions)

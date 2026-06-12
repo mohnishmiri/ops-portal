@@ -531,9 +531,7 @@ class OptimizationService:
             )
 
         # Disconnected private endpoints
-        private_endpoints = await self._run_resource_graph_query(
-            QUERY_DISCONNECTED_PRIVATE_ENDPOINTS, subscription_ids
-        )
+        private_endpoints = await self._run_resource_graph_query(QUERY_DISCONNECTED_PRIVATE_ENDPOINTS, subscription_ids)
         seen_pe_ids: set[str] = set()
         for pe in private_endpoints:
             pe_id = pe.get("id", "")

@@ -346,9 +346,7 @@ class DashboardService:
         ]
 
         # ── Resolve subscription IDs → display names ─────────────────
-        sub_name_map = await self._resolve_subscription_names(
-            subscription_ids or await get_scoped_subscription_ids()
-        )
+        sub_name_map = await self._resolve_subscription_names(subscription_ids or await get_scoped_subscription_ids())
         for spender in breakdown.breakdown:
             if spender.group_value in sub_name_map:
                 spender.group_value = sub_name_map[spender.group_value]
