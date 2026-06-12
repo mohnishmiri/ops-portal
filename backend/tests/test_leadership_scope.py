@@ -1,7 +1,5 @@
 """Tests for scope-aware leadership dashboard helpers."""
 
-import pytest
-
 from app.services.leadership_sync_service import (
     LEADERSHIP_DASHBOARD_CACHE_KEY,
     leadership_dashboard_cache_key,

@@ -78,6 +78,7 @@ ignore = ["B904", "E501", "RET504", "SIM108", "UP042"]
 [tool.ruff.lint.per-file-ignores]
 "app/api/v1/endpoints/*.py" = ["B008"]
 "app/auth/*.py" = ["B008"]
+"app/core/subscription_scope.py" = ["B008"]
 "app/plugins/**/*.py" = ["B008"]
 "tests/*.py" = ["S101"]
 

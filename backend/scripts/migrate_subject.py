@@ -27,9 +27,7 @@ async def migrate() -> None:
         if row:
             print("subject column already exists")
         else:
-            await conn.execute(
-                "ALTER TABLE alert_notification_history ADD COLUMN subject VARCHAR(500)"
-            )
+            await conn.execute("ALTER TABLE alert_notification_history ADD COLUMN subject VARCHAR(500)")
             print("Added subject column to alert_notification_history")
     finally:
         await conn.close()

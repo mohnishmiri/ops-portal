@@ -74,7 +74,12 @@ def test_advisor_display_name_uses_sku_key_for_reservations() -> None:
         _advisor_display_name(
             "eastus2",
             parsed,
-            {"sku": "Azure_Redis_Cache_Premium_P1_Cache", "region": "eastus2", "recommendedQuantity": "5", "term": "P1Y"},
+            {
+                "sku": "Azure_Redis_Cache_Premium_P1_Cache",
+                "region": "eastus2",
+                "recommendedQuantity": "5",
+                "term": "P1Y",
+            },
         )
         == "5× Azure_Redis_Cache_Premium_P1_Cache · 1yr RI"
     )
