@@ -12,7 +12,7 @@ import json as _json
 import urllib.error
 import urllib.request
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
@@ -29,6 +29,32 @@ _CACHE_TTL_VAULTS = 600  # 10 min — vault list rarely changes
 _CACHE_TTL_DASHBOARD = 300  # 5 min — dashboard aggregation
 _CACHE_TTL_LIST = 180  # 3 min — secrets/keys/certs list
 _CACHE_TTL_DETAIL = 600  # 10 min — individual cert/key detail
+
+
+def _normalize_vault_uri(vault_uri: str) -> str:
+    """Ensure vault URI is trimmed and ends with a trailing slash."""
+    trimmed = (vault_uri or "").strip()
+    if not trimmed:
+        return trimmed
+    return trimmed if trimmed.endswith("/") else f"{trimmed}/"
+
+
+def _parse_vault_http_error(he: urllib.error.HTTPError) -> tuple[str, str]:
+    """Return (combined message, Azure error message) from a Key Vault HTTP error."""
+    body = ""
+    with suppress(Exception):
+        body = he.read().decode("utf-8", errors="replace")
+    detail = ""
+    try:
+        err_json = _json.loads(body)
+        err_obj = err_json.get("error", {})
+        detail = err_obj.get("message", "") or err_obj.get("innererror", {}).get("message", "")
+    except Exception:
+        detail = body[:500] if body else ""
+    msg = f"HTTP Error {he.code}: {he.reason}"
+    if detail:
+        msg += f" — {detail}"
+    return msg, detail
 
 
 class KeyVaultService:
@@ -94,6 +120,46 @@ class KeyVaultService:
                 raise RuntimeError(msg) from he
 
         return await asyncio.to_thread(_fetch)
+
+    async def _vault_request(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+        timeout: int = 30,
+    ) -> dict:
+        """Make a Key Vault REST request and surface Azure error details."""
+        token = await self._get_vault_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+
+        def _fetch() -> dict:
+            no_proxy_handler = urllib.request.ProxyHandler({})
+            opener = urllib.request.build_opener(no_proxy_handler)
+            try:
+                with opener.open(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                    return _json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as he:
+                msg, detail = _parse_vault_http_error(he)
+                logger.error("vault_api_error", url=url, status=he.code, detail=detail[:300])
+                raise RuntimeError(msg) from he
+
+        return await asyncio.to_thread(_fetch)
+
+    @staticmethod
+    def _certificate_conflict_kind(error_message: str) -> str | None:
+        """Classify a certificate import/create 409 conflict."""
+        lowered = error_message.lower()
+        if "deleted but recoverable" in lowered or "deleted state" in lowered:
+            return "deleted"
+        if "pending" in lowered and ("inprogress" in lowered or "in progress" in lowered):
+            return "pending"
+        return None
 
     # ── Cache Helpers ──────────────────────────────────────────────────
 
@@ -608,6 +674,13 @@ class KeyVaultService:
 
         logger.warning("item_recovery_slow", item_type=item_type, name=name)
 
+    async def _delete_pending_certificate(self, vault_uri: str, name: str) -> None:
+        """Remove a stale pending certificate operation blocking import."""
+        vault_uri = _normalize_vault_uri(vault_uri)
+        pending_url = f"{vault_uri}certificates/{name}/pending?api-version=7.4"
+        await self._vault_request(pending_url, method="DELETE")
+        logger.info("certificate_pending_deleted", name=name, vault_uri=vault_uri)
+
     # ── Certificates ───────────────────────────────────────────────────
 
     @staticmethod
@@ -673,14 +746,12 @@ class KeyVaultService:
         expires: str | None = None,
     ) -> dict:
         """Import a certificate into Key Vault via REST import API."""
-        from datetime import timedelta
-
-        now = datetime.utcnow()
-        nbf_dt = datetime.fromisoformat(not_before) if not_before else now
-        exp_dt = datetime.fromisoformat(expires) if expires else now + timedelta(days=360)
+        vault_uri = _normalize_vault_uri(vault_uri)
+        now = datetime.now(UTC)
+        nbf_dt = datetime.fromisoformat(not_before).replace(tzinfo=UTC) if not_before else now
+        exp_dt = datetime.fromisoformat(expires).replace(tzinfo=UTC) if expires else now + timedelta(days=360)
 
         url = f"{vault_uri}certificates/{name}/import?api-version=7.4"
-        token = await self._get_vault_token()
         payload_dict: dict = {
             "value": base64.b64encode(cert_bytes).decode("ascii"),
             "tags": tags or {},
@@ -695,31 +766,31 @@ class KeyVaultService:
 
         payload = _json.dumps(payload_dict).encode("utf-8")
 
-        def _post(tok: str) -> dict:
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {tok}",
-                    "Content-Type": "application/json",
-                },
-            )
-            no_proxy_handler = urllib.request.ProxyHandler({})
-            opener = urllib.request.build_opener(no_proxy_handler)
-            with opener.open(req, timeout=30) as resp:
-                return _json.loads(resp.read())
+        async def _import_once() -> dict:
+            return await self._vault_request(url, method="POST", data=payload, timeout=30)
 
         try:
-            body = await asyncio.to_thread(_post, token)
-        except urllib.error.HTTPError as he:
-            if he.code == 409:
+            body = await _import_once()
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "409" not in msg and "Conflict" not in msg:
+                raise
+
+            conflict_kind = self._certificate_conflict_kind(msg)
+            if conflict_kind == "deleted":
                 logger.info("certificate_conflict_recovering", name=name, vault_uri=vault_uri)
                 await self._recover_deleted_item(vault_uri, "certificates", name)
-                token = await self._get_vault_token()
-                body = await asyncio.to_thread(_post, token)
+                body = await _import_once()
+            elif conflict_kind == "pending":
+                logger.info("certificate_pending_conflict", name=name, vault_uri=vault_uri)
+                await self._delete_pending_certificate(vault_uri, name)
+                body = await _import_once()
             else:
-                raise
+                raise RuntimeError(
+                    "Certificate import conflict. The certificate name may already exist, "
+                    "be pending creation, or be in a deleted state. "
+                    f"Detail: {msg.split(' — ', 1)[-1] if ' — ' in msg else msg}"
+                ) from exc
 
         attrs = body.get("attributes", {})
         vault_name = vault_uri.rstrip("/").split("//")[1].split(".")[0]

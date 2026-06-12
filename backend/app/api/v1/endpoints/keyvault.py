@@ -26,7 +26,7 @@ from app.services.keyvault_bulk_service import (
     parse_bulk_secrets_file,
     validate_bulk_secrets,
 )
-from app.services.keyvault_service import KeyVaultService
+from app.services.keyvault_service import KeyVaultService, _normalize_vault_uri
 from app.services.keyvault_sync_service import KeyVaultSyncService
 
 logger = structlog.get_logger(__name__)
@@ -1013,7 +1013,7 @@ async def create_certificate(
 
     try:
         result = await service.import_certificate(
-            vault_uri=request.vault_uri,
+            vault_uri=_normalize_vault_uri(request.vault_uri),
             name=request.name,
             cert_bytes=cert_bytes,
             password=request.password,
@@ -1182,7 +1182,20 @@ def _friendly_error(exc: Exception) -> str:
     if "401" in msg or "Unauthorized" in msg:
         return "Authentication failed. The service principal token may be invalid or expired."
     if "404" in msg or "Not Found" in msg:
+        if "certificates/import" in msg or "import permission" in msg.lower():
+            return (
+                "Certificate import failed. Verify the vault URI is correct and the service principal "
+                "has Key Vault Certificates Officer (or certificates/import permission)."
+            )
+        if "deleted" in msg.lower():
+            return "Certificate name is unavailable because a deleted certificate with this name still exists. Recover or purge it in Azure Key Vault, then retry."
         return "Vault or item not found."
+    if "409" in msg or "Conflict" in msg:
+        if "pending" in msg.lower():
+            return "A pending certificate operation is blocking import. Retry after it completes, or use a different certificate name."
+        if "deleted" in msg.lower():
+            return "A soft-deleted certificate with this name exists. Recover or purge it in Azure Key Vault, then retry."
+        return f"Certificate import conflict: {msg.split(' — ', 1)[-1] if ' — ' in msg else msg[:200]}"
     if "timeout" in msg.lower() or "timed out" in msg.lower():
         return "Request timed out. Vault may be behind a private endpoint."
     return msg[:300]
