@@ -139,6 +139,37 @@ class _ScopeRecordingSyncService:
         }
 
 
+class _AuditRecordingDB:
+    """Captures AuditLog rows written by the endpoint."""
+
+    def __init__(self):
+        self.added: list[Any] = []
+        self.commits = 0
+
+    def add(self, obj: Any) -> None:
+        self.added.append(obj)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        pass
+
+
+class _CertDeleteService:
+    def __init__(self):
+        self.deleted: tuple[str, str] | None = None
+
+    async def delete_certificate(self, vault_uri: str, name: str) -> dict:
+        self.deleted = (vault_uri, name)
+        return {"name": name, "deleted": True, "recovery_id": "rec-123"}
+
+
+class _NoopSyncService:
+    async def sync_vault(self, vault_uri: str, triggered_by: str = "mutation"):
+        return None
+
+
 class _EmptySecretsSyncService:
     async def get_secrets_from_db(self, vault_uri: str, search: str | None = None):
         return []
@@ -290,6 +321,33 @@ async def test_keyvault_dashboard_scopes_db_read_to_selected_subscriptions() -> 
     assert sync_service.received_subscription_ids == ["sub-a", "sub-b"]
     assert payload["source"] == "database"
     assert payload["total_vaults"] == 1
+
+
+@pytest.mark.anyio
+async def test_delete_certificate_writes_audit_log() -> None:
+    """Deleting a certificate calls the service and records a delete_certificate audit row."""
+    service = _CertDeleteService()
+    db = _AuditRecordingDB()
+
+    result = await keyvault.delete_certificate(
+        name="my-cert",
+        vault_uri="https://sample-kv.vault.azure.net/",
+        user=_user(),
+        service=_as_service(service),
+        sync_service=_as_sync_service(_NoopSyncService()),
+        db=_as_async_session(db),
+    )
+
+    assert result["deleted"] is True
+    assert service.deleted == ("https://sample-kv.vault.azure.net/", "my-cert")
+    assert len(db.added) == 1
+    audit = db.added[0]
+    assert audit.action == "delete_certificate"
+    assert audit.resource_type == "certificate"
+    assert audit.resource_id == "my-cert"
+    assert audit.status == "success"
+    assert audit.details["summary"] == "Deleted certificate my-cert"
+    assert audit.details["recovery_id"] == "rec-123"
 
 
 @pytest.mark.anyio

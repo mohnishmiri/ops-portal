@@ -1296,6 +1296,25 @@ export function useCertificateDetail(vaultUri: string | null, name: string | nul
   });
 }
 
+export function useDeleteCertificate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ vaultUri, name }: { vaultUri: string; name: string }) => {
+      const { data } = await apiClient.delete(
+        `/keyvault/certificates/${name}?vault_uri=${encodeURIComponent(vaultUri)}`
+      );
+      return data;
+    },
+    onSettled: async (_d, _e, vars) => {
+      await new Promise((r) => setTimeout(r, 600));
+      await qc.invalidateQueries({ queryKey: ["keyvault", "certificates", vars.vaultUri] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "cert-detail"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+    },
+  });
+}
+
 // ── Secret Value (view / decode) ──────────────────────────────────────
 
 export interface SecretValueResponse {

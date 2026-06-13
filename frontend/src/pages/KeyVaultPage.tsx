@@ -23,6 +23,7 @@ import {
   useCreateKey,
   useDeleteKey,
   useCertificateDetail,
+  useDeleteCertificate,
   useKeyVaultAuditHistory,
   useKeyVaultSyncStatus,
   useKeyVaultSync,
@@ -2178,8 +2179,10 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
   const fmt = (iso: string | null) => fmtDate(iso, timezone);
   const queryClient = useQueryClient();
   const { data: certs, isLoading, isError, error } = useVaultCertificates(vaultUri);
+  const deleteMutation = useDeleteCertificate();
   const [search, setSearch] = useState("");
   const [viewingCert, setViewingCert] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const showToast = useCallback((message: string, type: ToastState["type"] = "success") => setToast({ message, type }), []);
@@ -2258,6 +2261,19 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
     setRefreshing(false);
   };
 
+  const handleDelete = (name: string) => {
+    deleteMutation.mutate(
+      { vaultUri: vaultUri!, name },
+      {
+        onSuccess: () => {
+          showToast("Certificate deleted successfully");
+          setConfirmDelete(null);
+        },
+        onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to delete certificate", "error"),
+      }
+    );
+  };
+
   return (
     <div className={gridStyles.shell}>
       <GridToolbar
@@ -2317,6 +2333,7 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
                 <td className={gridStyles.centerCell}>
                   <div className="flex justify-center gap-1">
                     <GridIconButton onClick={() => setViewingCert(c.name)} title="View certificate" tone="blue">{Icons.eye()}</GridIconButton>
+                    {canWrite && <GridIconButton onClick={() => setConfirmDelete(c.name)} title="Delete certificate" tone="red">{Icons.trash()}</GridIconButton>}
                   </div>
                 </td>
               </tr>
@@ -2339,6 +2356,30 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
           onClose={() => setShowCreate(false)}
           onSuccess={() => showToast("Certificate imported successfully")}
         />
+      )}
+
+      {confirmDelete && (
+        <Modal title="Confirm Delete" onClose={() => setConfirmDelete(null)}>
+          <p className="text-sm text-gray-700 mb-4">
+            Are you sure you want to delete certificate <span className="font-mono font-bold">{confirmDelete}</span>?
+            This will soft-delete the certificate in Azure Key Vault.
+          </p>
+          {deleteMutation.isError && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
+              <p className="text-sm text-red-700">{(deleteMutation.error as any)?.response?.data?.detail || "Failed to delete certificate"}</p>
+            </div>
+          )}
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setConfirmDelete(null)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition">Cancel</button>
+            <button
+              onClick={() => handleDelete(confirmDelete)}
+              disabled={deleteMutation.isPending}
+              className="px-4 py-2 text-sm text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 transition"
+            >
+              {deleteMutation.isPending ? "Deleting..." : "Delete Certificate"}
+            </button>
+          </div>
+        </Modal>
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}

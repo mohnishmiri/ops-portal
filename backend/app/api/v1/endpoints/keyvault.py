@@ -1066,6 +1066,54 @@ async def create_certificate(
         raise HTTPException(status_code=502, detail=f"Cannot import certificate: {_friendly_error(e)}")
 
 
+@router.delete(
+    "/certificates/{name}",
+    summary="Delete a certificate (Write)",
+)
+async def delete_certificate(
+    name: str,
+    vault_uri: str = Query(description="Key Vault URI"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    http_request: Request = None,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Soft-delete a certificate. Write role required. Triggers vault sync."""
+    try:
+        result = await service.delete_certificate(vault_uri, name)
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="delete_certificate",
+            resource_type="certificate",
+            resource_name=name,
+            vault_uri=vault_uri,
+            status="success",
+            details={
+                "recovery_id": result.get("recovery_id"),
+            },
+        )
+        background_tasks.add_task(sync_service.sync_vault, vault_uri, triggered_by="mutation")
+        return result
+    except Exception as e:
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="delete_certificate",
+            resource_type="certificate",
+            resource_name=name,
+            vault_uri=vault_uri,
+            status="failed",
+            details={"error": str(e)},
+        )
+        logger.warning("delete_certificate_error", vault_uri=vault_uri, name=name, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot delete certificate: {_friendly_error(e)}")
+
+
 @router.get(
     "/history",
     summary="Get Key Vault CRUD audit history",

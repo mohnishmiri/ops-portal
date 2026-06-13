@@ -1009,6 +1009,33 @@ class KeyVaultService:
         await self._set_cache(detail_cache_key, result, _CACHE_TTL_DETAIL)
         return result
 
+    async def delete_certificate(self, vault_uri: str, name: str) -> dict:
+        """Soft-delete a certificate."""
+        url = f"{vault_uri}certificates/{name}?api-version=7.4"
+        token = await self._get_vault_token()
+        req = urllib.request.Request(
+            url,
+            method="DELETE",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        def _delete():
+            no_proxy_handler = urllib.request.ProxyHandler({})
+            opener = urllib.request.build_opener(no_proxy_handler)
+            with opener.open(req, timeout=15) as resp:
+                return _json.loads(resp.read())
+
+        body = await asyncio.to_thread(_delete)
+
+        vault_name = vault_uri.rstrip("/").split("//")[1].split(".")[0]
+        await self._invalidate_cache(f"kv:certs:{vault_name}", f"kv:cert-detail:{vault_name}:*", "kv:dashboard")
+
+        return {
+            "name": name,
+            "deleted": True,
+            "recovery_id": body.get("recoveryId", ""),
+        }
+
     # ── Dashboard Summary ──────────────────────────────────────────────
 
     async def get_dashboard_summary(self, *, refresh: bool = False) -> dict:
