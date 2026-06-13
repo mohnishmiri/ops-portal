@@ -44,6 +44,7 @@ import {
   useStartCluster,
   useStopCluster,
   useScaleHistory,
+  useAksNamespaces,
   refreshClusters,
   usePodLogs,
   usePodLogSearch,
@@ -59,6 +60,15 @@ import {
   NodeDetail,
   PodLogSearchResult,
 } from "../services/aksApi";
+import { useAksLiveWatch, LiveStatusBadge } from "../hooks/useAksLiveWatch";
+import {
+  SecretsTab,
+  ServicesTab,
+  ConfigMapsTab,
+  IngressTab,
+  HelmTab,
+  AuditHistoryTab,
+} from "../features/aks/AKSExtendedTabs";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import {
   BarChart,
@@ -157,7 +167,10 @@ const Icons = {
 
 // ── Tab Types ─────────────────────────────────────────────────────────
 
-type TabKey = "clusters" | "nodepools" | "deployments" | "pods" | "cronjobs" | "history";
+type TabKey =
+  | "clusters" | "nodepools" | "deployments" | "pods"
+  | "services" | "secrets" | "configmaps" | "ingress" | "helm"
+  | "cronjobs" | "history" | "audit";
 
 // ── Color Constants ───────────────────────────────────────────────────
 
@@ -355,6 +368,38 @@ const AKSOperationsPage: React.FC = () => {
   const { data: scaleHistoryData } = useScaleHistory(selectedCluster?.id);
   const { data: nodePoolsData, isLoading: loadingNodePools, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(selectedCluster?.id || "");
   const syncNodePoolsMutation = useSyncNodePools();
+  const { data: namespacesData } = useAksNamespaces(selectedCluster?.id);
+
+  const namespaceOptions = useMemo(() => {
+    const fromApi = namespacesData?.namespaces || [];
+    const fromDeps = (deploymentsData?.deployments || []).map((d) => d.namespace);
+    const fromPods = (podMetricsData?.pods || []).map((p) => p.namespace);
+    return [...new Set([...fromApi, ...fromDeps, ...fromPods])].sort();
+  }, [namespacesData, deploymentsData, podMetricsData]);
+
+  const liveResources = useMemo((): string[] => {
+    if (activeTab === "clusters") return ["clusters"];
+    if (!selectedCluster) return [];
+    const map: Partial<Record<TabKey, string[]>> = {
+      nodepools: ["nodepools"],
+      deployments: ["deployments"],
+      pods: ["pods"],
+      cronjobs: ["cronjobs"],
+      services: ["services"],
+      secrets: ["secrets"],
+      configmaps: ["configmaps"],
+      ingress: ["ingress"],
+      helm: ["helm"],
+    };
+    return map[activeTab] || [];
+  }, [activeTab, selectedCluster]);
+
+  const { status: liveStatus } = useAksLiveWatch({
+    clusterId: selectedCluster?.id,
+    namespace: selectedNamespace || undefined,
+    resources: liveResources,
+    enabled: liveResources.length > 0,
+  });
 
   // Mutations
   const scaleDeploymentMutation = useScaleDeployment();
@@ -982,13 +1027,16 @@ const AKSOperationsPage: React.FC = () => {
 
   // Auto-polling for cluster list (not dependent on selected cluster)
   useEffect(() => {
+    if (!clustersData?.last_sync && !syncClustersMutation.isPending) {
+      syncClustersMutation.mutate(undefined);
+    }
     const interval = setInterval(() => {
       if (!syncClustersMutation.isPending) {
         syncClustersMutation.mutate(undefined);
       }
     }, AUTO_SYNC_INTERVAL);
     return () => clearInterval(interval);
-  }, [syncClustersMutation]);
+  }, [syncClustersMutation, clustersData?.last_sync]);
 
   // Multi-deployment mutation status tracker
   type MutationActivity = {
@@ -1056,8 +1104,14 @@ const AKSOperationsPage: React.FC = () => {
     { key: "nodepools", label: "Node Pools", icon: Icons.scale() },
     { key: "deployments", label: "Deployments", icon: Icons.deployment() },
     { key: "pods", label: "Pod Metrics", icon: Icons.pod() },
+    { key: "services", label: "Services", icon: Icons.deployment() },
+    { key: "secrets", label: "Secrets", icon: Icons.warning() },
+    { key: "configmaps", label: "ConfigMaps", icon: Icons.memory() },
+    { key: "ingress", label: "Ingress", icon: Icons.cluster() },
+    { key: "helm", label: "Helm", icon: Icons.scale() },
     { key: "cronjobs", label: "CronJobs", icon: Icons.cronjob() },
     { key: "history", label: "Scale History", icon: Icons.history() },
+    { key: "audit", label: "Audit History", icon: Icons.history() },
   ];
 
   // ── Render Clusters Tab ─────────────────────────────────────────────
@@ -1070,6 +1124,7 @@ const AKSOperationsPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <h2 className="text-xl font-semibold text-gray-800">AKS Cluster Inventory</h2>
         <div className="flex items-center gap-2">
+          <LiveStatusBadge status={liveStatus} />
           <button
             onClick={() => refetchClusters()}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
@@ -1104,9 +1159,9 @@ const AKSOperationsPage: React.FC = () => {
             Last synced: {formatDate(clustersData.last_sync)}
           </span>
         )}
-        {!clustersData?.last_sync && (
-          <span className="text-sm text-yellow-600">
-            Not synced yet — click "Sync from Azure" to load
+        {!clustersData?.last_sync && !loadingClusters && (
+          <span className="text-sm text-blue-600">
+            Syncing cluster inventory automatically…
           </span>
         )}
       </div>
@@ -1908,7 +1963,18 @@ const AKSOperationsPage: React.FC = () => {
           CronJobs {selectedCluster && `- ${selectedCluster.name}`}
         </h2>
         {selectedCluster && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={selectedNamespace}
+              onChange={(e) => setSelectedNamespace(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+            >
+              <option value="">All Namespaces</option>
+              {namespaceOptions.map((ns) => (
+                <option key={ns} value={ns}>{ns}</option>
+              ))}
+            </select>
+            <LiveStatusBadge status={liveStatus} />
             {canWrite && (
             <button
               onClick={() => syncCronJobsMutation.mutate(
@@ -2722,7 +2788,10 @@ const AKSOperationsPage: React.FC = () => {
     <div className="py-6 space-y-6">
         {/* Header */}
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">AKS Operations Center</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-gray-900">AKS Operations Center</h1>
+            {liveResources.length > 0 && <LiveStatusBadge status={liveStatus} />}
+          </div>
           <p className="text-sm text-gray-500 mt-1">Multi-cluster management, deployment control, and observability</p>
         </div>
 
@@ -2753,6 +2822,36 @@ const AKSOperationsPage: React.FC = () => {
         {activeTab === "pods" && renderPodMetricsTab()}
         {activeTab === "cronjobs" && renderCronJobsTab()}
         {activeTab === "history" && renderHistoryTab()}
+        {activeTab === "audit" && (
+          <AuditHistoryTab clusterId={selectedCluster?.id} namespace={selectedNamespace || undefined} />
+        )}
+        {selectedCluster && ["services", "secrets", "configmaps", "ingress", "helm"].includes(activeTab) && (
+          <>
+            {activeTab === "services" && (
+              <ServicesTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+            )}
+            {activeTab === "secrets" && (
+              <SecretsTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+            )}
+            {activeTab === "configmaps" && (
+              <ConfigMapsTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+            )}
+            {activeTab === "ingress" && (
+              <IngressTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+            )}
+            {activeTab === "helm" && (
+              <HelmTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+            )}
+          </>
+        )}
+        {!selectedCluster && ["services", "secrets", "configmaps", "ingress", "helm"].includes(activeTab) && (
+          <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
+        )}
 
       {/* Generic Confirmation Modal */}
       {confirmDialog && (

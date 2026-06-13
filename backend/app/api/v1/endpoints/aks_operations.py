@@ -14,8 +14,9 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.endpoints.aks_extended_endpoints import register_extended_routes
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
@@ -30,7 +31,7 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-def _get_service(db: Session = Depends(get_db)) -> AKSOperationsService:
+def _get_service(db: AsyncSession = Depends(get_db)) -> AKSOperationsService:
     return get_aks_operations_service(db)
 
 
@@ -39,9 +40,68 @@ def _cluster_name_from_id(cluster_id: str) -> str:
     return cluster_id.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _audit_summary(action: str, resource_type: str, resource_name: str) -> str:
+    verb = {
+        "create_deployment": "Created",
+        "update_deployment": "Updated",
+        "delete_deployment": "Deleted",
+        "scale_deployment": "Scaled",
+        "restart_deployment": "Restarted",
+        "create_secret": "Created",
+        "update_secret": "Updated",
+        "delete_secret": "Deleted",
+        "reveal_secret": "Revealed",
+        "create_service": "Created",
+        "delete_service": "Deleted",
+        "create_configmap": "Created",
+        "update_configmap": "Updated",
+        "delete_configmap": "Deleted",
+        "create_ingress": "Created",
+        "delete_ingress": "Deleted",
+        "create_cronjob": "Created",
+        "update_cronjob": "Updated",
+        "delete_cronjob": "Deleted",
+        "suspend_cronjob": "Suspended",
+        "trigger_cronjob": "Triggered",
+        "start_cluster": "Started",
+        "stop_cluster": "Stopped",
+        "scale_nodepool": "Scaled",
+        "autoscale_nodepool": "Autoscale changed",
+        "helm_install": "Installed",
+        "helm_upgrade": "Upgraded",
+        "helm_uninstall": "Uninstalled",
+        "helm_rollback": "Rolled back",
+    }.get(action, "Changed")
+    return f"{verb} {resource_type} {resource_name}"
+
+
+def _serialize_aks_audit_entry(entry: AuditLog) -> dict:
+    details = entry.details if isinstance(entry.details, dict) else {}
+    resource_name = details.get("resource_name") or entry.resource_id or "unknown"
+    resource_type = details.get("resource_type") or entry.resource_type or "item"
+    summary = details.get("summary") or _audit_summary(entry.action, resource_type, resource_name)
+    return {
+        "id": entry.id,
+        "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
+        "user_id": entry.user_id,
+        "user_email": entry.user_email,
+        "action": entry.action,
+        "resource_type": resource_type,
+        "resource_id": entry.resource_id,
+        "resource_name": resource_name,
+        "cluster_id": details.get("cluster_id"),
+        "cluster_name": details.get("cluster_name"),
+        "namespace": details.get("namespace"),
+        "status": entry.status,
+        "summary": summary,
+        "details": details,
+    }
+
+
 async def _write_aks_audit_log(
-    db: Session | None,
+    db: AsyncSession | None,
     *,
+    request: Request | None = None,
     user: UserContext,
     action: str,
     resource_type: str,
@@ -63,18 +123,23 @@ async def _write_aks_audit_log(
             resource_id=resource_name,
             details={
                 "page": "AKSOperationsPage",
+                "feature": "aks_audit_history",
                 "cluster_id": cluster_id,
-                "cluster_name": _cluster_name_from_id(cluster_id),
+                "cluster_name": _cluster_name_from_id(cluster_id) if cluster_id else "",
                 "namespace": namespace,
                 "resource_name": resource_name,
+                "resource_type": resource_type,
+                "summary": details.get("summary") or _audit_summary(action, resource_type, resource_name),
                 **details,
             },
+            ip_address=request.client.host if request and request.client else None,
             status=status,
             timestamp=datetime.now(UTC),
         )
         db.add(entry)
-        db.commit()
+        await db.commit()
     except Exception as exc:
+        await db.rollback()
         logger.warning("aks_audit_log_failed", action=action, resource=resource_name, error=str(exc))
 
 
@@ -426,7 +491,7 @@ async def scale_deployment(
     http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Scale a deployment with audit logging."""
     result = await service.scale_deployment(
@@ -473,8 +538,10 @@ async def scale_deployment(
 )
 async def restart_deployment(
     request: RestartDeploymentRequest,
+    http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Restart a deployment with rolling update."""
     result = await service.restart_deployment(
@@ -485,7 +552,21 @@ async def restart_deployment(
         user_email=user.email,
     )
 
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="restart_deployment",
+        resource_type="deployment",
+        resource_name=request.deployment_name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={"error": result.get("error")},
+    )
+
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Restart operation failed"))
 
     return result
@@ -501,7 +582,7 @@ async def create_deployment(
     http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Create a new deployment."""
     result = await service.create_deployment(
@@ -547,7 +628,7 @@ async def update_deployment(
     http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Update an existing deployment."""
     result = await service.update_deployment(
@@ -593,7 +674,7 @@ async def delete_deployment(
     http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete a deployment."""
     result = await service.delete_deployment(
@@ -1367,3 +1448,11 @@ async def invalidate_cache(
     """Flush entire AKS cache. Admin only."""
     await data_cache.invalidate_all()
     return {"success": True, "message": "All AKS cache entries invalidated"}
+
+
+register_extended_routes(
+    router,
+    get_service=_get_service,
+    write_audit=_write_aks_audit_log,
+    serialize_audit=_serialize_aks_audit_entry,
+)

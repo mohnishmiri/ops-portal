@@ -81,6 +81,26 @@ async def _claim_startup_task_lock(task_name: str, ttl_seconds: int = 300) -> bo
         return True
 
 
+async def _startup_aks_cluster_sync() -> None:
+    """Sync AKS cluster inventory to DB on startup."""
+    try:
+        await asyncio.sleep(6)
+        from app.core.database import get_db_session
+        from app.services.aks_operations_service import get_aks_operations_service
+
+        async for db in get_db_session():
+            svc = get_aks_operations_service(db)
+            result = await svc.sync_clusters_to_db()
+            logger.info(
+                "aks_startup_cluster_sync_completed",
+                count=result.get("synced_count", 0),
+                db_saved=result.get("db_saved", False),
+            )
+            break
+    except Exception as exc:
+        logger.warning("aks_startup_cluster_sync_failed", error=str(exc)[:300])
+
+
 async def _startup_keyvault_sync() -> None:
     """Run initial KeyVault sync in background on startup."""
     try:
@@ -258,6 +278,13 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
                     logger.info("keyvault_startup_sync_skipped", reason="data_fresh")
     except Exception as exc:
         logger.warning("keyvault_startup_check_failed", error=str(exc)[:200])
+
+    # Auto-sync AKS cluster inventory on startup
+    try:
+        if not skip_background:
+            asyncio.create_task(_startup_aks_cluster_sync())
+    except Exception as exc:
+        logger.warning("aks_startup_sync_launch_failed", error=str(exc)[:200])
 
     # Auto-sync amortized cost data on startup if DB is empty or stale
     try:

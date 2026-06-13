@@ -1489,3 +1489,269 @@ export function useInvalidateCache() {
     },
   });
 }
+
+// ── Extended Resources (Secrets, Services, ConfigMaps, Ingress, Helm) ──
+
+export interface K8sSecret {
+  name: string;
+  namespace: string;
+  type: string;
+  keys?: string[];
+  key_count?: number;
+}
+
+export interface K8sService {
+  name: string;
+  namespace: string;
+  type: string;
+  cluster_ip?: string;
+  ports?: Array<{ port: number; target_port?: string; protocol?: string }>;
+}
+
+export interface K8sIngress {
+  name: string;
+  namespace: string;
+  hosts?: string[];
+  backend_services?: string[];
+  tls_secrets?: string[];
+  address?: string;
+  ingress_class?: string;
+}
+
+export interface HelmRelease {
+  name: string;
+  namespace: string;
+  chart: string;
+  revision: number;
+  status: string;
+  updated?: string;
+}
+
+export interface AksAuditEntry {
+  id: number;
+  timestamp: string | null;
+  user_email: string;
+  action: string;
+  resource_name: string;
+  status: string;
+  summary: string;
+}
+
+export async function fetchCachedSecrets(clusterId: string, namespace: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/secrets/cached`, { params: { cluster_id: clusterId, namespace } });
+  return data as { secrets: K8sSecret[]; count: number; source?: string };
+}
+
+export async function syncSecretsToDb(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.post(`${API_PREFIX}/secrets/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  return data;
+}
+
+export async function deleteSecretApi(clusterId: string, namespace: string, name: string) {
+  const { data } = await apiClient.delete(`${API_PREFIX}/secrets`, { params: { cluster_id: clusterId, namespace, name } });
+  return data;
+}
+
+export async function fetchCachedServices(clusterId: string, namespace: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/services/cached`, { params: { cluster_id: clusterId, namespace } });
+  return data as { services: K8sService[]; count: number };
+}
+
+export async function syncServicesToDb(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.post(`${API_PREFIX}/services/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  return data;
+}
+
+export async function deleteServiceApi(clusterId: string, namespace: string, name: string) {
+  const { data } = await apiClient.delete(`${API_PREFIX}/services`, { params: { cluster_id: clusterId, namespace, name } });
+  return data;
+}
+
+export async function fetchCachedConfigMapsExt(clusterId: string, namespace: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/cached`, { params: { cluster_id: clusterId, namespace } });
+  return data as { configmaps: ConfigMap[]; count: number };
+}
+
+export async function syncConfigMapsToDb(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.post(`${API_PREFIX}/configmaps/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  return data;
+}
+
+export async function deleteConfigMapApi(clusterId: string, namespace: string, name: string) {
+  const { data } = await apiClient.delete(`${API_PREFIX}/configmaps`, { params: { cluster_id: clusterId, namespace, name } });
+  return data;
+}
+
+export async function fetchCachedIngress(clusterId: string, namespace: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/ingress/cached`, { params: { cluster_id: clusterId, namespace } });
+  return data as { ingress: K8sIngress[]; count: number };
+}
+
+export async function syncIngressToDb(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.post(`${API_PREFIX}/ingress/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  return data;
+}
+
+export async function deleteIngressApi(clusterId: string, namespace: string, name: string) {
+  const { data } = await apiClient.delete(`${API_PREFIX}/ingress`, { params: { cluster_id: clusterId, namespace, name } });
+  return data;
+}
+
+export async function fetchHelmReleases(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/releases`, { params: { cluster_id: clusterId, namespace } });
+  return data as { releases: HelmRelease[]; count: number };
+}
+
+export async function uninstallHelmRelease(clusterId: string, releaseName: string, namespace: string) {
+  const { data } = await apiClient.delete(`${API_PREFIX}/helm/uninstall`, { params: { cluster_id: clusterId, release_name: releaseName, namespace } });
+  return data;
+}
+
+export async function fetchAksNamespaces(clusterId: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/namespaces`, { params: { cluster_id: clusterId } });
+  return data as { namespaces: string[]; count: number };
+}
+
+export async function fetchAksAuditHistory(clusterId?: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/history`, { params: { cluster_id: clusterId, namespace } });
+  return data as { history: AksAuditEntry[]; count: number };
+}
+
+export function useCachedSecrets(clusterId: string, namespace: string) {
+  return useQuery({
+    queryKey: ["aks-secrets-cached", clusterId, namespace],
+    queryFn: () => fetchCachedSecrets(clusterId, namespace),
+    enabled: !!clusterId && !!namespace,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSyncSecrets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace }: { clusterId: string; namespace?: string }) => syncSecretsToDb(clusterId, namespace),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] }),
+  });
+}
+
+export function useDeleteSecret() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
+      deleteSecretApi(clusterId, namespace, name),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] }),
+  });
+}
+
+export function useCachedServices(clusterId: string, namespace: string) {
+  return useQuery({
+    queryKey: ["aks-services-cached", clusterId, namespace],
+    queryFn: () => fetchCachedServices(clusterId, namespace),
+    enabled: !!clusterId && !!namespace,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSyncServices() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace }: { clusterId: string; namespace?: string }) => syncServicesToDb(clusterId, namespace),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] }),
+  });
+}
+
+export function useDeleteService() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
+      deleteServiceApi(clusterId, namespace, name),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] }),
+  });
+}
+
+export function useCachedConfigMaps(clusterId: string, namespace: string) {
+  return useQuery({
+    queryKey: ["aks-configmaps-cached", clusterId, namespace],
+    queryFn: () => fetchCachedConfigMapsExt(clusterId, namespace),
+    enabled: !!clusterId && !!namespace,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSyncConfigMaps() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace }: { clusterId: string; namespace?: string }) => syncConfigMapsToDb(clusterId, namespace),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] }),
+  });
+}
+
+export function useDeleteConfigMap() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
+      deleteConfigMapApi(clusterId, namespace, name),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] }),
+  });
+}
+
+export function useCachedIngress(clusterId: string, namespace: string) {
+  return useQuery({
+    queryKey: ["aks-ingress-cached", clusterId, namespace],
+    queryFn: () => fetchCachedIngress(clusterId, namespace),
+    enabled: !!clusterId && !!namespace,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSyncIngress() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace }: { clusterId: string; namespace?: string }) => syncIngressToDb(clusterId, namespace),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-ingress-cached", v.clusterId] }),
+  });
+}
+
+export function useDeleteIngress() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
+      deleteIngressApi(clusterId, namespace, name),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-ingress-cached", v.clusterId] }),
+  });
+}
+
+export function useHelmReleases(clusterId: string, namespace?: string) {
+  return useQuery({
+    queryKey: ["aks-helm-releases", clusterId, namespace],
+    queryFn: () => fetchHelmReleases(clusterId, namespace),
+    enabled: !!clusterId,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useUninstallHelmRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clusterId, releaseName, namespace }: { clusterId: string; releaseName: string; namespace: string }) =>
+      uninstallHelmRelease(clusterId, releaseName, namespace),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-helm-releases", v.clusterId] }),
+  });
+}
+
+export function useAksNamespaces(clusterId: string | undefined) {
+  return useQuery({
+    queryKey: ["aks-namespaces", clusterId],
+    queryFn: () => fetchAksNamespaces(clusterId!),
+    enabled: !!clusterId,
+    staleTime: 60_000,
+  });
+}
+
+export function useAksAuditHistory(clusterId?: string, namespace?: string) {
+  return useQuery({
+    queryKey: ["aks-audit-history", clusterId, namespace],
+    queryFn: () => fetchAksAuditHistory(clusterId, namespace),
+    refetchInterval: 60_000,
+  });
+}

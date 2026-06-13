@@ -292,3 +292,48 @@ def require_role(*roles: UserRole):  # noqa: ANN201
         return user
 
     return _role_checker
+
+
+async def get_current_user_from_token(token: str | None) -> UserContext:
+    """Validate Bearer token for WebSocket connections (query param or first message)."""
+    if not token:
+        if _dev_auth_enabled():
+            return _dev_user()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+
+    try:
+        claims = await _decode_token(token)
+        mapped_roles = _map_roles(claims.roles)
+        if not mapped_roles and settings.ENVIRONMENT != "development":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No app role assigned.",
+            )
+        return UserContext(
+            user_id=claims.sub,
+            object_id=claims.oid,
+            display_name=claims.name,
+            email=claims.email or claims.preferred_username,
+            roles=mapped_roles or ([UserRole.READ] if settings.ENVIRONMENT == "development" else []),
+            raw_roles=claims.roles,
+            tenant_id=claims.tenant_id,
+        )
+    except HTTPException:
+        if _dev_auth_enabled():
+            try:
+                unverified = jwt.get_unverified_claims(token)
+                return UserContext(
+                    user_id=unverified.get("sub", "dev-user-00000000"),
+                    object_id=unverified.get("oid", "00000000-0000-0000-0000-000000000000"),
+                    display_name=unverified.get("name", "Local Developer"),
+                    email=unverified.get("email") or unverified.get("preferred_username") or "dev@localhost",
+                    roles=[UserRole.ADMIN],
+                    raw_roles=unverified.get("roles", ["admin"]),
+                    tenant_id=unverified.get("tid", "development"),
+                )
+            except Exception:
+                return _dev_user()
+        raise

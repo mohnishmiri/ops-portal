@@ -166,3 +166,16 @@ apiClient.interceptors.response.use(
 
 export default apiClient;
 export { msalInstance };
+
+/** Acquire ID token for WebSocket auth (same token as REST API). */
+export async function getAuthToken(): Promise<string | null> {
+  if (isDevMode) return null;
+  const account = msalInstance.getActiveAccount();
+  if (!account) return null;
+  try {
+    const response = await msalInstance.acquireTokenSilent({ ...silentRequest, account });
+    return response.idToken;
+  } catch {
+    return null;
+  }
+}

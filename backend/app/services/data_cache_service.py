@@ -256,6 +256,30 @@ class DataCacheService:
         logger.info("cache_invalidated", scope="clusters", keys=count)
         return count
 
+    async def invalidate_for_secrets(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:secrets:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="secrets", cluster_id=cluster_id[:60], keys=count)
+        return count
+
+    async def invalidate_for_services(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:services:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="services", cluster_id=cluster_id[:60], keys=count)
+        return count
+
+    async def invalidate_for_configmaps(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:configmaps:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="configmaps", cluster_id=cluster_id[:60], keys=count)
+        return count
+
+    async def invalidate_for_ingress(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:ingress:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="ingress", cluster_id=cluster_id[:60], keys=count)
+        return count
+
     async def invalidate_all(self) -> int:
         """Nuclear option — flush all AKS caches."""
         count = await cache_manager.invalidate("aks:*")
