@@ -6,12 +6,56 @@ import csv
 import io
 import json
 import re
+from datetime import date, datetime
 from typing import Any
 
 SECRET_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9-]+$")
 SECRET_NAME_MAX_LEN = 127
 SECRET_VALUE_MAX_BYTES = 25 * 1024  # Azure Key Vault limit
 BULK_SECRET_MAX_COUNT = 1000
+
+_EXPIRES_INPUT_FORMATS = (
+    "%Y-%m-%d",
+    "%m/%d/%Y",
+    "%m/%d/%y",
+    "%m-%d-%Y",
+)
+
+
+def parse_expires_to_iso(value: Any) -> str:
+    """Normalize common spreadsheet date formats to ISO-8601 for Key Vault."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None).isoformat()
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day).isoformat()
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Expiration date is empty")
+
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None).isoformat()
+    except ValueError:
+        pass
+
+    for fmt in _EXPIRES_INPUT_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).isoformat()
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"Expiration date '{text}' is not recognized. Use YYYY-MM-DD (e.g. 2027-06-10) or MM/DD/YYYY (e.g. 6/10/2027)"
+    )
+
+
+def _expires_cell_to_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return parse_expires_to_iso(value)
+    text = str(value).strip()
+    return text or None
 
 
 def validate_bulk_secrets(
@@ -69,6 +113,13 @@ def validate_bulk_secrets(
             if len(value_bytes) > SECRET_VALUE_MAX_BYTES:
                 row_errors.append(f"Secret value exceeds {SECRET_VALUE_MAX_BYTES} bytes")
 
+        expires_raw = secret.get("expires")
+        if expires_raw not in (None, ""):
+            try:
+                secret["expires"] = parse_expires_to_iso(expires_raw)
+            except ValueError as exc:
+                row_errors.append(str(exc))
+
         if row_errors:
             for message in row_errors:
                 errors.append({"row": index, "name": name or f"row-{index}", "error": message})
@@ -118,6 +169,8 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
                     for pair in raw_value.split(",")
                     if "=" in pair
                 }
+        elif key == "expires":
+            normalized[key] = _expires_cell_to_string(raw_value)
         else:
             normalized[key] = str(raw_value).strip() if key != "tags" else raw_value
     return normalized

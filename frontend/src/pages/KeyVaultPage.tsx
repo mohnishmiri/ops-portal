@@ -275,7 +275,7 @@ const readFileAsBase64 = (file: File): Promise<string> =>
   });
 
 const downloadBulkSecretTemplate = (format: "csv" | "json") => {
-  const csv = "secret_name,secret_value,content_type,expires,tags\nexample-secret,example-value,text/plain,,\n";
+  const csv = "secret_name,secret_value,content_type,expires,tags\nexample-secret,example-value,text/plain,2027-06-10,\n";
   const json = JSON.stringify(
     { secrets: [{ name: "example-secret", value: "example-value", content_type: "text/plain" }] },
     null,

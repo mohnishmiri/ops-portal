@@ -14,6 +14,7 @@ from app.services.keyvault_bulk_service import (
     parse_bulk_secrets_csv,
     parse_bulk_secrets_file,
     parse_bulk_secrets_json,
+    parse_expires_to_iso,
     validate_bulk_secrets,
 )
 from app.services.keyvault_service import KeyVaultService, _normalize_vault_uri
@@ -57,6 +58,36 @@ def test_validate_bulk_secrets_rejects_oversized_value():
     )
     assert result["valid"] is False
     assert any("exceeds" in err["error"] for err in result["errors"])
+
+
+def test_validate_bulk_secrets_accepts_us_expiry_format():
+    secrets = [{"name": "Test-1", "value": "secret", "expires": "6/10/2027"}]
+    result = validate_bulk_secrets(secrets, vault_uri="https://vault.vault.azure.net/")
+    assert result["valid"] is True
+    assert secrets[0]["expires"] == "2027-06-10T00:00:00"
+
+
+def test_parse_expires_to_iso_accepts_iso_and_slash_formats():
+    assert parse_expires_to_iso("2027-06-10") == "2027-06-10T00:00:00"
+    assert parse_expires_to_iso("6/10/2027") == "2027-06-10T00:00:00"
+
+
+def test_validate_bulk_secrets_rejects_unrecognized_expiry():
+    result = validate_bulk_secrets(
+        [{"name": "bad-date", "value": "x", "expires": "not-a-date"}],
+        vault_uri="https://vault.vault.azure.net/",
+    )
+    assert result["valid"] is False
+    assert any("Expiration date" in err["error"] for err in result["errors"])
+
+
+def test_parse_bulk_secrets_csv_normalizes_us_expiry():
+    content = b"secret_name,secret_value,expires\nTest-1,abc123,6/10/2027\n"
+    rows = parse_bulk_secrets_csv(content)
+    assert rows[0]["expires"] == "6/10/2027"
+    result = validate_bulk_secrets(rows, vault_uri="https://vault.vault.azure.net/")
+    assert result["valid"] is True
+    assert rows[0]["expires"] == "2027-06-10T00:00:00"
 
 
 def test_validate_bulk_secrets_rejects_over_limit():
