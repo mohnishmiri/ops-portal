@@ -866,6 +866,7 @@ const SecretFormDialog: React.FC<{
   const [encodeBase64, setEncodeBase64] = useState(false);
   const [decodeInput, setDecodeInput] = useState(false);
   const [decodedPreview, setDecodedPreview] = useState<string | null>(null);
+  const [keepOpen, setKeepOpen] = useState(false);
   const isEdit = !!editSecret;
 
   // Date fields — default: today → today + 360 days
@@ -898,6 +899,20 @@ const SecretFormDialog: React.FC<{
     });
   }, [value]);
 
+  const resetForm = useCallback(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const expiry = new Date(Date.now() + 360 * 86400000).toISOString().slice(0, 10);
+    setName("");
+    setValue("");
+    setContentType("");
+    setEncodeBase64(false);
+    setDecodeInput(false);
+    setDecodedPreview(null);
+    setNotBefore(today);
+    setExpiresDate(expiry);
+    createMutation.reset();
+  }, [createMutation]);
+
   const handleSubmit = () => {
     if (!name.trim() || !value.trim()) return;
     createMutation.mutate(
@@ -913,7 +928,11 @@ const SecretFormDialog: React.FC<{
       {
         onSuccess: () => {
           onSuccess();
-          onClose();
+          if (!isEdit && keepOpen) {
+            resetForm();
+          } else {
+            onClose();
+          }
         },
       }
     );
@@ -1040,20 +1059,36 @@ const SecretFormDialog: React.FC<{
         )}
 
         {/* Actions */}
-        <div className="flex justify-end gap-2 pt-2">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSubmit}
-            disabled={!name.trim() || !value.trim() || createMutation.isPending}
-            className="px-4 py-2 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-          >
-            {createMutation.isPending ? "Saving..." : isEdit ? "Update Secret" : "Create Secret"}
-          </button>
+        <div className="flex items-center justify-between gap-4 pt-2">
+          {!isEdit && (
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="keep-open"
+                checked={keepOpen}
+                onChange={(e) => setKeepOpen(e.target.checked)}
+                className="accent-blue-600"
+              />
+              <label htmlFor="keep-open" className="text-sm text-gray-700">
+                Keep dialog open to add another secret
+              </label>
+            </div>
+          )}
+          <div className={`flex gap-2 ${isEdit ? "ml-auto" : ""}`}>
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSubmit}
+              disabled={!name.trim() || !value.trim() || createMutation.isPending}
+              className="px-4 py-2 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              {createMutation.isPending ? "Saving..." : isEdit ? "Update Secret" : "Create Secret"}
+            </button>
+          </div>
         </div>
       </div>
     </Modal>
