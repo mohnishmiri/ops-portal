@@ -1076,12 +1076,20 @@ export interface KeyVaultDashboard {
 }
 
 export function useKeyVaultDashboard() {
+  // Scope the dashboard to the subscriptions selected in the top-nav picker.
+  // The query key must include the scope so React Query refetches when the
+  // selection changes; gate on `isLoading` so the first request waits until
+  // the scope is known (otherwise the initial load shows all subscriptions).
+  const { effectiveSubscriptionIds, isLoading: scopeLoading } = useSubscriptionScope();
+  const scopeKey = leadershipScopeQueryKey(effectiveSubscriptionIds);
+
   return useQuery<KeyVaultDashboard>({
-    queryKey: ["keyvault", "dashboard"],
+    queryKey: ["keyvault", "dashboard", scopeKey],
     queryFn: async () => {
       const { data } = await apiClient.get("/keyvault/dashboard");
       return data;
     },
+    enabled: !scopeLoading,
     staleTime: 5 * 60 * 1000,
     refetchInterval: DASHBOARD_POLL_INTERVAL,
   });

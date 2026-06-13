@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
 from app.services.keyvault_bulk_service import (
@@ -273,10 +274,15 @@ async def keyvault_dashboard(
     service: KeyVaultService = Depends(_get_kv_service),
     sync_service: KeyVaultSyncService = Depends(_get_sync_service),
 ) -> dict:
-    """Key Vault dashboard — reads from PG; falls back to Azure if DB empty."""
+    """Key Vault dashboard — reads from PG; falls back to Azure if DB empty.
+
+    Scoped to the subscriptions selected in the top-nav picker (bound on the
+    request by ``bind_subscription_scope``); falls back to all monitored subs.
+    """
+    scoped_ids = await get_scoped_subscription_ids()
     try:
         if not refresh:
-            db_data = await sync_service.get_dashboard_from_db()
+            db_data = await sync_service.get_dashboard_from_db(subscription_ids=scoped_ids)
             if db_data:
                 if _dashboard_cache_looks_zeroed(db_data):
                     try:

@@ -538,19 +538,28 @@ class KeyVaultSyncService:
 
     # ── Read from DB ───────────────────────────────────────────────────
 
-    async def get_dashboard_from_db(self) -> dict | None:
+    async def get_dashboard_from_db(self, subscription_ids: list[str] | None = None) -> dict | None:
         """
         Build dashboard summary entirely from PG data.
-        Returns None if no data has been synced yet.
+
+        When ``subscription_ids`` is provided, vaults and expiring items are
+        restricted to those subscriptions (the per-request scope). Returns None
+        if no data has been synced yet for the scope.
         """
-        # Check if any vaults exist in DB
-        count_result = await self.db.execute(select(func.count(KeyVaultSnapshot.id)))
+        # Check if any vaults exist in DB (within scope, if scoped)
+        count_stmt = select(func.count(KeyVaultSnapshot.id))
+        if subscription_ids:
+            count_stmt = count_stmt.where(KeyVaultSnapshot.subscription_id.in_(subscription_ids))
+        count_result = await self.db.execute(count_stmt)
         vault_count = count_result.scalar()
         if not vault_count:
             return None  # No data synced yet — caller falls back to Azure API
 
-        # Get all vaults with counts
-        vaults_result = await self.db.execute(select(KeyVaultSnapshot).order_by(KeyVaultSnapshot.name))
+        # Get all vaults with counts (within scope, if scoped)
+        vaults_stmt = select(KeyVaultSnapshot).order_by(KeyVaultSnapshot.name)
+        if subscription_ids:
+            vaults_stmt = vaults_stmt.where(KeyVaultSnapshot.subscription_id.in_(subscription_ids))
+        vaults_result = await self.db.execute(vaults_stmt)
         vaults = vaults_result.scalars().all()
 
         total_secrets = 0
@@ -581,11 +590,14 @@ class KeyVaultSyncService:
 
         # Get expiring items from DB — secrets, keys, certs with expires set
         # Secrets expiring within 90 days
-        secrets_result = await self.db.execute(
+        secrets_stmt = (
             select(KeyVaultSecretSnapshot, KeyVaultSnapshot.name.label("vault_name"))
             .join(KeyVaultSnapshot, KeyVaultSecretSnapshot.vault_id == KeyVaultSnapshot.id)
             .where(KeyVaultSecretSnapshot.expires.isnot(None))
         )
+        if subscription_ids:
+            secrets_stmt = secrets_stmt.where(KeyVaultSnapshot.subscription_id.in_(subscription_ids))
+        secrets_result = await self.db.execute(secrets_stmt)
         for row in secrets_result:
             secret = row[0]
             vault_name = row[1]
@@ -599,22 +611,28 @@ class KeyVaultSyncService:
             )
 
         # Keys expiring within 90 days
-        keys_result = await self.db.execute(
+        keys_stmt = (
             select(KeyVaultKeySnapshot, KeyVaultSnapshot.name.label("vault_name"))
             .join(KeyVaultSnapshot, KeyVaultKeySnapshot.vault_id == KeyVaultSnapshot.id)
             .where(KeyVaultKeySnapshot.expires.isnot(None))
         )
+        if subscription_ids:
+            keys_stmt = keys_stmt.where(KeyVaultSnapshot.subscription_id.in_(subscription_ids))
+        keys_result = await self.db.execute(keys_stmt)
         for row in keys_result:
             key = row[0]
             vault_name = row[1]
             _check_expiry_from_db(expiring_soon, key.name, vault_name, "key", key.expires, key.enabled)
 
         # Certs expiring within 90 days
-        certs_result = await self.db.execute(
+        certs_stmt = (
             select(KeyVaultCertSnapshot, KeyVaultSnapshot.name.label("vault_name"))
             .join(KeyVaultSnapshot, KeyVaultCertSnapshot.vault_id == KeyVaultSnapshot.id)
             .where(KeyVaultCertSnapshot.expires.isnot(None))
         )
+        if subscription_ids:
+            certs_stmt = certs_stmt.where(KeyVaultSnapshot.subscription_id.in_(subscription_ids))
+        certs_result = await self.db.execute(certs_stmt)
         for row in certs_result:
             cert = row[0]
             vault_name = row[1]

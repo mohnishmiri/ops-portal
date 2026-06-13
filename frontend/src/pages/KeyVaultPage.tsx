@@ -2553,7 +2553,7 @@ type TabKey = "secrets" | "keys" | "certificates" | "audit";
 const KeyVaultPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { canWrite } = useAuth();
-  const { data: dashboard, isLoading, isError, error } = useKeyVaultDashboard();
+  const { data: dashboard, isPending, isError, error } = useKeyVaultDashboard();
   const { data: vaults } = useKeyVaults();
   const { data: syncStatuses } = useKeyVaultSyncStatus(1);
   const syncMutation = useKeyVaultSync();
@@ -2576,7 +2576,9 @@ const KeyVaultPage: React.FC = () => {
     setRefreshingDashboard(true);
     try {
       const fresh = await refreshKeyVaultDashboard();
-      queryClient.setQueryData(["keyvault", "dashboard"], fresh);
+      // Key includes the active subscription scope — update whichever variant
+      // is currently mounted rather than the bare (now-unused) static key.
+      queryClient.setQueriesData({ queryKey: ["keyvault", "dashboard"] }, fresh);
     } catch { /* ignore */ }
     setRefreshingDashboard(false);
   };
@@ -2601,7 +2603,7 @@ const KeyVaultPage: React.FC = () => {
 
 
 
-  if (isLoading) {
+  if (isPending) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />

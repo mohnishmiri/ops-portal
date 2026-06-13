@@ -6,6 +6,10 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints import keyvault
+from app.core.subscription_scope import (
+    reset_scoped_subscription_ids,
+    set_scoped_subscription_ids,
+)
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
 
@@ -37,7 +41,7 @@ class _FakeSession:
 
 
 class _FailingSyncService:
-    async def get_dashboard_from_db(self):
+    async def get_dashboard_from_db(self, subscription_ids=None):
         raise RuntimeError("db unavailable")
 
     async def get_vaults_from_db(self):
@@ -74,7 +78,7 @@ class _LiveSecretsService:
 
 
 class _ZeroedDashboardSyncService:
-    async def get_dashboard_from_db(self):
+    async def get_dashboard_from_db(self, subscription_ids=None):
         return {
             "total_vaults": 1,
             "total_secrets": 0,
@@ -90,6 +94,40 @@ class _ZeroedDashboardSyncService:
                     "subscription_id": "sub-1",
                     "secrets_count": 0,
                     "keys_count": 0,
+                    "certificates_count": 0,
+                    "soft_delete": True,
+                    "purge_protection": True,
+                    "rbac_enabled": True,
+                }
+            ],
+            "generated_at": "2026-04-10T00:00:00",
+            "source": "database",
+        }
+
+
+class _ScopeRecordingSyncService:
+    """Records the subscription scope the dashboard endpoint passes through."""
+
+    def __init__(self):
+        self.received_subscription_ids: list[str] | None = "__unset__"  # type: ignore[assignment]
+
+    async def get_dashboard_from_db(self, subscription_ids=None):
+        self.received_subscription_ids = subscription_ids
+        return {
+            "total_vaults": 1,
+            "total_secrets": 3,
+            "total_keys": 1,
+            "total_certificates": 0,
+            "expiring_within_30_days": 0,
+            "expiring_within_90_days": 0,
+            "expiring_items": [],
+            "vault_summaries": [
+                {
+                    "name": "scoped-kv",
+                    "location": "eastus2",
+                    "subscription_id": "sub-a",
+                    "secrets_count": 3,
+                    "keys_count": 1,
                     "certificates_count": 0,
                     "soft_delete": True,
                     "purge_protection": True,
@@ -232,6 +270,26 @@ async def test_keyvault_dashboard_falls_back_when_db_cache_fails() -> None:
 
     assert payload["source"] == "azure_api"
     assert payload["total_vaults"] == 0
+
+
+@pytest.mark.anyio
+async def test_keyvault_dashboard_scopes_db_read_to_selected_subscriptions() -> None:
+    """Dashboard DB read is filtered by the request's selected subscription scope."""
+    sync_service = _ScopeRecordingSyncService()
+    token = set_scoped_subscription_ids(["sub-a", "sub-b"])
+    try:
+        payload = await keyvault.keyvault_dashboard(
+            refresh=False,
+            user=_user(),
+            service=_as_service(_DashboardService()),
+            sync_service=_as_sync_service(sync_service),
+        )
+    finally:
+        reset_scoped_subscription_ids(token)
+
+    assert sync_service.received_subscription_ids == ["sub-a", "sub-b"]
+    assert payload["source"] == "database"
+    assert payload["total_vaults"] == 1
 
 
 @pytest.mark.anyio
