@@ -1208,8 +1208,7 @@ export function useCreateKey() {
       return data;
     },
     onSettled: async (_d, _e, vars) => {
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "keys", vars.vault_uri] });
+      await syncKeyVaultListAfterMutation(qc, "keys", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "key-detail"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
@@ -1227,8 +1226,7 @@ export function useDeleteKey() {
       return data;
     },
     onSettled: async (_d, _e, vars) => {
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "keys", vars.vaultUri] });
+      await syncKeyVaultListAfterMutation(qc, "keys", vars.vaultUri);
       qc.invalidateQueries({ queryKey: ["keyvault", "key-detail"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
@@ -1253,6 +1251,30 @@ export function useVaultCertificates(vaultUri: string | null) {
 export async function refreshVaultCertificates(vaultUri: string) {
   const { data } = await apiClient.get(`/keyvault/certificates?vault_uri=${encodeURIComponent(vaultUri)}&refresh=true`);
   return data;
+}
+
+const KEYVAULT_PROPAGATION_DELAY_MS = 600;
+
+type KeyVaultListResource = "secrets" | "keys" | "certificates";
+
+/** Force-refresh a vault list grid from Azure after create/delete/bulk mutations. */
+async function syncKeyVaultListAfterMutation(
+  qc: QueryClient,
+  resource: KeyVaultListResource,
+  vaultUri: string,
+) {
+  await new Promise((r) => setTimeout(r, KEYVAULT_PROPAGATION_DELAY_MS));
+  const refreshers: Record<KeyVaultListResource, (uri: string) => Promise<unknown>> = {
+    secrets: refreshVaultSecrets,
+    keys: refreshVaultKeys,
+    certificates: refreshVaultCertificates,
+  };
+  try {
+    const fresh = await refreshers[resource](vaultUri);
+    qc.setQueryData(["keyvault", resource, vaultUri], fresh);
+  } catch {
+    await qc.invalidateQueries({ queryKey: ["keyvault", resource, vaultUri] });
+  }
 }
 
 // ── Certificate Detail ────────────────────────────────────────────────
@@ -1306,8 +1328,7 @@ export function useDeleteCertificate() {
       return data;
     },
     onSettled: async (_d, _e, vars) => {
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "certificates", vars.vaultUri] });
+      await syncKeyVaultListAfterMutation(qc, "certificates", vars.vaultUri);
       qc.invalidateQueries({ queryKey: ["keyvault", "cert-detail"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
@@ -1366,9 +1387,7 @@ export function useCreateSecret() {
       return data;
     },
     onSettled: async (_d, _e, vars) => {
-      // Brief delay — Azure KV needs a moment to propagate writes
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "secrets", vars.vault_uri] });
+      await syncKeyVaultListAfterMutation(qc, "secrets", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
@@ -1388,9 +1407,7 @@ export function useDeleteSecret() {
       return data;
     },
     onSettled: async (_d, _e, vars) => {
-      // Brief delay — Azure KV needs a moment to propagate deletes
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "secrets", vars.vaultUri] });
+      await syncKeyVaultListAfterMutation(qc, "secrets", vars.vaultUri);
       qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
@@ -1506,8 +1523,7 @@ export function useBulkCreateSecrets() {
       return aggregated;
     },
     onSettled: async (_d, _e, vars) => {
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "secrets", vars.vault_uri] });
+      await syncKeyVaultListAfterMutation(qc, "secrets", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
@@ -1535,8 +1551,7 @@ export function useCreateCertificate() {
       return data;
     },
     onSettled: async (_d, _e, vars) => {
-      await new Promise((r) => setTimeout(r, 600));
-      await qc.invalidateQueries({ queryKey: ["keyvault", "certificates", vars.vault_uri] });
+      await syncKeyVaultListAfterMutation(qc, "certificates", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "cert-detail"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
