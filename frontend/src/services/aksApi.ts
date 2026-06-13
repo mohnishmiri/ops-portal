@@ -1498,6 +1498,17 @@ export interface K8sSecret {
   type: string;
   keys?: string[];
   key_count?: number;
+  created_at?: string;
+}
+
+export interface SecretDetail {
+  name: string;
+  namespace: string;
+  type: string;
+  data: Record<string, string>;
+  keys: string[];
+  labels?: Record<string, string>;
+  created_at?: string;
 }
 
 export interface K8sService {
@@ -1505,7 +1516,21 @@ export interface K8sService {
   namespace: string;
   type: string;
   cluster_ip?: string;
-  ports?: Array<{ port: number; target_port?: string; protocol?: string }>;
+  external_ip?: string;
+  ports?: Array<{ port: number; target_port?: string; protocol?: string; name?: string }>;
+  selector?: Record<string, string>;
+  created_at?: string;
+}
+
+export interface ServiceDetail {
+  name: string;
+  namespace: string;
+  type: string;
+  cluster_ip?: string;
+  ports?: Array<{ port: number; target_port?: string; protocol?: string; name?: string }>;
+  selector?: Record<string, string>;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
 }
 
 export interface K8sIngress {
@@ -1537,9 +1562,51 @@ export interface AksAuditEntry {
   summary: string;
 }
 
-export async function fetchCachedSecrets(clusterId: string, namespace: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/secrets/cached`, { params: { cluster_id: clusterId, namespace } });
-  return data as { secrets: K8sSecret[]; count: number; source?: string };
+export interface IngressDetail {
+  name: string;
+  namespace: string;
+  ingress_class?: string;
+  rules?: Array<{
+    host?: string;
+    path?: string;
+    path_type?: string;
+    service_name?: string;
+    service_port?: number;
+  }>;
+  tls?: Array<{ hosts?: string[]; secret_name?: string }>;
+  linked_services?: string[];
+  linked_secrets?: string[];
+  address?: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+}
+
+export interface CachedExtendedList<T> {
+  source: string;
+  last_sync: string | null;
+  count: number;
+  items: T;
+}
+
+function extendedCachedParams(clusterId: string, namespace?: string) {
+  const params: Record<string, string> = { cluster_id: clusterId };
+  if (namespace) {
+    params.namespace = namespace;
+  }
+  return params;
+}
+
+const EXTENDED_QUERY_OPTIONS = {
+  staleTime: 5 * 60 * 1000,
+  gcTime: 10 * 60 * 1000,
+  retry: 2,
+} as const;
+
+export async function fetchCachedSecrets(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/secrets/cached`, {
+    params: extendedCachedParams(clusterId, namespace),
+  });
+  return data as { secrets: K8sSecret[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncSecretsToDb(clusterId: string, namespace?: string) {
@@ -1552,9 +1619,45 @@ export async function deleteSecretApi(clusterId: string, namespace: string, name
   return data;
 }
 
-export async function fetchCachedServices(clusterId: string, namespace: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/services/cached`, { params: { cluster_id: clusterId, namespace } });
-  return data as { services: K8sService[]; count: number };
+export async function fetchSecretDetail(clusterId: string, namespace: string, name: string, reveal = false) {
+  const { data } = await apiClient.get(`${API_PREFIX}/secrets/detail`, {
+    params: { cluster_id: clusterId, namespace, name, reveal },
+  });
+  return data as SecretDetail;
+}
+
+export async function createSecretApi(
+  clusterId: string,
+  namespace: string,
+  name: string,
+  data: Record<string, string>,
+  secretType = "Opaque"
+) {
+  const { data: resp } = await apiClient.post(`${API_PREFIX}/secrets`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    data,
+    secret_type: secretType,
+  });
+  return resp;
+}
+
+export async function updateSecretApi(clusterId: string, namespace: string, name: string, data: Record<string, string>) {
+  const { data: resp } = await apiClient.put(`${API_PREFIX}/secrets`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    data,
+  });
+  return resp;
+}
+
+export async function fetchCachedServices(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/services/cached`, {
+    params: extendedCachedParams(clusterId, namespace),
+  });
+  return data as { services: K8sService[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncServicesToDb(clusterId: string, namespace?: string) {
@@ -1567,9 +1670,39 @@ export async function deleteServiceApi(clusterId: string, namespace: string, nam
   return data;
 }
 
-export async function fetchCachedConfigMapsExt(clusterId: string, namespace: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/cached`, { params: { cluster_id: clusterId, namespace } });
-  return data as { configmaps: ConfigMap[]; count: number };
+export async function fetchServiceDetail(clusterId: string, namespace: string, name: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/services/detail`, {
+    params: { cluster_id: clusterId, namespace, name },
+  });
+  return data as ServiceDetail;
+}
+
+export async function createServiceApi(
+  clusterId: string,
+  namespace: string,
+  name: string,
+  port: number,
+  targetPort: number | string,
+  selector: Record<string, string>,
+  serviceType = "ClusterIP"
+) {
+  const { data } = await apiClient.post(`${API_PREFIX}/services`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    port,
+    target_port: targetPort,
+    selector,
+    service_type: serviceType,
+  });
+  return data;
+}
+
+export async function fetchCachedConfigMapsExt(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/cached`, {
+    params: extendedCachedParams(clusterId, namespace),
+  });
+  return data as { configmaps: ConfigMap[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncConfigMapsToDb(clusterId: string, namespace?: string) {
@@ -1582,9 +1715,31 @@ export async function deleteConfigMapApi(clusterId: string, namespace: string, n
   return data;
 }
 
-export async function fetchCachedIngress(clusterId: string, namespace: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/ingress/cached`, { params: { cluster_id: clusterId, namespace } });
-  return data as { ingress: K8sIngress[]; count: number };
+export async function createConfigMapApi(clusterId: string, namespace: string, name: string, data: Record<string, string>) {
+  const { data: resp } = await apiClient.post(`${API_PREFIX}/configmaps`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    data,
+  });
+  return resp;
+}
+
+export async function updateConfigMapApi(clusterId: string, namespace: string, name: string, data: Record<string, string>) {
+  const { data: resp } = await apiClient.put(`${API_PREFIX}/configmaps`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    data,
+  });
+  return resp;
+}
+
+export async function fetchCachedIngress(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/ingress/cached`, {
+    params: extendedCachedParams(clusterId, namespace),
+  });
+  return data as { ingress: K8sIngress[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncIngressToDb(clusterId: string, namespace?: string) {
@@ -1595,6 +1750,13 @@ export async function syncIngressToDb(clusterId: string, namespace?: string) {
 export async function deleteIngressApi(clusterId: string, namespace: string, name: string) {
   const { data } = await apiClient.delete(`${API_PREFIX}/ingress`, { params: { cluster_id: clusterId, namespace, name } });
   return data;
+}
+
+export async function fetchIngressDetail(clusterId: string, namespace: string, name: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/ingress/detail`, {
+    params: { cluster_id: clusterId, namespace, name },
+  });
+  return data as IngressDetail;
 }
 
 export async function fetchHelmReleases(clusterId: string, namespace?: string) {
@@ -1617,12 +1779,12 @@ export async function fetchAksAuditHistory(clusterId?: string, namespace?: strin
   return data as { history: AksAuditEntry[]; count: number };
 }
 
-export function useCachedSecrets(clusterId: string, namespace: string) {
+export function useCachedSecrets(clusterId: string, namespace?: string) {
   return useQuery({
     queryKey: ["aks-secrets-cached", clusterId, namespace],
     queryFn: () => fetchCachedSecrets(clusterId, namespace),
-    enabled: !!clusterId && !!namespace,
-    refetchInterval: 30_000,
+    enabled: !!clusterId,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -1643,12 +1805,41 @@ export function useDeleteSecret() {
   });
 }
 
-export function useCachedServices(clusterId: string, namespace: string) {
+export function useSecretDetail(clusterId: string, namespace: string, name: string, reveal = false, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-secret-detail", clusterId, namespace, name, reveal],
+    queryFn: () => fetchSecretDetail(clusterId, namespace, name, reveal),
+    enabled: enabled && !!clusterId && !!namespace && !!name,
+  });
+}
+
+export function useCreateSecret() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { clusterId: string; namespace: string; name: string; data: Record<string, string>; secretType?: string }) =>
+      createSecretApi(vars.clusterId, vars.namespace, vars.name, vars.data, vars.secretType),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] }),
+  });
+}
+
+export function useUpdateSecret() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { clusterId: string; namespace: string; name: string; data: Record<string, string> }) =>
+      updateSecretApi(vars.clusterId, vars.namespace, vars.name, vars.data),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-secret-detail", v.clusterId, v.namespace, v.name] });
+    },
+  });
+}
+
+export function useCachedServices(clusterId: string, namespace?: string) {
   return useQuery({
     queryKey: ["aks-services-cached", clusterId, namespace],
     queryFn: () => fetchCachedServices(clusterId, namespace),
-    enabled: !!clusterId && !!namespace,
-    refetchInterval: 30_000,
+    enabled: !!clusterId,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -1669,12 +1860,37 @@ export function useDeleteService() {
   });
 }
 
-export function useCachedConfigMaps(clusterId: string, namespace: string) {
+export function useServiceDetail(clusterId: string, namespace: string, name: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-service-detail", clusterId, namespace, name],
+    queryFn: () => fetchServiceDetail(clusterId, namespace, name),
+    enabled: enabled && !!clusterId && !!namespace && !!name,
+  });
+}
+
+export function useCreateService() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      clusterId: string;
+      namespace: string;
+      name: string;
+      port: number;
+      targetPort: number | string;
+      selector: Record<string, string>;
+      serviceType?: string;
+    }) =>
+      createServiceApi(vars.clusterId, vars.namespace, vars.name, vars.port, vars.targetPort, vars.selector, vars.serviceType),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] }),
+  });
+}
+
+export function useCachedConfigMaps(clusterId: string, namespace?: string) {
   return useQuery({
     queryKey: ["aks-configmaps-cached", clusterId, namespace],
     queryFn: () => fetchCachedConfigMapsExt(clusterId, namespace),
-    enabled: !!clusterId && !!namespace,
-    refetchInterval: 30_000,
+    enabled: !!clusterId,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -1695,12 +1911,33 @@ export function useDeleteConfigMap() {
   });
 }
 
-export function useCachedIngress(clusterId: string, namespace: string) {
+export function useCreateConfigMap() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { clusterId: string; namespace: string; name: string; data: Record<string, string> }) =>
+      createConfigMapApi(vars.clusterId, vars.namespace, vars.name, vars.data),
+    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] }),
+  });
+}
+
+export function useUpdateConfigMap() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { clusterId: string; namespace: string; name: string; data: Record<string, string> }) =>
+      updateConfigMapApi(vars.clusterId, vars.namespace, vars.name, vars.data),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-configmap-detail", v.clusterId, v.namespace, v.name] });
+    },
+  });
+}
+
+export function useCachedIngress(clusterId: string, namespace?: string) {
   return useQuery({
     queryKey: ["aks-ingress-cached", clusterId, namespace],
     queryFn: () => fetchCachedIngress(clusterId, namespace),
-    enabled: !!clusterId && !!namespace,
-    refetchInterval: 30_000,
+    enabled: !!clusterId,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -1718,6 +1955,14 @@ export function useDeleteIngress() {
     mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
       deleteIngressApi(clusterId, namespace, name),
     onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-ingress-cached", v.clusterId] }),
+  });
+}
+
+export function useIngressDetail(clusterId: string, namespace: string, name: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-ingress-detail", clusterId, namespace, name],
+    queryFn: () => fetchIngressDetail(clusterId, namespace, name),
+    enabled: enabled && !!clusterId && !!namespace && !!name,
   });
 }
 

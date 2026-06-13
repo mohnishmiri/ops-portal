@@ -22,7 +22,7 @@ from app.services.aks_operations_service import get_aks_operations_service
 
 logger = structlog.get_logger(__name__)
 
-POLL_INTERVAL_SECONDS = 30
+POLL_INTERVAL_SECONDS = 60
 
 
 @dataclass

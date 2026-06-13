@@ -45,6 +45,14 @@ import {
   useStopCluster,
   useScaleHistory,
   useAksNamespaces,
+  useCachedSecrets,
+  useCachedServices,
+  useCachedConfigMaps,
+  useCachedIngress,
+  useSyncSecrets,
+  useSyncServices,
+  useSyncConfigMaps,
+  useSyncIngress,
   refreshClusters,
   usePodLogs,
   usePodLogSearch,
@@ -369,6 +377,16 @@ const AKSOperationsPage: React.FC = () => {
   const { data: nodePoolsData, isLoading: loadingNodePools, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(selectedCluster?.id || "");
   const syncNodePoolsMutation = useSyncNodePools();
   const { data: namespacesData } = useAksNamespaces(selectedCluster?.id);
+
+  const extendedNsFilter = selectedNamespace || undefined;
+  const { data: secretsData } = useCachedSecrets(selectedCluster?.id || "", extendedNsFilter);
+  const { data: servicesData } = useCachedServices(selectedCluster?.id || "", extendedNsFilter);
+  const { data: configMapsData } = useCachedConfigMaps(selectedCluster?.id || "", extendedNsFilter);
+  const { data: ingressData } = useCachedIngress(selectedCluster?.id || "", extendedNsFilter);
+  const syncSecretsMutation = useSyncSecrets();
+  const syncServicesMutation = useSyncServices();
+  const syncConfigMapsMutation = useSyncConfigMaps();
+  const syncIngressMutation = useSyncIngress();
 
   const namespaceOptions = useMemo(() => {
     const fromApi = namespacesData?.namespaces || [];
@@ -1021,9 +1039,60 @@ const AKSOperationsPage: React.FC = () => {
       if (!syncNodePoolsMutation.isPending) {
         syncNodePoolsMutation.mutate({ clusterId: selectedCluster.id });
       }
+      if (!syncSecretsMutation.isPending) {
+        syncSecretsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+      }
+      if (!syncServicesMutation.isPending) {
+        syncServicesMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+      }
+      if (!syncConfigMapsMutation.isPending) {
+        syncConfigMapsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+      }
+      if (!syncIngressMutation.isPending) {
+        syncIngressMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+      }
     }, AUTO_SYNC_INTERVAL);
     return () => clearInterval(interval);
-  }, [selectedCluster, selectedNamespace, syncDeploymentsMutation, syncCronJobsMutation, syncNodePoolsMutation]);
+  }, [
+    selectedCluster,
+    selectedNamespace,
+    extendedNsFilter,
+    syncDeploymentsMutation,
+    syncCronJobsMutation,
+    syncNodePoolsMutation,
+    syncSecretsMutation,
+    syncServicesMutation,
+    syncConfigMapsMutation,
+    syncIngressMutation,
+  ]);
+
+  // Initial sync for extended resources when cluster selected and cache is cold
+  useEffect(() => {
+    if (!selectedCluster) return;
+    if (!secretsData?.last_sync && !syncSecretsMutation.isPending) {
+      syncSecretsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+    }
+    if (!servicesData?.last_sync && !syncServicesMutation.isPending) {
+      syncServicesMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+    }
+    if (!configMapsData?.last_sync && !syncConfigMapsMutation.isPending) {
+      syncConfigMapsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+    }
+    if (!ingressData?.last_sync && !syncIngressMutation.isPending) {
+      syncIngressMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
+    }
+  }, [
+    selectedCluster,
+    extendedNsFilter,
+    secretsData?.last_sync,
+    servicesData?.last_sync,
+    configMapsData?.last_sync,
+    ingressData?.last_sync,
+    syncSecretsMutation,
+    syncServicesMutation,
+    syncConfigMapsMutation,
+    syncIngressMutation,
+  ]);
 
   // Auto-polling for cluster list (not dependent on selected cluster)
   useEffect(() => {
@@ -2829,23 +2898,23 @@ const AKSOperationsPage: React.FC = () => {
           <>
             {activeTab === "services" && (
               <ServicesTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "secrets" && (
               <SecretsTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "configmaps" && (
               <ConfigMapsTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "ingress" && (
               <IngressTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "helm" && (
               <HelmTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} />
+                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
           </>
         )}

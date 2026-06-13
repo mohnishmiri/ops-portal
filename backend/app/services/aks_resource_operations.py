@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 from kubernetes import client as k8s_client
 from sqlalchemy import delete, select
+from sqlalchemy import func as sa_func
 
 from app.models.database import AzureResourceInventory
 
@@ -40,12 +41,38 @@ class AKSResourceOperationsMixin:
                 rg = parts[i + 1]
         return sub_id, rg
 
+    async def _get_inventory_last_sync_time(
+        self,
+        cluster_id: str,
+        resource_type: str,
+        id_segment: str,
+    ) -> str | None:
+        if not self.db:
+            return None
+        try:
+            query = select(sa_func.max(AzureResourceInventory.last_sync)).where(
+                AzureResourceInventory.resource_type == resource_type,
+                AzureResourceInventory.resource_id.like(f"{cluster_id}/{id_segment}/%"),
+            )
+            result = await self.db.execute(query)
+            last_sync = result.scalar()
+            return last_sync.isoformat() if last_sync else None
+        except Exception as exc:
+            logger.error(
+                "get_inventory_last_sync_failed",
+                cluster_id=cluster_id,
+                resource_type=resource_type,
+                error=str(exc),
+            )
+            return None
+
     async def _sync_inventory(
         self,
         cluster_id: str,
         resource_type: str,
         id_segment: str,
         items: list[dict[str, Any]],
+        namespace: str | None = None,
     ) -> dict[str, Any]:
         if not self.db:
             return {
@@ -59,12 +86,15 @@ class AKSResourceOperationsMixin:
 
         sub_id, rg = self._cluster_parts(cluster_id)
         try:
-            await self.db.execute(
-                delete(AzureResourceInventory).where(
-                    AzureResourceInventory.resource_type == resource_type,
-                    AzureResourceInventory.resource_id.like(f"{cluster_id}/{id_segment}/%"),
-                )
+            delete_query = delete(AzureResourceInventory).where(
+                AzureResourceInventory.resource_type == resource_type,
+                AzureResourceInventory.resource_id.like(f"{cluster_id}/{id_segment}/%"),
             )
+            if namespace:
+                delete_query = delete_query.where(
+                    AzureResourceInventory.resource_id.like(f"{cluster_id}/{id_segment}/{namespace}/%"),
+                )
+            await self.db.execute(delete_query)
             for item in items:
                 ns = item.get("namespace", "")
                 name = item.get("name", "")
@@ -159,7 +189,7 @@ class AKSResourceOperationsMixin:
             )
         return items
 
-    async def list_secrets(self, cluster_id: str, namespace: str) -> list[dict[str, Any]]:
+    async def list_secrets(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._fetch_secrets_live(cluster_id, namespace)
 
     async def get_secret_detail(self, cluster_id: str, namespace: str, name: str, *, reveal: bool = False) -> dict:
@@ -213,10 +243,13 @@ class AKSResourceOperationsMixin:
 
     async def sync_secrets_to_db(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
         items = await self._fetch_secrets_live(cluster_id, namespace)
-        return await self._sync_inventory(cluster_id, "aks_secret", "secret", items)
+        return await self._sync_inventory(cluster_id, "aks_secret", "secret", items, namespace)
 
     async def get_secrets_from_db(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._get_inventory_from_db(cluster_id, "aks_secret", "secret", namespace)
+
+    async def get_secrets_last_sync_time(self, cluster_id: str) -> str | None:
+        return await self._get_inventory_last_sync_time(cluster_id, "aks_secret", "secret")
 
     # ── Services ───────────────────────────────────────────────────────
 
@@ -253,7 +286,7 @@ class AKSResourceOperationsMixin:
             )
         return items
 
-    async def list_services(self, cluster_id: str, namespace: str) -> list[dict[str, Any]]:
+    async def list_services(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._fetch_services_live(cluster_id, namespace)
 
     async def get_service_detail(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
@@ -304,10 +337,13 @@ class AKSResourceOperationsMixin:
 
     async def sync_services_to_db(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
         items = await self._fetch_services_live(cluster_id, namespace)
-        return await self._sync_inventory(cluster_id, "aks_service", "service", items)
+        return await self._sync_inventory(cluster_id, "aks_service", "service", items, namespace)
 
     async def get_services_from_db(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._get_inventory_from_db(cluster_id, "aks_service", "service", namespace)
+
+    async def get_services_last_sync_time(self, cluster_id: str) -> str | None:
+        return await self._get_inventory_last_sync_time(cluster_id, "aks_service", "service")
 
     # ── ConfigMaps (extended) ──────────────────────────────────────────
 
@@ -360,10 +396,13 @@ class AKSResourceOperationsMixin:
 
     async def sync_configmaps_to_db(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
         items = await self._fetch_configmaps_live(cluster_id, namespace)
-        return await self._sync_inventory(cluster_id, "aks_configmap", "configmap", items)
+        return await self._sync_inventory(cluster_id, "aks_configmap", "configmap", items, namespace)
 
     async def get_configmaps_from_db(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._get_inventory_from_db(cluster_id, "aks_configmap", "configmap", namespace)
+
+    async def get_configmaps_last_sync_time(self, cluster_id: str) -> str | None:
+        return await self._get_inventory_last_sync_time(cluster_id, "aks_configmap", "configmap")
 
     # ── Ingress ────────────────────────────────────────────────────────
 
@@ -498,10 +537,13 @@ class AKSResourceOperationsMixin:
 
     async def sync_ingress_to_db(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
         items = await self._fetch_ingress_live(cluster_id, namespace)
-        return await self._sync_inventory(cluster_id, "aks_ingress", "ingress", items)
+        return await self._sync_inventory(cluster_id, "aks_ingress", "ingress", items, namespace)
 
     async def get_ingress_from_db(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._get_inventory_from_db(cluster_id, "aks_ingress", "ingress", namespace)
+
+    async def get_ingress_last_sync_time(self, cluster_id: str) -> str | None:
+        return await self._get_inventory_last_sync_time(cluster_id, "aks_ingress", "ingress")
 
     # ── Pods inventory ─────────────────────────────────────────────────
 
@@ -534,7 +576,7 @@ class AKSResourceOperationsMixin:
 
     async def sync_pods_to_db(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
         items = await self._fetch_pods_inventory_live(cluster_id, namespace)
-        return await self._sync_inventory(cluster_id, "aks_pod", "pod", items)
+        return await self._sync_inventory(cluster_id, "aks_pod", "pod", items, namespace)
 
     async def get_pods_from_db(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._get_inventory_from_db(cluster_id, "aks_pod", "pod", namespace)
