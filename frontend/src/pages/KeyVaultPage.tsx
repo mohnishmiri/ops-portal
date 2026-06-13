@@ -9,6 +9,7 @@ import React, { useState, useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
+import { formatAxiosError } from "../services/apiErrors";
 import { AutoRefreshIndicator, gridStyles, type SortState, nextSortState, SortableHeader } from "../components/gridStyles";
 import {
   useKeyVaultDashboard,
@@ -1344,10 +1345,11 @@ const BulkSecretUploadDialog: React.FC<{
 
         {(parseMutation.isError || validateMutation.isError || uploadMutation.isError) && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-            {(parseMutation.error as any)?.response?.data?.detail
-              || (validateMutation.error as any)?.response?.data?.detail
-              || (uploadMutation.error as any)?.response?.data?.detail
-              || "Bulk upload failed"}
+            {parseMutation.isError
+              ? formatAxiosError(parseMutation.error, "Failed to parse file")
+              : validateMutation.isError
+                ? formatAxiosError(validateMutation.error, "Validation request failed")
+                : formatAxiosError(uploadMutation.error, "Bulk upload failed")}
           </div>
         )}
 

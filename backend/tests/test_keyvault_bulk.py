@@ -83,6 +83,21 @@ def test_parse_bulk_secrets_file_rejects_unknown_extension():
         parse_bulk_secrets_file("secrets.txt", b"name,value\n")
 
 
+@pytest.mark.asyncio
+async def test_bulk_validate_endpoint_returns_row_errors_for_invalid_names(admin_client):
+    resp = await admin_client.post(
+        "/api/v1/keyvault/secrets/bulk-validate",
+        json={
+            "vault_uri": "https://vault.vault.azure.net/",
+            "secrets": [{"name": "bad_name", "value": "x"}],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is False
+    assert any("alphanumeric" in err["error"] for err in body["errors"])
+
+
 def _make_pem_cert() -> bytes:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")])

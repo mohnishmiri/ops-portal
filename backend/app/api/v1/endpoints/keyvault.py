@@ -10,6 +10,7 @@ post-mutation updates.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
@@ -222,29 +223,18 @@ class BulkExtendSecretExpiryRequest(BaseModel):
     secrets: list[ExtendSecretExpiryRequest]
 
 
-class BulkSecretItem(BaseModel):
-    """Single secret in a bulk upload batch."""
-
-    name: str = Field(min_length=1, max_length=127, pattern=r"^[a-zA-Z0-9-]+$")
-    value: str
-    content_type: str | None = None
-    tags: dict[str, str] = Field(default_factory=dict)
-    encode_base64: bool = False
-    expires: str | None = None
-
-
 class BulkCreateSecretsRequest(BaseModel):
     """Bulk create or update secrets in a single vault."""
 
     vault_uri: str
-    secrets: list[BulkSecretItem] = Field(min_length=1, max_length=BULK_SECRET_MAX_COUNT)
+    secrets: list[dict[str, Any]] = Field(min_length=1, max_length=BULK_SECRET_MAX_COUNT)
 
 
 class BulkValidateSecretsRequest(BaseModel):
     """Validate secrets before bulk upload without writing to Azure."""
 
     vault_uri: str
-    secrets: list[BulkSecretItem] = Field(min_length=1, max_length=BULK_SECRET_MAX_COUNT)
+    secrets: list[dict[str, Any]] = Field(min_length=1, max_length=BULK_SECRET_MAX_COUNT)
 
 
 class CreateCertificateRequest(BaseModel):
@@ -647,8 +637,7 @@ async def bulk_validate_secrets(
     user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> dict:
     """Pre-validate bulk secret payload. Does not write to Azure or log secret values."""
-    payload = [item.model_dump() for item in request.secrets]
-    return validate_bulk_secrets(payload, vault_uri=request.vault_uri)
+    return validate_bulk_secrets(request.secrets, vault_uri=request.vault_uri)
 
 
 @router.post(
@@ -665,10 +654,7 @@ async def bulk_create_secrets(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Create or update multiple secrets in one vault. Returns per-secret results."""
-    validation = validate_bulk_secrets(
-        [item.model_dump() for item in request.secrets],
-        vault_uri=request.vault_uri,
-    )
+    validation = validate_bulk_secrets(request.secrets, vault_uri=request.vault_uri)
     if not validation["valid"]:
         raise HTTPException(
             status_code=400,
@@ -681,18 +667,26 @@ async def bulk_create_secrets(
     results: list[dict] = []
     vaults_touched: set[str] = set()
 
-    for item in request.secrets:
-        existing = await _item_exists_in_cache(sync_service, request.vault_uri, "secret", item.name)
+    for secret in request.secrets:
+        name = str(secret["name"])
+        tags = secret.get("tags") or {}
+        if not isinstance(tags, dict):
+            tags = {}
+        encode_base64 = secret.get("encode_base64", False)
+        if isinstance(encode_base64, str):
+            encode_base64 = encode_base64.strip().lower() in ("1", "true", "yes", "on")
+
+        existing = await _item_exists_in_cache(sync_service, request.vault_uri, "secret", name)
         action = "update_secret" if existing else "create_secret"
         try:
             await service.create_or_update_secret(
                 vault_uri=request.vault_uri,
-                name=item.name,
-                value=item.value,
-                content_type=item.content_type,
-                tags=item.tags,
-                encode_base64=item.encode_base64,
-                expires=item.expires,
+                name=name,
+                value=str(secret["value"]),
+                content_type=secret.get("content_type"),
+                tags={str(k): str(v) for k, v in tags.items()},
+                encode_base64=bool(encode_base64),
+                expires=secret.get("expires"),
             )
             await _write_keyvault_audit_log(
                 db,
@@ -700,23 +694,23 @@ async def bulk_create_secrets(
                 user=user,
                 action=action,
                 resource_type="secret",
-                resource_name=item.name,
+                resource_name=name,
                 vault_uri=request.vault_uri,
                 status="success",
                 details={
                     "bulk": True,
-                    "content_type": item.content_type,
-                    "tag_keys": sorted((item.tags or {}).keys()),
-                    "expires": item.expires,
+                    "content_type": secret.get("content_type"),
+                    "tag_keys": sorted(tags.keys()),
+                    "expires": secret.get("expires"),
                 },
             )
             vaults_touched.add(request.vault_uri)
-            results.append({"name": item.name, "status": "success"})
+            results.append({"name": name, "status": "success"})
         except Exception as e:
             logger.warning(
                 "bulk_create_secret_error",
                 vault_uri=request.vault_uri,
-                name=item.name,
+                name=name,
                 error=str(e),
             )
             await _write_keyvault_audit_log(
@@ -725,12 +719,12 @@ async def bulk_create_secrets(
                 user=user,
                 action=action,
                 resource_type="secret",
-                resource_name=item.name,
+                resource_name=name,
                 vault_uri=request.vault_uri,
                 status="failed",
                 details={"bulk": True, "error": str(e)},
             )
-            results.append({"name": item.name, "status": "failed", "error": _friendly_error(e)})
+            results.append({"name": name, "status": "failed", "error": _friendly_error(e)})
 
     await _write_keyvault_audit_log(
         db,
