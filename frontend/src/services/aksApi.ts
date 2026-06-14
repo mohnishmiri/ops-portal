@@ -930,6 +930,10 @@ export async function fetchSyncJob(jobId: number): Promise<SyncJobDetail> {
 }
 
 const AKS_SYNC_THROTTLE_MS = 3 * 60 * 1000;
+// Client-side watchdog: stop the spinner if a job never resolves (worker down,
+// job stuck "running", or the status poll keeps failing). Without this the
+// button can spin indefinitely because nothing else clears jobId.
+const AKS_SYNC_WATCHDOG_MS = 4 * 60 * 1000;
 const aksSyncCompletedAt = new Map<string, number>();
 const aksSyncAttemptedAt = new Map<string, number>();
 
@@ -986,6 +990,7 @@ export function useAksBackgroundSync(args: {
   const [error, setError] = useState<string | null>(null);
   const [lastStatus, setLastStatus] = useState<string>("idle");
   const processedJobRef = useRef<number | null>(null);
+  const pollStartedAtRef = useRef<number | null>(null);
   const syncKey = aksSyncKey(resourceType, clusterId, namespace);
 
   const enqueueMutation = useMutation({
@@ -993,6 +998,7 @@ export function useAksBackgroundSync(args: {
       enqueueAksResourceSync({ resourceType, clusterId, namespace, force }),
     onSuccess: (res) => {
       processedJobRef.current = null;
+      pollStartedAtRef.current = Date.now();
       setJobId(res.job_id);
       setLastStatus(res.status || "queued");
       setError(null);
@@ -1011,7 +1017,7 @@ export function useAksBackgroundSync(args: {
       const status = query.state.data?.status;
       return status === "queued" || status === "running" ? 3000 : false;
     },
-    retry: false,
+    retry: 2,
     refetchOnWindowFocus: false,
   });
 
@@ -1038,23 +1044,59 @@ export function useAksBackgroundSync(args: {
     setLastStatus(job.status);
     if (job.status === "completed" && processedJobRef.current !== job.id) {
       processedJobRef.current = job.id;
+      pollStartedAtRef.current = null;
       aksSyncCompletedAt.set(syncKey, Date.now());
       invalidateAksResourceQueries(queryClient, resourceType, clusterId);
       setError(null);
       setJobId(null);
     }
     if (job.status === "failed") {
+      pollStartedAtRef.current = null;
       setError(job.last_error || "Background refresh failed");
       setJobId(null);
     }
   }, [clusterId, jobQuery.data, queryClient, resourceType, syncKey]);
 
+  // Recovery guards — without these the spinner can never clear if the job
+  // gets stuck "running" (worker down / hung Azure call) or the status poll
+  // keeps failing. Both paths reset jobId so the button becomes clickable again.
+  useEffect(() => {
+    if (!jobId) return;
+
+    // 1. The status poll has exhausted its retries and is still failing.
+    if (jobQuery.isError) {
+      const err = jobQuery.error as { response?: { data?: { detail?: string } }; message?: string };
+      pollStartedAtRef.current = null;
+      setError(err?.response?.data?.detail || err?.message || "Lost contact with the sync job");
+      setLastStatus("failed");
+      setJobId(null);
+      return;
+    }
+
+    // 2. Watchdog — the job has been queued/running far longer than expected.
+    const timer = setInterval(() => {
+      if (
+        pollStartedAtRef.current &&
+        Date.now() - pollStartedAtRef.current > AKS_SYNC_WATCHDOG_MS
+      ) {
+        pollStartedAtRef.current = null;
+        setError("Sync is taking longer than expected. It may still finish in the background — try again shortly.");
+        setLastStatus("failed");
+        setJobId(null);
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [jobId, jobQuery.isError, jobQuery.error]);
+
+  // Ignore stale poll data once jobId is cleared — React Query keeps the last
+  // result around until GC, which would otherwise keep the spinner stuck.
+  const polledStatus = jobId ? jobQuery.data?.status : undefined;
   const isRunning =
     enqueueMutation.isPending ||
     lastStatus === "queued" ||
     lastStatus === "running" ||
-    jobQuery.data?.status === "queued" ||
-    jobQuery.data?.status === "running";
+    polledStatus === "queued" ||
+    polledStatus === "running";
 
   return {
     start,
