@@ -46,26 +46,48 @@ export function useAksLiveWatch({
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
+  const resourcesRef = useRef(resources);
+  const clusterIdRef = useRef(clusterId);
+  const namespaceRef = useRef(namespace);
   const [status, setStatus] = useState<LiveWatchStatus>("offline");
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
+
+  resourcesRef.current = resources;
+  clusterIdRef.current = clusterId;
+  namespaceRef.current = namespace;
 
   const invalidateForResource = useCallback(
     (resourceType: string) => {
       const keys = RESOURCE_QUERY_KEYS[resourceType] || [];
       keys.forEach((key) => {
-        if (clusterId) {
-          queryClient.invalidateQueries({ queryKey: [key, clusterId] });
+        if (clusterIdRef.current) {
+          queryClient.invalidateQueries({ queryKey: [key, clusterIdRef.current] });
         } else {
           queryClient.invalidateQueries({ queryKey: [key] });
         }
       });
     },
-    [clusterId, queryClient]
+    [queryClient]
   );
 
+  const sendSubscribe = useCallback((ws: WebSocket) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({
+        type: "subscribe",
+        cluster_id: clusterIdRef.current || undefined,
+        namespace: namespaceRef.current || undefined,
+        resources: resourcesRef.current,
+      })
+    );
+  }, []);
+
+  // Maintain a single WebSocket connection; update subscription in place on tab changes.
   useEffect(() => {
     if (!enabled || resources.length === 0) {
       setStatus("offline");
+      wsRef.current?.close();
+      wsRef.current = null;
       return;
     }
 
@@ -76,6 +98,8 @@ export function useAksLiveWatch({
       if (cancelled) return;
       setStatus(retryRef.current > 0 ? "reconnecting" : "connecting");
       const token = isDevMode ? null : await getAuthToken();
+      if (cancelled) return;
+
       const ws = new WebSocket(buildWsUrl(token));
       wsRef.current = ws;
 
@@ -83,20 +107,16 @@ export function useAksLiveWatch({
         if (cancelled) return;
         retryRef.current = 0;
         setStatus("live");
-        ws.send(
-          JSON.stringify({
-            type: "subscribe",
-            cluster_id: clusterId || undefined,
-            namespace: namespace || undefined,
-            resources,
-          })
-        );
+        sendSubscribe(ws);
       };
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === "live_event" && msg.resource_type) {
+          if (msg.type === "sync_complete" && msg.resource_type) {
+            setLastEventAt(msg.timestamp || new Date().toISOString());
+            invalidateForResource(msg.resource_type);
+          } else if (msg.type === "live_event" && msg.resource_type) {
             setLastEventAt(msg.timestamp || new Date().toISOString());
             invalidateForResource(msg.resource_type);
           }
@@ -107,6 +127,7 @@ export function useAksLiveWatch({
 
       ws.onclose = () => {
         if (cancelled) return;
+        wsRef.current = null;
         setStatus("reconnecting");
         const delay = Math.min(30000, 1000 * 2 ** retryRef.current);
         retryRef.current += 1;
@@ -126,7 +147,16 @@ export function useAksLiveWatch({
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [clusterId, namespace, resources.join(","), enabled, invalidateForResource]);
+  }, [enabled, invalidateForResource, sendSubscribe]);
+
+  // Re-subscribe on tab/cluster/namespace changes without tearing down the socket.
+  useEffect(() => {
+    if (!enabled || resources.length === 0) return;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      sendSubscribe(ws);
+    }
+  }, [clusterId, namespace, resources.join(","), enabled, sendSubscribe]);
 
   return { status, lastEventAt };
 }

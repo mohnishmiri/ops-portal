@@ -330,29 +330,22 @@ async def list_cached_clusters(
     try:
         clusters = await service.get_clusters_from_db()
         last_sync = await service.get_clusters_last_sync_time()
-
-        if clusters:
-            if environment:
-                clusters = [c for c in clusters if c.get("environment") == environment]
-            return {
-                "source": "db",
-                "last_sync": last_sync,
-                "clusters": clusters,
-                "count": len(clusters),
-            }
+        if environment:
+            clusters = [c for c in clusters if c.get("environment") == environment]
+        return {
+            "source": "db",
+            "last_sync": last_sync,
+            "clusters": clusters,
+            "count": len(clusters),
+        }
     except Exception as e:
         logger.warning("cached_clusters_db_failed", error=str(e))
-
-    # Fallback: fetch live from Azure
-    clusters = await service.get_all_clusters(bypass_cache=True)
-    if environment:
-        clusters = [c for c in clusters if c.get("environment") == environment]
-    return {
-        "source": "azure",
-        "last_sync": None,
-        "clusters": clusters,
-        "count": len(clusters),
-    }
+        return {
+            "source": "db",
+            "last_sync": None,
+            "clusters": [],
+            "count": 0,
+        }
 
 
 @router.post(
@@ -421,25 +414,20 @@ async def list_cached_deployments(
     try:
         deployments = await service.get_deployments_from_db(cluster_id, namespace)
         last_sync = await service.get_deployments_last_sync_time(cluster_id)
-
-        if deployments:
-            return {
-                "source": "db",
-                "last_sync": last_sync,
-                "deployments": deployments,
-                "count": len(deployments),
-            }
+        return {
+            "source": "db",
+            "last_sync": last_sync,
+            "deployments": deployments,
+            "count": len(deployments),
+        }
     except Exception as e:
         logger.warning("cached_deployments_db_failed", cluster_id=cluster_id, error=str(e))
-
-    # Fallback: fetch live from Kubernetes
-    deployments = await service.list_deployments(cluster_id, namespace, bypass_cache=True)
-    return {
-        "source": "kubernetes",
-        "last_sync": None,
-        "deployments": deployments,
-        "count": len(deployments),
-    }
+        return {
+            "source": "db",
+            "last_sync": None,
+            "deployments": [],
+            "count": 0,
+        }
 
 
 @router.post(
@@ -967,25 +955,20 @@ async def list_cached_cronjobs(
     try:
         cronjobs = await service.get_cronjobs_from_db(cluster_id, namespace)
         last_sync = await service.get_cronjobs_last_sync_time(cluster_id)
-
-        if cronjobs:
-            return {
-                "source": "db",
-                "last_sync": last_sync,
-                "cronjobs": cronjobs,
-                "count": len(cronjobs),
-            }
+        return {
+            "source": "db",
+            "last_sync": last_sync,
+            "cronjobs": cronjobs,
+            "count": len(cronjobs),
+        }
     except Exception as e:
         logger.warning("cached_cronjobs_db_failed", cluster_id=cluster_id, error=str(e))
-
-    # Fallback: fetch live from Kubernetes
-    cronjobs = await service.list_cronjobs(cluster_id, namespace, bypass_cache=True)
-    return {
-        "source": "kubernetes",
-        "last_sync": None,
-        "cronjobs": cronjobs,
-        "count": len(cronjobs),
-    }
+        return {
+            "source": "db",
+            "last_sync": None,
+            "cronjobs": [],
+            "count": 0,
+        }
 
 
 @router.post(
@@ -1306,25 +1289,20 @@ async def list_cached_node_pools(
     try:
         node_pools = await service.get_node_pools_from_db(cluster_id)
         last_sync = await service.get_node_pools_last_sync_time(cluster_id)
-
-        if node_pools:
-            return {
-                "source": "db",
-                "last_sync": last_sync,
-                "node_pools": node_pools,
-                "count": len(node_pools),
-            }
+        return {
+            "source": "db",
+            "last_sync": last_sync,
+            "node_pools": node_pools,
+            "count": len(node_pools),
+        }
     except Exception as e:
         logger.warning("cached_node_pools_db_failed", cluster_id=cluster_id, error=str(e))
-
-    # Fallback: fetch live from Azure/K8s
-    node_pools = await service.get_node_pools(cluster_id, bypass_cache=True)
-    return {
-        "source": "azure",
-        "last_sync": None,
-        "node_pools": node_pools,
-        "count": len(node_pools),
-    }
+        return {
+            "source": "db",
+            "last_sync": None,
+            "node_pools": [],
+            "count": 0,
+        }
 
 
 @router.post(

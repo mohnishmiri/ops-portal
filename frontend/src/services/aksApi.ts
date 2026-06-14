@@ -882,7 +882,7 @@ export function useCachedClusters(environment?: string) {
     queryFn: () => fetchCachedClusters(environment),
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    refetchInterval: 30_000,
+    refetchInterval: 5 * 60 * 1000,
     retry: 2,
   });
 }
@@ -909,14 +909,14 @@ export function useDeployments(clusterId: string, namespace?: string) {
   });
 }
 
-export function useCachedDeployments(clusterId: string, namespace?: string) {
+export function useCachedDeployments(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-deployments-cached", clusterId, namespace],
     queryFn: () => fetchCachedDeployments(clusterId, namespace),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    refetchInterval: 30_000,
+    refetchInterval: 5 * 60 * 1000,
     retry: 2,
   });
 }
@@ -1018,14 +1018,14 @@ export function useDeleteDeployment() {
   });
 }
 
-export function usePodMetrics(clusterId: string, namespace?: string) {
+export function usePodMetrics(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-pod-metrics", clusterId, namespace],
     queryFn: () => fetchPodMetrics(clusterId, namespace),
-    enabled: !!clusterId,
-    staleTime: 60 * 1000,       // 1 min — matches backend Redis TTL
+    enabled: !!clusterId && enabled,
+    staleTime: 60 * 1000,
     gcTime: 3 * 60 * 1000,
-    refetchInterval: 60 * 1000,  // poll every 1 min (served from Redis)
+    refetchInterval: 5 * 60 * 1000,
     retry: 1,
   });
 }
@@ -1127,14 +1127,14 @@ export function useCronJobs(clusterId: string, namespace?: string) {
   });
 }
 
-export function useCachedCronJobs(clusterId: string, namespace?: string) {
+export function useCachedCronJobs(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-cronjobs-cached", clusterId, namespace],
     queryFn: () => fetchCachedCronJobs(clusterId, namespace),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    refetchInterval: 30_000,
+    refetchInterval: 5 * 60 * 1000,
     retry: 2,
   });
 }
@@ -1297,11 +1297,13 @@ export function useScaleHistory(
   clusterId?: string,
   namespace?: string,
   deploymentName?: string,
-  days: number = 30
+  days: number = 30,
+  enabled = true
 ) {
   return useQuery({
     queryKey: ["aks-scale-history", clusterId, namespace, deploymentName, days],
     queryFn: () => fetchScaleHistory(clusterId, namespace, deploymentName, days),
+    enabled,
   });
 }
 
@@ -1319,14 +1321,14 @@ export function useNodePools(clusterId: string) {
   });
 }
 
-export function useCachedNodePools(clusterId: string) {
+export function useCachedNodePools(clusterId: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-nodepools-cached", clusterId],
     queryFn: () => fetchCachedNodePools(clusterId),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    refetchInterval: 30_000,
+    refetchInterval: 5 * 60 * 1000,
     retry: 2,
   });
 }
@@ -1779,11 +1781,11 @@ export async function fetchAksAuditHistory(clusterId?: string, namespace?: strin
   return data as { history: AksAuditEntry[]; count: number };
 }
 
-export function useCachedSecrets(clusterId: string, namespace?: string) {
+export function useCachedSecrets(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-secrets-cached", clusterId, namespace],
     queryFn: () => fetchCachedSecrets(clusterId, namespace),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1834,11 +1836,11 @@ export function useUpdateSecret() {
   });
 }
 
-export function useCachedServices(clusterId: string, namespace?: string) {
+export function useCachedServices(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-services-cached", clusterId, namespace],
     queryFn: () => fetchCachedServices(clusterId, namespace),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1885,11 +1887,11 @@ export function useCreateService() {
   });
 }
 
-export function useCachedConfigMaps(clusterId: string, namespace?: string) {
+export function useCachedConfigMaps(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-configmaps-cached", clusterId, namespace],
     queryFn: () => fetchCachedConfigMapsExt(clusterId, namespace),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1932,11 +1934,11 @@ export function useUpdateConfigMap() {
   });
 }
 
-export function useCachedIngress(clusterId: string, namespace?: string) {
+export function useCachedIngress(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-ingress-cached", clusterId, namespace],
     queryFn: () => fetchCachedIngress(clusterId, namespace),
-    enabled: !!clusterId,
+    enabled: !!clusterId && enabled,
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1984,12 +1986,12 @@ export function useUninstallHelmRelease() {
   });
 }
 
-export function useAksNamespaces(clusterId: string | undefined) {
+export function useAksNamespaces(clusterId: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ["aks-namespaces", clusterId],
     queryFn: () => fetchAksNamespaces(clusterId!),
-    enabled: !!clusterId,
-    staleTime: 60_000,
+    enabled: !!clusterId && enabled,
+    staleTime: 5 * 60 * 1000,
   });
 }
 

@@ -163,23 +163,20 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         try:
             items = await service.get_secrets_from_db(cluster_id, namespace)
             last_sync = await service.get_secrets_last_sync_time(cluster_id)
-            if items:
-                return {
-                    "source": "db",
-                    "last_sync": last_sync,
-                    "secrets": items,
-                    "count": len(items),
-                }
+            return {
+                "source": "db",
+                "last_sync": last_sync,
+                "secrets": items,
+                "count": len(items),
+            }
         except Exception as e:
             logger.warning("cached_secrets_db_failed", cluster_id=cluster_id, error=str(e))
-
-        live = await service.list_secrets(cluster_id, namespace)
-        return {
-            "source": "kubernetes",
-            "last_sync": None,
-            "secrets": live,
-            "count": len(live),
-        }
+            return {
+                "source": "db",
+                "last_sync": None,
+                "secrets": [],
+                "count": 0,
+            }
 
     @router.post("/secrets/sync")
     async def sync_secrets(
@@ -332,23 +329,20 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         try:
             items = await service.get_services_from_db(cluster_id, namespace)
             last_sync = await service.get_services_last_sync_time(cluster_id)
-            if items:
-                return {
-                    "source": "db",
-                    "last_sync": last_sync,
-                    "services": items,
-                    "count": len(items),
-                }
+            return {
+                "source": "db",
+                "last_sync": last_sync,
+                "services": items,
+                "count": len(items),
+            }
         except Exception as e:
             logger.warning("cached_services_db_failed", cluster_id=cluster_id, error=str(e))
-
-        live = await service.list_services(cluster_id, namespace)
-        return {
-            "source": "kubernetes",
-            "last_sync": None,
-            "services": live,
-            "count": len(live),
-        }
+            return {
+                "source": "db",
+                "last_sync": None,
+                "services": [],
+                "count": 0,
+            }
 
     @router.post("/services/sync")
     async def sync_services(
@@ -447,23 +441,20 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         try:
             items = await service.get_configmaps_from_db(cluster_id, namespace)
             last_sync = await service.get_configmaps_last_sync_time(cluster_id)
-            if items:
-                return {
-                    "source": "db",
-                    "last_sync": last_sync,
-                    "configmaps": items,
-                    "count": len(items),
-                }
+            return {
+                "source": "db",
+                "last_sync": last_sync,
+                "configmaps": items,
+                "count": len(items),
+            }
         except Exception as e:
             logger.warning("cached_configmaps_db_failed", cluster_id=cluster_id, error=str(e))
-
-        live = await service._fetch_configmaps_live(cluster_id, namespace)
-        return {
-            "source": "kubernetes",
-            "last_sync": None,
-            "configmaps": live,
-            "count": len(live),
-        }
+            return {
+                "source": "db",
+                "last_sync": None,
+                "configmaps": [],
+                "count": 0,
+            }
 
     @router.post("/configmaps/sync")
     async def sync_configmaps(
@@ -557,23 +548,20 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         try:
             items = await service.get_ingress_from_db(cluster_id, namespace)
             last_sync = await service.get_ingress_last_sync_time(cluster_id)
-            if items:
-                return {
-                    "source": "db",
-                    "last_sync": last_sync,
-                    "ingress": items,
-                    "count": len(items),
-                }
+            return {
+                "source": "db",
+                "last_sync": last_sync,
+                "ingress": items,
+                "count": len(items),
+            }
         except Exception as e:
             logger.warning("cached_ingress_db_failed", cluster_id=cluster_id, error=str(e))
-
-        live = await service._fetch_ingress_live(cluster_id, namespace)
-        return {
-            "source": "kubernetes",
-            "last_sync": None,
-            "ingress": live,
-            "count": len(live),
-        }
+            return {
+                "source": "db",
+                "last_sync": None,
+                "ingress": [],
+                "count": 0,
+            }
 
     @router.post("/ingress/sync")
     async def sync_ingress(

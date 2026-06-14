@@ -187,6 +187,23 @@ class AKSLiveSyncHub:
         for cid in dead:
             self._clients.pop(cid, None)
 
+    async def _emit_sync_complete(
+        self,
+        resource_type: str,
+        *,
+        cluster_id: str | None = None,
+        namespace: str | None = None,
+    ) -> None:
+        await self._broadcast(
+            {
+                "type": "sync_complete",
+                "resource_type": resource_type,
+                "cluster_id": cluster_id,
+                "namespace": namespace,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        )
+
     async def _poll_clusters_loop(self) -> None:
         while self._any_subscriber_wants("clusters"):
             try:
@@ -196,21 +213,8 @@ class AKSLiveSyncHub:
                     for cluster in result.get("resources") or []:
                         cid = cluster.get("id", "")
                         fp = _fingerprint(cluster)
-                        prev = self._cluster_fingerprints.get(cid)
-                        if prev == fp:
-                            continue
                         self._cluster_fingerprints[cid] = fp
-                        await self._broadcast(
-                            {
-                                "type": "live_event",
-                                "resource_type": "clusters",
-                                "event_type": "ADDED" if prev is None else "MODIFIED",
-                                "cluster_id": cid,
-                                "name": cluster.get("name"),
-                                "summary": f"Cluster {cluster.get('name')} synced",
-                                "timestamp": datetime.now(UTC).isoformat(),
-                            }
-                        )
+                    await self._emit_sync_complete("clusters")
                     break
             except asyncio.CancelledError:
                 raise
@@ -230,22 +234,8 @@ class AKSLiveSyncHub:
                     prev_map = self._nodepool_fingerprints[cluster_id]
                     for pool in result.get("resources") or []:
                         name = pool.get("name", "")
-                        fp = _fingerprint(pool)
-                        prev = prev_map.get(name)
-                        if prev == fp:
-                            continue
-                        prev_map[name] = fp
-                        await self._broadcast(
-                            {
-                                "type": "live_event",
-                                "resource_type": "nodepools",
-                                "event_type": "ADDED" if prev is None else "MODIFIED",
-                                "cluster_id": cluster_id,
-                                "name": name,
-                                "summary": f"Node pool {name} synced",
-                                "timestamp": datetime.now(UTC).isoformat(),
-                            }
-                        )
+                        prev_map[name] = _fingerprint(pool)
+                    await self._emit_sync_complete("nodepools", cluster_id=cluster_id)
                     break
             except asyncio.CancelledError:
                 raise
@@ -287,23 +277,12 @@ class AKSLiveSyncHub:
                         name = item.get("name", "")
                         ns = item.get("namespace", namespace)
                         item_key = f"{ns}/{name}"
-                        fp = _fingerprint(item)
-                        prev = prev_map.get(item_key)
-                        if prev == fp:
-                            continue
-                        prev_map[item_key] = fp
-                        await self._broadcast(
-                            {
-                                "type": "live_event",
-                                "resource_type": resource,
-                                "event_type": "ADDED" if prev is None else "MODIFIED",
-                                "cluster_id": cluster_id,
-                                "namespace": ns,
-                                "name": name,
-                                "summary": f"{resource.rstrip('s')} {name} synced",
-                                "timestamp": datetime.now(UTC).isoformat(),
-                            }
-                        )
+                        prev_map[item_key] = _fingerprint(item)
+                    await self._emit_sync_complete(
+                        resource,
+                        cluster_id=cluster_id,
+                        namespace=namespace or None,
+                    )
                     break
             except asyncio.CancelledError:
                 raise

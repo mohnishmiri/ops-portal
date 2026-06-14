@@ -45,14 +45,6 @@ import {
   useStopCluster,
   useScaleHistory,
   useAksNamespaces,
-  useCachedSecrets,
-  useCachedServices,
-  useCachedConfigMaps,
-  useCachedIngress,
-  useSyncSecrets,
-  useSyncServices,
-  useSyncConfigMaps,
-  useSyncIngress,
   refreshClusters,
   usePodLogs,
   usePodLogSearch,
@@ -355,45 +347,56 @@ const AKSOperationsPage: React.FC = () => {
     });
   }, []);
 
+  // Load only the data needed for the active tab — avoids parallel K8s/Azure storms.
+  const clusterScopedTabs = new Set<TabKey>([
+    "nodepools", "deployments", "pods", "cronjobs",
+    "services", "secrets", "configmaps", "ingress", "helm",
+  ]);
+  const needsNamespaces = !!selectedCluster && clusterScopedTabs.has(activeTab);
+  const loadDeployments = !!selectedCluster && activeTab === "deployments";
+  const loadPodMetrics = !!selectedCluster && activeTab === "pods";
+  const loadCronJobs = !!selectedCluster && activeTab === "cronjobs";
+  const loadNodePools = !!selectedCluster && activeTab === "nodepools";
+  const loadScaleHistory = activeTab === "history";
+
   // Queries — use DB-cached clusters for fast load
   const { data: clustersData, isLoading: loadingClusters, refetch: refetchClusters } = useCachedClusters();
   const syncClustersMutation = useSyncClusters();
   const { data: deploymentsData, isLoading: loadingDeployments, isError: deploymentsError, error: deploymentsErr } = useCachedDeployments(
     selectedCluster?.id || "",
-    selectedNamespace || undefined
+    selectedNamespace || undefined,
+    loadDeployments
   );
   const syncDeploymentsMutation = useSyncDeployments();
   const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = usePodMetrics(
     selectedCluster?.id || "",
-    selectedNamespace || undefined
+    selectedNamespace || undefined,
+    loadPodMetrics
   );
 
   const { data: cronJobsData, isLoading: loadingCronJobs, isError: cronJobsError, error: cronJobsErr } = useCachedCronJobs(
     selectedCluster?.id || "",
-    selectedNamespace || undefined
+    selectedNamespace || undefined,
+    loadCronJobs
   );
   const syncCronJobsMutation = useSyncCronJobs();
-  const { data: scaleHistoryData } = useScaleHistory(selectedCluster?.id);
-  const { data: nodePoolsData, isLoading: loadingNodePools, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(selectedCluster?.id || "");
+  const { data: scaleHistoryData } = useScaleHistory(
+    loadScaleHistory ? selectedCluster?.id : undefined,
+    undefined,
+    undefined,
+    30,
+    loadScaleHistory
+  );
+  const { data: nodePoolsData, isLoading: loadingNodePools, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(
+    selectedCluster?.id || "",
+    loadNodePools
+  );
   const syncNodePoolsMutation = useSyncNodePools();
-  const { data: namespacesData } = useAksNamespaces(selectedCluster?.id);
-
-  const extendedNsFilter = selectedNamespace || undefined;
-  const { data: secretsData } = useCachedSecrets(selectedCluster?.id || "", extendedNsFilter);
-  const { data: servicesData } = useCachedServices(selectedCluster?.id || "", extendedNsFilter);
-  const { data: configMapsData } = useCachedConfigMaps(selectedCluster?.id || "", extendedNsFilter);
-  const { data: ingressData } = useCachedIngress(selectedCluster?.id || "", extendedNsFilter);
-  const syncSecretsMutation = useSyncSecrets();
-  const syncServicesMutation = useSyncServices();
-  const syncConfigMapsMutation = useSyncConfigMaps();
-  const syncIngressMutation = useSyncIngress();
+  const { data: namespacesData } = useAksNamespaces(selectedCluster?.id, needsNamespaces);
 
   const namespaceOptions = useMemo(() => {
-    const fromApi = namespacesData?.namespaces || [];
-    const fromDeps = (deploymentsData?.deployments || []).map((d) => d.namespace);
-    const fromPods = (podMetricsData?.pods || []).map((p) => p.namespace);
-    return [...new Set([...fromApi, ...fromDeps, ...fromPods])].sort();
-  }, [namespacesData, deploymentsData, podMetricsData]);
+    return [...(namespacesData?.namespaces || [])].sort();
+  }, [namespacesData]);
 
   const liveResources = useMemo((): string[] => {
     if (activeTab === "clusters") return ["clusters"];
@@ -407,7 +410,6 @@ const AKSOperationsPage: React.FC = () => {
       secrets: ["secrets"],
       configmaps: ["configmaps"],
       ingress: ["ingress"],
-      helm: ["helm"],
     };
     return map[activeTab] || [];
   }, [activeTab, selectedCluster]);
@@ -1024,88 +1026,6 @@ const AKSOperationsPage: React.FC = () => {
   }, []);
   const sortedHistory = useMemo(() => sortItems(historyPag.filtered, histSort.key, histSort.direction, histAccessor), [historyPag.filtered, histSort, histAccessor, sortItems]);
   const pagedSortedHistory = useMemo(() => sortedHistory.slice((historyPag.page - 1) * PAGE_SIZE, historyPag.page * PAGE_SIZE), [sortedHistory, historyPag.page]);
-
-  // ── Auto-polling: sync from Azure periodically ──────────────────────
-  const AUTO_SYNC_INTERVAL = 60_000; // 60 seconds
-  useEffect(() => {
-    if (!selectedCluster) return;
-    const interval = setInterval(() => {
-      if (!syncDeploymentsMutation.isPending) {
-        syncDeploymentsMutation.mutate({ clusterId: selectedCluster.id, namespace: selectedNamespace || undefined });
-      }
-      if (!syncCronJobsMutation.isPending) {
-        syncCronJobsMutation.mutate({ clusterId: selectedCluster.id, namespace: selectedNamespace || undefined });
-      }
-      if (!syncNodePoolsMutation.isPending) {
-        syncNodePoolsMutation.mutate({ clusterId: selectedCluster.id });
-      }
-      if (!syncSecretsMutation.isPending) {
-        syncSecretsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-      }
-      if (!syncServicesMutation.isPending) {
-        syncServicesMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-      }
-      if (!syncConfigMapsMutation.isPending) {
-        syncConfigMapsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-      }
-      if (!syncIngressMutation.isPending) {
-        syncIngressMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-      }
-    }, AUTO_SYNC_INTERVAL);
-    return () => clearInterval(interval);
-  }, [
-    selectedCluster,
-    selectedNamespace,
-    extendedNsFilter,
-    syncDeploymentsMutation,
-    syncCronJobsMutation,
-    syncNodePoolsMutation,
-    syncSecretsMutation,
-    syncServicesMutation,
-    syncConfigMapsMutation,
-    syncIngressMutation,
-  ]);
-
-  // Initial sync for extended resources when cluster selected and cache is cold
-  useEffect(() => {
-    if (!selectedCluster) return;
-    if (!secretsData?.last_sync && !syncSecretsMutation.isPending) {
-      syncSecretsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-    }
-    if (!servicesData?.last_sync && !syncServicesMutation.isPending) {
-      syncServicesMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-    }
-    if (!configMapsData?.last_sync && !syncConfigMapsMutation.isPending) {
-      syncConfigMapsMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-    }
-    if (!ingressData?.last_sync && !syncIngressMutation.isPending) {
-      syncIngressMutation.mutate({ clusterId: selectedCluster.id, namespace: extendedNsFilter });
-    }
-  }, [
-    selectedCluster,
-    extendedNsFilter,
-    secretsData?.last_sync,
-    servicesData?.last_sync,
-    configMapsData?.last_sync,
-    ingressData?.last_sync,
-    syncSecretsMutation,
-    syncServicesMutation,
-    syncConfigMapsMutation,
-    syncIngressMutation,
-  ]);
-
-  // Auto-polling for cluster list (not dependent on selected cluster)
-  useEffect(() => {
-    if (!clustersData?.last_sync && !syncClustersMutation.isPending) {
-      syncClustersMutation.mutate(undefined);
-    }
-    const interval = setInterval(() => {
-      if (!syncClustersMutation.isPending) {
-        syncClustersMutation.mutate(undefined);
-      }
-    }, AUTO_SYNC_INTERVAL);
-    return () => clearInterval(interval);
-  }, [syncClustersMutation, clustersData?.last_sync]);
 
   // Multi-deployment mutation status tracker
   type MutationActivity = {
