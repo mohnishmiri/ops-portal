@@ -8,6 +8,7 @@
  * - CronJob management
  */
 
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import apiClient from "./apiClient";
 
@@ -317,7 +318,7 @@ export async function fetchCachedClusters(
   if (environment) {
     params.set("environment", environment);
   }
-  const { data } = await apiClient.get(`${API_PREFIX}/clusters/cached`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/clusters/cached`, { params, timeout: 8000 });
   return data;
 }
 
@@ -329,7 +330,7 @@ export async function syncClustersToDb(): Promise<{
   resources: AKSCluster[];
   db_saved: boolean;
 }> {
-  const { data } = await apiClient.post(`${API_PREFIX}/clusters/sync`);
+  const { data } = await apiClient.post(`${API_PREFIX}/clusters/sync`, null, { timeout: 15000 });
   return data;
 }
 
@@ -359,7 +360,7 @@ export async function fetchCachedDeployments(
   if (namespace) {
     params.set("namespace", namespace);
   }
-  const { data } = await apiClient.get(`${API_PREFIX}/deployments/cached`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/deployments/cached`, { params, timeout: 8000 });
   return data;
 }
 
@@ -379,7 +380,7 @@ export async function syncDeploymentsToDb(
   if (namespace) {
     params.set("namespace", namespace);
   }
-  const { data } = await apiClient.post(`${API_PREFIX}/deployments/sync`, null, { params });
+  const { data } = await apiClient.post(`${API_PREFIX}/deployments/sync`, null, { params, timeout: 15000 });
   return data;
 }
 
@@ -468,7 +469,7 @@ export async function fetchPodMetrics(
   if (refresh) {
     params.set("refresh", "true");
   }
-  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics`, { params, timeout: 8000 });
   return data;
 }
 
@@ -621,7 +622,7 @@ export async function fetchCachedCronJobs(
   if (namespace) {
     params.set("namespace", namespace);
   }
-  const { data } = await apiClient.get(`${API_PREFIX}/cronjobs/cached`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/cronjobs/cached`, { params, timeout: 8000 });
   return data;
 }
 
@@ -641,7 +642,7 @@ export async function syncCronJobsToDb(
   if (namespace) {
     params.set("namespace", namespace);
   }
-  const { data } = await apiClient.post(`${API_PREFIX}/cronjobs/sync`, null, { params });
+  const { data } = await apiClient.post(`${API_PREFIX}/cronjobs/sync`, null, { params, timeout: 15000 });
   return data;
 }
 
@@ -799,7 +800,7 @@ export async function fetchCachedNodePools(
   clusterId: string
 ): Promise<{ source: string; last_sync: string | null; node_pools: NodePoolDetails[]; count: number }> {
   const params = new URLSearchParams({ cluster_id: clusterId });
-  const { data } = await apiClient.get(`${API_PREFIX}/nodepools/cached`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/nodepools/cached`, { params, timeout: 8000 });
   return data;
 }
 
@@ -815,7 +816,7 @@ export async function syncNodePoolsToDb(
   db_saved: boolean;
 }> {
   const params = new URLSearchParams({ cluster_id: clusterId });
-  const { data } = await apiClient.post(`${API_PREFIX}/nodepools/sync`, null, { params });
+  const { data } = await apiClient.post(`${API_PREFIX}/nodepools/sync`, null, { params, timeout: 15000 });
   return data;
 }
 
@@ -864,6 +865,208 @@ export async function stopCluster(clusterId: string): Promise<ClusterActionResul
   return data;
 }
 
+// ── Background AKS Sync Jobs ──────────────────────────────────────────
+
+export type AksSyncResourceType =
+  | "clusters"
+  | "nodepools"
+  | "deployments"
+  | "pods"
+  | "cronjobs"
+  | "services"
+  | "secrets"
+  | "configmaps"
+  | "ingress";
+
+export interface SyncJobDetail {
+  id: number;
+  job_type: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  idempotency_key: string | null;
+  triggered_by: string | null;
+  attempts: number;
+  last_error: string | null;
+  result: Record<string, unknown> | null;
+  enqueued_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface EnqueueSyncJobResponse {
+  job_id: number;
+  status: string;
+  job_type: string;
+  idempotency_key: string | null;
+  reused: boolean;
+}
+
+export async function enqueueAksResourceSync(args: {
+  resourceType: AksSyncResourceType;
+  clusterId?: string;
+  namespace?: string;
+  force?: boolean;
+}): Promise<EnqueueSyncJobResponse> {
+  const scope = args.resourceType === "clusters" ? "all" : args.clusterId || "";
+  const namespace = args.namespace || "all";
+  const idempotencyKey = `aks:${scope}:${args.resourceType}:${namespace}`.slice(0, 120);
+  const { data } = await apiClient.post(
+    "/sync-jobs",
+    {
+      job_type: "aks_resource_sync",
+      cluster_id: args.clusterId,
+      resource_type: args.resourceType,
+      namespace: args.namespace,
+      force: args.force ?? false,
+      idempotency_key: idempotencyKey,
+    },
+    { timeout: 8000 }
+  );
+  return data;
+}
+
+export async function fetchSyncJob(jobId: number): Promise<SyncJobDetail> {
+  const { data } = await apiClient.get(`/sync-jobs/${jobId}`, { timeout: 8000 });
+  return data;
+}
+
+const AKS_SYNC_THROTTLE_MS = 3 * 60 * 1000;
+const aksSyncCompletedAt = new Map<string, number>();
+const aksSyncAttemptedAt = new Map<string, number>();
+
+function aksSyncKey(resourceType: AksSyncResourceType, clusterId?: string, namespace?: string): string {
+  return `${resourceType}:${clusterId || "all"}:${namespace || "all"}`;
+}
+
+function invalidateAksResourceQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  resourceType: AksSyncResourceType,
+  clusterId?: string,
+) {
+  const keyMap: Record<AksSyncResourceType, string[]> = {
+    clusters: ["aks-clusters-cached", "aks-clusters"],
+    nodepools: ["aks-nodepools-cached", "aks-nodepools"],
+    deployments: ["aks-deployments-cached", "aks-deployments"],
+    pods: ["aks-pod-metrics"],
+    cronjobs: ["aks-cronjobs-cached", "aks-cronjobs"],
+    services: ["aks-services-cached"],
+    secrets: ["aks-secrets-cached"],
+    configmaps: ["aks-configmaps-cached"],
+    ingress: ["aks-ingress-cached"],
+  };
+  keyMap[resourceType].forEach((key) => {
+    if (resourceType === "clusters" || !clusterId) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    } else {
+      queryClient.invalidateQueries({ queryKey: [key, clusterId] });
+    }
+  });
+  if (resourceType !== "clusters" && clusterId) {
+    queryClient.invalidateQueries({ queryKey: ["aks-namespaces", clusterId] });
+  }
+}
+
+export function useAksBackgroundSync(args: {
+  resourceType: AksSyncResourceType;
+  clusterId?: string;
+  namespace?: string;
+  enabled?: boolean;
+  auto?: boolean;
+  throttleMs?: number;
+}) {
+  const {
+    resourceType,
+    clusterId,
+    namespace,
+    enabled = true,
+    auto = true,
+    throttleMs = AKS_SYNC_THROTTLE_MS,
+  } = args;
+  const queryClient = useQueryClient();
+  const [jobId, setJobId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [lastStatus, setLastStatus] = useState<string>("idle");
+  const processedJobRef = useRef<number | null>(null);
+  const syncKey = aksSyncKey(resourceType, clusterId, namespace);
+
+  const enqueueMutation = useMutation({
+    mutationFn: (force: boolean = false) =>
+      enqueueAksResourceSync({ resourceType, clusterId, namespace, force }),
+    onSuccess: (res) => {
+      processedJobRef.current = null;
+      setJobId(res.job_id);
+      setLastStatus(res.status || "queued");
+      setError(null);
+    },
+    onError: (err: any) => {
+      setLastStatus("failed");
+      setError(err?.response?.data?.detail || err?.message || "Failed to enqueue refresh");
+    },
+  });
+
+  const jobQuery = useQuery({
+    queryKey: ["sync-job", jobId],
+    queryFn: () => fetchSyncJob(jobId!),
+    enabled: !!jobId && lastStatus !== "completed" && lastStatus !== "failed",
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" ? 3000 : false;
+    },
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+
+  const start = (force = false) => {
+    if (!enabled) return;
+    if (resourceType !== "clusters" && !clusterId) return;
+    aksSyncAttemptedAt.set(syncKey, Date.now());
+    enqueueMutation.mutate(force);
+  };
+
+  useEffect(() => {
+    if (!auto || !enabled) return;
+    if (resourceType !== "clusters" && !clusterId) return;
+    if (enqueueMutation.isPending || jobId) return;
+    const lastActivityAt = Math.max(aksSyncCompletedAt.get(syncKey) || 0, aksSyncAttemptedAt.get(syncKey) || 0);
+    if (Date.now() - lastActivityAt < throttleMs) return;
+    start(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, enabled, syncKey, throttleMs]);
+
+  useEffect(() => {
+    const job = jobQuery.data;
+    if (!job) return;
+    setLastStatus(job.status);
+    if (job.status === "completed" && processedJobRef.current !== job.id) {
+      processedJobRef.current = job.id;
+      aksSyncCompletedAt.set(syncKey, Date.now());
+      invalidateAksResourceQueries(queryClient, resourceType, clusterId);
+      setError(null);
+      setJobId(null);
+    }
+    if (job.status === "failed") {
+      setError(job.last_error || "Background refresh failed");
+      setJobId(null);
+    }
+  }, [clusterId, jobQuery.data, queryClient, resourceType, syncKey]);
+
+  const isRunning =
+    enqueueMutation.isPending ||
+    lastStatus === "queued" ||
+    lastStatus === "running" ||
+    jobQuery.data?.status === "queued" ||
+    jobQuery.data?.status === "running";
+
+  return {
+    start,
+    job: jobQuery.data,
+    jobId,
+    status: lastStatus,
+    error,
+    isRunning,
+    isRetrying: isRunning && (jobQuery.data?.attempts || 0) > 1,
+  };
+}
+
 // ── React Query Hooks ─────────────────────────────────────────────────
 
 export function useClusters(subscriptionIds?: string[], environment?: string) {
@@ -880,10 +1083,17 @@ export function useCachedClusters(environment?: string) {
   return useQuery({
     queryKey: ["aks-clusters-cached", environment],
     queryFn: () => fetchCachedClusters(environment),
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      clusters: [],
+      count: 0,
+    },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
-    retry: 2,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -914,10 +1124,17 @@ export function useCachedDeployments(clusterId: string, namespace?: string, enab
     queryKey: ["aks-deployments-cached", clusterId, namespace],
     queryFn: () => fetchCachedDeployments(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      deployments: [],
+      count: 0,
+    },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
-    retry: 2,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -1023,10 +1240,15 @@ export function usePodMetrics(clusterId: string, namespace?: string, enabled = t
     queryKey: ["aks-pod-metrics", clusterId, namespace],
     queryFn: () => fetchPodMetrics(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      pods: [],
+      count: 0,
+    },
     staleTime: 60 * 1000,
     gcTime: 3 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
-    retry: 1,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -1132,10 +1354,17 @@ export function useCachedCronJobs(clusterId: string, namespace?: string, enabled
     queryKey: ["aks-cronjobs-cached", clusterId, namespace],
     queryFn: () => fetchCachedCronJobs(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      cronjobs: [],
+      count: 0,
+    },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
-    retry: 2,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -1326,10 +1555,17 @@ export function useCachedNodePools(clusterId: string, enabled = true) {
     queryKey: ["aks-nodepools-cached", clusterId],
     queryFn: () => fetchCachedNodePools(clusterId),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      node_pools: [],
+      count: 0,
+    },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
-    retry: 2,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -1601,18 +1837,20 @@ function extendedCachedParams(clusterId: string, namespace?: string) {
 const EXTENDED_QUERY_OPTIONS = {
   staleTime: 5 * 60 * 1000,
   gcTime: 10 * 60 * 1000,
-  retry: 2,
+  retry: false,
+  refetchOnWindowFocus: false,
 } as const;
 
 export async function fetchCachedSecrets(clusterId: string, namespace?: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/secrets/cached`, {
     params: extendedCachedParams(clusterId, namespace),
+    timeout: 8000,
   });
   return data as { secrets: K8sSecret[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncSecretsToDb(clusterId: string, namespace?: string) {
-  const { data } = await apiClient.post(`${API_PREFIX}/secrets/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  const { data } = await apiClient.post(`${API_PREFIX}/secrets/sync`, null, { params: { cluster_id: clusterId, namespace }, timeout: 15000 });
   return data;
 }
 
@@ -1658,12 +1896,13 @@ export async function updateSecretApi(clusterId: string, namespace: string, name
 export async function fetchCachedServices(clusterId: string, namespace?: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/services/cached`, {
     params: extendedCachedParams(clusterId, namespace),
+    timeout: 8000,
   });
   return data as { services: K8sService[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncServicesToDb(clusterId: string, namespace?: string) {
-  const { data } = await apiClient.post(`${API_PREFIX}/services/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  const { data } = await apiClient.post(`${API_PREFIX}/services/sync`, null, { params: { cluster_id: clusterId, namespace }, timeout: 15000 });
   return data;
 }
 
@@ -1703,12 +1942,13 @@ export async function createServiceApi(
 export async function fetchCachedConfigMapsExt(clusterId: string, namespace?: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/configmaps/cached`, {
     params: extendedCachedParams(clusterId, namespace),
+    timeout: 8000,
   });
   return data as { configmaps: ConfigMap[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncConfigMapsToDb(clusterId: string, namespace?: string) {
-  const { data } = await apiClient.post(`${API_PREFIX}/configmaps/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  const { data } = await apiClient.post(`${API_PREFIX}/configmaps/sync`, null, { params: { cluster_id: clusterId, namespace }, timeout: 15000 });
   return data;
 }
 
@@ -1740,12 +1980,13 @@ export async function updateConfigMapApi(clusterId: string, namespace: string, n
 export async function fetchCachedIngress(clusterId: string, namespace?: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/ingress/cached`, {
     params: extendedCachedParams(clusterId, namespace),
+    timeout: 8000,
   });
   return data as { ingress: K8sIngress[]; count: number; source?: string; last_sync?: string | null };
 }
 
 export async function syncIngressToDb(clusterId: string, namespace?: string) {
-  const { data } = await apiClient.post(`${API_PREFIX}/ingress/sync`, null, { params: { cluster_id: clusterId, namespace } });
+  const { data } = await apiClient.post(`${API_PREFIX}/ingress/sync`, null, { params: { cluster_id: clusterId, namespace }, timeout: 15000 });
   return data;
 }
 
@@ -1762,7 +2003,7 @@ export async function fetchIngressDetail(clusterId: string, namespace: string, n
 }
 
 export async function fetchHelmReleases(clusterId: string, namespace?: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/helm/releases`, { params: { cluster_id: clusterId, namespace } });
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/releases`, { params: { cluster_id: clusterId, namespace }, timeout: 8000 });
   return data as { releases: HelmRelease[]; count: number };
 }
 
@@ -1772,12 +2013,12 @@ export async function uninstallHelmRelease(clusterId: string, releaseName: strin
 }
 
 export async function fetchAksNamespaces(clusterId: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/namespaces`, { params: { cluster_id: clusterId } });
+  const { data } = await apiClient.get(`${API_PREFIX}/namespaces`, { params: { cluster_id: clusterId }, timeout: 8000 });
   return data as { namespaces: string[]; count: number };
 }
 
 export async function fetchAksAuditHistory(clusterId?: string, namespace?: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/history`, { params: { cluster_id: clusterId, namespace } });
+  const { data } = await apiClient.get(`${API_PREFIX}/history`, { params: { cluster_id: clusterId, namespace }, timeout: 8000 });
   return data as { history: AksAuditEntry[]; count: number };
 }
 
@@ -1786,6 +2027,12 @@ export function useCachedSecrets(clusterId: string, namespace?: string, enabled 
     queryKey: ["aks-secrets-cached", clusterId, namespace],
     queryFn: () => fetchCachedSecrets(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      secrets: [],
+      count: 0,
+    },
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1841,6 +2088,12 @@ export function useCachedServices(clusterId: string, namespace?: string, enabled
     queryKey: ["aks-services-cached", clusterId, namespace],
     queryFn: () => fetchCachedServices(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      services: [],
+      count: 0,
+    },
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1892,6 +2145,12 @@ export function useCachedConfigMaps(clusterId: string, namespace?: string, enabl
     queryKey: ["aks-configmaps-cached", clusterId, namespace],
     queryFn: () => fetchCachedConfigMapsExt(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      configmaps: [],
+      count: 0,
+    },
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1939,6 +2198,12 @@ export function useCachedIngress(clusterId: string, namespace?: string, enabled 
     queryKey: ["aks-ingress-cached", clusterId, namespace],
     queryFn: () => fetchCachedIngress(clusterId, namespace),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      ingress: [],
+      count: 0,
+    },
     ...EXTENDED_QUERY_OPTIONS,
   });
 }
@@ -1973,7 +2238,14 @@ export function useHelmReleases(clusterId: string, namespace?: string) {
     queryKey: ["aks-helm-releases", clusterId, namespace],
     queryFn: () => fetchHelmReleases(clusterId, namespace),
     enabled: !!clusterId,
-    refetchInterval: 60_000,
+    placeholderData: {
+      releases: [],
+      count: 0,
+    },
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -1991,7 +2263,13 @@ export function useAksNamespaces(clusterId: string | undefined, enabled = true) 
     queryKey: ["aks-namespaces", clusterId],
     queryFn: () => fetchAksNamespaces(clusterId!),
     enabled: !!clusterId && enabled,
+    placeholderData: {
+      namespaces: [],
+      count: 0,
+    },
     staleTime: 5 * 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -1999,6 +2277,13 @@ export function useAksAuditHistory(clusterId?: string, namespace?: string) {
   return useQuery({
     queryKey: ["aks-audit-history", clusterId, namespace],
     queryFn: () => fetchAksAuditHistory(clusterId, namespace),
-    refetchInterval: 60_000,
+    placeholderData: {
+      history: [],
+      count: 0,
+    },
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }

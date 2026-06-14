@@ -17,14 +17,11 @@ import { AutoRefreshIndicator, gridStyles, SortState, nextSortState, SortableHea
 import {
   useClusters,
   useCachedClusters,
-  useSyncClusters,
   useCachedDeployments,
-  useSyncDeployments,
   usePodMetrics,
 
   useNodePools,
   useCachedNodePools,
-  useSyncNodePools,
   useScaleDeployment,
   useRestartDeployment,
   useCreateDeployment,
@@ -38,13 +35,13 @@ import {
   useCronJobDetail,
   useConfigMapDetail,
   useCachedCronJobs,
-  useSyncCronJobs,
   useScaleNodePool,
   useUpdateAutoscaling,
   useStartCluster,
   useStopCluster,
   useScaleHistory,
   useAksNamespaces,
+  useAksBackgroundSync,
   refreshClusters,
   usePodLogs,
   usePodLogSearch,
@@ -60,7 +57,6 @@ import {
   NodeDetail,
   PodLogSearchResult,
 } from "../services/aksApi";
-import { useAksLiveWatch, LiveStatusBadge } from "../hooks/useAksLiveWatch";
 import {
   SecretsTab,
   ServicesTab,
@@ -189,6 +185,24 @@ const PIE_COLORS = ["#3f9bca", "#2d7aa8", "#10b981", "#f59e0b", "#ef4444", "#6b7
 // ── Reusable Helpers ──────────────────────────────────────────────────
 
 const PAGE_SIZE = 15;
+
+type AksBackgroundSyncState = ReturnType<typeof useAksBackgroundSync>;
+
+function BackgroundRefreshStatus({ sync }: { sync: AksBackgroundSyncState }) {
+  if (sync.isRetrying) {
+    return <span className="text-sm text-amber-600">Refresh delayed, retrying...</span>;
+  }
+  if (sync.isRunning) {
+    return <span className="text-sm text-blue-600">Refreshing in background...</span>;
+  }
+  if (sync.error) {
+    return <span className="text-sm text-red-600">Last refresh failed. Cached data is still shown.</span>;
+  }
+  if (sync.status === "completed") {
+    return <span className="text-sm text-green-600">Background refresh complete.</span>;
+  }
+  return null;
+}
 
 function useSearchPagination<T>(items: T[], searchFn: (item: T, q: string) => boolean) {
   const [search, setSearch] = useState("");
@@ -360,14 +374,17 @@ const AKSOperationsPage: React.FC = () => {
   const loadScaleHistory = activeTab === "history";
 
   // Queries — use DB-cached clusters for fast load
-  const { data: clustersData, isLoading: loadingClusters, refetch: refetchClusters } = useCachedClusters();
-  const syncClustersMutation = useSyncClusters();
+  const {
+    data: clustersData,
+    isLoading: loadingClusters,
+    isFetching: fetchingClusters,
+    refetch: refetchClusters,
+  } = useCachedClusters();
   const { data: deploymentsData, isLoading: loadingDeployments, isError: deploymentsError, error: deploymentsErr } = useCachedDeployments(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadDeployments
   );
-  const syncDeploymentsMutation = useSyncDeployments();
   const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = usePodMetrics(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
@@ -379,7 +396,6 @@ const AKSOperationsPage: React.FC = () => {
     selectedNamespace || undefined,
     loadCronJobs
   );
-  const syncCronJobsMutation = useSyncCronJobs();
   const { data: scaleHistoryData } = useScaleHistory(
     loadScaleHistory ? selectedCluster?.id : undefined,
     undefined,
@@ -391,34 +407,38 @@ const AKSOperationsPage: React.FC = () => {
     selectedCluster?.id || "",
     loadNodePools
   );
-  const syncNodePoolsMutation = useSyncNodePools();
   const { data: namespacesData } = useAksNamespaces(selectedCluster?.id, needsNamespaces);
 
   const namespaceOptions = useMemo(() => {
     return [...(namespacesData?.namespaces || [])].sort();
   }, [namespacesData]);
 
-  const liveResources = useMemo((): string[] => {
-    if (activeTab === "clusters") return ["clusters"];
-    if (!selectedCluster) return [];
-    const map: Partial<Record<TabKey, string[]>> = {
-      nodepools: ["nodepools"],
-      deployments: ["deployments"],
-      pods: ["pods"],
-      cronjobs: ["cronjobs"],
-      services: ["services"],
-      secrets: ["secrets"],
-      configmaps: ["configmaps"],
-      ingress: ["ingress"],
-    };
-    return map[activeTab] || [];
-  }, [activeTab, selectedCluster]);
-
-  const { status: liveStatus } = useAksLiveWatch({
+  const clustersRefresh = useAksBackgroundSync({
+    resourceType: "clusters",
+    enabled: activeTab === "clusters",
+  });
+  const deploymentsRefresh = useAksBackgroundSync({
+    resourceType: "deployments",
     clusterId: selectedCluster?.id,
     namespace: selectedNamespace || undefined,
-    resources: liveResources,
-    enabled: liveResources.length > 0,
+    enabled: loadDeployments,
+  });
+  const podMetricsRefresh = useAksBackgroundSync({
+    resourceType: "pods",
+    clusterId: selectedCluster?.id,
+    namespace: selectedNamespace || undefined,
+    enabled: loadPodMetrics,
+  });
+  const cronJobsRefresh = useAksBackgroundSync({
+    resourceType: "cronjobs",
+    clusterId: selectedCluster?.id,
+    namespace: selectedNamespace || undefined,
+    enabled: loadCronJobs,
+  });
+  const nodePoolsRefresh = useAksBackgroundSync({
+    resourceType: "nodepools",
+    clusterId: selectedCluster?.id,
+    enabled: loadNodePools,
   });
 
   // Mutations
@@ -1107,30 +1127,30 @@ const AKSOperationsPage: React.FC = () => {
 
   const renderClustersTab = () => {
     const { search: cSearch, setSearch: setCSearch, page: cPage, setPage: setCPage, paged: pagedClusters, filtered: filteredClusters, totalPages: cTotalPages } = clustersPag;
+    const hasClusters = allClusters.length > 0;
+    const isAzureSource = clustersData?.source === "azure";
+    const sourceLabel = isAzureSource ? "Azure Live" : "Database Cache";
 
     return (
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <h2 className="text-xl font-semibold text-gray-800">AKS Cluster Inventory</h2>
         <div className="flex items-center gap-2">
-          <LiveStatusBadge status={liveStatus} />
           <button
             onClick={() => refetchClusters()}
+            disabled={fetchingClusters}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
           >
-            {Icons.refresh("w-4 h-4")} Refresh
+            {Icons.refresh(fetchingClusters ? "w-4 h-4 animate-spin" : "w-4 h-4")} {fetchingClusters ? "Refreshing..." : "Refresh"}
           </button>
           {canWrite && (
           <button
-            onClick={() => syncClustersMutation.mutate(undefined, {
-              onSuccess: () => showToast("AKS clusters synced from Azure to DB"),
-              onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to sync clusters", "error"),
-            })}
-            disabled={syncClustersMutation.isPending}
+            onClick={() => clustersRefresh.start(true)}
+            disabled={clustersRefresh.isRunning}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
           >
-            {Icons.refresh(syncClustersMutation.isPending ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-            {syncClustersMutation.isPending ? "Syncing..." : "Sync from Azure"}
+            {Icons.refresh(clustersRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
+            {clustersRefresh.isRunning ? "Syncing..." : "Sync from Azure"}
           </button>
           )}
         </div>
@@ -1139,20 +1159,21 @@ const AKSOperationsPage: React.FC = () => {
       {/* Source & Last Sync Info */}
       <div className="flex items-center gap-3">
         <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-          clustersData?.source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
+          isAzureSource ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
         }`}>
-          Source: {clustersData?.source === "db" ? "Database" : "Azure Live"}
+          Source: {sourceLabel}
         </span>
         {clustersData?.last_sync && (
           <span className="text-sm text-gray-500">
             Last synced: {formatDate(clustersData.last_sync)}
           </span>
         )}
-        {!clustersData?.last_sync && !loadingClusters && (
-          <span className="text-sm text-blue-600">
-            Syncing cluster inventory automatically…
+        {!clustersData?.last_sync && (
+          <span className="text-sm text-amber-600">
+            No saved sync yet. Use Sync from Azure to populate the cache.
           </span>
         )}
+        <BackgroundRefreshStatus sync={clustersRefresh} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -1188,8 +1209,12 @@ const AKSOperationsPage: React.FC = () => {
 
       <GridSearchBar search={cSearch} onSearch={setCSearch} onPage={setCPage} totalItems={allClusters.length} shownItems={filteredClusters.length} placeholder="Search clusters..." />
 
-      {loadingClusters ? (
+      {loadingClusters && !clustersData ? (
         <div className="text-center py-8 text-gray-500">Loading clusters...</div>
+      ) : !hasClusters ? (
+        <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-6 text-sm text-amber-800">
+          No AKS clusters are available in the local inventory cache yet. The page is ready; run <span className="font-semibold">Sync from Azure</span> to refresh inventory without blocking navigation.
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {pagedClusters.map((cluster) => (
@@ -1363,18 +1388,12 @@ const AKSOperationsPage: React.FC = () => {
             <div className="flex items-center gap-2">
               {canWrite && (
               <button
-                onClick={() => syncDeploymentsMutation.mutate(
-                  { clusterId: selectedCluster.id, namespace: selectedNamespace || undefined },
-                  {
-                    onSuccess: () => showToast("Deployments synced from Kubernetes to DB"),
-                    onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to sync Deployments", "error"),
-                  }
-                )}
-                disabled={syncDeploymentsMutation.isPending}
+                onClick={() => deploymentsRefresh.start(true)}
+                disabled={deploymentsRefresh.isRunning}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
               >
-                {Icons.refresh(syncDeploymentsMutation.isPending ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-                {syncDeploymentsMutation.isPending ? "Syncing..." : "Sync from Azure"}
+                {Icons.refresh(deploymentsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
+                {deploymentsRefresh.isRunning ? "Syncing..." : "Sync from Kubernetes"}
               </button>
               )}
               {canWrite && (
@@ -1405,9 +1424,10 @@ const AKSOperationsPage: React.FC = () => {
           )}
           {!deploymentsData?.last_sync && (
             <span className="text-sm text-yellow-600">
-              Not synced yet — click "Sync from Azure" to load
+              Not synced yet — cached table will update after background refresh
             </span>
           )}
+          <BackgroundRefreshStatus sync={deploymentsRefresh} />
         </div>
       )}
 
@@ -1805,6 +1825,11 @@ const AKSOperationsPage: React.FC = () => {
           </select>
         )}
       </div>
+      {selectedCluster && (
+        <div className="flex items-center gap-3">
+          <BackgroundRefreshStatus sync={podMetricsRefresh} />
+        </div>
+      )}
 
       {!selectedCluster ? (
         <div className="text-center py-16 text-gray-500">
@@ -1963,21 +1988,14 @@ const AKSOperationsPage: React.FC = () => {
                 <option key={ns} value={ns}>{ns}</option>
               ))}
             </select>
-            <LiveStatusBadge status={liveStatus} />
             {canWrite && (
             <button
-              onClick={() => syncCronJobsMutation.mutate(
-                { clusterId: selectedCluster.id, namespace: selectedNamespace || undefined },
-                {
-                  onSuccess: () => showToast("CronJobs synced from Kubernetes to DB"),
-                  onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to sync CronJobs", "error"),
-                }
-              )}
-              disabled={syncCronJobsMutation.isPending}
+              onClick={() => cronJobsRefresh.start(true)}
+              disabled={cronJobsRefresh.isRunning}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
             >
-              {Icons.refresh(syncCronJobsMutation.isPending ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-              {syncCronJobsMutation.isPending ? "Syncing..." : "Sync from Azure"}
+              {Icons.refresh(cronJobsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
+              {cronJobsRefresh.isRunning ? "Syncing..." : "Sync from Kubernetes"}
             </button>
             )}
             {canWrite && (
@@ -2007,9 +2025,10 @@ const AKSOperationsPage: React.FC = () => {
           )}
           {!cronJobsData?.last_sync && (
             <span className="text-sm text-yellow-600">
-              Not synced yet — click "Sync from Azure" to load
+              Not synced yet — cached table will update after background refresh
             </span>
           )}
+          <BackgroundRefreshStatus sync={cronJobsRefresh} />
         </div>
       )}
 
@@ -2311,15 +2330,12 @@ const AKSOperationsPage: React.FC = () => {
           <div className="flex items-center gap-2">
             {canWrite && (
             <button
-              onClick={() => syncNodePoolsMutation.mutate({ clusterId: selectedCluster.id }, {
-                onSuccess: () => showToast("Node pools synced from Azure to DB"),
-                onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to sync node pools", "error"),
-              })}
-              disabled={syncNodePoolsMutation.isPending}
+              onClick={() => nodePoolsRefresh.start(true)}
+              disabled={nodePoolsRefresh.isRunning}
               className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm"
             >
-              {Icons.refresh(syncNodePoolsMutation.isPending ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-              {syncNodePoolsMutation.isPending ? "Syncing..." : "Sync from Azure"}
+              {Icons.refresh(nodePoolsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
+              {nodePoolsRefresh.isRunning ? "Syncing..." : "Sync from Azure"}
             </button>
             )}
           </div>
@@ -2341,9 +2357,10 @@ const AKSOperationsPage: React.FC = () => {
           )}
           {!nodePoolsData.last_sync && (
             <span className="text-sm text-yellow-600">
-              Not synced yet — click "Sync from Azure" to cache data for faster loads
+              Not synced yet — cached table will update after background refresh
             </span>
           )}
+          <BackgroundRefreshStatus sync={nodePoolsRefresh} />
         </div>
       )}
 
@@ -2779,7 +2796,6 @@ const AKSOperationsPage: React.FC = () => {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold text-gray-900">AKS Operations Center</h1>
-            {liveResources.length > 0 && <LiveStatusBadge status={liveStatus} />}
           </div>
           <p className="text-sm text-gray-500 mt-1">Multi-cluster management, deployment control, and observability</p>
         </div>
@@ -2818,23 +2834,23 @@ const AKSOperationsPage: React.FC = () => {
           <>
             {activeTab === "services" && (
               <ServicesTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
+                onNamespaceChange={setSelectedNamespace} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "secrets" && (
               <SecretsTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
+                onNamespaceChange={setSelectedNamespace} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "configmaps" && (
               <ConfigMapsTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
+                onNamespaceChange={setSelectedNamespace} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "ingress" && (
               <IngressTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
+                onNamespaceChange={setSelectedNamespace} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
             {activeTab === "helm" && (
               <HelmTab cluster={selectedCluster} namespace={selectedNamespace} namespaces={namespaceOptions}
-                onNamespaceChange={setSelectedNamespace} liveStatus={liveStatus} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
+                onNamespaceChange={setSelectedNamespace} canWrite={canWrite} showToast={showToast} formatDate={formatDate} />
             )}
           </>
         )}

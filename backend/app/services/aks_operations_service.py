@@ -2648,9 +2648,12 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         """
         Sync AKS clusters from Azure live API to DB (AzureResourceInventory).
 
-        Strategy: DELETE all existing 'aks_cluster' rows then INSERT fresh data.
+        Strategy: replace only the current subscription scope's 'aks_cluster'
+        rows, then INSERT fresh data. This prevents one user's scoped sync from
+        wiping another user's cached cluster inventory.
         Returns sync result with count and last_sync timestamp.
         """
+        scoped_subscription_ids = await get_scoped_subscription_ids()
         clusters = await self._fetch_clusters_live()
 
         if not self.db:
@@ -2663,9 +2666,23 @@ class AKSOperationsService(AKSResourceOperationsMixin):
             }
 
         try:
-            # Delete existing aks_cluster rows
+            # Delete only the rows covered by this sync scope. If no scope is
+            # available, do not clear the shared inventory cache.
+            if not scoped_subscription_ids:
+                logger.warning("aks_clusters_sync_skipped_no_subscription_scope")
+                return {
+                    "synced_count": len(clusters),
+                    "resource_type": "aks_cluster",
+                    "last_sync": datetime.utcnow().isoformat(),
+                    "resources": clusters,
+                    "db_saved": False,
+                }
+
             await self.db.execute(
-                delete(AzureResourceInventory).where(AzureResourceInventory.resource_type == "aks_cluster")
+                delete(AzureResourceInventory).where(
+                    AzureResourceInventory.resource_type == "aks_cluster",
+                    AzureResourceInventory.subscription_id.in_(scoped_subscription_ids),
+                )
             )
 
             # Insert fresh rows

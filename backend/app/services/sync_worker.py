@@ -15,12 +15,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import random
 from datetime import datetime, timedelta
 
 import structlog
 from sqlalchemy import select, update
 
 from app.core import database as _db_module
+from app.core.subscription_scope import reset_scoped_subscription_ids, set_scoped_subscription_ids
 from app.models.database import SyncJob
 
 
@@ -42,6 +44,8 @@ MAX_ATTEMPTS = 3
 ABANDONED_RUNNING_TIMEOUT_MINUTES = 120
 _ALREADY_RUNNING_WAIT_SECONDS = 30
 _ALREADY_RUNNING_MAX_WAITS = 24  # up to ~12 minutes waiting for an in-flight sync
+_RETRY_BACKOFF_BASE_SECONDS = 5
+_RETRY_BACKOFF_MAX_SECONDS = 60
 
 _worker_task: asyncio.Task | None = None
 _shutdown_event: asyncio.Event | None = None
@@ -174,6 +178,56 @@ async def _run_job(job: SyncJob) -> tuple[str, str | None, dict | None]:
 
             return await _await_full_sync_result(job, _run_leadership)
 
+    if job.job_type == "aks_resource_sync":
+        from app.services.aks_operations_service import get_aks_operations_service
+
+        resource_type = str(payload.get("resource_type") or "").lower()
+        cluster_id = payload.get("cluster_id")
+        namespace = payload.get("namespace") or None
+        raw_subscription_ids = payload.get("subscription_ids")
+        subscription_ids = (
+            [str(item) for item in raw_subscription_ids] if isinstance(raw_subscription_ids, list) else None
+        )
+
+        async with session_factory() as session:
+            svc = get_aks_operations_service(session)
+            sync_map = {
+                "clusters": lambda: svc.sync_clusters_to_db(),
+                "nodepools": lambda: svc.sync_node_pools_to_db(str(cluster_id)),
+                "deployments": lambda: svc.sync_deployments_to_db(str(cluster_id), namespace),
+                "pods": lambda: svc.sync_pods_to_db(str(cluster_id), namespace),
+                "cronjobs": lambda: svc.sync_cronjobs_to_db(str(cluster_id), namespace),
+                "services": lambda: svc.sync_services_to_db(str(cluster_id), namespace),
+                "secrets": lambda: svc.sync_secrets_to_db(str(cluster_id), namespace),
+                "configmaps": lambda: svc.sync_configmaps_to_db(str(cluster_id), namespace),
+                "ingress": lambda: svc.sync_ingress_to_db(str(cluster_id), namespace),
+            }
+            sync_fn = sync_map.get(resource_type)
+            if sync_fn is None:
+                return "failed", f"unsupported AKS resource_type: {resource_type}", None
+            if resource_type != "clusters" and not cluster_id:
+                return "failed", "cluster_id is required for AKS resource sync", None
+
+            scope_token = set_scoped_subscription_ids(subscription_ids) if subscription_ids is not None else None
+            try:
+                started = datetime.utcnow()
+                result = await sync_fn()
+                result = {
+                    **(result or {}),
+                    "status": "completed",
+                    "job_type": "aks_resource_sync",
+                    "resource_type": resource_type,
+                    "cluster_id": cluster_id,
+                    "namespace": namespace,
+                    "attempts": job.attempts or 0,
+                    "duration_ms": int((datetime.utcnow() - started).total_seconds() * 1000),
+                    "retryable": False,
+                }
+                return "completed", None, result
+            finally:
+                if scope_token is not None:
+                    reset_scoped_subscription_ids(scope_token)
+
     return "failed", f"unknown job_type: {job.job_type}", None
 
 
@@ -195,10 +249,13 @@ async def _finalize_job(job_id: int, status: str, error: str | None, result: dic
         await session.commit()
 
 
-async def _requeue_for_retry(job_id: int, error: str) -> None:
+async def _requeue_for_retry(job_id: int, error: str, attempts: int = 0) -> None:
     session_factory = _get_session_factory()
     if session_factory is None:
         return
+    delay = min(_RETRY_BACKOFF_MAX_SECONDS, _RETRY_BACKOFF_BASE_SECONDS * (2 ** max(0, attempts - 1)))
+    delay = delay + random.uniform(0, min(5, delay))
+    await asyncio.sleep(delay)
     async with session_factory() as session:
         await session.execute(
             update(SyncJob)
@@ -206,7 +263,7 @@ async def _requeue_for_retry(job_id: int, error: str) -> None:
             .values(status="queued", last_error=error[:2000], started_at=None)
         )
         await session.commit()
-        logger.info("sync_worker_requeued_for_retry", job_id=job_id)
+        logger.info("sync_worker_requeued_for_retry", job_id=job_id, delay_s=round(delay, 2))
 
 
 async def _worker_loop() -> None:
@@ -243,7 +300,7 @@ async def _worker_loop() -> None:
                 status, error, result = "failed", f"{type(exc).__name__}: {exc}"[:500], None
 
             if status != "completed" and (job.attempts or 0) < MAX_ATTEMPTS:
-                await _requeue_for_retry(job.id, error or "unknown error")
+                await _requeue_for_retry(job.id, error or "unknown error", job.attempts or 0)
             else:
                 await _finalize_job(job.id, status, error, result)
                 logger.info(

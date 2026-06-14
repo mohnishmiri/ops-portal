@@ -23,10 +23,10 @@ from datetime import datetime, timedelta
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user
 from app.core.database import get_db
 from app.core.subscription_scope import subscription_ids_for_manual_amortized_sync
 from app.models.auth import UserContext, UserRole
@@ -37,15 +37,30 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
-_ALLOWED_JOB_TYPES = {"amortized", "leadership"}
+_ALLOWED_JOB_TYPES = {"amortized", "leadership", "aks_resource_sync"}
+_AKS_RESOURCE_TYPES = {
+    "clusters",
+    "nodepools",
+    "deployments",
+    "pods",
+    "cronjobs",
+    "services",
+    "secrets",
+    "configmaps",
+    "ingress",
+}
+_STALE_RUNNING_MINUTES = 30
 
 
 class EnqueueRequest(BaseModel):
     """Body for POST /sync-jobs."""
 
-    job_type: str = Field(..., description="One of: amortized, leadership")
+    job_type: str = Field(..., description="One of: amortized, leadership, aks_resource_sync")
     months: int | None = Field(None, ge=1, le=12, description="Amortized: months window (default 2)")
     force: bool = Field(False, description="Amortized: wipe + re-fetch entire window")
+    cluster_id: str | None = Field(None, description="AKS sync: cluster resource ID")
+    resource_type: str | None = Field(None, description="AKS sync: resource type to refresh")
+    namespace: str | None = Field(None, description="AKS sync: optional namespace filter")
     idempotency_key: str | None = Field(
         None,
         max_length=120,
@@ -111,13 +126,20 @@ def _job_to_detail(job: SyncJob) -> SyncJobDetail:
 async def enqueue_sync_job(
     body: EnqueueRequest,
     request: Request,
-    user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
+    user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EnqueueResponse:
     if body.job_type not in _ALLOWED_JOB_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported job_type. Allowed: {sorted(_ALLOWED_JOB_TYPES)}",
+        )
+    if body.job_type != "aks_resource_sync" and not (
+        user.is_admin or user.has_role(UserRole.ADMIN) or user.has_role(UserRole.WRITE)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="WRITE role required to enqueue this sync job",
         )
     if body.force and not user.is_admin:
         raise HTTPException(
@@ -131,15 +153,57 @@ async def enqueue_sync_job(
         scoped_ids = await subscription_ids_for_manual_amortized_sync(request)
         if scoped_ids:
             payload["subscription_ids"] = scoped_ids
+    elif body.job_type == "aks_resource_sync":
+        resource_type = (body.resource_type or "").strip().lower()
+        if resource_type not in _AKS_RESOURCE_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported AKS resource_type. Allowed: {sorted(_AKS_RESOURCE_TYPES)}",
+            )
+        if resource_type != "clusters" and not body.cluster_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cluster_id is required for AKS resource sync",
+            )
+        payload = {
+            "cluster_id": body.cluster_id,
+            "resource_type": resource_type,
+            "namespace": body.namespace or None,
+            "subscription_ids": getattr(request.state, "scoped_subscription_ids", None),
+            "force": body.force,
+        }
 
     # Detect whether we reused an existing job by checking the DB before/after.
     pre_existing_id: int | None = None
-    if body.idempotency_key:
+    idempotency_key = body.idempotency_key
+    if body.job_type == "aks_resource_sync" and not idempotency_key:
+        resource_type = payload["resource_type"]
+        scope = "all" if resource_type == "clusters" else str(payload.get("cluster_id") or "")
+        namespace = str(payload.get("namespace") or "all")
+        idempotency_key = f"aks:{scope}:{resource_type}:{namespace}"[:120]
+
+    if idempotency_key:
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=_STALE_RUNNING_MINUTES)
+        await db.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.job_type == body.job_type,
+                SyncJob.idempotency_key == idempotency_key,
+                SyncJob.status == "running",
+                SyncJob.started_at < stale_cutoff,
+            )
+            .values(
+                status="failed",
+                completed_at=datetime.utcnow(),
+                last_error="stale running job expired before enqueue",
+            )
+        )
+        await db.commit()
         result = await db.execute(
             select(SyncJob)
             .where(
                 SyncJob.job_type == body.job_type,
-                SyncJob.idempotency_key == body.idempotency_key,
+                SyncJob.idempotency_key == idempotency_key,
                 SyncJob.status.in_(["queued", "running"]),
             )
             .order_by(SyncJob.enqueued_at.desc())
@@ -153,7 +217,7 @@ async def enqueue_sync_job(
         body.job_type,
         payload=payload,
         triggered_by=user.email or "api",
-        idempotency_key=body.idempotency_key,
+        idempotency_key=idempotency_key,
     )
 
     reused = pre_existing_id == job_id
@@ -164,7 +228,7 @@ async def enqueue_sync_job(
         job_id=job_id,
         status=(job.status if job else "queued"),
         job_type=body.job_type,
-        idempotency_key=body.idempotency_key,
+        idempotency_key=idempotency_key,
         reused=reused,
     )
 

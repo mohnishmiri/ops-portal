@@ -4,7 +4,6 @@
 
 import React, { useCallback, useState } from "react";
 import { gridStyles } from "../../components/gridStyles";
-import { LiveStatusBadge, LiveWatchStatus } from "../../hooks/useAksLiveWatch";
 import {
   AKSCluster,
   K8sIngress,
@@ -17,10 +16,7 @@ import {
   useCachedIngress,
   useHelmReleases,
   useAksAuditHistory,
-  useSyncSecrets,
-  useSyncServices,
-  useSyncConfigMaps,
-  useSyncIngress,
+  useAksBackgroundSync,
   useDeleteSecret,
   useDeleteService,
   useDeleteConfigMap,
@@ -59,21 +55,37 @@ type TabProps = {
   namespace: string;
   namespaces: string[];
   onNamespaceChange: (ns: string) => void;
-  liveStatus: LiveWatchStatus;
   canWrite: boolean;
   showToast: (msg: string, type?: "success" | "error") => void;
   formatDate: (value: string) => string;
 };
 
 type ResourceRef = { namespace: string; name: string };
+type AksBackgroundSyncState = ReturnType<typeof useAksBackgroundSync>;
 
 function useNsFilter(namespace: string) {
   return namespace || undefined;
 }
 
+function BackgroundRefreshStatus({ sync }: { sync?: AksBackgroundSyncState }) {
+  if (!sync) return null;
+  if (sync.isRetrying) {
+    return <span className="text-sm text-amber-600">Refresh delayed, retrying...</span>;
+  }
+  if (sync.isRunning) {
+    return <span className="text-sm text-blue-600">Refreshing in background...</span>;
+  }
+  if (sync.error) {
+    return <span className="text-sm text-red-600">Last refresh failed. Cached data is still shown.</span>;
+  }
+  if (sync.status === "completed") {
+    return <span className="text-sm text-green-600">Background refresh complete.</span>;
+  }
+  return null;
+}
+
 function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
   title,
-  liveStatus,
   namespace,
   namespaces,
   onNamespaceChange,
@@ -85,6 +97,7 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
   syncing,
   onCreate,
   createLabel,
+  backgroundSync,
   isLoading,
   items,
   searchPlaceholder,
@@ -93,7 +106,6 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
   renderRow,
 }: {
   title: string;
-  liveStatus: LiveWatchStatus;
   namespace: string;
   namespaces: string[];
   onNamespaceChange: (ns: string) => void;
@@ -105,6 +117,7 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
   syncing?: boolean;
   onCreate?: () => void;
   createLabel?: string;
+  backgroundSync?: AksBackgroundSyncState;
   isLoading: boolean;
   items: T[];
   searchPlaceholder: string;
@@ -119,7 +132,6 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
     <div className="space-y-4">
       <ExtendedTabToolbar
         title={title}
-        liveBadge={<LiveStatusBadge status={liveStatus} />}
         namespaceSelect={
           <NamespaceSelect namespaces={namespaces} value={namespace} onChange={onNamespaceChange} />
         }
@@ -130,6 +142,7 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
         canWrite={canWrite}
       />
       <CacheSourceBadge source={source} lastSync={lastSync} formatDate={formatDate} />
+      <BackgroundRefreshStatus sync={backgroundSync} />
       {isLoading ? (
         <div className="text-center py-8 text-gray-500">Loading...</div>
       ) : (
@@ -170,11 +183,15 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
 }
 
 export const SecretsTab: React.FC<TabProps> = ({
-  cluster, namespace, namespaces, onNamespaceChange, liveStatus, canWrite, showToast, formatDate,
+  cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
   const { data, isLoading } = useCachedSecrets(cluster.id, nsFilter);
-  const syncMut = useSyncSecrets();
+  const backgroundSync = useAksBackgroundSync({
+    resourceType: "secrets",
+    clusterId: cluster.id,
+    namespace: nsFilter,
+  });
   const deleteMut = useDeleteSecret();
   const createMut = useCreateSecret();
   const updateMut = useUpdateSecret();
@@ -192,7 +209,6 @@ export const SecretsTab: React.FC<TabProps> = ({
     <>
       <ExtendedResourceGrid
         title="Secrets"
-        liveStatus={liveStatus}
         namespace={namespace}
         namespaces={namespaces}
         onNamespaceChange={onNamespaceChange}
@@ -200,11 +216,9 @@ export const SecretsTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => syncMut.mutate(
-          { clusterId: cluster.id, namespace: nsFilter },
-          { onSuccess: () => showToast("Secrets synced"), onError: () => showToast("Sync failed", "error") }
-        )}
-        syncing={syncMut.isPending}
+        onSync={() => backgroundSync.start(true)}
+        syncing={backgroundSync.isRunning}
+        backgroundSync={backgroundSync}
         onCreate={() => setShowCreate(true)}
         createLabel="Create Secret"
         isLoading={isLoading}
@@ -294,11 +308,15 @@ export const SecretsTab: React.FC<TabProps> = ({
 };
 
 export const ServicesTab: React.FC<TabProps> = ({
-  cluster, namespace, namespaces, onNamespaceChange, liveStatus, canWrite, showToast, formatDate,
+  cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
   const { data, isLoading } = useCachedServices(cluster.id, nsFilter);
-  const syncMut = useSyncServices();
+  const backgroundSync = useAksBackgroundSync({
+    resourceType: "services",
+    clusterId: cluster.id,
+    namespace: nsFilter,
+  });
   const deleteMut = useDeleteService();
   const createMut = useCreateService();
   const items = data?.services || [];
@@ -314,7 +332,6 @@ export const ServicesTab: React.FC<TabProps> = ({
     <>
       <ExtendedResourceGrid
         title="Services"
-        liveStatus={liveStatus}
         namespace={namespace}
         namespaces={namespaces}
         onNamespaceChange={onNamespaceChange}
@@ -322,11 +339,9 @@ export const ServicesTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => syncMut.mutate(
-          { clusterId: cluster.id, namespace: nsFilter },
-          { onSuccess: () => showToast("Services synced"), onError: () => showToast("Sync failed", "error") }
-        )}
-        syncing={syncMut.isPending}
+        onSync={() => backgroundSync.start(true)}
+        syncing={backgroundSync.isRunning}
+        backgroundSync={backgroundSync}
         onCreate={() => setShowCreate(true)}
         createLabel="Create Service"
         isLoading={isLoading}
@@ -401,11 +416,15 @@ export const ServicesTab: React.FC<TabProps> = ({
 };
 
 export const ConfigMapsTab: React.FC<TabProps> = ({
-  cluster, namespace, namespaces, onNamespaceChange, liveStatus, canWrite, showToast, formatDate,
+  cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
   const { data, isLoading } = useCachedConfigMaps(cluster.id, nsFilter);
-  const syncMut = useSyncConfigMaps();
+  const backgroundSync = useAksBackgroundSync({
+    resourceType: "configmaps",
+    clusterId: cluster.id,
+    namespace: nsFilter,
+  });
   const deleteMut = useDeleteConfigMap();
   const createMut = useCreateConfigMap();
   const updateMut = useUpdateConfigMap();
@@ -423,7 +442,6 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
     <>
       <ExtendedResourceGrid
         title="ConfigMaps"
-        liveStatus={liveStatus}
         namespace={namespace}
         namespaces={namespaces}
         onNamespaceChange={onNamespaceChange}
@@ -431,11 +449,9 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => syncMut.mutate(
-          { clusterId: cluster.id, namespace: nsFilter },
-          { onSuccess: () => showToast("ConfigMaps synced"), onError: () => showToast("Sync failed", "error") }
-        )}
-        syncing={syncMut.isPending}
+        onSync={() => backgroundSync.start(true)}
+        syncing={backgroundSync.isRunning}
+        backgroundSync={backgroundSync}
         onCreate={() => setShowCreate(true)}
         createLabel="Create ConfigMap"
         isLoading={isLoading}
@@ -524,11 +540,15 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
 };
 
 export const IngressTab: React.FC<TabProps> = ({
-  cluster, namespace, namespaces, onNamespaceChange, liveStatus, canWrite, showToast, formatDate,
+  cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
   const { data, isLoading } = useCachedIngress(cluster.id, nsFilter);
-  const syncMut = useSyncIngress();
+  const backgroundSync = useAksBackgroundSync({
+    resourceType: "ingress",
+    clusterId: cluster.id,
+    namespace: nsFilter,
+  });
   const deleteMut = useDeleteIngress();
   const items = data?.ingress || [];
 
@@ -541,7 +561,6 @@ export const IngressTab: React.FC<TabProps> = ({
     <>
       <ExtendedResourceGrid
         title="Ingress"
-        liveStatus={liveStatus}
         namespace={namespace}
         namespaces={namespaces}
         onNamespaceChange={onNamespaceChange}
@@ -549,11 +568,9 @@ export const IngressTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => syncMut.mutate(
-          { clusterId: cluster.id, namespace: nsFilter },
-          { onSuccess: () => showToast("Ingress synced"), onError: () => showToast("Sync failed", "error") }
-        )}
-        syncing={syncMut.isPending}
+        onSync={() => backgroundSync.start(true)}
+        syncing={backgroundSync.isRunning}
+        backgroundSync={backgroundSync}
         isLoading={isLoading}
         items={items}
         searchPlaceholder="Search ingress..."
@@ -612,7 +629,7 @@ export const IngressTab: React.FC<TabProps> = ({
 };
 
 export const HelmTab: React.FC<TabProps> = ({
-  cluster, namespace, namespaces, onNamespaceChange, liveStatus, canWrite, showToast,
+  cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast,
 }) => {
   const nsFilter = useNsFilter(namespace);
   const { data, isLoading } = useHelmReleases(cluster.id, nsFilter);
@@ -625,7 +642,6 @@ export const HelmTab: React.FC<TabProps> = ({
     <div className="space-y-4">
       <ExtendedTabToolbar
         title="Helm Releases"
-        liveBadge={<LiveStatusBadge status={liveStatus} />}
         namespaceSelect={<NamespaceSelect namespaces={namespaces} value={namespace} onChange={onNamespaceChange} />}
         canWrite={canWrite}
       />
