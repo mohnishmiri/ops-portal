@@ -254,6 +254,7 @@ export const SecretsTab: React.FC<TabProps> = ({
           clusterId={cluster.id}
           namespace={viewTarget.namespace}
           name={viewTarget.name}
+          initialKeys={items.find((s) => s.namespace === viewTarget.namespace && s.name === viewTarget.name)?.keys}
           canWrite={canWrite}
           onClose={() => setViewTarget(null)}
         />
@@ -581,6 +582,7 @@ export const IngressTab: React.FC<TabProps> = ({
             <th className={gridStyles.headerCell}>Hosts</th>
             <th className={gridStyles.headerCell}>Services</th>
             <th className={gridStyles.headerCell}>Address</th>
+            <th className={gridStyles.headerCell}>Updated</th>
           </>
         }
         renderRow={(i) => (
@@ -590,6 +592,7 @@ export const IngressTab: React.FC<TabProps> = ({
             <td className={gridStyles.cell}>{(i.hosts || []).join(", ") || "—"}</td>
             <td className={gridStyles.cell}>{(i.backend_services || []).join(", ") || "—"}</td>
             <td className={gridStyles.cell}>{i.address || "—"}</td>
+            <td className={gridStyles.cell}>{i.updated ? formatDate(i.updated) : "—"}</td>
             <td className={gridStyles.centerCell}>
               <ResourceActionButtons
                 canWrite={canWrite}

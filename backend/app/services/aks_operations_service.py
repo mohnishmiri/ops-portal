@@ -2005,22 +2005,32 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         cluster_id: str,
         namespace: str,
         name: str,
+        bypass_cache: bool = False,
     ) -> dict[str, Any]:
         """Get detailed ConfigMap content including data."""
+        db_detail = await self._get_configmap_detail_from_db(cluster_id, namespace, name)
+        if db_detail is not None and not bypass_cache:
+            return db_detail
+
+        cache_key = CacheKeys.configmap_detail(cluster_id, namespace, name)
         try:
-            _, core_v1, _ = await self._get_k8s_clients(cluster_id)
-            cm = await asyncio.to_thread(core_v1.read_namespaced_config_map, name, namespace)
-            return {
-                "name": cm.metadata.name,
-                "namespace": cm.metadata.namespace,
-                "data": dict(cm.data) if cm.data else {},
-                "binary_data_keys": (list(cm.binary_data.keys()) if cm.binary_data else []),
-                "labels": dict(cm.metadata.labels) if cm.metadata.labels else {},
-                "annotations": (dict(cm.metadata.annotations) if cm.metadata.annotations else {}),
-                "created_at": (cm.metadata.creation_timestamp.isoformat() if cm.metadata.creation_timestamp else None),
-                "detail_source": "live",
-            }
+            if not bypass_cache:
+                cached, _tier = await data_cache.get_or_fetch(
+                    key=cache_key,
+                    ttl=TTL.K8S_RESOURCE_DETAIL,
+                    fetch_fn=lambda: self._fetch_configmap_detail_live(cluster_id, namespace, name),
+                )
+                return cached
+            return await self._fetch_configmap_detail_live(cluster_id, namespace, name)
         except Exception as e:
+            if db_detail is not None:
+                logger.warning(
+                    "configmap_detail_live_failed_using_db_fallback",
+                    name=name,
+                    namespace=namespace,
+                    error=str(e),
+                )
+                return db_detail
             logger.warning(
                 "configmap_detail_live_failed_returning_placeholder",
                 name=name,
@@ -2038,6 +2048,72 @@ class AKSOperationsService(AKSResourceOperationsMixin):
                 "detail_source": "unavailable",
                 "data_unavailable_reason": str(e),
             }
+
+    async def _get_configmap_detail_from_db(
+        self,
+        cluster_id: str,
+        namespace: str,
+        name: str,
+    ) -> dict[str, Any] | None:
+        if not self.db:
+            return None
+
+        resource_id = f"{cluster_id}/configmap/{namespace}/{name}"
+        try:
+            query = select(AzureResourceInventory).where(
+                AzureResourceInventory.resource_type == "aks_configmap",
+                AzureResourceInventory.resource_id == resource_id,
+            )
+            result = await self.db.execute(query)
+            record = result.scalars().first()
+            if record is None:
+                return None
+
+            details = dict(record.resource_details or {})
+            details.pop("_cluster_id", None)
+            data = details.get("data") if isinstance(details.get("data"), dict) else {}
+            return {
+                "name": details.get("name", name),
+                "namespace": details.get("namespace", namespace),
+                "data": data,
+                "binary_data_keys": list(details.get("binary_data_keys") or []),
+                "labels": details.get("labels") if isinstance(details.get("labels"), dict) else {},
+                "annotations": details.get("annotations") if isinstance(details.get("annotations"), dict) else {},
+                "created_at": details.get("created_at"),
+                "detail_source": "db",
+                "_last_sync": record.last_sync.isoformat() if record.last_sync else None,
+            }
+        except Exception as e:
+            logger.warning(
+                "configmap_detail_db_fallback_failed",
+                cluster_id=cluster_id,
+                namespace=namespace,
+                name=name,
+                error=str(e),
+            )
+            return None
+
+    async def _fetch_configmap_detail_live(
+        self,
+        cluster_id: str,
+        namespace: str,
+        name: str,
+    ) -> dict[str, Any]:
+        _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+        cm = await asyncio.wait_for(
+            asyncio.to_thread(core_v1.read_namespaced_config_map, name, namespace),
+            timeout=15,
+        )
+        return {
+            "name": cm.metadata.name,
+            "namespace": cm.metadata.namespace,
+            "data": dict(cm.data) if cm.data else {},
+            "binary_data_keys": (list(cm.binary_data.keys()) if cm.binary_data else []),
+            "labels": dict(cm.metadata.labels) if cm.metadata.labels else {},
+            "annotations": (dict(cm.metadata.annotations) if cm.metadata.annotations else {}),
+            "created_at": (cm.metadata.creation_timestamp.isoformat() if cm.metadata.creation_timestamp else None),
+            "detail_source": "live",
+        }
 
     # =========================================================================
     # F. NODE POOL OPERATIONS

@@ -111,10 +111,10 @@ export const MetricCard: React.FC<MetricCardProps> = ({
             {title}
           </p>
           <div className="mt-1 flex flex-wrap items-end gap-x-3 gap-y-1">
-            <p className={`text-2xl font-bold ${styles.value} ${valueClassName}`}>{value}</p>
+            <div className={`text-2xl font-bold ${styles.value} ${valueClassName}`}>{value}</div>
             {meta}
           </div>
-          {subtitle ? <p className="mt-1 text-xs text-slate-400">{subtitle}</p> : null}
+          {subtitle ? <div className="mt-1 text-xs text-slate-400">{subtitle}</div> : null}
         </div>
       </div>
     </div>

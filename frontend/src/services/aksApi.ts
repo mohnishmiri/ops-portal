@@ -202,8 +202,9 @@ export interface ConfigMapDetail {
   labels: Record<string, string>;
   annotations: Record<string, string>;
   created_at: string;
-  detail_source?: "live" | "unavailable";
+  detail_source?: "live" | "db" | "unavailable";
   data_unavailable_reason?: string;
+  _last_sync?: string | null;
 }
 
 export interface ScaleHistory {
@@ -457,6 +458,18 @@ export async function deleteDeployment(
 }
 
 // Pod Metrics
+export async function fetchCachedPodMetrics(
+  clusterId: string,
+  namespace?: string
+): Promise<{ source: string; last_sync: string | null; pods: PodMetrics[]; count: number }> {
+  const params = new URLSearchParams({ cluster_id: clusterId });
+  if (namespace) {
+    params.set("namespace", namespace);
+  }
+  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics/cached`, { params });
+  return data;
+}
+
 export async function fetchPodMetrics(
   clusterId: string,
   namespace?: string,
@@ -469,7 +482,7 @@ export async function fetchPodMetrics(
   if (refresh) {
     params.set("refresh", "true");
   }
-  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics`, { params, timeout: 8000 });
+  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics`, { params, timeout: 30000 });
   return data;
 }
 
@@ -746,6 +759,20 @@ export async function triggerCronJob(
   return data;
 }
 
+const EXTENDED_DETAIL_QUERY_OPTIONS = {
+  staleTime: 2 * 60 * 1000,
+  gcTime: 10 * 60 * 1000,
+  retry: 1,
+  refetchOnWindowFocus: false,
+} as const;
+
+const EXTENDED_LIST_QUERY_OPTIONS = {
+  staleTime: 5 * 60 * 1000,
+  gcTime: 10 * 60 * 1000,
+  retry: false,
+  refetchOnWindowFocus: false,
+} as const;
+
 // ConfigMaps
 export async function fetchConfigMaps(
   clusterId: string,
@@ -762,7 +789,7 @@ export async function fetchConfigMapDetail(
   name: string
 ): Promise<ConfigMapDetail> {
   const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
-  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/detail`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/detail`, { params, timeout: 8000 });
   return data;
 }
 
@@ -950,7 +977,7 @@ function invalidateAksResourceQueries(
     clusters: ["aks-clusters-cached", "aks-clusters"],
     nodepools: ["aks-nodepools-cached", "aks-nodepools"],
     deployments: ["aks-deployments-cached", "aks-deployments"],
-    pods: ["aks-pod-metrics"],
+    pods: ["aks-pod-metrics-cached", "aks-pod-metrics"],
     cronjobs: ["aks-cronjobs-cached", "aks-cronjobs"],
     services: ["aks-services-cached"],
     secrets: ["aks-secrets-cached"],
@@ -1277,6 +1304,25 @@ export function useDeleteDeployment() {
   });
 }
 
+export function useCachedPodMetrics(clusterId: string, namespace?: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-pod-metrics-cached", clusterId, namespace],
+    queryFn: () => fetchCachedPodMetrics(clusterId, namespace),
+    enabled: !!clusterId && enabled,
+    placeholderData: {
+      source: "db",
+      last_sync: null,
+      pods: [],
+      count: 0,
+    },
+    staleTime: 60 * 1000,
+    gcTime: 3 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function usePodMetrics(clusterId: string, namespace?: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-pod-metrics", clusterId, namespace],
@@ -1558,9 +1604,7 @@ export function useConfigMapDetail(clusterId: string, namespace: string, name: s
     queryKey: ["aks-configmap-detail", clusterId, namespace, name],
     queryFn: () => fetchConfigMapDetail(clusterId, namespace, name),
     enabled: !!clusterId && !!namespace && !!name,
-    staleTime: 2 * 60 * 1000,
-    gcTime: 5 * 60 * 1000,
-    retry: 1,
+    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 
@@ -1707,6 +1751,7 @@ export function refreshDeployments(queryClient: ReturnType<typeof useQueryClient
 
 export function refreshPodMetrics(queryClient: ReturnType<typeof useQueryClient>, clusterId: string) {
   fetchPodMetrics(clusterId, undefined, true).then(() => {
+    queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics-cached", clusterId] });
     queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics", clusterId] });
   });
 }
@@ -1762,6 +1807,7 @@ export function useInvalidateCache() {
       // After flushing backend cache, also invalidate all frontend queries
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
       queryClient.invalidateQueries({ queryKey: ["aks-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics-cached"] });
       queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics"] });
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs"] });
       queryClient.invalidateQueries({ queryKey: ["aks-nodepools"] });
@@ -1789,6 +1835,9 @@ export interface SecretDetail {
   keys: string[];
   labels?: Record<string, string>;
   created_at?: string;
+  detail_source?: "live" | "db" | "db_masked";
+  data_unavailable_reason?: string;
+  _last_sync?: string | null;
 }
 
 export interface K8sService {
@@ -1811,6 +1860,8 @@ export interface ServiceDetail {
   selector?: Record<string, string>;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
+  detail_source?: "live" | "db";
+  _last_sync?: string | null;
 }
 
 export interface K8sIngress {
@@ -1821,6 +1872,8 @@ export interface K8sIngress {
   tls_secrets?: string[];
   address?: string;
   ingress_class?: string;
+  created_at?: string;
+  updated?: string;
 }
 
 export interface HelmRelease {
@@ -1859,6 +1912,8 @@ export interface IngressDetail {
   address?: string;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
+  detail_source?: "live" | "db";
+  _last_sync?: string | null;
 }
 
 export interface CachedExtendedList<T> {
@@ -1875,13 +1930,6 @@ function extendedCachedParams(clusterId: string, namespace?: string) {
   }
   return params;
 }
-
-const EXTENDED_QUERY_OPTIONS = {
-  staleTime: 5 * 60 * 1000,
-  gcTime: 10 * 60 * 1000,
-  retry: false,
-  refetchOnWindowFocus: false,
-} as const;
 
 export async function fetchCachedSecrets(clusterId: string, namespace?: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/secrets/cached`, {
@@ -1904,6 +1952,7 @@ export async function deleteSecretApi(clusterId: string, namespace: string, name
 export async function fetchSecretDetail(clusterId: string, namespace: string, name: string, reveal = false) {
   const { data } = await apiClient.get(`${API_PREFIX}/secrets/detail`, {
     params: { cluster_id: clusterId, namespace, name, reveal },
+    timeout: reveal ? 20000 : 8000,
   });
   return data as SecretDetail;
 }
@@ -1956,6 +2005,7 @@ export async function deleteServiceApi(clusterId: string, namespace: string, nam
 export async function fetchServiceDetail(clusterId: string, namespace: string, name: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/services/detail`, {
     params: { cluster_id: clusterId, namespace, name },
+    timeout: 8000,
   });
   return data as ServiceDetail;
 }
@@ -2040,6 +2090,7 @@ export async function deleteIngressApi(clusterId: string, namespace: string, nam
 export async function fetchIngressDetail(clusterId: string, namespace: string, name: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/ingress/detail`, {
     params: { cluster_id: clusterId, namespace, name },
+    timeout: 8000,
   });
   return data as IngressDetail;
 }
@@ -2075,7 +2126,7 @@ export function useCachedSecrets(clusterId: string, namespace?: string, enabled 
       secrets: [],
       count: 0,
     },
-    ...EXTENDED_QUERY_OPTIONS,
+    ...EXTENDED_LIST_QUERY_OPTIONS,
   });
 }
 
@@ -2096,11 +2147,20 @@ export function useDeleteSecret() {
   });
 }
 
-export function useSecretDetail(clusterId: string, namespace: string, name: string, reveal = false, enabled = true) {
+export function useSecretDetail(
+  clusterId: string,
+  namespace: string,
+  name: string,
+  reveal = false,
+  enabled = true,
+  placeholderData?: SecretDetail,
+) {
   return useQuery({
     queryKey: ["aks-secret-detail", clusterId, namespace, name, reveal],
     queryFn: () => fetchSecretDetail(clusterId, namespace, name, reveal),
     enabled: enabled && !!clusterId && !!namespace && !!name,
+    placeholderData,
+    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 
@@ -2136,7 +2196,7 @@ export function useCachedServices(clusterId: string, namespace?: string, enabled
       services: [],
       count: 0,
     },
-    ...EXTENDED_QUERY_OPTIONS,
+    ...EXTENDED_LIST_QUERY_OPTIONS,
   });
 }
 
@@ -2162,6 +2222,7 @@ export function useServiceDetail(clusterId: string, namespace: string, name: str
     queryKey: ["aks-service-detail", clusterId, namespace, name],
     queryFn: () => fetchServiceDetail(clusterId, namespace, name),
     enabled: enabled && !!clusterId && !!namespace && !!name,
+    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 
@@ -2193,7 +2254,7 @@ export function useCachedConfigMaps(clusterId: string, namespace?: string, enabl
       configmaps: [],
       count: 0,
     },
-    ...EXTENDED_QUERY_OPTIONS,
+    ...EXTENDED_LIST_QUERY_OPTIONS,
   });
 }
 
@@ -2246,7 +2307,7 @@ export function useCachedIngress(clusterId: string, namespace?: string, enabled 
       ingress: [],
       count: 0,
     },
-    ...EXTENDED_QUERY_OPTIONS,
+    ...EXTENDED_LIST_QUERY_OPTIONS,
   });
 }
 
@@ -2272,6 +2333,7 @@ export function useIngressDetail(clusterId: string, namespace: string, name: str
     queryKey: ["aks-ingress-detail", clusterId, namespace, name],
     queryFn: () => fetchIngressDetail(clusterId, namespace, name),
     enabled: enabled && !!clusterId && !!namespace && !!name,
+    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 

@@ -693,6 +693,37 @@ async def delete_deployment(
 
 
 @router.get(
+    "/pods/metrics/cached",
+    summary="List pod metrics from DB cache (fast)",
+    description="Get pod metrics from database inventory. Background sync keeps data fresh.",
+)
+async def list_cached_pod_metrics(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    namespace: str = Query(default=None, description="Filter by namespace"),
+    user: UserContext = Depends(get_current_user),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """Get pod metrics from DB cache — fast, no Kubernetes API call."""
+    try:
+        pods = await service.get_pod_metrics_from_db(cluster_id, namespace)
+        last_sync = await service.get_pods_last_sync_time(cluster_id)
+        return {
+            "source": "db",
+            "last_sync": last_sync,
+            "pods": pods,
+            "count": len(pods),
+        }
+    except Exception as e:
+        logger.warning("cached_pod_metrics_db_failed", cluster_id=cluster_id, error=str(e))
+        return {
+            "source": "db",
+            "last_sync": None,
+            "pods": [],
+            "count": 0,
+        }
+
+
+@router.get(
     "/pods/metrics",
     summary="Get pod metrics",
     description="Get real-time CPU and memory metrics for pods. Pass refresh=true to bypass cache.",

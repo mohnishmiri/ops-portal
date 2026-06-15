@@ -18,7 +18,7 @@ import {
   useClusters,
   useCachedClusters,
   useCachedDeployments,
-  usePodMetrics,
+  useCachedPodMetrics,
 
   useNodePools,
   useCachedNodePools,
@@ -385,7 +385,7 @@ const AKSOperationsPage: React.FC = () => {
     selectedNamespace || undefined,
     loadDeployments
   );
-  const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = usePodMetrics(
+  const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = useCachedPodMetrics(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadPodMetrics
@@ -1827,6 +1827,21 @@ const AKSOperationsPage: React.FC = () => {
       </div>
       {selectedCluster && (
         <div className="flex items-center gap-3">
+          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+            podMetricsData?.source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
+          }`}>
+            Source: {podMetricsData?.source === "db" ? "Database" : "Kubernetes Live"}
+          </span>
+          {podMetricsData?.last_sync && (
+            <span className="text-sm text-gray-500">
+              Last synced: {formatDate(podMetricsData.last_sync)}
+            </span>
+          )}
+          {!podMetricsData?.last_sync && (
+            <span className="text-sm text-yellow-600">
+              Not synced yet — cached table will update after background refresh
+            </span>
+          )}
           <BackgroundRefreshStatus sync={podMetricsRefresh} />
         </div>
       )}
@@ -1835,12 +1850,12 @@ const AKSOperationsPage: React.FC = () => {
         <div className="text-center py-16 text-gray-500">
           Select a cluster from the Clusters tab to view pod metrics
         </div>
-      ) : podMetricsError ? (
+      ) : podMetricsError && allPods.length === 0 ? (
         <div className="text-center py-12">
           <div className="text-red-600 font-medium mb-2">{Icons.warning("w-6 h-6 mx-auto mb-2")}Failed to load pod metrics</div>
           <div className="text-sm text-gray-500 max-w-md mx-auto">{(podMetricsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
         </div>
-      ) : loadingPodMetrics ? (
+      ) : loadingPodMetrics && allPods.length === 0 ? (
         <div className="text-center py-8 text-gray-500">Loading pod metrics...</div>
       ) : (
         <>
@@ -3524,6 +3539,7 @@ function CronJobDetailDialog({ cluster_id, namespace, name, onClose }: { cluster
 function ConfigMapContent({ cluster_id, namespace, name }: { cluster_id: string; namespace: string; name: string }) {
   const { data, isLoading, isError } = useConfigMapDetail(cluster_id, namespace, name);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   if (isLoading) return <div className="px-3 py-4 text-center text-xs text-gray-400">Loading ConfigMap...</div>;
   if (isError) return <div className="px-3 py-4 text-center text-xs text-red-400">Failed to load ConfigMap</div>;
@@ -3537,27 +3553,48 @@ function ConfigMapContent({ cluster_id, namespace, name }: { cluster_id: string;
   }
   if (!data || !data.data || Object.keys(data.data).length === 0) return <div className="px-3 py-4 text-center text-xs text-gray-400">No data keys</div>;
 
+  const entries = Object.entries(data.data);
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? entries.filter(([key, value]) => key.toLowerCase().includes(q) || value.toLowerCase().includes(q))
+    : entries;
+
   return (
     <div className="border-t">
-      {Object.entries(data.data).map(([key, value]) => (
-        <div key={key} className="border-b last:border-b-0">
-          <button
-            onClick={() => setExpandedKey(expandedKey === key ? null : key)}
-            className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-blue-50 text-xs"
-          >
-            <span className="font-mono text-blue-700">{key}</span>
-            <span className="text-gray-400 flex items-center gap-1">
-              {value.length > 100 ? `${(value.length / 1024).toFixed(1)} KB` : `${value.length} chars`}
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={10} height={10} className={`transition-transform ${expandedKey === key ? "rotate-180" : ""}`}><polyline points="6 9 12 15 18 9"/></svg>
-            </span>
-          </button>
-          {expandedKey === key && (
-            <div className="px-3 pb-2">
-              <pre className="font-mono text-xs bg-gray-900 text-green-300 p-3 rounded overflow-x-auto max-h-[300px] overflow-y-auto whitespace-pre-wrap">{value}</pre>
-            </div>
-          )}
+      {entries.length > 3 ? (
+        <div className="px-3 py-2 border-b bg-att-50/40">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search config keys..."
+            className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-att-400"
+          />
         </div>
-      ))}
+      ) : null}
+      {filtered.length === 0 ? (
+        <div className="px-3 py-4 text-center text-xs text-gray-400">No keys match your search</div>
+      ) : (
+        filtered.map(([key, value]) => (
+          <div key={key} className="border-b last:border-b-0">
+            <button
+              onClick={() => setExpandedKey(expandedKey === key ? null : key)}
+              className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-att-50 text-xs"
+            >
+              <span className="font-mono text-att-700">{key}</span>
+              <span className="text-gray-400 flex items-center gap-1">
+                {value.length > 100 ? `${(value.length / 1024).toFixed(1)} KB` : `${value.length} chars`}
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={10} height={10} className={`transition-transform ${expandedKey === key ? "rotate-180" : ""}`}><polyline points="6 9 12 15 18 9"/></svg>
+              </span>
+            </button>
+            {expandedKey === key && (
+              <div className="px-3 pb-2">
+                <pre className="font-mono text-xs bg-gray-900 text-green-300 p-3 rounded overflow-x-auto max-h-[300px] overflow-y-auto whitespace-pre-wrap">{value}</pre>
+              </div>
+            )}
+          </div>
+        ))
+      )}
       {data.binary_data_keys && data.binary_data_keys.length > 0 && (
         <div className="px-3 py-2 text-xs text-gray-400">
           Binary data keys: {data.binary_data_keys.join(", ")}

@@ -170,3 +170,119 @@ async def test_get_configmap_detail_returns_placeholder_when_live_fetch_fails(
     assert result["data"] == {}
     assert result["detail_source"] == "unavailable"
     assert "not reachable" in result["data_unavailable_reason"]
+
+
+@pytest.mark.anyio
+async def test_get_secret_detail_uses_db_for_masked_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cluster_id = (
+        "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.ContainerService/managedClusters/cluster-1"
+    )
+    namespace = "default"
+    name = "app-credentials"
+
+    record = SimpleNamespace(
+        resource_details={
+            "name": name,
+            "namespace": namespace,
+            "type": "Opaque",
+            "keys": ["aaf_id", "aaf_password", "keyfile"],
+            "labels": {"app": "demo"},
+            "created_at": "2026-04-01T00:00:00Z",
+        },
+        last_sync=datetime(2026, 4, 2, 9, 57, 54),
+    )
+    fake_db = _DetailDbSession(record)
+    service = AKSOperationsService(fake_db)
+
+    live_fetch = AsyncMock(side_effect=AssertionError("live fetch should not run for masked secret detail"))
+    monkeypatch.setattr(service, "_fetch_secret_detail_live", live_fetch)
+
+    result = await service.get_secret_detail(cluster_id, namespace, name, reveal=False)
+
+    assert result["detail_source"] == "db"
+    assert result["keys"] == ["aaf_id", "aaf_password", "keyfile"]
+    assert result["data"] == {
+        "aaf_id": "***",
+        "aaf_password": "***",
+        "keyfile": "***",
+    }
+    live_fetch.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_get_pod_metrics_from_db_normalizes_pod_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    cluster_id = (
+        "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.ContainerService/managedClusters/cluster-1"
+    )
+    service = AKSOperationsService(db_session=None)
+
+    monkeypatch.setattr(
+        service,
+        "_get_inventory_from_db",
+        AsyncMock(
+            return_value=[
+                {
+                    "name": "api-pod-1",
+                    "namespace": "default",
+                    "phase": "Running",
+                    "total_cpu_millicores": 100,
+                    "total_memory_mb": 256,
+                }
+            ]
+        ),
+    )
+
+    pods = await service.get_pod_metrics_from_db(cluster_id)
+
+    assert len(pods) == 1
+    assert pods[0]["pod_name"] == "api-pod-1"
+    assert pods[0]["namespace"] == "default"
+
+
+@pytest.mark.anyio
+async def test_sync_pods_to_db_uses_full_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    cluster_id = (
+        "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.ContainerService/managedClusters/cluster-1"
+    )
+    fake_db = _WriteDbSession()
+    service = AKSOperationsService(fake_db)
+    metrics = [
+        {
+            "pod_name": "worker-0",
+            "namespace": "team-a",
+            "phase": "Running",
+            "total_cpu_millicores": 50,
+            "total_memory_mb": 128,
+            "containers": [],
+        }
+    ]
+
+    monkeypatch.setattr(service, "_fetch_pod_metrics_live", AsyncMock(return_value=metrics))
+    sync_inventory = AsyncMock(return_value={"synced_count": 1, "db_saved": True})
+    monkeypatch.setattr(service, "_sync_inventory", sync_inventory)
+
+    result = await service.sync_pods_to_db(cluster_id, "team-a")
+
+    service._fetch_pod_metrics_live.assert_awaited_once_with(cluster_id, "team-a")
+    sync_inventory.assert_awaited_once()
+    synced_items = sync_inventory.await_args.args[3]
+    assert synced_items[0]["name"] == "worker-0"
+    assert synced_items[0]["pod_name"] == "worker-0"
+    assert result["synced_count"] == 1
+
+
+def test_k8s_updated_at_prefers_managed_fields_time() -> None:
+    from app.services.aks_resource_operations import _k8s_updated_at
+
+    metadata = SimpleNamespace(
+        creation_timestamp=datetime(2026, 4, 1, 0, 0, 0),
+        managed_fields=[
+            SimpleNamespace(time=datetime(2026, 4, 1, 8, 0, 0)),
+            SimpleNamespace(time=datetime(2026, 4, 2, 12, 30, 0)),
+        ],
+    )
+
+    assert _k8s_updated_at(metadata) == "2026-04-02T12:30:00"
+
