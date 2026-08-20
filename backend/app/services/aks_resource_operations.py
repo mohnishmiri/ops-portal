@@ -16,19 +16,6 @@ from app.models.database import AzureResourceInventory
 logger = structlog.get_logger(__name__)
 
 MASK = "***"
-_K8S_CALL_TIMEOUT_SECONDS = 15
-
-
-def _k8s_updated_at(metadata: Any) -> str | None:
-    """Best-effort last-modified timestamp from K8s object metadata."""
-    if metadata is None:
-        return None
-    managed = getattr(metadata, "managed_fields", None) or []
-    times = [mf.time for mf in managed if getattr(mf, "time", None)]
-    if times:
-        return max(times).isoformat()
-    created = getattr(metadata, "creation_timestamp", None)
-    return created.isoformat() if created else None
 
 
 class AKSResourceOperationsMixin:
@@ -138,28 +125,6 @@ class AKSResourceOperationsMixin:
             "db_saved": True,
         }
 
-    async def _k8s_call(self, fn, *args, **kwargs):
-        """Run a blocking K8s SDK call with a hard timeout."""
-        return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=_K8S_CALL_TIMEOUT_SECONDS)
-
-    async def _get_inventory_record(
-        self,
-        cluster_id: str,
-        resource_type: str,
-        id_segment: str,
-        namespace: str,
-        name: str,
-    ):
-        if not self.db:
-            return None
-        resource_id = f"{cluster_id}/{id_segment}/{namespace}/{name}"
-        query = select(AzureResourceInventory).where(
-            AzureResourceInventory.resource_type == resource_type,
-            AzureResourceInventory.resource_id == resource_id,
-        )
-        result = await self.db.execute(query)
-        return result.scalars().first()
-
     async def _get_inventory_from_db(
         self,
         cluster_id: str,
@@ -180,8 +145,33 @@ class AKSResourceOperationsMixin:
             items = [i for i in items if i.get("namespace") == namespace]
         return items
 
+    async def _delete_inventory_item(self, cluster_id: str, id_segment: str, namespace: str, name: str) -> None:
+        """Remove a single resource from the DB inventory after K8s deletion."""
+        if not self.db:
+            return
+        resource_id = f"{cluster_id}/{id_segment}/{namespace}/{name}"
+        try:
+            await self.db.execute(
+                delete(AzureResourceInventory).where(
+                    AzureResourceInventory.resource_id == resource_id,
+                )
+            )
+            await self.db.commit()
+        except Exception as exc:
+            logger.warning("delete_inventory_item_failed", resource_id=resource_id, error=str(exc)[:200])
+            await self.db.rollback()
+
     async def list_namespaces_for_cluster(self, cluster_id: str) -> list[str]:
-        """Aggregate unique namespaces from synced inventory."""
+        """List all namespaces from the K8s cluster, falling back to synced inventory."""
+        # Try fetching live from K8s first for the full list
+        try:
+            _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+            resp = await asyncio.to_thread(core_v1.list_namespace)
+            return sorted(ns.metadata.name for ns in resp.items if ns.metadata and ns.metadata.name)
+        except Exception as exc:
+            logger.warning("list_namespaces_live_failed", cluster_id=cluster_id[:80], error=str(exc)[:200])
+
+        # Fallback: aggregate from synced inventory
         if not self.db:
             return []
         segments = ("deployment", "service", "secret", "configmap", "ingress", "cronjob", "pod")
@@ -202,10 +192,10 @@ class AKSResourceOperationsMixin:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
         items: list[dict[str, Any]] = []
         if namespace:
-            resp = await self._k8s_call(core_v1.list_namespaced_secret, namespace)
+            resp = await asyncio.to_thread(core_v1.list_namespaced_secret, namespace)
             secrets = resp.items
         else:
-            resp = await self._k8s_call(core_v1.list_secret_for_all_namespaces)
+            resp = await asyncio.to_thread(core_v1.list_secret_for_all_namespaces)
             secrets = resp.items
         for sec in secrets:
             keys = list(sec.data.keys()) if sec.data else []
@@ -225,57 +215,11 @@ class AKSResourceOperationsMixin:
         return items
 
     async def list_secrets(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
-        cached = await self.get_secrets_from_db(cluster_id, namespace)
-        if cached:
-            return cached
         return await self._fetch_secrets_live(cluster_id, namespace)
 
-    async def _get_secret_detail_from_db(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-        *,
-        reveal: bool = False,
-    ) -> dict[str, Any] | None:
-        record = await self._get_inventory_record(cluster_id, "aks_secret", "secret", namespace, name)
-        if record is None:
-            return None
-
-        details = dict(record.resource_details or {})
-        keys = list(details.get("keys") or [])
-        data: dict[str, str] = {}
-        if reveal:
-            stored_data = details.get("data")
-            if isinstance(stored_data, dict) and stored_data:
-                data = dict(stored_data)
-            else:
-                return None
-        else:
-            data = dict.fromkeys(keys, MASK)
-
-        return {
-            "name": details.get("name", name),
-            "namespace": details.get("namespace", namespace),
-            "type": details.get("type", "Opaque"),
-            "data": data,
-            "keys": keys,
-            "labels": details.get("labels") if isinstance(details.get("labels"), dict) else {},
-            "created_at": details.get("created_at"),
-            "detail_source": "db",
-            "_last_sync": record.last_sync.isoformat() if record.last_sync else None,
-        }
-
-    async def _fetch_secret_detail_live(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-        *,
-        reveal: bool = False,
-    ) -> dict[str, Any]:
+    async def get_secret_detail(self, cluster_id: str, namespace: str, name: str, *, reveal: bool = False) -> dict:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
-        sec = await self._k8s_call(core_v1.read_namespaced_secret, name, namespace)
+        sec = await asyncio.to_thread(core_v1.read_namespaced_secret, name, namespace)
         data: dict[str, str] = {}
         if sec.data:
             for k, v in sec.data.items():
@@ -293,49 +237,7 @@ class AKSResourceOperationsMixin:
             "keys": list(sec.data.keys()) if sec.data else [],
             "labels": dict(sec.metadata.labels) if sec.metadata.labels else {},
             "created_at": (sec.metadata.creation_timestamp.isoformat() if sec.metadata.creation_timestamp else None),
-            "detail_source": "live",
         }
-
-    async def get_secret_detail(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-        *,
-        reveal: bool = False,
-        bypass_cache: bool = False,
-    ) -> dict:
-        if not reveal:
-            db_detail = await self._get_secret_detail_from_db(cluster_id, namespace, name, reveal=False)
-            if db_detail is not None:
-                return db_detail
-
-        cache_key = CacheKeys.secret_detail(cluster_id, namespace, name, reveal=reveal)
-        try:
-            if not bypass_cache:
-                cached, _tier = await data_cache.get_or_fetch(
-                    key=cache_key,
-                    ttl=TTL.K8S_RESOURCE_DETAIL,
-                    fetch_fn=lambda: self._fetch_secret_detail_live(cluster_id, namespace, name, reveal=reveal),
-                )
-                return cached
-            return await self._fetch_secret_detail_live(cluster_id, namespace, name, reveal=reveal)
-        except Exception as exc:
-            fallback = await self._get_secret_detail_from_db(cluster_id, namespace, name, reveal=False)
-            if fallback is not None:
-                logger.warning(
-                    "secret_detail_live_failed_using_db_fallback",
-                    cluster_id=cluster_id,
-                    namespace=namespace,
-                    name=name,
-                    reveal=reveal,
-                    error=str(exc),
-                )
-                if reveal:
-                    fallback["detail_source"] = "db_masked"
-                    fallback["data_unavailable_reason"] = "Live cluster unreachable; secret values not stored in cache"
-                return fallback
-            raise
 
     async def create_secret(
         self, cluster_id: str, namespace: str, name: str, data: dict[str, str], secret_type: str = "Opaque"
@@ -352,15 +254,16 @@ class AKSResourceOperationsMixin:
 
     async def update_secret(self, cluster_id: str, namespace: str, name: str, data: dict[str, str]) -> dict[str, Any]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
-        existing = await self._k8s_call(core_v1.read_namespaced_secret, name, namespace)
+        existing = await asyncio.to_thread(core_v1.read_namespaced_secret, name, namespace)
         existing.string_data = data
-        await self._k8s_call(core_v1.replace_namespaced_secret, name, namespace, existing)
+        await asyncio.to_thread(core_v1.replace_namespaced_secret, name, namespace, existing)
         await data_cache.invalidate_for_secrets(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
     async def delete_secret(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
         await asyncio.to_thread(core_v1.delete_namespaced_secret, name, namespace)
+        await self._delete_inventory_item(cluster_id, "secret", namespace, name)
         await data_cache.invalidate_for_secrets(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
@@ -379,10 +282,10 @@ class AKSResourceOperationsMixin:
     async def _fetch_services_live(self, cluster_id: str, namespace: str | None) -> list[dict[str, Any]]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
         if namespace:
-            resp = await self._k8s_call(core_v1.list_namespaced_service, namespace)
+            resp = await asyncio.to_thread(core_v1.list_namespaced_service, namespace)
             svcs = resp.items
         else:
-            resp = await self._k8s_call(core_v1.list_service_for_all_namespaces)
+            resp = await asyncio.to_thread(core_v1.list_service_for_all_namespaces)
             svcs = resp.items
         items = []
         for svc in svcs:
@@ -410,39 +313,11 @@ class AKSResourceOperationsMixin:
         return items
 
     async def list_services(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
-        cached = await self.get_services_from_db(cluster_id, namespace)
-        if cached:
-            return cached
         return await self._fetch_services_live(cluster_id, namespace)
 
-    async def _get_service_detail_from_db(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-    ) -> dict[str, Any] | None:
-        record = await self._get_inventory_record(cluster_id, "aks_service", "service", namespace, name)
-        if record is None:
-            return None
-
-        details = dict(record.resource_details or {})
-        details.pop("_cluster_id", None)
-        return {
-            "name": details.get("name", name),
-            "namespace": details.get("namespace", namespace),
-            "type": details.get("type"),
-            "cluster_ip": details.get("cluster_ip"),
-            "ports": list(details.get("ports") or []),
-            "selector": details.get("selector") if isinstance(details.get("selector"), dict) else {},
-            "labels": details.get("labels") if isinstance(details.get("labels"), dict) else {},
-            "annotations": details.get("annotations") if isinstance(details.get("annotations"), dict) else {},
-            "detail_source": "db",
-            "_last_sync": record.last_sync.isoformat() if record.last_sync else None,
-        }
-
-    async def _fetch_service_detail_live(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
+    async def get_service_detail(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
-        svc = await self._k8s_call(core_v1.read_namespaced_service, name, namespace)
+        svc = await asyncio.to_thread(core_v1.read_namespaced_service, name, namespace)
         ports = []
         for p in svc.spec.ports or []:
             ports.append({"port": p.port, "target_port": str(p.target_port), "protocol": p.protocol, "name": p.name})
@@ -455,42 +330,7 @@ class AKSResourceOperationsMixin:
             "selector": dict(svc.spec.selector) if svc.spec.selector else {},
             "labels": dict(svc.metadata.labels) if svc.metadata.labels else {},
             "annotations": dict(svc.metadata.annotations) if svc.metadata.annotations else {},
-            "detail_source": "live",
         }
-
-    async def get_service_detail(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-        *,
-        bypass_cache: bool = False,
-    ) -> dict[str, Any]:
-        db_detail = await self._get_service_detail_from_db(cluster_id, namespace, name)
-        if db_detail is not None and not bypass_cache:
-            return db_detail
-
-        cache_key = CacheKeys.service_detail(cluster_id, namespace, name)
-        try:
-            if not bypass_cache:
-                cached, _tier = await data_cache.get_or_fetch(
-                    key=cache_key,
-                    ttl=TTL.K8S_RESOURCE_DETAIL,
-                    fetch_fn=lambda: self._fetch_service_detail_live(cluster_id, namespace, name),
-                )
-                return cached
-            return await self._fetch_service_detail_live(cluster_id, namespace, name)
-        except Exception as exc:
-            if db_detail is not None:
-                logger.warning(
-                    "service_detail_live_failed_using_db_fallback",
-                    cluster_id=cluster_id,
-                    namespace=namespace,
-                    name=name,
-                    error=str(exc),
-                )
-                return db_detail
-            raise
 
     async def create_service(
         self,
@@ -515,9 +355,33 @@ class AKSResourceOperationsMixin:
         await data_cache.invalidate_for_services(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
+    async def update_service(
+        self,
+        cluster_id: str,
+        namespace: str,
+        name: str,
+        port: int,
+        target_port: int | str,
+        selector: dict[str, str],
+        service_type: str = "ClusterIP",
+    ) -> dict[str, Any]:
+        _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+        body = k8s_client.V1Service(
+            metadata=k8s_client.V1ObjectMeta(name=name, namespace=namespace),
+            spec=k8s_client.V1ServiceSpec(
+                type=service_type,
+                selector=selector,
+                ports=[k8s_client.V1ServicePort(port=port, target_port=target_port)],
+            ),
+        )
+        await asyncio.to_thread(core_v1.replace_namespaced_service, name, namespace, body)
+        await data_cache.invalidate_for_services(cluster_id)
+        return {"success": True, "name": name, "namespace": namespace}
+
     async def delete_service(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
         await asyncio.to_thread(core_v1.delete_namespaced_service, name, namespace)
+        await self._delete_inventory_item(cluster_id, "service", namespace, name)
         await data_cache.invalidate_for_services(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
@@ -536,21 +400,18 @@ class AKSResourceOperationsMixin:
     async def _fetch_configmaps_live(self, cluster_id: str, namespace: str | None) -> list[dict[str, Any]]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
         if namespace:
-            resp = await self._k8s_call(core_v1.list_namespaced_config_map, namespace)
+            resp = await asyncio.to_thread(core_v1.list_namespaced_config_map, namespace)
             cms = resp.items
         else:
-            resp = await self._k8s_call(core_v1.list_config_map_for_all_namespaces)
+            resp = await asyncio.to_thread(core_v1.list_config_map_for_all_namespaces)
             cms = resp.items
         return [
             {
                 "name": cm.metadata.name,
                 "namespace": cm.metadata.namespace,
-                "data": dict(cm.data) if cm.data else {},
                 "data_keys": list(cm.data.keys()) if cm.data else [],
-                "binary_data_keys": list(cm.binary_data.keys()) if cm.binary_data else [],
                 "created_at": (cm.metadata.creation_timestamp.isoformat() if cm.metadata.creation_timestamp else None),
                 "labels": dict(cm.metadata.labels) if cm.metadata.labels else {},
-                "annotations": dict(cm.metadata.annotations) if cm.metadata.annotations else {},
             }
             for cm in cms
         ]
@@ -580,6 +441,7 @@ class AKSResourceOperationsMixin:
     async def delete_configmap(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)
         await asyncio.to_thread(core_v1.delete_namespaced_config_map, name, namespace)
+        await self._delete_inventory_item(cluster_id, "configmap", namespace, name)
         await data_cache.invalidate_for_configmaps(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
@@ -598,16 +460,15 @@ class AKSResourceOperationsMixin:
     async def _fetch_ingress_live(self, cluster_id: str, namespace: str | None) -> list[dict[str, Any]]:
         net_v1 = await self._get_networking_client(cluster_id)
         if namespace:
-            resp = await self._k8s_call(net_v1.list_namespaced_ingress, namespace)
+            resp = await asyncio.to_thread(net_v1.list_namespaced_ingress, namespace)
             ing_list = resp.items
         else:
-            resp = await self._k8s_call(net_v1.list_ingress_for_all_namespaces)
+            resp = await asyncio.to_thread(net_v1.list_ingress_for_all_namespaces)
             ing_list = resp.items
         items = []
         for ing in ing_list:
             hosts: list[str] = []
             services: list[str] = []
-            rules: list[dict[str, Any]] = []
             for rule in ing.spec.rules or []:
                 if rule.host:
                     hosts.append(rule.host)
@@ -615,19 +476,7 @@ class AKSResourceOperationsMixin:
                     svc_name = path.backend.service.name if path.backend and path.backend.service else None
                     if svc_name:
                         services.append(svc_name)
-                    rules.append(
-                        {
-                            "host": rule.host,
-                            "path": path.path,
-                            "path_type": path.path_type,
-                            "service_name": svc_name,
-                            "service_port": path.backend.service.port.number
-                            if path.backend and path.backend.service and path.backend.service.port
-                            else None,
-                        }
-                    )
             tls_secrets = [t.secret_name for t in ing.spec.tls or [] if t.secret_name]
-            tls_blocks = [{"hosts": t.hosts or [], "secret_name": t.secret_name} for t in ing.spec.tls or []]
             address = None
             if ing.status and ing.status.load_balancer and ing.status.load_balancer.ingress:
                 lb = ing.status.load_balancer.ingress[0]
@@ -639,54 +488,18 @@ class AKSResourceOperationsMixin:
                     "ingress_class": ing.spec.ingress_class_name,
                     "hosts": hosts,
                     "backend_services": sorted(set(services)),
-                    "linked_services": sorted(set(services)),
                     "tls_secrets": tls_secrets,
-                    "linked_secrets": tls_secrets,
-                    "rules": rules,
-                    "tls": tls_blocks,
                     "address": address,
-                    "labels": dict(ing.metadata.labels) if ing.metadata.labels else {},
-                    "annotations": dict(ing.metadata.annotations) if ing.metadata.annotations else {},
                     "created_at": (
                         ing.metadata.creation_timestamp.isoformat() if ing.metadata.creation_timestamp else None
                     ),
-                    "updated": _k8s_updated_at(ing.metadata),
                 }
             )
         return items
 
-    async def _get_ingress_detail_from_db(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-    ) -> dict[str, Any] | None:
-        record = await self._get_inventory_record(cluster_id, "aks_ingress", "ingress", namespace, name)
-        if record is None:
-            return None
-
-        details = dict(record.resource_details or {})
-        details.pop("_cluster_id", None)
-        linked_services = list(details.get("linked_services") or details.get("backend_services") or [])
-        linked_secrets = list(details.get("linked_secrets") or details.get("tls_secrets") or [])
-        return {
-            "name": details.get("name", name),
-            "namespace": details.get("namespace", namespace),
-            "ingress_class": details.get("ingress_class"),
-            "rules": list(details.get("rules") or []),
-            "tls": list(details.get("tls") or []),
-            "linked_services": linked_services,
-            "linked_secrets": linked_secrets,
-            "address": details.get("address"),
-            "labels": details.get("labels") if isinstance(details.get("labels"), dict) else {},
-            "annotations": details.get("annotations") if isinstance(details.get("annotations"), dict) else {},
-            "detail_source": "db",
-            "_last_sync": record.last_sync.isoformat() if record.last_sync else None,
-        }
-
-    async def _fetch_ingress_detail_live(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
+    async def get_ingress_detail(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
         net_v1 = await self._get_networking_client(cluster_id)
-        ing = await self._k8s_call(net_v1.read_namespaced_ingress, name, namespace)
+        ing = await asyncio.to_thread(net_v1.read_namespaced_ingress, name, namespace)
         rules = []
         linked_services: list[str] = []
         for rule in ing.spec.rules or []:
@@ -721,42 +534,7 @@ class AKSResourceOperationsMixin:
             "address": address,
             "labels": dict(ing.metadata.labels) if ing.metadata.labels else {},
             "annotations": dict(ing.metadata.annotations) if ing.metadata.annotations else {},
-            "detail_source": "live",
         }
-
-    async def get_ingress_detail(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-        *,
-        bypass_cache: bool = False,
-    ) -> dict[str, Any]:
-        db_detail = await self._get_ingress_detail_from_db(cluster_id, namespace, name)
-        if db_detail is not None and not bypass_cache:
-            return db_detail
-
-        cache_key = CacheKeys.ingress_detail(cluster_id, namespace, name)
-        try:
-            if not bypass_cache:
-                cached, _tier = await data_cache.get_or_fetch(
-                    key=cache_key,
-                    ttl=TTL.K8S_RESOURCE_DETAIL,
-                    fetch_fn=lambda: self._fetch_ingress_detail_live(cluster_id, namespace, name),
-                )
-                return cached
-            return await self._fetch_ingress_detail_live(cluster_id, namespace, name)
-        except Exception as exc:
-            if db_detail is not None:
-                logger.warning(
-                    "ingress_detail_live_failed_using_db_fallback",
-                    cluster_id=cluster_id,
-                    namespace=namespace,
-                    name=name,
-                    error=str(exc),
-                )
-                return db_detail
-            raise
 
     async def create_ingress(
         self,
@@ -802,9 +580,54 @@ class AKSResourceOperationsMixin:
         await data_cache.invalidate_for_ingress(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
+    async def update_ingress(
+        self,
+        cluster_id: str,
+        namespace: str,
+        name: str,
+        rules: list[dict[str, Any]],
+        tls: list[dict[str, Any]] | None = None,
+        ingress_class: str | None = None,
+    ) -> dict[str, Any]:
+        net_v1 = await self._get_networking_client(cluster_id)
+        http_rules = []
+        for rule in rules:
+            paths = []
+            for p in rule.get("paths", []):
+                paths.append(
+                    k8s_client.V1HTTPIngressPath(
+                        path=p.get("path", "/"),
+                        path_type=p.get("path_type", "Prefix"),
+                        backend=k8s_client.V1IngressBackend(
+                            service=k8s_client.V1IngressServiceBackend(
+                                name=p["service_name"],
+                                port=k8s_client.V1ServiceBackendPort(number=int(p["service_port"])),
+                            )
+                        ),
+                    )
+                )
+            http_rules.append(
+                k8s_client.V1IngressRule(host=rule.get("host"), http=k8s_client.V1HTTPIngressRuleValue(paths=paths))
+            )
+        tls_rules = None
+        if tls:
+            tls_rules = [k8s_client.V1IngressTLS(hosts=t.get("hosts"), secret_name=t.get("secret_name")) for t in tls]
+        body = k8s_client.V1Ingress(
+            metadata=k8s_client.V1ObjectMeta(name=name, namespace=namespace),
+            spec=k8s_client.V1IngressSpec(
+                ingress_class_name=ingress_class,
+                rules=http_rules,
+                tls=tls_rules,
+            ),
+        )
+        await asyncio.to_thread(net_v1.replace_namespaced_ingress, name, namespace, body)
+        await data_cache.invalidate_for_ingress(cluster_id)
+        return {"success": True, "name": name, "namespace": namespace}
+
     async def delete_ingress(self, cluster_id: str, namespace: str, name: str) -> dict[str, Any]:
         net_v1 = await self._get_networking_client(cluster_id)
         await asyncio.to_thread(net_v1.delete_namespaced_ingress, name, namespace)
+        await self._delete_inventory_item(cluster_id, "ingress", namespace, name)
         await data_cache.invalidate_for_ingress(cluster_id)
         return {"success": True, "name": name, "namespace": namespace}
 
@@ -820,35 +643,43 @@ class AKSResourceOperationsMixin:
 
     # ── Pods inventory ─────────────────────────────────────────────────
 
+    async def _fetch_pods_inventory_live(self, cluster_id: str, namespace: str | None) -> list[dict[str, Any]]:
+        _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+        if namespace:
+            resp = await asyncio.to_thread(core_v1.list_namespaced_pod, namespace)
+            pods = resp.items
+        else:
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(core_v1.list_pod_for_all_namespaces),
+                timeout=60.0,
+            )
+            pods = resp.items
+        items = []
+        for pod in pods:
+            restarts = 0
+            if pod.status and pod.status.container_statuses:
+                restarts = sum(cs.restart_count for cs in pod.status.container_statuses)
+            items.append(
+                {
+                    "name": pod.metadata.name,
+                    "namespace": pod.metadata.namespace,
+                    "phase": pod.status.phase if pod.status else "Unknown",
+                    "node": pod.spec.node_name,
+                    "restarts": restarts,
+                    "created_at": (
+                        pod.metadata.creation_timestamp.isoformat() if pod.metadata.creation_timestamp else None
+                    ),
+                }
+            )
+        return items
+
     async def sync_pods_to_db(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
-        """Sync full pod metrics inventory from live K8s into DB for fast cached reads."""
-        metrics = await self._fetch_pod_metrics_live(cluster_id, namespace)
-        items = [{**pod, "name": pod["pod_name"]} for pod in metrics]
+        items = await self._fetch_pods_inventory_live(cluster_id, namespace)
         return await self._sync_inventory(cluster_id, "aks_pod", "pod", items, namespace)
 
     async def get_pods_from_db(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         return await self._get_inventory_from_db(cluster_id, "aks_pod", "pod", namespace)
 
-    async def get_pod_metrics_from_db(
-        self, cluster_id: str, namespace: str | None = None
-    ) -> list[dict[str, Any]]:
-        items = await self._get_inventory_from_db(cluster_id, "aks_pod", "pod", namespace)
-        pods: list[dict[str, Any]] = []
-        for item in items:
-            pod = dict(item)
-            pod.pop("_cluster_id", None)
-            if "pod_name" not in pod and pod.get("name"):
-                pod["pod_name"] = pod["name"]
-            pods.append(pod)
-        return pods
-
-    async def get_pods_last_sync_time(self, cluster_id: str) -> str | None:
-        return await self._get_inventory_last_sync_time(cluster_id, "aks_pod", "pod")
-
 
 # Late import to avoid circular dependency at module load
-from app.services.data_cache_service import (  # noqa: E402
-    TTL,
-    CacheKeys,
-    data_cache,
-)
+from app.services.data_cache_service import data_cache  # noqa: E402

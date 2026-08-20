@@ -88,10 +88,11 @@ const CompliancePage: React.FC = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <ShieldIcon cls="h-8 w-8 text-att-500" />
             Compliance & Drift Detection
           </h1>
-          <p className="text-sm text-gray-500 mt-1">
+          <p className="mt-1 text-sm text-gray-500">
             Monitor infrastructure drift, verify checksums, and track compliance
             scores
           </p>

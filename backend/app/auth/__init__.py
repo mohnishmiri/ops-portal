@@ -26,8 +26,10 @@ def _dev_auth_enabled() -> bool:
     return settings.ENVIRONMENT == "development" and settings.DEV_AUTH_BYPASS
 
 
-# In local dev (explicit opt-in), allow requests without a Bearer token.
-_bearer_scheme = HTTPBearer(auto_error=not _dev_auth_enabled())
+# Authentication dependencies decide whether a route may continue without a
+# Bearer token. This lets signed browser-only dashboard launch/proxy URLs reach
+# their own token validation while normal API routes still return 401.
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def _dev_user() -> UserContext:
@@ -191,6 +193,9 @@ async def get_current_user(
             ...
     """
     if credentials is None:
+        path = request.url.path
+        if path.startswith("/api/v1/aks/dashboard/") and ("/launch/" in path or "/proxy" in path):
+            return None
         if _dev_auth_enabled():
             user = _dev_user()
             request.state.user = user

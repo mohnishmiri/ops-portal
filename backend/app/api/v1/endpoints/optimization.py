@@ -287,6 +287,15 @@ async def delete_disconnected_private_endpoint_endpoint(
             resource_group=body.resource_group,
             endpoint_name=body.endpoint_name,
         )
+        # Invalidate optimization cache so stale PE no longer appears on refresh
+        from app.core.db_cache import cache_manager
+        from app.core.subscription_scope import get_scoped_subscription_ids
+
+        opt_svc = _get_optimization_service()
+        subs = await get_scoped_subscription_ids()
+        cache_key = opt_svc._summary_cache_key(subs)
+        await cache_manager.invalidate(cache_key)
+
         await _write_cost_cleanup_audit_log(
             db,
             request=request,
@@ -299,6 +308,7 @@ async def delete_disconnected_private_endpoint_endpoint(
             status="success",
             details={
                 "summary": f"Deleted disconnected private endpoint '{body.endpoint_name}'",
+                "action_type": result.get("action", "delete"),
             },
         )
         return result

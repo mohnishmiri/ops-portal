@@ -41,22 +41,33 @@ logger = structlog.get_logger(__name__)
 
 POLL_INTERVAL_SECONDS = 5
 MAX_ATTEMPTS = 3
-ABANDONED_RUNNING_TIMEOUT_MINUTES = 120
 _ALREADY_RUNNING_WAIT_SECONDS = 30
 _ALREADY_RUNNING_MAX_WAITS = 24  # up to ~12 minutes waiting for an in-flight sync
 _RETRY_BACKOFF_BASE_SECONDS = 5
 _RETRY_BACKOFF_MAX_SECONDS = 60
+
+# Errors that indicate a configuration issue — retrying won't help.
+_NON_RETRYABLE_ERROR_SUBSTRINGS = (
+    "CredentialUnavailableError",
+    "ClientAuthenticationError",
+    "AuthenticationError",
+    "AADSTS",
+)
 
 _worker_task: asyncio.Task | None = None
 _shutdown_event: asyncio.Event | None = None
 
 
 async def _expire_abandoned_jobs() -> None:
-    """Recover jobs left in 'running' by a crashed/restarted process."""
+    """Recover jobs left in 'running' by a crashed/restarted process.
+
+    On startup, expire any job in 'running' state that started more than
+    5 minutes ago — it was almost certainly owned by a now-dead worker.
+    """
     session_factory = _get_session_factory()
     if session_factory is None:
         return
-    cutoff = datetime.utcnow() - timedelta(minutes=ABANDONED_RUNNING_TIMEOUT_MINUTES)
+    cutoff = datetime.utcnow() - timedelta(minutes=5)
     try:
         async with session_factory() as session:
             result = await session.execute(
@@ -81,6 +92,7 @@ async def _claim_next_job() -> SyncJob | None:
 
     Uses SELECT ... FOR UPDATE SKIP LOCKED so multiple replicas can run
     workers without claiming the same queued job.
+    Skips aks_resource_sync jobs — those are processed inline by the endpoint.
     """
     session_factory = _get_session_factory()
     if session_factory is None:
@@ -88,7 +100,7 @@ async def _claim_next_job() -> SyncJob | None:
     async with session_factory() as session:
         result = await session.execute(
             select(SyncJob)
-            .where(SyncJob.status == "queued")
+            .where(SyncJob.status == "queued", SyncJob.job_type != "aks_resource_sync")
             .order_by(SyncJob.enqueued_at.asc())
             .limit(1)
             .with_for_update(skip_locked=True)
@@ -299,7 +311,8 @@ async def _worker_loop() -> None:
                 )
                 status, error, result = "failed", f"{type(exc).__name__}: {exc}"[:500], None
 
-            if status != "completed" and (job.attempts or 0) < MAX_ATTEMPTS:
+            is_retryable = not any(s in (error or "") for s in _NON_RETRYABLE_ERROR_SUBSTRINGS)
+            if status != "completed" and is_retryable and (job.attempts or 0) < MAX_ATTEMPTS:
                 await _requeue_for_retry(job.id, error or "unknown error", job.attempts or 0)
             else:
                 await _finalize_job(job.id, status, error, result)

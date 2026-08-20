@@ -220,17 +220,11 @@ async def require_page_permission(resource_name: str, perm: str = "view"):
 
 **Recommendation:** For high-sensitivity revocations (removing admin access, revoking all access), use **Entra ID → Revoke sign-in sessions** for that user, then use Entra Continuous Access Evaluation (CAE) to propagate revocation in near-real-time.
 
-### Gap 4 — Subscription-Level Access Control ✅ (partially implemented, v1.2.0)
+### Gap 4 — No Subscription-Level Access Control ℹ️
 
-**Implemented (v1.2.0):**
+**Current state:** `UserContext.allowed_subscriptions` exists in the model but is never populated or enforced. All authenticated users with page access can see data for all Azure subscriptions.
 
-1. **Admin monitored ceiling** — Sync jobs and the maximum data set are defined by `admin_subscriptions` rows where `enabled = True AND monitored = True` (`get_monitored_subscription_ids()`).
-2. **Per-user read scope** — Each user can persist a subset via **Subscription scope** (nav picker). Stored in `user_subscription_preferences`; applied per request through `bind_subscription_scope` on `/api/v1` and `get_scoped_subscription_ids()` in read-path services.
-3. **Effective formula:** `monitored ∩ allowed_subscriptions ∩ selected_subscription_ids` (empty selection = all monitored).
-
-**Still a gap:** `UserContext.allowed_subscriptions` is not populated from Entra ID or a DB mapping today (empty = all monitored). To enforce org-wide RBAC per subscription, populate that field during token processing and the existing resolver will intersect it automatically.
-
-**Leadership scope (v1.2.0+):** Narrowed subscription picker filters leadership KPIs via scoped amortized DB aggregation and per-scope page-cache keys. Global `leadership_dashboard_snapshots` (`environment=ALL`) remain the source for full-monitored views; partial scopes do not read the global snapshot.
+**Recommendation:** If multi-tenant or subscription-scoped access is needed, populate `allowed_subscriptions` during token processing (e.g., from a custom claim or a DB lookup) and filter cost/AKS/compliance queries accordingly.
 
 ### Gap 5 — No Audit Log for Permission Changes ℹ️
 
@@ -281,5 +275,3 @@ User navigates to /env-costs (Amortized Costs)
 | Grant per-user access overrides | ❌ | ❌ | ✅ |
 | See other users' permissions | ❌ | ❌ | ✅ |
 | Revoke all permissions for a page | ❌ | ❌ | ✅ |
-| Narrow subscription scope (personal) | ✅ | ✅ | ✅ |
-| Delete unattached disks / disconnected PEs | ❌ | ❌ | ✅ |

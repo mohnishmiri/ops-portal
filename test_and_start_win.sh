@@ -99,9 +99,27 @@ kill_port() {
 yellow "► Freeing ports $BACKEND_PORT and $FRONTEND_PORT …"
 kill_port "$BACKEND_PORT"
 kill_port "$FRONTEND_PORT"
+
+# Kill all stale Python processes to prevent ghost sync workers
+if [[ "$OS" == "windows" ]]; then
+  PYTHON_PIDS=$(tasklist 2>/dev/null | grep -i "python.exe" | awk '{print $2}' || true)
+  if [[ -n "$PYTHON_PIDS" ]]; then
+    yellow "  Killing stale Python processes: $PYTHON_PIDS"
+    for pid in $PYTHON_PIDS; do
+      taskkill //F //PID "$pid" 2>/dev/null || true
+    done
+  fi
+else
+  PYTHON_PIDS=$(pgrep -f "uvicorn app.main:app" 2>/dev/null || true)
+  if [[ -n "$PYTHON_PIDS" ]]; then
+    yellow "  Killing stale uvicorn processes: $PYTHON_PIDS"
+    echo "$PYTHON_PIDS" | xargs kill -9 2>/dev/null || true
+  fi
+fi
+
 # Brief pause only if something was killed
 sleep 1
-green "  ✓ Ports cleared"
+green "  ✓ Ports and stale processes cleared"
 printf '\n'
 
 # Clean stale PID files

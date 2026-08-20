@@ -23,7 +23,6 @@ logger = structlog.get_logger(__name__)
 _azure_available = False
 _pg_flex_available = False
 try:
-    from azure.identity import DefaultAzureCredential
     from azure.mgmt.compute import ComputeManagementClient
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.storage import StorageManagementClient
@@ -113,7 +112,9 @@ class AzureResourceService:
         """Get or create Azure credential."""
         self._ensure_azure_available()
         if self._credential is None:
-            self._credential = DefaultAzureCredential()
+            from app.core.azure_auth import get_azure_credential
+
+            self._credential = get_azure_credential()
         return self._credential
 
     def _get_compute_client(self):
@@ -740,8 +741,31 @@ class AzureResourceService:
                     statuses.append(str(state.status))
             return statuses
 
+        def _is_resource_not_found(exc: Exception) -> bool:
+            """Check if exception indicates the resource no longer exists."""
+            from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+
+            if isinstance(exc, ResourceNotFoundError):
+                return True
+            return isinstance(exc, HttpResponseError) and exc.status_code == 404
+
         def _delete() -> dict[str, Any]:
-            endpoint = network.private_endpoints.get(resource_group, endpoint_name)
+            try:
+                endpoint = network.private_endpoints.get(resource_group, endpoint_name)
+            except Exception as get_exc:
+                if _is_resource_not_found(get_exc):
+                    return {
+                        "status": "success",
+                        "action": "already_deleted",
+                        "resource_name": endpoint_name,
+                        "resource_group": resource_group,
+                        "subscription_id": subscription_id,
+                        "message": (
+                            f"Private endpoint '{endpoint_name}' no longer exists in Azure "
+                            "(likely stale Resource Graph data). No action needed."
+                        ),
+                    }
+                raise
             statuses = _connection_statuses(endpoint)
             if not statuses:
                 raise ValueError(f"Private endpoint '{endpoint_name}' has no private link connections to evaluate.")
@@ -753,8 +777,23 @@ class AzureResourceService:
                 )
             if not any(s.lower() == "disconnected" for s in statuses):
                 raise ValueError(f"Private endpoint '{endpoint_name}' has no disconnected connections.")
-            poller = network.private_endpoints.begin_delete(resource_group, endpoint_name)
-            poller.wait()
+            try:
+                poller = network.private_endpoints.begin_delete(resource_group, endpoint_name)
+                poller.wait()
+            except Exception as del_exc:
+                if _is_resource_not_found(del_exc):
+                    return {
+                        "status": "success",
+                        "action": "already_deleted",
+                        "resource_name": endpoint_name,
+                        "resource_group": resource_group,
+                        "subscription_id": subscription_id,
+                        "message": (
+                            f"Private endpoint '{endpoint_name}' was removed between validation "
+                            "and deletion (race condition). No action needed."
+                        ),
+                    }
+                raise
             return {
                 "status": "success",
                 "action": "delete",
@@ -770,6 +809,7 @@ class AzureResourceService:
                 endpoint=endpoint_name,
                 resource_group=resource_group,
                 subscription_id=subscription_id,
+                action=result.get("action", "delete"),
             )
             return result
         except ValueError:

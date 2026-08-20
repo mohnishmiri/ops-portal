@@ -61,7 +61,6 @@ class CacheTTL:
     POD_METRICS: int = 60  # 1 min — most volatile
     CRONJOBS: int = 120  # 2 min
     CRONJOB_DETAIL: int = 120  # 2 min
-    K8S_RESOURCE_DETAIL: int = 120  # 2 min — secrets/services/configmaps/ingress
     NODE_POOLS: int = 300  # 5 min — rarely changes
     SUBSCRIPTIONS: int = 600  # 10 min — almost static
     UNDERUTILIZED: int = 600  # 10 min — DB aggregation cache
@@ -111,22 +110,6 @@ class CacheKeys:
     @staticmethod
     def cronjob_detail(cluster_id: str, namespace: str, name: str) -> str:
         return f"{CacheKeys.PREFIX}:cronjobs:detail:{_hash_params(cluster_id, namespace, name)}"
-
-    @staticmethod
-    def secret_detail(cluster_id: str, namespace: str, name: str, *, reveal: bool = False) -> str:
-        return f"{CacheKeys.PREFIX}:secrets:detail:{_hash_params(cluster_id, namespace, name, reveal)}"
-
-    @staticmethod
-    def service_detail(cluster_id: str, namespace: str, name: str) -> str:
-        return f"{CacheKeys.PREFIX}:services:detail:{_hash_params(cluster_id, namespace, name)}"
-
-    @staticmethod
-    def configmap_detail(cluster_id: str, namespace: str, name: str) -> str:
-        return f"{CacheKeys.PREFIX}:configmaps:detail:{_hash_params(cluster_id, namespace, name)}"
-
-    @staticmethod
-    def ingress_detail(cluster_id: str, namespace: str, name: str) -> str:
-        return f"{CacheKeys.PREFIX}:ingress:detail:{_hash_params(cluster_id, namespace, name)}"
 
     @staticmethod
     def node_pools(cluster_id: str) -> str:

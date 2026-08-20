@@ -135,6 +135,16 @@ def _register_platform_jobs(scheduler: AsyncIOScheduler) -> None:
         coalesce=True,
     )
 
+    scheduler.add_job(
+        run_environment_schedules_job,
+        IntervalTrigger(minutes=1),
+        id="environment_schedule_runner",
+        name="Environment Schedule Runner",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
 
 def _remove_legacy_alert_jobs(scheduler: AsyncIOScheduler) -> None:
     """Remove pre-migration hard-coded alert jobs from a running scheduler."""
@@ -968,3 +978,102 @@ def get_scheduler_status() -> dict[str, Any]:
         "jobs": jobs,
         "job_count": len(jobs),
     }
+
+
+# ── Environment Scaling Schedule Runner ───────────────────────────────
+
+
+async def run_environment_schedules_job() -> None:
+    """Execute due environment scaling schedules."""
+    from app.models.database import EnvironmentExecutionHistory, EnvironmentSchedule
+    from app.services.environment_scaling_service import get_environment_scaling_service
+
+    try:
+        async for db in get_db_session():
+            now = datetime.utcnow()
+            result = await db.execute(select(EnvironmentSchedule).where(EnvironmentSchedule.is_enabled.is_(True)))
+            schedules = result.scalars().all()
+
+            for schedule in schedules:
+                if schedule.next_run_at and schedule.next_run_at > now:
+                    continue
+
+                if schedule.end_date and now > schedule.end_date:
+                    schedule.is_enabled = False
+                    await db.commit()
+                    continue
+
+                if schedule.start_date and now < schedule.start_date:
+                    continue
+
+                # Skip if there's already a running execution for this schedule
+                running_check = await db.execute(
+                    select(EnvironmentExecutionHistory.id)
+                    .where(EnvironmentExecutionHistory.schedule_id == schedule.id)
+                    .where(EnvironmentExecutionHistory.status == "running")
+                    .limit(1)
+                )
+                if running_check.scalar_one_or_none() is not None:
+                    logger.debug(
+                        "environment_schedule_skipped_already_running",
+                        schedule_id=schedule.id,
+                        job_name=schedule.job_name,
+                    )
+                    continue
+
+                # Update next_run_at BEFORE execution to prevent re-trigger
+                schedule.next_run_at = _compute_env_schedule_next_run(schedule, now)
+                await db.commit()
+
+                logger.info(
+                    "environment_schedule_executing",
+                    schedule_id=schedule.id,
+                    job_name=schedule.job_name,
+                )
+
+                try:
+                    service = get_environment_scaling_service(db)
+                    await service.execute_scheduled_job(schedule.id)
+                    await db.commit()
+                except Exception as exc:
+                    await db.rollback()
+                    logger.error(
+                        "environment_schedule_run_failed",
+                        schedule_id=schedule.id,
+                        error=str(exc)[:200],
+                    )
+
+    except Exception as exc:
+        logger.error("environment_schedule_job_failed", error=str(exc)[:200])
+
+
+def _compute_env_schedule_next_run(
+    schedule,
+    now: datetime,
+) -> datetime | None:
+    """Compute the next run time for an environment schedule in UTC."""
+    from zoneinfo import ZoneInfo
+
+    if schedule.schedule_type == "one_time":
+        return None
+
+    # Use the schedule's timezone for cron computation
+    tz = ZoneInfo(schedule.timezone) if schedule.timezone else UTC
+
+    if schedule.schedule_type == "cron" and schedule.cron_expression:
+        try:
+            trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=tz)
+            next_fire = trigger.get_next_fire_time(None, now.replace(tzinfo=UTC))
+            if next_fire and next_fire.tzinfo:
+                return next_fire.astimezone(UTC).replace(tzinfo=None)
+            return next_fire
+        except Exception:
+            return now + timedelta(hours=24)
+
+    intervals = {
+        "daily": timedelta(days=1),
+        "weekly": timedelta(weeks=1),
+        "monthly": timedelta(days=30),
+    }
+    delta = intervals.get(schedule.schedule_type, timedelta(days=1))
+    return now + delta

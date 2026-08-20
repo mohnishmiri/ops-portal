@@ -16,7 +16,7 @@ const RESOURCE_QUERY_KEYS: Record<string, string[]> = {
   clusters: ["aks-clusters-cached", "aks-clusters"],
   nodepools: ["aks-nodepools-cached", "aks-nodepools"],
   deployments: ["aks-deployments-cached", "aks-deployments"],
-  pods: ["aks-pod-metrics-cached", "aks-pod-metrics"],
+  pods: ["aks-pod-metrics"],
   cronjobs: ["aks-cronjobs-cached", "aks-cronjobs"],
   secrets: ["aks-secrets-cached"],
   services: ["aks-services-cached"],

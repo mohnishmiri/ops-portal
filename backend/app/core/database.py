@@ -123,6 +123,14 @@ async def create_tables() -> None:
             await conn.execute(
                 text(
                     """
+                    ALTER TABLE IF EXISTS custom_expiry_alert_configs
+                    ADD COLUMN IF NOT EXISTS environment VARCHAR(20)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
                     ALTER TABLE IF EXISTS aks_pod_checksums
                     ADD COLUMN IF NOT EXISTS image_digests JSONB
                     """
@@ -150,6 +158,96 @@ async def create_tables() -> None:
                     """
                     ALTER TABLE IF EXISTS resources
                     ADD COLUMN IF NOT EXISTS is_system BOOLEAN NOT NULL DEFAULT FALSE
+                    """
+                )
+            )
+            # Drop the old global unique index on environment_sequences.name
+            # (replaced by composite unique on name+cluster_id+namespace)
+            await conn.execute(
+                text(
+                    """
+                    DROP INDEX IF EXISTS ix_environment_sequences_name
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS environment_sequences
+                    DROP CONSTRAINT IF EXISTS environment_sequences_name_key
+                    """
+                )
+            )
+            # Fix stale step_details: completed/failed executions with pending steps
+            await conn.execute(
+                text(
+                    """
+                    UPDATE environment_execution_history
+                    SET step_details = (
+                        SELECT jsonb_agg(
+                            CASE
+                                WHEN elem->>'status' = 'pending' OR elem->>'status' = 'running'
+                                THEN jsonb_set(elem, '{status}', to_jsonb(status))
+                                ELSE elem
+                            END
+                        )
+                        FROM jsonb_array_elements(step_details) AS elem
+                    )
+                    WHERE status IN ('completed', 'failed', 'rolled_back')
+                      AND step_details IS NOT NULL
+                      AND step_details::text LIKE '%pending%'
+                    """
+                )
+            )
+            # Backfill environment_scope column on permissions table (Jun 2026)
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS permissions
+                    ADD COLUMN IF NOT EXISTS environment_scope VARCHAR(20) NOT NULL DEFAULT 'all'
+                    """
+                )
+            )
+            # Create teams table if it doesn't exist
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS teams (
+                        id SERIAL PRIMARY KEY,
+                        team_name VARCHAR(255) NOT NULL UNIQUE,
+                        description TEXT,
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            # Create team_memberships table if it doesn't exist
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS team_memberships (
+                        id SERIAL PRIMARY KEY,
+                        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                        user_id VARCHAR(255) NOT NULL,
+                        user_email VARCHAR(255),
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        CONSTRAINT uq_team_user UNIQUE (team_id, user_id)
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_team_memberships_team_id ON team_memberships(team_id)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_team_memberships_user_id ON team_memberships(user_id)
                     """
                 )
             )
@@ -250,6 +348,17 @@ async def get_session() -> AsyncSession:
 
     async with _SessionLocal() as session:
         return session
+
+
+async def get_standalone_session() -> AsyncSession | None:
+    """Get a new independent session, or None if DB unavailable.
+
+    Use for fire-and-forget writes (e.g. audit logging) that must not
+    interfere with the request's main session.
+    """
+    if not _db_connected or _SessionLocal is None:
+        return None
+    return _SessionLocal()
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:

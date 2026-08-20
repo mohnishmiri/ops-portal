@@ -70,6 +70,14 @@ class AKSHelmService:
                 os.unlink(kubeconfig)
 
     async def list_releases(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
+        """List Helm releases — tries CLI first, falls back to K8s API secrets."""
+        try:
+            return await self._list_releases_cli(cluster_id, namespace)
+        except FileNotFoundError:
+            logger.info("helm_cli_not_found_using_k8s_api_fallback")
+            return await self._list_releases_from_secrets(cluster_id, namespace)
+
+    async def _list_releases_cli(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         kubeconfig = await self._kubeconfig_path(cluster_id)
         try:
             env = {**os.environ, "KUBECONFIG": kubeconfig}
@@ -86,12 +94,80 @@ class AKSHelmService:
                 return []
             data = json.loads(proc.stdout or "[]")
             return data if isinstance(data, list) else []
-        except FileNotFoundError:
-            logger.warning("helm_cli_not_found")
-            return []
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(kubeconfig)
+
+    async def _list_releases_from_secrets(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
+        """Read Helm releases directly from Kubernetes secrets (owner=helm label)."""
+        import base64
+        import gzip
+
+        _, core_v1, _ = await self._aks._get_k8s_clients(cluster_id)
+        try:
+            if namespace:
+                secrets = await asyncio.to_thread(
+                    core_v1.list_namespaced_secret,
+                    namespace,
+                    label_selector="owner=helm",
+                )
+            else:
+                secrets = await asyncio.to_thread(
+                    core_v1.list_secret_for_all_namespaces,
+                    label_selector="owner=helm",
+                )
+
+            # Group by release name — pick latest revision per release
+            releases_map: dict[str, dict[str, Any]] = {}
+            for secret in secrets.items:
+                labels = secret.metadata.labels or {}
+                name = labels.get("name", "")
+                status = labels.get("status", "unknown")
+                version_str = labels.get("version", "0")
+
+                key = f"{secret.metadata.namespace}/{name}"
+                existing = releases_map.get(key)
+                revision = int(version_str) if version_str.isdigit() else 0
+
+                if existing and existing.get("_revision", 0) >= revision:
+                    continue
+
+                # Try to extract chart info from the release data
+                chart_name = ""
+                app_version = ""
+                try:
+                    raw = secret.data.get("release", "")
+                    if raw:
+                        decoded = base64.b64decode(base64.b64decode(raw))
+                        release_data = json.loads(gzip.decompress(decoded))
+                        chart_meta = release_data.get("chart", {}).get("metadata", {})
+                        chart_name = f"{chart_meta.get('name', '')}-{chart_meta.get('version', '')}"
+                        app_version = chart_meta.get("appVersion", "")
+                except Exception:
+                    chart_name = labels.get("name", "")
+
+                releases_map[key] = {
+                    "name": name,
+                    "namespace": secret.metadata.namespace,
+                    "revision": str(revision),
+                    "status": status.replace("_", " ").title() if status else "Unknown",
+                    "chart": chart_name,
+                    "app_version": app_version,
+                    "updated": (
+                        secret.metadata.creation_timestamp.isoformat() if secret.metadata.creation_timestamp else ""
+                    ),
+                    "_revision": revision,
+                }
+
+            # Remove internal _revision field
+            result = []
+            for r in releases_map.values():
+                r.pop("_revision", None)
+                result.append(r)
+            return sorted(result, key=lambda x: x.get("name", ""))
+        except Exception as e:
+            logger.warning("helm_list_from_secrets_failed", error=str(e))
+            return []
 
     async def install_release(
         self,

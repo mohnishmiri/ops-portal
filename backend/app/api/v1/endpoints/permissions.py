@@ -57,10 +57,11 @@ class ResourceUpdateRequest(BaseModel):
 
 
 class PermissionCreateRequest(BaseModel):
-    subject_type: str = Field(..., description="'user' or 'role'")
-    subject_id: str = Field(..., description="user_id or role name (admin/write/read)")
+    subject_type: str = Field(..., description="'user', 'role', or 'group'")
+    subject_id: str = Field(..., description="user_id, role name (admin/write/read), or team name")
     resource_id: int = Field(...)
     permission_type: str = Field(..., description="'view' or 'edit'")
+    environment_scope: str = Field(default="all", description="'all', 'prod', or 'nonprod'")
 
 
 def _resource_to_dict(r) -> dict:
@@ -86,6 +87,7 @@ def _permission_to_dict(p: Permission) -> dict:
         "resource_name": p.resource.resource_name if p.resource else None,
         "resource_type": p.resource.resource_type if p.resource else None,
         "permission_type": p.permission_type,
+        "environment_scope": p.environment_scope,
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 
@@ -254,10 +256,12 @@ async def create_permission(
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
-    if req.subject_type not in ("user", "role"):
-        raise HTTPException(status_code=400, detail="subject_type must be 'user' or 'role'")
+    if req.subject_type not in ("user", "role", "group"):
+        raise HTTPException(status_code=400, detail="subject_type must be 'user', 'role', or 'group'")
     if req.permission_type not in ("view", "edit"):
         raise HTTPException(status_code=400, detail="permission_type must be 'view' or 'edit'")
+    if req.environment_scope not in ("all", "prod", "nonprod"):
+        raise HTTPException(status_code=400, detail="environment_scope must be 'all', 'prod', or 'nonprod'")
 
     res = await db.execute(select(Resource).where(Resource.id == req.resource_id))
     resource = res.scalar_one_or_none()
@@ -269,6 +273,7 @@ async def create_permission(
         subject_id=req.subject_id,
         resource_id=req.resource_id,
         permission_type=req.permission_type,
+        environment_scope=req.environment_scope,
     )
     db.add(perm)
     try:
@@ -406,3 +411,276 @@ async def list_audit_log(
     result = await db.execute(stmt)
     entries = [_audit_to_dict(e) for e in result.scalars().all()]
     return JSONResponse(content={"entries": entries, "total": len(entries)})
+
+
+# ── Team management endpoints ─────────────────────────────────────────────────
+
+
+class TeamCreateRequest(BaseModel):
+    team_name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+
+
+class TeamMemberRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+    user_email: str | None = None
+
+
+def _team_to_dict(t, include_members: bool = False) -> dict:
+    members = []
+    if include_members:
+        members = [
+            {
+                "id": m.id,
+                "user_id": m.user_id,
+                "user_email": m.user_email,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in t.members
+        ]
+    return {
+        "id": t.id,
+        "team_name": t.team_name,
+        "description": t.description,
+        "member_count": len(members),
+        "members": members,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+    }
+
+
+def _team_to_dict_raw(team_id, team_name, description, created_at, updated_at) -> dict:
+    """Build team dict from plain values (avoids lazy-loading expired ORM objects)."""
+    return {
+        "id": team_id,
+        "team_name": team_name,
+        "description": description,
+        "member_count": 0,
+        "members": [],
+        "created_at": created_at.isoformat() if created_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
+@router.post("/teams", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def create_team(
+    request: Request,
+    req: TeamCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """Create an app-managed team for group-based permission grants."""
+    from app.models.database import Team
+
+    team = Team(team_name=req.team_name, description=req.description)
+    db.add(team)
+    try:
+        await db.commit()
+        await db.refresh(team, attribute_names=["id", "team_name", "description", "created_at", "updated_at"])
+    except IntegrityError:
+        await db.rollback()
+        result = await db.execute(select(Team).where(Team.team_name == req.team_name))
+        existing = result.scalar_one_or_none()
+        if existing:
+            response_data = _team_to_dict_raw(
+                existing.id, existing.team_name, existing.description, existing.created_at, existing.updated_at
+            )
+            return JSONResponse(content=jsonable_encoder(response_data))
+        raise
+
+    # Capture data BEFORE audit write (which commits and may expire the object)
+    response_data = _team_to_dict_raw(team.id, team.team_name, team.description, team.created_at, team.updated_at)
+
+    logger.info("team_created", team_name=req.team_name, by=user.user_id)
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="resource_created",
+        summary=f"Created team '{req.team_name}'",
+        details={"team_name": req.team_name, "resource_type": "team"},
+    )
+    return JSONResponse(content=jsonable_encoder(response_data))
+
+
+@router.get("/teams", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def list_teams(db: AsyncSession = Depends(get_db)):
+    """List all teams with their members."""
+    from sqlalchemy.orm import selectinload
+
+    from app.models.database import Team
+
+    result = await db.execute(select(Team).options(selectinload(Team.members)).order_by(Team.team_name))
+    teams = result.scalars().all()
+    return JSONResponse(content=jsonable_encoder([_team_to_dict(t, include_members=True) for t in teams]))
+
+
+@router.get("/teams/{team_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def get_team(team_id: int, db: AsyncSession = Depends(get_db)):
+    """Get a single team with members."""
+    from sqlalchemy.orm import selectinload
+
+    from app.models.database import Team
+
+    result = await db.execute(select(Team).options(selectinload(Team.members)).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return JSONResponse(content=jsonable_encoder(_team_to_dict(team, include_members=True)))
+
+
+@router.delete("/teams/{team_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def delete_team(
+    team_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """Delete a team (cascades to memberships; revokes group permissions manually if desired)."""
+    from app.models.database import Team
+
+    result = await db.execute(select(Team).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    team_name = team.team_name
+    await db.delete(team)
+    await db.commit()
+    logger.info("team_deleted", team_id=team_id, team_name=team_name, by=user.user_id)
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="resource_deleted",
+        summary=f"Deleted team '{team_name}'",
+        details={"team_name": team_name, "resource_type": "team"},
+    )
+    return JSONResponse(content={"deleted": True, "team_id": team_id})
+
+
+@router.post("/teams/{team_id}/members", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def add_team_member(
+    team_id: int,
+    request: Request,
+    req: TeamMemberRequest,
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """Add a user to a team."""
+    from app.models.database import Team, TeamMembership
+
+    result = await db.execute(select(Team).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Capture before commit/audit expires the object
+    team_name_val = team.team_name
+
+    membership = TeamMembership(team_id=team_id, user_id=req.user_id, user_email=req.user_email)
+    db.add(membership)
+    try:
+        await db.commit()
+        await db.refresh(membership, attribute_names=["id", "team_id", "user_id", "user_email", "created_at"])
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="User is already a member of this team")
+
+    # Capture membership data before audit write
+    mem_id = membership.id
+    mem_user_id = membership.user_id
+    mem_user_email = membership.user_email
+
+    logger.info("team_member_added", team=team_name_val, user_id=req.user_id, by=user.user_id)
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="permission_granted",
+        summary=f"Added user '{req.user_id}' to team '{team_name_val}'",
+        details={"team_name": team_name_val, "user_id": req.user_id, "resource_type": "team_membership"},
+    )
+    return JSONResponse(
+        content={
+            "id": mem_id,
+            "team_id": team_id,
+            "team_name": team_name_val,
+            "user_id": mem_user_id,
+            "user_email": mem_user_email,
+        }
+    )
+
+
+@router.delete("/teams/{team_id}/members/{member_user_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def remove_team_member(
+    team_id: int,
+    member_user_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """Remove a user from a team."""
+    from app.models.database import Team, TeamMembership
+
+    result = await db.execute(select(Team).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    mem_result = await db.execute(
+        select(TeamMembership).where(TeamMembership.team_id == team_id, TeamMembership.user_id == member_user_id)
+    )
+    membership = mem_result.scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Membership not found")
+
+    # Capture before commit expires the object
+    team_name_val = team.team_name
+
+    await db.delete(membership)
+    await db.commit()
+    logger.info("team_member_removed", team=team_name_val, user_id=member_user_id, by=user.user_id)
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="permission_revoked",
+        summary=f"Removed user '{member_user_id}' from team '{team_name_val}'",
+        details={"team_name": team_name_val, "user_id": member_user_id, "resource_type": "team_membership"},
+    )
+    return JSONResponse(content={"deleted": True, "team_id": team_id, "user_id": member_user_id})
+
+
+# ── Resource sync endpoint ─────────────────────────────────────────────────────
+
+
+@router.post("/resources/sync", dependencies=[Depends(require_role(UserRole.ADMIN))])
+async def sync_resources(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """
+    Trigger a re-seed of the resource registry.
+
+    Runs the same seeder that fires on startup — useful after deploying new
+    plugins or modules without restarting the backend.
+    """
+    from app.core.resource_registry import seed_permissions, seed_resources
+
+    await seed_resources(db)
+    await seed_permissions(db)
+    logger.info("resource_sync_triggered", by=user.user_id)
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="resource_updated",
+        summary="Manual resource registry sync triggered",
+        details={"action": "sync"},
+    )
+    # Return updated resource list
+    result = await db.execute(select(Resource).order_by(Resource.resource_type, Resource.resource_name))
+    rows = result.scalars().all()
+    return JSONResponse(content={"synced": True, "resources": jsonable_encoder([_resource_to_dict(r) for r in rows])})

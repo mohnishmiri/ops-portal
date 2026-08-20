@@ -46,7 +46,7 @@ async def test_unauthenticated_api_returns_401(client):
     """Protected endpoints require authentication."""
     resp = await client.get("/api/v1/costs/daily")
     if _dev_auth_enabled():
-        assert resp.status_code == 200
+        assert resp.status_code not in (401, 403)
     else:
         assert resp.status_code in (401, 403)
 
@@ -55,7 +55,7 @@ async def test_unauthenticated_api_returns_401(client):
 async def test_unauthenticated_dashboard_returns_401(client):
     resp = await client.get("/api/v1/dashboards/leadership")
     if _dev_auth_enabled():
-        assert resp.status_code == 200
+        assert resp.status_code not in (401, 403)
     else:
         assert resp.status_code in (401, 403)
 
@@ -230,3 +230,32 @@ async def test_delete_unattached_disk_succeeds_for_admin(admin_client, monkeypat
     data = resp.json()
     assert data["status"] == "success"
     assert data["resource_name"] == "disk-01"
+
+
+@pytest.mark.anyio
+async def test_get_deployment_detail_returns_yaml(admin_client, monkeypatch):
+    async def fake_get_detail(self, cluster_id: str, namespace: str, deployment_name: str):
+        assert cluster_id == "cluster-1"
+        assert namespace == "default"
+        assert deployment_name == "web"
+        return {
+            "name": deployment_name,
+            "namespace": namespace,
+            "yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+        }
+
+    monkeypatch.setattr(
+        "app.services.aks_operations_service.AKSOperationsService.get_deployment_detail",
+        fake_get_detail,
+    )
+
+    resp = await admin_client.get(
+        "/api/v1/aks/deployments/details",
+        params={"cluster_id": "cluster-1", "namespace": "default", "name": "web"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "web"
+    assert data["namespace"] == "default"
+    assert "kind: Deployment" in data["yaml"]

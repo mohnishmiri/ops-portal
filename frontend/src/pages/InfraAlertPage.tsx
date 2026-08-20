@@ -12,6 +12,7 @@
 
 import React, { useState, useMemo, useCallback } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import { useSubscriptionScope } from "../contexts/SubscriptionContext";
 import Toast, { type ToastState } from "../components/Toast";
 import { AutoRefreshIndicator, gridStyles, type SortState, nextSortState, SortableHeader } from "../components/gridStyles";
 import { MetricCard } from "../components/MetricCard";
@@ -22,6 +23,7 @@ import {
   CreatePGFlexConfigRequest,
   CreateStorageAlertConfigRequest,
   CreateVMThresholdConfigRequest,
+  EnvClassification,
   ExpiryAlert,
   ExpiryAlertType,
   ExpiryConfig,
@@ -37,6 +39,7 @@ import {
   VMThresholdConfig,
   formatRelativeTime,
   getAlertTypeLabel,
+  getEnvLabel,
   getNotificationStatusColor,
   getNotificationTypeLabel,
   useAcknowledgeExpiryAlert,
@@ -565,7 +568,13 @@ const TablePagination: React.FC<{
 const InfraAlertPage: React.FC = () => {
   const { canWrite } = useAuth();
   const { timezone, formatDate } = usePortalTimezone();
+  const { availableSubscriptions, effectiveSubscriptionIds } = useSubscriptionScope();
+  const scopedSubscriptions = useMemo(
+    () => availableSubscriptions.filter((s) => effectiveSubscriptionIds.includes(s.subscription_id)),
+    [availableSubscriptions, effectiveSubscriptionIds],
+  );
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
+  const [subscriptionFilter, setSubscriptionFilter] = useState<string>("");
   const [showAddVMConfig, setShowAddVMConfig] = useState(false);
   const [showAddExpiryConfig, setShowAddExpiryConfig] = useState(false);
   const [editingVMConfig, setEditingVMConfig] = useState<VMThresholdConfig | null>(null);
@@ -606,6 +615,7 @@ const InfraAlertPage: React.FC = () => {
     resource_identifier: "",
     expiry_date: "",
     description: "",
+    environment: "non_prod",
     warning_days_before: 30,
     critical_days_before: 7,
     notification_emails: [],
@@ -687,6 +697,47 @@ const InfraAlertPage: React.FC = () => {
     adminSubscriptions?.forEach((s) => map.set(s.subscription_id, s.subscription_name || s.name));
     return map;
   }, [adminSubscriptions]);
+
+  // Subscription-filtered data
+  const filteredAzureVMs = useMemo(
+    () => subscriptionFilter ? azureVMs.filter((v) => v.subscription_id === subscriptionFilter) : azureVMs,
+    [azureVMs, subscriptionFilter],
+  );
+  const filteredStorageAccounts = useMemo(
+    () => subscriptionFilter ? storageAccounts.filter((s) => s.subscription_id === subscriptionFilter) : storageAccounts,
+    [storageAccounts, subscriptionFilter],
+  );
+  const filteredDisks = useMemo(
+    () => subscriptionFilter ? disks.filter((d) => d.subscription_id === subscriptionFilter) : disks,
+    [disks, subscriptionFilter],
+  );
+  const filteredPGServers = useMemo(
+    () => subscriptionFilter ? pgServers.filter((p) => p.subscription_id === subscriptionFilter) : pgServers,
+    [pgServers, subscriptionFilter],
+  );
+  const filteredVMConfigs = useMemo(
+    () => subscriptionFilter ? vmConfigs.filter((c) => c.subscription_id === subscriptionFilter) : vmConfigs,
+    [vmConfigs, subscriptionFilter],
+  );
+  const filteredStorageConfigs = useMemo(
+    () => subscriptionFilter ? storageConfigs.filter((c) => c.subscription_id === subscriptionFilter) : storageConfigs,
+    [storageConfigs, subscriptionFilter],
+  );
+  const filteredPGConfigs = useMemo(
+    () => subscriptionFilter ? pgConfigs.filter((c) => c.subscription_id === subscriptionFilter) : pgConfigs,
+    [pgConfigs, subscriptionFilter],
+  );
+  const filteredVMAlerts = useMemo(() => {
+    if (!subscriptionFilter) return vmAlerts;
+    const configIds = new Set(filteredVMConfigs.map((c) => c.id));
+    return vmAlerts.filter((a) => configIds.has(a.config_id));
+  }, [vmAlerts, subscriptionFilter, filteredVMConfigs]);
+  const filteredPGAlerts = useMemo(() => {
+    if (!subscriptionFilter) return pgAlerts;
+    const configIds = new Set(filteredPGConfigs.map((c) => c.id));
+    return pgAlerts.filter((a) => configIds.has(a.config_id));
+  }, [pgAlerts, subscriptionFilter, filteredPGConfigs]);
+
   const { data: inventorySummary } = useResourceInventorySummary();
   const { data: schedulerStatus } = useSchedulerStatus();
   const { data: alertScheduleConfigs = [] } = useAlertScheduleConfigs();
@@ -962,7 +1013,7 @@ const InfraAlertPage: React.FC = () => {
   const renderVMAlerts = () => {
     const vmAlertSort = tblSort("vmAlerts", "created_at", "desc");
     const { items: pagedVMAlerts, total: totalVMAlerts, page: vmAlertPage } = filterAndPaginate(
-      vmAlerts,
+      filteredVMAlerts,
       tbl("vmAlerts").search,
       tbl("vmAlerts").page,
       (a) => [a.vm_name, a.metric_type, a.severity, a.status],
@@ -983,6 +1034,18 @@ const InfraAlertPage: React.FC = () => {
       {/* Filters */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
+          <select
+            value={subscriptionFilter}
+            onChange={(e) => setSubscriptionFilter(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All Subscriptions</option>
+            {scopedSubscriptions.map((s) => (
+              <option key={s.subscription_id} value={s.subscription_id}>
+                {s.subscription_name}
+              </option>
+            ))}
+          </select>
           <select
             value={alertStatusFilter}
             onChange={(e) => setAlertStatusFilter(e.target.value)}
@@ -1081,7 +1144,7 @@ const InfraAlertPage: React.FC = () => {
   const renderPGAlerts = () => {
     const pgAlertSort = tblSort("pgAlerts", "created_at", "desc");
     const { items: pagedPGAlerts, total: totalPGAlerts, page: pgAlertPage } = filterAndPaginate(
-      pgAlerts,
+      filteredPGAlerts,
       tbl("pgAlerts").search,
       tbl("pgAlerts").page,
       (a) => [a.server_name, a.metric_type, a.severity, a.status],
@@ -1102,6 +1165,18 @@ const InfraAlertPage: React.FC = () => {
       {/* Filters */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
+          <select
+            value={subscriptionFilter}
+            onChange={(e) => setSubscriptionFilter(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All Subscriptions</option>
+            {scopedSubscriptions.map((s) => (
+              <option key={s.subscription_id} value={s.subscription_id}>
+                {s.subscription_name}
+              </option>
+            ))}
+          </select>
           <select
             value={pgAlertStatusFilter}
             onChange={(e) => setPgAlertStatusFilter(e.target.value)}
@@ -1343,7 +1418,7 @@ const InfraAlertPage: React.FC = () => {
     const storageConfigSort = tblSort("storageConfigs", "account_name", "asc");
     const pgConfigSort = tblSort("pgConfigs", "server_name", "asc");
     const { items: pagedVMConfigs, total: totalVMConfigs, page: vmCfgPage } = filterAndPaginate(
-      vmConfigs,
+      filteredVMConfigs,
       tbl("vmConfigs").search,
       tbl("vmConfigs").page,
       (c) => [c.vm_name, c.resource_group],
@@ -1361,11 +1436,12 @@ const InfraAlertPage: React.FC = () => {
       expiryConfigs,
       tbl("expiryConfigs").search,
       tbl("expiryConfigs").page,
-      (c) => [getAlertTypeLabel(c.alert_type), c.resource_name],
+      (c) => [getAlertTypeLabel(c.alert_type), c.resource_name, getEnvLabel(c.environment)],
       expiryConfigSort,
       {
         alert_type: (c) => getAlertTypeLabel(c.alert_type),
         resource_name: (c) => c.resource_name,
+        environment: (c) => getEnvLabel(c.environment),
         expiry_date: (c) => c.expiry_date,
         warning_days_before: (c) => c.warning_days_before,
         critical_days_before: (c) => c.critical_days_before,
@@ -1373,7 +1449,7 @@ const InfraAlertPage: React.FC = () => {
       },
     );
     const { items: pagedStorageConfigs, total: totalStorageConfigs, page: storageCfgPage } = filterAndPaginate(
-      storageConfigs,
+      filteredStorageConfigs,
       tbl("storageConfigs").search,
       tbl("storageConfigs").page,
       (c) => [c.account_name, c.resource_group],
@@ -1390,6 +1466,22 @@ const InfraAlertPage: React.FC = () => {
 
     return (
     <div className="space-y-8">
+      {/* Subscription Filter */}
+      <div className="flex items-center gap-4">
+        <select
+          value={subscriptionFilter}
+          onChange={(e) => setSubscriptionFilter(e.target.value)}
+          className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">All Subscriptions</option>
+          {scopedSubscriptions.map((s) => (
+            <option key={s.subscription_id} value={s.subscription_id}>
+              {s.subscription_name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       {/* VM Threshold Configs */}
       <div>
         <div className="flex items-center justify-between mb-4">
@@ -1523,6 +1615,7 @@ const InfraAlertPage: React.FC = () => {
               <tr>
                 <th className={gridStyles.headerCell}><SortableHeader label="Type" active={expiryConfigSort.key === "alert_type"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "alert_type", "asc")} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Resource" active={expiryConfigSort.key === "resource_name"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "resource_name", "asc")} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="ENV" active={expiryConfigSort.key === "environment"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "environment", "asc")} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Expiry Date" active={expiryConfigSort.key === "expiry_date"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "expiry_date", "asc")} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Warning (days)" active={expiryConfigSort.key === "warning_days_before"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "warning_days_before", "desc")} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Critical (days)" active={expiryConfigSort.key === "critical_days_before"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "critical_days_before", "desc")} /></th>
@@ -1537,6 +1630,15 @@ const InfraAlertPage: React.FC = () => {
                     {getAlertTypeLabel(config.alert_type)}
                   </td>
                   <td className={gridStyles.cell}>{config.resource_name}</td>
+                  <td className={gridStyles.cell}>
+                    {config.environment ? (
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${config.environment === "prod" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
+                        {getEnvLabel(config.environment)}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
                   <td className={gridStyles.cell}>
                     {formatDateOnly(config.expiry_date)}
                   </td>
@@ -1559,6 +1661,7 @@ const InfraAlertPage: React.FC = () => {
                             resource_identifier: config.resource_identifier,
                             expiry_date: toDateInputValue(config.expiry_date),
                             description: config.description || '',
+                            environment: config.environment || "non_prod",
                             warning_days_before: config.warning_days_before,
                             critical_days_before: config.critical_days_before,
                             notification_emails: config.notification_emails || [],
@@ -1722,7 +1825,7 @@ const InfraAlertPage: React.FC = () => {
         <div className={gridStyles.shell}>
           {(() => {
             const { items: pagedPGConfigs, total: totalPGConfigs, page: pgCfgPage } = filterAndPaginate(
-              pgConfigs, tbl("pgConfigs").search, tbl("pgConfigs").page,
+              filteredPGConfigs, tbl("pgConfigs").search, tbl("pgConfigs").page,
               (c) => [c.server_name, c.resource_group],
               pgConfigSort,
               {
@@ -1822,11 +1925,14 @@ const InfraAlertPage: React.FC = () => {
   // ── Main Render ─────────────────────────────────────────────────────
 
   return (
-    <div className="py-6">
+    <div className="py-6 space-y-6">
       {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Infrastructure Alerts</h1>
-        <p className="text-gray-600 mt-1">
+      <div>
+        <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+          {Icons.alert("h-8 w-8 text-att-500")}
+          Infrastructure Alerts
+        </h1>
+        <p className="mt-1 text-sm text-gray-500">
           Monitor VM thresholds (CPU, Memory, Disk) and track expiry dates for critical resources
         </p>
       </div>
@@ -2123,6 +2229,7 @@ const InfraAlertPage: React.FC = () => {
                   data: {
                     resource_name: expiryFormData.resource_name,
                     description: expiryFormData.description,
+                    environment: expiryFormData.environment,
                     expiry_date: expiryFormData.expiry_date,
                     warning_days_before: expiryFormData.warning_days_before,
                     critical_days_before: expiryFormData.critical_days_before,
@@ -2144,7 +2251,7 @@ const InfraAlertPage: React.FC = () => {
               }
             }}>
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="col-span-2">
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Alert Type *</label>
                   <select
                     value={expiryFormData.alert_type}
@@ -2157,6 +2264,17 @@ const InfraAlertPage: React.FC = () => {
                     <option value="aaf_account">AAF Account Expiry</option>
                     <option value="database_account">Database Account Expiry</option>
                     <option value="itservices_domain">ITServices Domain Expiry</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Environment *</label>
+                  <select
+                    value={expiryFormData.environment || "non_prod"}
+                    onChange={(e) => setExpiryFormData({ ...expiryFormData, environment: e.target.value as EnvClassification })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="non_prod">NPROD</option>
+                    <option value="prod">PROD</option>
                   </select>
                 </div>
                 <div>
@@ -2780,6 +2898,7 @@ const InfraAlertPage: React.FC = () => {
       resource_identifier: "",
       expiry_date: "",
       description: "",
+      environment: "non_prod",
       warning_days_before: 30,
       critical_days_before: 7,
       notification_emails: [],
@@ -2829,7 +2948,7 @@ const InfraAlertPage: React.FC = () => {
     const diskSort = tblSort("disks", "name", "asc");
     const pgServerSort = tblSort("pgServers", "name", "asc");
     const { items: pagedVMs, total: totalVMs, page: vmPage } = filterAndPaginate(
-      azureVMs, tbl("vms").search, tbl("vms").page,
+      filteredAzureVMs, tbl("vms").search, tbl("vms").page,
       (v) => [v.name, v.resource_group, v.location, v.vm_size, v.power_state],
       vmSort,
       {
@@ -2841,7 +2960,7 @@ const InfraAlertPage: React.FC = () => {
       },
     );
     const { items: pagedSA, total: totalSA, page: saPage } = filterAndPaginate(
-      storageAccounts, tbl("storageAccounts").search, tbl("storageAccounts").page,
+      filteredStorageAccounts, tbl("storageAccounts").search, tbl("storageAccounts").page,
       (s) => [s.name, s.resource_group, s.location, s.kind, s.sku],
       storageSort,
       {
@@ -2855,7 +2974,7 @@ const InfraAlertPage: React.FC = () => {
       },
     );
     const { items: pagedDisks, total: totalDisks, page: diskPage } = filterAndPaginate(
-      disks, tbl("disks").search, tbl("disks").page,
+      filteredDisks, tbl("disks").search, tbl("disks").page,
       (d) => [d.name, d.resource_group, d.location, d.sku, d.os_type, d.disk_state],
       diskSort,
       {
@@ -2870,35 +2989,51 @@ const InfraAlertPage: React.FC = () => {
     );
     return (
       <div className="space-y-6">
+        {/* Subscription Filter */}
+        <div className="flex items-center gap-4">
+          <select
+            value={subscriptionFilter}
+            onChange={(e) => setSubscriptionFilter(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All Subscriptions</option>
+            {scopedSubscriptions.map((s) => (
+              <option key={s.subscription_id} value={s.subscription_id}>
+                {s.subscription_name}
+              </option>
+            ))}
+          </select>
+        </div>
+
         {/* Resource Summary */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <StatCard
             title="Total Resources"
-            value={inventorySummary?.total_resources || 0}
+            value={filteredAzureVMs.length + filteredStorageAccounts.length + filteredDisks.length + filteredPGServers.length}
             icon={Icons.database("text-blue-600")}
             color="blue"
           />
           <StatCard
             title="Virtual Machines"
-            value={azureVMs.length}
+            value={filteredAzureVMs.length}
             icon={Icons.server("text-green-600")}
             color="green"
           />
           <StatCard
             title="Storage Accounts"
-            value={storageAccounts.length}
+            value={filteredStorageAccounts.length}
             icon={Icons.database("text-purple-600")}
             color="purple"
           />
           <StatCard
             title="Managed Disks"
-            value={disks.length}
+            value={filteredDisks.length}
             icon={Icons.database("text-orange-600")}
             color="orange"
           />
           <StatCard
             title="PG Flex Servers"
-            value={pgServers.length}
+            value={filteredPGServers.length}
             icon={Icons.database("text-indigo-600")}
             color="indigo"
           />
@@ -3044,6 +3179,132 @@ const InfraAlertPage: React.FC = () => {
             <div className="text-center py-12 text-gray-400">No VMs found. Click "Sync Resources" to load from Azure.</div>
           )}
           <TablePagination currentPage={vmPage} totalItems={totalVMs} onPageChange={(p) => setTblPage("vms", p)} />
+        </div>
+
+        {/* PG Flex Servers Table */}
+        <div className={gridStyles.shell}>
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-800">PostgreSQL Flexible Servers</h3>
+            <SearchBar value={tbl("pgServers").search} onChange={(v) => setTblSearch("pgServers", v)} placeholder="Search PG servers..." />
+          </div>
+          {(() => {
+            const { items: pagedPGServers, total: totalPGServers, page: pgSrvPage } = filterAndPaginate(
+              filteredPGServers, tbl("pgServers").search, tbl("pgServers").page,
+              (s) => [s.name, s.resource_group, s.location, s.state, s.version, s.sku_name],
+              pgServerSort,
+              {
+                name: (s) => s.name,
+                resource_group: (s) => s.resource_group,
+                location: (s) => s.location,
+                state: (s) => s.state,
+                version: (s) => s.version,
+                sku_name: (s) => s.sku_name,
+              },
+            );
+            return (
+              <>
+                <table className={gridStyles.table}>
+                  <thead className={gridStyles.head}>
+                    <tr>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Name" active={pgServerSort.key === "name"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "name", "asc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Resource Group" active={pgServerSort.key === "resource_group"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "resource_group", "asc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Location" active={pgServerSort.key === "location"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "location", "asc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="State" active={pgServerSort.key === "state"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "state", "asc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Version" active={pgServerSort.key === "version"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "version", "asc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="SKU" active={pgServerSort.key === "sku_name"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "sku_name", "asc")} /></th>
+                      <th className={gridStyles.headerCellCenter}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedPGServers.map((server) => (
+                      <tr key={server.id} className={gridStyles.row}>
+                        <td className={gridStyles.strongCell}>{server.name}</td>
+                        <td className={gridStyles.cell}>{server.resource_group}</td>
+                        <td className={gridStyles.cell}>{server.location}</td>
+                        <td className={gridStyles.cell}>
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            server.state === "Ready" ? "bg-green-100 text-green-700" :
+                            server.state === "Stopped" ? "bg-red-100 text-red-700" :
+                            "bg-yellow-100 text-yellow-700"
+                          }`}>{server.state || "Unknown"}</span>
+                        </td>
+                        <td className={gridStyles.cell}>{server.version || "—"}</td>
+                        <td className={gridStyles.cell}>{server.sku_name || "—"}</td>
+                        <td className={gridStyles.centerCell}>
+                          <div className="flex justify-center gap-1">
+                            {canWrite && server.state === "Stopped" && (
+                              <GridActionButton
+                                onClick={() => {
+                                  setPGActionTarget(server.name);
+                                  startPGServerMut.mutate(
+                                    { resource_group: server.resource_group, server_name: server.name },
+                                    {
+                                      onSuccess: () => { showToast(`PG Server '${server.name}' started successfully`); syncResources.mutate("pg-servers"); },
+                                      onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to start PG Server '${server.name}'`, "error"),
+                                      onSettled: () => setPGActionTarget(null),
+                                    },
+                                  );
+                                }}
+                                disabled={pgActionTarget === server.name}
+                                title="Start PG Server"
+                                tone="green"
+                              >
+                                {pgActionTarget === server.name && startPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.play()}
+                              </GridActionButton>
+                            )}
+                            {canWrite && server.state === "Ready" && (
+                              <>
+                                <GridActionButton
+                                  onClick={() => {
+                                    setPGActionTarget(server.name);
+                                    stopPGServerMut.mutate(
+                                      { resource_group: server.resource_group, server_name: server.name },
+                                      {
+                                        onSuccess: () => { showToast(`PG Server '${server.name}' stopped successfully`); syncResources.mutate("pg-servers"); },
+                                        onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to stop PG Server '${server.name}'`, "error"),
+                                        onSettled: () => setPGActionTarget(null),
+                                      },
+                                    );
+                                  }}
+                                  disabled={pgActionTarget === server.name}
+                                  title="Stop PG Server"
+                                  tone="red"
+                                >
+                                  {pgActionTarget === server.name && stopPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.stop()}
+                                </GridActionButton>
+                                <GridActionButton
+                                  onClick={() => {
+                                    setPGActionTarget(server.name);
+                                    restartPGServerMut.mutate(
+                                      { resource_group: server.resource_group, server_name: server.name },
+                                      {
+                                        onSuccess: () => { showToast(`PG Server '${server.name}' restarted successfully`); syncResources.mutate("pg-servers"); },
+                                        onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to restart PG Server '${server.name}'`, "error"),
+                                        onSettled: () => setPGActionTarget(null),
+                                      },
+                                    );
+                                  }}
+                                  disabled={pgActionTarget === server.name}
+                                  title="Restart PG Server"
+                                  tone="orange"
+                                >
+                                  {pgActionTarget === server.name && restartPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.restart()}
+                                </GridActionButton>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {totalPGServers === 0 && (
+                  <div className="text-center py-12 text-gray-400">No PostgreSQL Flexible Servers found. Click &quot;Sync Resources&quot; to load from Azure.</div>
+                )}
+                <TablePagination currentPage={pgSrvPage} totalItems={totalPGServers} onPageChange={(p) => setTblPage("pgServers", p)} />
+              </>
+            );
+          })()}
         </div>
 
         {/* Storage Accounts Table */}
@@ -3208,132 +3469,6 @@ const InfraAlertPage: React.FC = () => {
             <div className="text-center py-12 text-gray-400">No managed disks found. Click &quot;Sync Resources&quot; to load from Azure.</div>
           )}
           <TablePagination currentPage={diskPage} totalItems={totalDisks} onPageChange={(p) => setTblPage("disks", p)} />
-        </div>
-
-        {/* PG Flex Servers Table */}
-        <div className={gridStyles.shell}>
-          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-800">PostgreSQL Flexible Servers</h3>
-            <SearchBar value={tbl("pgServers").search} onChange={(v) => setTblSearch("pgServers", v)} placeholder="Search PG servers..." />
-          </div>
-          {(() => {
-            const { items: pagedPGServers, total: totalPGServers, page: pgSrvPage } = filterAndPaginate(
-              pgServers, tbl("pgServers").search, tbl("pgServers").page,
-              (s) => [s.name, s.resource_group, s.location, s.state, s.version, s.sku_name],
-              pgServerSort,
-              {
-                name: (s) => s.name,
-                resource_group: (s) => s.resource_group,
-                location: (s) => s.location,
-                state: (s) => s.state,
-                version: (s) => s.version,
-                sku_name: (s) => s.sku_name,
-              },
-            );
-            return (
-              <>
-                <table className={gridStyles.table}>
-                  <thead className={gridStyles.head}>
-                    <tr>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Name" active={pgServerSort.key === "name"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "name", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Resource Group" active={pgServerSort.key === "resource_group"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "resource_group", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Location" active={pgServerSort.key === "location"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "location", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="State" active={pgServerSort.key === "state"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "state", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Version" active={pgServerSort.key === "version"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "version", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="SKU" active={pgServerSort.key === "sku_name"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "sku_name", "asc")} /></th>
-                      <th className={gridStyles.headerCellCenter}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedPGServers.map((server) => (
-                      <tr key={server.id} className={gridStyles.row}>
-                        <td className={gridStyles.strongCell}>{server.name}</td>
-                        <td className={gridStyles.cell}>{server.resource_group}</td>
-                        <td className={gridStyles.cell}>{server.location}</td>
-                        <td className={gridStyles.cell}>
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                            server.state === "Ready" ? "bg-green-100 text-green-700" :
-                            server.state === "Stopped" ? "bg-red-100 text-red-700" :
-                            "bg-yellow-100 text-yellow-700"
-                          }`}>{server.state || "Unknown"}</span>
-                        </td>
-                        <td className={gridStyles.cell}>{server.version || "—"}</td>
-                        <td className={gridStyles.cell}>{server.sku_name || "—"}</td>
-                        <td className={gridStyles.centerCell}>
-                          <div className="flex justify-center gap-1">
-                            {canWrite && server.state === "Stopped" && (
-                              <GridActionButton
-                                onClick={() => {
-                                  setPGActionTarget(server.name);
-                                  startPGServerMut.mutate(
-                                    { resource_group: server.resource_group, server_name: server.name },
-                                    {
-                                      onSuccess: () => { showToast(`PG Server '${server.name}' started successfully`); syncResources.mutate("pg-servers"); },
-                                      onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to start PG Server '${server.name}'`, "error"),
-                                      onSettled: () => setPGActionTarget(null),
-                                    },
-                                  );
-                                }}
-                                disabled={pgActionTarget === server.name}
-                                title="Start PG Server"
-                                tone="green"
-                              >
-                                {pgActionTarget === server.name && startPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.play()}
-                              </GridActionButton>
-                            )}
-                            {canWrite && server.state === "Ready" && (
-                              <>
-                                <GridActionButton
-                                  onClick={() => {
-                                    setPGActionTarget(server.name);
-                                    stopPGServerMut.mutate(
-                                      { resource_group: server.resource_group, server_name: server.name },
-                                      {
-                                        onSuccess: () => { showToast(`PG Server '${server.name}' stopped successfully`); syncResources.mutate("pg-servers"); },
-                                        onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to stop PG Server '${server.name}'`, "error"),
-                                        onSettled: () => setPGActionTarget(null),
-                                      },
-                                    );
-                                  }}
-                                  disabled={pgActionTarget === server.name}
-                                  title="Stop PG Server"
-                                  tone="red"
-                                >
-                                  {pgActionTarget === server.name && stopPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.stop()}
-                                </GridActionButton>
-                                <GridActionButton
-                                  onClick={() => {
-                                    setPGActionTarget(server.name);
-                                    restartPGServerMut.mutate(
-                                      { resource_group: server.resource_group, server_name: server.name },
-                                      {
-                                        onSuccess: () => { showToast(`PG Server '${server.name}' restarted successfully`); syncResources.mutate("pg-servers"); },
-                                        onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to restart PG Server '${server.name}'`, "error"),
-                                        onSettled: () => setPGActionTarget(null),
-                                      },
-                                    );
-                                  }}
-                                  disabled={pgActionTarget === server.name}
-                                  title="Restart PG Server"
-                                  tone="orange"
-                                >
-                                  {pgActionTarget === server.name && restartPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.restart()}
-                                </GridActionButton>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {totalPGServers === 0 && (
-                  <div className="text-center py-12 text-gray-400">No PostgreSQL Flexible Servers found. Click &quot;Sync Resources&quot; to load from Azure.</div>
-                )}
-                <TablePagination currentPage={pgSrvPage} totalItems={totalPGServers} onPageChange={(p) => setTblPage("pgServers", p)} />
-              </>
-            );
-          })()}
         </div>
 
         {/* ── Resource Usage Charts ──────────────────────────────── */}

@@ -72,6 +72,11 @@ class CreateExpiryConfigRequest(BaseModel):
     resource_identifier: str = Field(..., description="Unique identifier for the resource")
     expiry_date: datetime = Field(..., description="Expiry date of the resource")
     description: str | None = Field(default=None)
+    environment: str | None = Field(
+        default=None,
+        pattern="^(prod|non_prod)$",
+        description="Environment classification: prod or non_prod",
+    )
     warning_days_before: int = Field(default=30, ge=1)
     critical_days_before: int = Field(default=7, ge=1)
     notification_emails: list[str] = Field(default=[])
@@ -83,6 +88,7 @@ class UpdateExpiryConfigRequest(BaseModel):
 
     resource_name: str | None = None
     description: str | None = None
+    environment: str | None = Field(default=None, pattern="^(prod|non_prod)$")
     expiry_date: datetime | None = None
     warning_days_before: int | None = Field(default=None, ge=1)
     critical_days_before: int | None = Field(default=None, ge=1)
@@ -554,6 +560,7 @@ async def create_expiry_config(
         critical_days_before=request.critical_days_before,
         notification_emails=request.notification_emails,
         metadata=request.metadata,
+        environment=request.environment,
     )
 
 

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ── Application ───────────────────────────────────────────────────
-    APP_VERSION: str = "1.2.0"
+    APP_VERSION: str = "1.3.0"
     ENVIRONMENT: str = Field(default="development", description="development | staging | production")
     LOG_LEVEL: str = "INFO"
     DEBUG: bool = False
@@ -147,6 +147,84 @@ class Settings(BaseSettings):
         default="USD",
         description="Currency code used when querying the Azure Retail Prices API",
     )
+
+    # ── Kubernetes Dashboard Proxy ────────────────────────────────────
+    K8S_DASHBOARD_TOKEN_PROD: str = Field(default="", description="Bearer token for Production K8s Dashboard")
+    K8S_DASHBOARD_TOKEN_PREPROD: str = Field(default="", description="Bearer token for PreProd K8s Dashboard")
+    K8S_DASHBOARD_TOKEN_PERF: str = Field(default="", description="Bearer token for Performance K8s Dashboard")
+    K8S_DASHBOARD_TOKEN_UAT: str = Field(default="", description="Bearer token for UAT K8s Dashboard")
+    K8S_DASHBOARD_TOKEN_DEV: str = Field(default="", description="Bearer token for Development K8s Dashboard")
+    K8S_DASHBOARD_TOKEN_DR: str = Field(default="", description="Bearer token for DR K8s Dashboard")
+    K8S_DASHBOARD_SESSION_SECRET: str = Field(
+        default="",
+        description="Secret used to sign K8s Dashboard launch and session tokens",
+    )
+    K8S_DASHBOARD_PROXY_TIMEOUT: int = Field(
+        default=30, description="Timeout in seconds for proxied dashboard requests"
+    )
+
+    # ── Keyfactor Command (Certificate Lifecycle) ─────────────────────
+    # Certificate management authenticates to Keyfactor via an Azure AD
+    # service principal (OAuth2 client-credentials). All values are config
+    # driven — never hardcode secrets or environment-specific URLs.
+    KEYFACTOR_BASE_URL: str = Field(
+        default="",
+        description="Base URL of the Keyfactor Command instance, e.g. https://keyfactor.example.com",
+    )
+    KEYFACTOR_TENANT_ID: str = Field(
+        default="",
+        description="Azure AD tenant ID for the Keyfactor service principal (defaults to AZURE_TENANT_ID)",
+    )
+    KEYFACTOR_CLIENT_ID: str = Field(
+        default="",
+        description="Client ID of the Azure AD service principal used to obtain Keyfactor tokens",
+    )
+    KEYFACTOR_CLIENT_SECRET: str = Field(
+        default="",
+        description="Client secret of the Keyfactor service principal (source from Key Vault / env)",
+    )
+    KEYFACTOR_OAUTH_SCOPE: str = Field(
+        default="",
+        description="OAuth2 scope/resource for the Keyfactor API app registration, e.g. api://<app-id>/.default",
+    )
+    KEYFACTOR_TOKEN_URL: str = Field(
+        default="",
+        description="Optional explicit OAuth2 token endpoint. Defaults to the tenant v2.0 token endpoint.",
+    )
+    KEYFACTOR_API_VERSION: str = Field(
+        default="1",
+        description="Value for the x-keyfactor-api-version header",
+    )
+    KEYFACTOR_TIMEOUT_SECONDS: int = Field(
+        default=30,
+        description="Timeout in seconds for Keyfactor and token requests",
+    )
+    KEYFACTOR_VERIFY_SSL: bool = Field(
+        default=True,
+        description="Verify TLS certificates when calling Keyfactor",
+    )
+    KEYFACTOR_DEFAULT_CA: str = Field(
+        default="",
+        description="Optional default issuing CA (logical name) used to pre-fill enrollment",
+    )
+    KEYFACTOR_DEFAULT_TEMPLATE: str = Field(
+        default="",
+        description="Optional default certificate template short name used to pre-fill enrollment",
+    )
+    KEYFACTOR_LIST_CACHE_TTL: int = Field(
+        default=60,
+        description="Short-lived cache TTL (seconds) for certificate search results",
+    )
+
+    @property
+    def keyfactor_tenant_id(self) -> str:
+        return self.KEYFACTOR_TENANT_ID or self.AZURE_TENANT_ID
+
+    @property
+    def keyfactor_token_url(self) -> str:
+        if self.KEYFACTOR_TOKEN_URL:
+            return self.KEYFACTOR_TOKEN_URL
+        return f"https://login.microsoftonline.com/{self.keyfactor_tenant_id}/oauth2/v2.0/token"
 
     # ── RBAC Roles ────────────────────────────────────────────────────
     ROLE_ADMIN: str = "OpsPortal.Admin"

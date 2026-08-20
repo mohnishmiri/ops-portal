@@ -208,10 +208,7 @@ const isAdmin = useIsAdmin();
 
 4. **Audit trail** — The `UserContext` is attached to `request.state` by `get_current_user()`. Future middleware can log all API calls with the user identity for audit purposes (the `AuditLogEntry` model is already defined).
 
-5. **Subscription-level access (v1.2.0)** — Two layers are live:
-   - **Admin monitored set:** `admin_subscriptions.enabled AND monitored` — controls sync ingestion and the maximum portal data set.
-   - **Per-user picker:** `user_subscription_preferences` + `bind_subscription_scope` — each user can narrow reads without affecting others.
-   - **RBAC hook:** `UserContext.allowed_subscriptions` is still empty by default (= all monitored). Populate from a custom claim or DB mapping to enforce org-wide subscription RBAC; `resolve_effective_subscription_ids()` already intersects it.
+5. **Subscription-level access** — The `UserContext.allowed_subscriptions` field supports future per-subscription RBAC. Currently empty (= access all). Can be populated from a database mapping table.
 
 ---
 

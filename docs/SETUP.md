@@ -42,7 +42,7 @@ The application requires a Service Principal with **Reader** access to the targe
 | `AZURE_TENANT_ID`       | `e741d71c-c6b6-47b0-803c-0f3b32b07556`          |
 | `AZURE_CLIENT_ID`       | `68a52619-4061-448c-8264-922aedba1b5b`           |
 | `AZURE_CLIENT_SECRET`   | *(your client secret)*                           |
-| `AZURE_SUBSCRIPTION_IDS`| Comma-separated subscription GUIDs (fallback when DB empty) |
+| `AZURE_SUBSCRIPTION_IDS`| Comma-separated subscription GUIDs               |
 
 ---
 
@@ -119,15 +119,6 @@ KEYVAULT_URL=
 ```
 
 > **Important**: Never commit secrets to Git. The `.env` file should be in `.gitignore`.
-
-### Subscription scoping (v1.2.0)
-
-1. **Admin panel** — Register subscriptions and set `enabled` + `monitored`. Only `enabled AND monitored` rows are synced and appear in the user picker. Optional `environment` tags drive Prod/Non-Prod cost classification (falls back to subscription name when empty).
-2. **Per-user picker** — The nav **Subscription scope** control saves preferences per Entra user (`user_subscription_preferences`). Empty selection = all monitored subscriptions. Other users are unaffected.
-3. **API reads** — Scoped GET requests include `subscription_ids` query params when narrowed. Backend resolves effective scope via `app/core/subscription_scope.py` (query param or saved preference).
-4. **Sync jobs** — Scheduler/startup always sync the full admin-monitored set. Manual **amortized** sync only refreshes the user's narrowed scope when the picker is set; leadership manual sync stays global.
-
-See `docs/ARCHITECTURE.md` §2.4 and `backend/README.md` for details.
 
 ---
 

@@ -77,6 +77,12 @@ export interface Deployment {
   memory_limit?: string;
 }
 
+export interface DeploymentDetail {
+  name: string;
+  namespace: string;
+  yaml: string;
+}
+
 export interface PodMetrics {
   namespace: string;
   pod_name: string;
@@ -90,6 +96,7 @@ export interface PodMetrics {
   host_ip?: string;
   service_account?: string;
   restart_policy?: string;
+  started_at?: string;
   labels?: Record<string, string>;
   conditions?: Array<{ type: string; status: string }>;
   total_cpu_request?: number;
@@ -202,9 +209,8 @@ export interface ConfigMapDetail {
   labels: Record<string, string>;
   annotations: Record<string, string>;
   created_at: string;
-  detail_source?: "live" | "db" | "unavailable";
+  detail_source?: "live" | "unavailable";
   data_unavailable_reason?: string;
-  _last_sync?: string | null;
 }
 
 export interface ScaleHistory {
@@ -280,6 +286,10 @@ export interface ClusterActionResult {
 // ── API Functions ─────────────────────────────────────────────────────
 
 const API_PREFIX = "/aks";
+
+/** If the previous fetch is still in-flight, wait longer before retrying; otherwise use the normal interval. */
+const safeInterval = (ms: number) => (query: { state: { fetchStatus: string } }) =>
+  query.state.fetchStatus === "fetching" ? ms * 2 : ms;
 
 // Clusters
 export async function fetchClusters(
@@ -362,6 +372,30 @@ export async function fetchCachedDeployments(
     params.set("namespace", namespace);
   }
   const { data } = await apiClient.get(`${API_PREFIX}/deployments/cached`, { params, timeout: 8000 });
+  return data;
+}
+
+// Lightweight status-only poll (name + replicas) for smooth real-time updates
+export interface DeploymentStatus {
+  name: string;
+  namespace: string;
+  replicas: number;
+  ready_replicas: number;
+}
+
+export async function fetchDeploymentStatuses(
+  clusterId: string,
+  namespace?: string,
+  live = false
+): Promise<{ statuses: DeploymentStatus[]; count: number }> {
+  const params = new URLSearchParams({ cluster_id: clusterId });
+  if (namespace) {
+    params.set("namespace", namespace);
+  }
+  if (live) {
+    params.set("live", "true");
+  }
+  const { data } = await apiClient.get(`${API_PREFIX}/deployments/status`, { params, timeout: 8000 });
   return data;
 }
 
@@ -458,18 +492,6 @@ export async function deleteDeployment(
 }
 
 // Pod Metrics
-export async function fetchCachedPodMetrics(
-  clusterId: string,
-  namespace?: string
-): Promise<{ source: string; last_sync: string | null; pods: PodMetrics[]; count: number }> {
-  const params = new URLSearchParams({ cluster_id: clusterId });
-  if (namespace) {
-    params.set("namespace", namespace);
-  }
-  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics/cached`, { params });
-  return data;
-}
-
 export async function fetchPodMetrics(
   clusterId: string,
   namespace?: string,
@@ -482,7 +504,7 @@ export async function fetchPodMetrics(
   if (refresh) {
     params.set("refresh", "true");
   }
-  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics`, { params, timeout: 30000 });
+  const { data } = await apiClient.get(`${API_PREFIX}/pods/metrics`, { params, timeout: 60000 });
   return data;
 }
 
@@ -639,6 +661,16 @@ export async function fetchCachedCronJobs(
   return data;
 }
 
+export async function fetchDeploymentDetail(
+  clusterId: string,
+  namespace: string,
+  name: string,
+): Promise<DeploymentDetail> {
+  const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
+  const { data } = await apiClient.get(`${API_PREFIX}/deployments/details`, { params });
+  return data;
+}
+
 // Sync CronJobs from Kubernetes to DB
 export async function syncCronJobsToDb(
   clusterId: string,
@@ -759,20 +791,6 @@ export async function triggerCronJob(
   return data;
 }
 
-const EXTENDED_DETAIL_QUERY_OPTIONS = {
-  staleTime: 2 * 60 * 1000,
-  gcTime: 10 * 60 * 1000,
-  retry: 1,
-  refetchOnWindowFocus: false,
-} as const;
-
-const EXTENDED_LIST_QUERY_OPTIONS = {
-  staleTime: 5 * 60 * 1000,
-  gcTime: 10 * 60 * 1000,
-  retry: false,
-  refetchOnWindowFocus: false,
-} as const;
-
 // ConfigMaps
 export async function fetchConfigMaps(
   clusterId: string,
@@ -789,7 +807,7 @@ export async function fetchConfigMapDetail(
   name: string
 ): Promise<ConfigMapDetail> {
   const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
-  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/detail`, { params, timeout: 8000 });
+  const { data } = await apiClient.get(`${API_PREFIX}/configmaps/detail`, { params });
   return data;
 }
 
@@ -956,11 +974,7 @@ export async function fetchSyncJob(jobId: number): Promise<SyncJobDetail> {
   return data;
 }
 
-const AKS_SYNC_THROTTLE_MS = 3 * 60 * 1000;
-// Client-side watchdog: stop the spinner if a job never resolves (worker down,
-// job stuck "running", or the status poll keeps failing). Without this the
-// button can spin indefinitely because nothing else clears jobId.
-const AKS_SYNC_WATCHDOG_MS = 4 * 60 * 1000;
+const AKS_SYNC_THROTTLE_MS = 10_000; // 10s — sync from K8s for near-real-time
 const aksSyncCompletedAt = new Map<string, number>();
 const aksSyncAttemptedAt = new Map<string, number>();
 
@@ -977,7 +991,7 @@ function invalidateAksResourceQueries(
     clusters: ["aks-clusters-cached", "aks-clusters"],
     nodepools: ["aks-nodepools-cached", "aks-nodepools"],
     deployments: ["aks-deployments-cached", "aks-deployments"],
-    pods: ["aks-pod-metrics-cached", "aks-pod-metrics"],
+    pods: ["aks-pod-metrics"],
     cronjobs: ["aks-cronjobs-cached", "aks-cronjobs"],
     services: ["aks-services-cached"],
     secrets: ["aks-secrets-cached"],
@@ -1017,16 +1031,19 @@ export function useAksBackgroundSync(args: {
   const [error, setError] = useState<string | null>(null);
   const [lastStatus, setLastStatus] = useState<string>("idle");
   const processedJobRef = useRef<number | null>(null);
-  const pollStartedAtRef = useRef<number | null>(null);
+  const jobIdRef = useRef<number | null>(null);
+  const pendingRef = useRef(false);
   const syncKey = aksSyncKey(resourceType, clusterId, namespace);
 
   const enqueueMutation = useMutation({
     mutationFn: (force: boolean = false) =>
       enqueueAksResourceSync({ resourceType, clusterId, namespace, force }),
+    onMutate: () => { pendingRef.current = true; },
+    onSettled: () => { pendingRef.current = false; },
     onSuccess: (res) => {
       processedJobRef.current = null;
-      pollStartedAtRef.current = Date.now();
       setJobId(res.job_id);
+      jobIdRef.current = res.job_id;
       setLastStatus(res.status || "queued");
       setError(null);
     },
@@ -1044,7 +1061,7 @@ export function useAksBackgroundSync(args: {
       const status = query.state.data?.status;
       return status === "queued" || status === "running" ? 3000 : false;
     },
-    retry: 2,
+    retry: false,
     refetchOnWindowFocus: false,
   });
 
@@ -1055,13 +1072,28 @@ export function useAksBackgroundSync(args: {
     enqueueMutation.mutate(force);
   };
 
+  // Auto-trigger sync on an interval (checks throttle internally)
   useEffect(() => {
     if (!auto || !enabled) return;
     if (resourceType !== "clusters" && !clusterId) return;
-    if (enqueueMutation.isPending || jobId) return;
-    const lastActivityAt = Math.max(aksSyncCompletedAt.get(syncKey) || 0, aksSyncAttemptedAt.get(syncKey) || 0);
-    if (Date.now() - lastActivityAt < throttleMs) return;
-    start(false);
+
+    const trySync = () => {
+      // Skip if a sync is already in-flight or a job is being tracked
+      if (pendingRef.current || jobIdRef.current) return;
+      const lastActivityAt = Math.max(
+        aksSyncCompletedAt.get(syncKey) || 0,
+        aksSyncAttemptedAt.get(syncKey) || 0
+      );
+      if (Date.now() - lastActivityAt < throttleMs) return;
+      start(false);
+    };
+
+    // Fire immediately on mount/tab-switch
+    trySync();
+
+    // Then check more frequently than throttle so we pick up completions quickly
+    const timer = setInterval(trySync, Math.min(throttleMs, 5_000));
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, enabled, syncKey, throttleMs]);
 
@@ -1071,59 +1103,22 @@ export function useAksBackgroundSync(args: {
     setLastStatus(job.status);
     if (job.status === "completed" && processedJobRef.current !== job.id) {
       processedJobRef.current = job.id;
-      pollStartedAtRef.current = null;
       aksSyncCompletedAt.set(syncKey, Date.now());
       invalidateAksResourceQueries(queryClient, resourceType, clusterId);
       setError(null);
       setJobId(null);
+      jobIdRef.current = null;
     }
     if (job.status === "failed") {
-      pollStartedAtRef.current = null;
       setError(job.last_error || "Background refresh failed");
       setJobId(null);
+      jobIdRef.current = null;
     }
   }, [clusterId, jobQuery.data, queryClient, resourceType, syncKey]);
 
-  // Recovery guards — without these the spinner can never clear if the job
-  // gets stuck "running" (worker down / hung Azure call) or the status poll
-  // keeps failing. Both paths reset jobId so the button becomes clickable again.
-  useEffect(() => {
-    if (!jobId) return;
-
-    // 1. The status poll has exhausted its retries and is still failing.
-    if (jobQuery.isError) {
-      const err = jobQuery.error as { response?: { data?: { detail?: string } }; message?: string };
-      pollStartedAtRef.current = null;
-      setError(err?.response?.data?.detail || err?.message || "Lost contact with the sync job");
-      setLastStatus("failed");
-      setJobId(null);
-      return;
-    }
-
-    // 2. Watchdog — the job has been queued/running far longer than expected.
-    const timer = setInterval(() => {
-      if (
-        pollStartedAtRef.current &&
-        Date.now() - pollStartedAtRef.current > AKS_SYNC_WATCHDOG_MS
-      ) {
-        pollStartedAtRef.current = null;
-        setError("Sync is taking longer than expected. It may still finish in the background — try again shortly.");
-        setLastStatus("failed");
-        setJobId(null);
-      }
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [jobId, jobQuery.isError, jobQuery.error]);
-
-  // Ignore stale poll data once jobId is cleared — React Query keeps the last
-  // result around until GC, which would otherwise keep the spinner stuck.
-  const polledStatus = jobId ? jobQuery.data?.status : undefined;
   const isRunning =
     enqueueMutation.isPending ||
-    lastStatus === "queued" ||
-    lastStatus === "running" ||
-    polledStatus === "queued" ||
-    polledStatus === "running";
+    (!!jobId && lastStatus !== "completed" && lastStatus !== "failed" && lastStatus !== "idle");
 
   return {
     start,
@@ -1148,7 +1143,7 @@ export function useClusters(subscriptionIds?: string[], environment?: string) {
   });
 }
 
-export function useCachedClusters(environment?: string) {
+export function useCachedClusters(environment?: string, autoRefresh = true) {
   return useQuery({
     queryKey: ["aks-clusters-cached", environment],
     queryFn: () => fetchCachedClusters(environment),
@@ -1158,9 +1153,9 @@ export function useCachedClusters(environment?: string) {
       clusters: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
+    staleTime: autoRefresh ? 4_000 : 5 * 60 * 1000,
+    gcTime: 60_000,
+    refetchInterval: autoRefresh ? safeInterval(5_000) : false,
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -1193,16 +1188,61 @@ export function useCachedDeployments(clusterId: string, namespace?: string, enab
     queryKey: ["aks-deployments-cached", clusterId, namespace],
     queryFn: () => fetchCachedDeployments(clusterId, namespace),
     enabled: !!clusterId && enabled,
-    placeholderData: {
+    placeholderData: (prev) => prev ?? {
       source: "db",
       last_sync: null,
       deployments: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
-    retry: false,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000), // full refetch every 5s for real-time grid
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/**
+ * Lightweight status-only poll that runs every 5 seconds by default.
+ * Merges status (replicas/ready_replicas) into cached deployment data
+ * without triggering a full refetch — only the Status column re-renders.
+ */
+export function useDeploymentStatusPoll(clusterId: string, namespace?: string, enabled = true, intervalMs = 5_000, live = false) {
+  const queryClient = useQueryClient();
+  return useQuery({
+    queryKey: ["aks-deployment-status", clusterId, namespace, live],
+    queryFn: async () => {
+      const result = await fetchDeploymentStatuses(clusterId, namespace, live);
+      // Merge status into cached deployments without full refetch
+      queryClient.setQueryData<{
+        source: string;
+        last_sync: string | null;
+        deployments: Deployment[];
+        count: number;
+      }>(["aks-deployments-cached", clusterId, namespace], (prev) => {
+        if (!prev || !prev.deployments.length) return prev;
+        const statusMap = new Map(
+          result.statuses.map((s) => [`${s.namespace}/${s.name}`, s])
+        );
+        let changed = false;
+        const updated = prev.deployments.map((d) => {
+          const key = `${d.namespace}/${d.name}`;
+          const st = statusMap.get(key);
+          if (st && (st.replicas !== d.replicas || st.ready_replicas !== d.ready_replicas)) {
+            changed = true;
+            return { ...d, replicas: st.replicas, ready_replicas: st.ready_replicas };
+          }
+          return d;
+        });
+        return changed ? { ...prev, deployments: updated } : prev;
+      });
+      return result;
+    },
+    enabled: !!clusterId && enabled,
+    refetchInterval: intervalMs > 0 ? safeInterval(intervalMs) : false,
+    staleTime: Math.max(intervalMs - 5000, 3000),
+    gcTime: 60_000,
+    retry: 1,
     refetchOnWindowFocus: false,
   });
 }
@@ -1238,7 +1278,9 @@ export function useScaleDeployment() {
         queryKey: ["aks-deployments", variables.clusterId],
       });
       queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployment-status"] });
       queryClient.invalidateQueries({ queryKey: ["aks-scale-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1259,6 +1301,9 @@ export function useRestartDeployment() {
       queryClient.invalidateQueries({
         queryKey: ["aks-deployments", variables.clusterId],
       });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployment-status"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1269,7 +1314,9 @@ export function useCreateDeployment() {
     mutationFn: (payload: Parameters<typeof createDeployment>[0]) => createDeployment(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
       queryClient.invalidateQueries({ queryKey: ["aks-scale-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1280,7 +1327,9 @@ export function useUpdateDeployment() {
     mutationFn: (payload: Parameters<typeof updateDeployment>[0]) => updateDeployment(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
       queryClient.invalidateQueries({ queryKey: ["aks-scale-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1299,27 +1348,10 @@ export function useDeleteDeployment() {
     }) => deleteDeployment(clusterId, namespace, name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
       queryClient.invalidateQueries({ queryKey: ["aks-scale-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
-  });
-}
-
-export function useCachedPodMetrics(clusterId: string, namespace?: string, enabled = true) {
-  return useQuery({
-    queryKey: ["aks-pod-metrics-cached", clusterId, namespace],
-    queryFn: () => fetchCachedPodMetrics(clusterId, namespace),
-    enabled: !!clusterId && enabled,
-    placeholderData: {
-      source: "db",
-      last_sync: null,
-      pods: [],
-      count: 0,
-    },
-    staleTime: 60 * 1000,
-    gcTime: 3 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
-    retry: false,
-    refetchOnWindowFocus: false,
   });
 }
 
@@ -1328,14 +1360,14 @@ export function usePodMetrics(clusterId: string, namespace?: string, enabled = t
     queryKey: ["aks-pod-metrics", clusterId, namespace],
     queryFn: () => fetchPodMetrics(clusterId, namespace),
     enabled: !!clusterId && enabled,
-    placeholderData: {
+    placeholderData: (prev) => prev ?? {
       pods: [],
       count: 0,
     },
-    staleTime: 60 * 1000,
-    gcTime: 3 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
-    retry: false,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000), // refetch every 5s for real-time pod metrics
+    retry: 1,
     refetchOnWindowFocus: false,
   });
 }
@@ -1442,16 +1474,16 @@ export function useCachedCronJobs(clusterId: string, namespace?: string, enabled
     queryKey: ["aks-cronjobs-cached", clusterId, namespace],
     queryFn: () => fetchCachedCronJobs(clusterId, namespace),
     enabled: !!clusterId && enabled,
-    placeholderData: {
+    placeholderData: (prev) => prev ?? {
       source: "db",
       last_sync: null,
       cronjobs: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
-    retry: false,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
+    retry: 1,
     refetchOnWindowFocus: false,
   });
 }
@@ -1516,6 +1548,7 @@ export function useSuspendCronJob() {
       await queryClient.invalidateQueries({
         queryKey: ["aks-cronjobs", variables.clusterId],
       });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1526,6 +1559,8 @@ export function useCreateCronJob() {
     mutationFn: (payload: Parameters<typeof createCronJob>[0]) => createCronJob(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-cronjobs-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1536,6 +1571,8 @@ export function useUpdateCronJob() {
     mutationFn: (payload: Parameters<typeof updateCronJob>[0]) => updateCronJob(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-cronjobs-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1554,6 +1591,8 @@ export function useDeleteCronJob() {
     }) => deleteCronJob(clusterId, namespace, name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-cronjobs-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1564,6 +1603,17 @@ export function useCronJobDetail(clusterId: string, namespace: string, name: str
     queryFn: () => fetchCronJobDetail(clusterId, namespace, name),
     enabled: !!clusterId && !!namespace && !!name,
     staleTime: 2 * 60 * 1000, // 2 min — matches backend Redis TTL
+    gcTime: 5 * 60 * 1000,
+    retry: 1,
+  });
+}
+
+export function useDeploymentDetail(clusterId: string, namespace: string, name: string) {
+  return useQuery({
+    queryKey: ["aks-deployment-detail", clusterId, namespace, name],
+    queryFn: () => fetchDeploymentDetail(clusterId, namespace, name),
+    enabled: !!clusterId && !!namespace && !!name,
+    staleTime: 2 * 60 * 1000,
     gcTime: 5 * 60 * 1000,
     retry: 1,
   });
@@ -1584,6 +1634,7 @@ export function useTriggerCronJob() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs"] });
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -1604,7 +1655,9 @@ export function useConfigMapDetail(clusterId: string, namespace: string, name: s
     queryKey: ["aks-configmap-detail", clusterId, namespace, name],
     queryFn: () => fetchConfigMapDetail(clusterId, namespace, name),
     enabled: !!clusterId && !!namespace && !!name,
-    ...EXTENDED_DETAIL_QUERY_OPTIONS,
+    staleTime: 2 * 60 * 1000,
+    gcTime: 5 * 60 * 1000,
+    retry: 1,
   });
 }
 
@@ -1647,9 +1700,9 @@ export function useCachedNodePools(clusterId: string, enabled = true) {
       node_pools: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -1718,6 +1771,7 @@ export function useStartCluster() {
     mutationFn: ({ clusterId }: { clusterId: string }) => startCluster(clusterId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-clusters-cached"] });
     },
   });
 }
@@ -1728,6 +1782,7 @@ export function useStopCluster() {
     mutationFn: ({ clusterId }: { clusterId: string }) => stopCluster(clusterId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-clusters-cached"] });
     },
   });
 }
@@ -1751,7 +1806,6 @@ export function refreshDeployments(queryClient: ReturnType<typeof useQueryClient
 
 export function refreshPodMetrics(queryClient: ReturnType<typeof useQueryClient>, clusterId: string) {
   fetchPodMetrics(clusterId, undefined, true).then(() => {
-    queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics-cached", clusterId] });
     queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics", clusterId] });
   });
 }
@@ -1807,7 +1861,6 @@ export function useInvalidateCache() {
       // After flushing backend cache, also invalidate all frontend queries
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
       queryClient.invalidateQueries({ queryKey: ["aks-deployments"] });
-      queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics-cached"] });
       queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics"] });
       queryClient.invalidateQueries({ queryKey: ["aks-cronjobs"] });
       queryClient.invalidateQueries({ queryKey: ["aks-nodepools"] });
@@ -1835,9 +1888,6 @@ export interface SecretDetail {
   keys: string[];
   labels?: Record<string, string>;
   created_at?: string;
-  detail_source?: "live" | "db" | "db_masked";
-  data_unavailable_reason?: string;
-  _last_sync?: string | null;
 }
 
 export interface K8sService {
@@ -1860,8 +1910,6 @@ export interface ServiceDetail {
   selector?: Record<string, string>;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
-  detail_source?: "live" | "db";
-  _last_sync?: string | null;
 }
 
 export interface K8sIngress {
@@ -1872,8 +1920,6 @@ export interface K8sIngress {
   tls_secrets?: string[];
   address?: string;
   ingress_class?: string;
-  created_at?: string;
-  updated?: string;
 }
 
 export interface HelmRelease {
@@ -1912,8 +1958,6 @@ export interface IngressDetail {
   address?: string;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
-  detail_source?: "live" | "db";
-  _last_sync?: string | null;
 }
 
 export interface CachedExtendedList<T> {
@@ -1930,6 +1974,14 @@ function extendedCachedParams(clusterId: string, namespace?: string) {
   }
   return params;
 }
+
+const EXTENDED_QUERY_OPTIONS = {
+  staleTime: 4_000,
+  gcTime: 60_000,
+  refetchInterval: safeInterval(5_000),
+  retry: false,
+  refetchOnWindowFocus: false,
+} as const;
 
 export async function fetchCachedSecrets(clusterId: string, namespace?: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/secrets/cached`, {
@@ -1952,7 +2004,6 @@ export async function deleteSecretApi(clusterId: string, namespace: string, name
 export async function fetchSecretDetail(clusterId: string, namespace: string, name: string, reveal = false) {
   const { data } = await apiClient.get(`${API_PREFIX}/secrets/detail`, {
     params: { cluster_id: clusterId, namespace, name, reveal },
-    timeout: reveal ? 20000 : 8000,
   });
   return data as SecretDetail;
 }
@@ -2005,7 +2056,6 @@ export async function deleteServiceApi(clusterId: string, namespace: string, nam
 export async function fetchServiceDetail(clusterId: string, namespace: string, name: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/services/detail`, {
     params: { cluster_id: clusterId, namespace, name },
-    timeout: 8000,
   });
   return data as ServiceDetail;
 }
@@ -2020,6 +2070,27 @@ export async function createServiceApi(
   serviceType = "ClusterIP"
 ) {
   const { data } = await apiClient.post(`${API_PREFIX}/services`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    port,
+    target_port: targetPort,
+    selector,
+    service_type: serviceType,
+  });
+  return data;
+}
+
+export async function updateServiceApi(
+  clusterId: string,
+  namespace: string,
+  name: string,
+  port: number,
+  targetPort: number | string,
+  selector: Record<string, string>,
+  serviceType = "ClusterIP"
+) {
+  const { data } = await apiClient.put(`${API_PREFIX}/services`, {
     cluster_id: clusterId,
     namespace,
     name,
@@ -2087,10 +2158,28 @@ export async function deleteIngressApi(clusterId: string, namespace: string, nam
   return data;
 }
 
+export async function updateIngressApi(
+  clusterId: string,
+  namespace: string,
+  name: string,
+  rules: Array<{ host?: string; paths: Array<{ path: string; path_type: string; service_name: string; service_port: number }> }>,
+  tls?: Array<{ hosts?: string[]; secret_name: string }> | null,
+  ingressClass?: string | null,
+) {
+  const { data } = await apiClient.put(`${API_PREFIX}/ingress`, {
+    cluster_id: clusterId,
+    namespace,
+    name,
+    rules,
+    tls: tls || undefined,
+    ingress_class: ingressClass || undefined,
+  });
+  return data;
+}
+
 export async function fetchIngressDetail(clusterId: string, namespace: string, name: string) {
   const { data } = await apiClient.get(`${API_PREFIX}/ingress/detail`, {
     params: { cluster_id: clusterId, namespace, name },
-    timeout: 8000,
   });
   return data as IngressDetail;
 }
@@ -2126,7 +2215,7 @@ export function useCachedSecrets(clusterId: string, namespace?: string, enabled 
       secrets: [],
       count: 0,
     },
-    ...EXTENDED_LIST_QUERY_OPTIONS,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -2143,24 +2232,18 @@ export function useDeleteSecret() {
   return useMutation({
     mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
       deleteSecretApi(clusterId, namespace, name),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
-export function useSecretDetail(
-  clusterId: string,
-  namespace: string,
-  name: string,
-  reveal = false,
-  enabled = true,
-  placeholderData?: SecretDetail,
-) {
+export function useSecretDetail(clusterId: string, namespace: string, name: string, reveal = false, enabled = true) {
   return useQuery({
     queryKey: ["aks-secret-detail", clusterId, namespace, name, reveal],
     queryFn: () => fetchSecretDetail(clusterId, namespace, name, reveal),
     enabled: enabled && !!clusterId && !!namespace && !!name,
-    placeholderData,
-    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 
@@ -2169,7 +2252,10 @@ export function useCreateSecret() {
   return useMutation({
     mutationFn: (vars: { clusterId: string; namespace: string; name: string; data: Record<string, string>; secretType?: string }) =>
       createSecretApi(vars.clusterId, vars.namespace, vars.name, vars.data, vars.secretType),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2181,6 +2267,7 @@ export function useUpdateSecret() {
     onSuccess: (_, v) => {
       qc.invalidateQueries({ queryKey: ["aks-secrets-cached", v.clusterId] });
       qc.invalidateQueries({ queryKey: ["aks-secret-detail", v.clusterId, v.namespace, v.name] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -2196,7 +2283,7 @@ export function useCachedServices(clusterId: string, namespace?: string, enabled
       services: [],
       count: 0,
     },
-    ...EXTENDED_LIST_QUERY_OPTIONS,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -2213,7 +2300,10 @@ export function useDeleteService() {
   return useMutation({
     mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
       deleteServiceApi(clusterId, namespace, name),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2222,7 +2312,6 @@ export function useServiceDetail(clusterId: string, namespace: string, name: str
     queryKey: ["aks-service-detail", clusterId, namespace, name],
     queryFn: () => fetchServiceDetail(clusterId, namespace, name),
     enabled: enabled && !!clusterId && !!namespace && !!name,
-    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 
@@ -2239,7 +2328,31 @@ export function useCreateService() {
       serviceType?: string;
     }) =>
       createServiceApi(vars.clusterId, vars.namespace, vars.name, vars.port, vars.targetPort, vars.selector, vars.serviceType),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useUpdateService() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      clusterId: string;
+      namespace: string;
+      name: string;
+      port: number;
+      targetPort: number | string;
+      selector: Record<string, string>;
+      serviceType?: string;
+    }) =>
+      updateServiceApi(vars.clusterId, vars.namespace, vars.name, vars.port, vars.targetPort, vars.selector, vars.serviceType),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-services-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-service-detail", v.clusterId, v.namespace, v.name] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2254,7 +2367,7 @@ export function useCachedConfigMaps(clusterId: string, namespace?: string, enabl
       configmaps: [],
       count: 0,
     },
-    ...EXTENDED_LIST_QUERY_OPTIONS,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -2271,7 +2384,10 @@ export function useDeleteConfigMap() {
   return useMutation({
     mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
       deleteConfigMapApi(clusterId, namespace, name),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2280,7 +2396,10 @@ export function useCreateConfigMap() {
   return useMutation({
     mutationFn: (vars: { clusterId: string; namespace: string; name: string; data: Record<string, string> }) =>
       createConfigMapApi(vars.clusterId, vars.namespace, vars.name, vars.data),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2292,6 +2411,7 @@ export function useUpdateConfigMap() {
     onSuccess: (_, v) => {
       qc.invalidateQueries({ queryKey: ["aks-configmaps-cached", v.clusterId] });
       qc.invalidateQueries({ queryKey: ["aks-configmap-detail", v.clusterId, v.namespace, v.name] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -2307,7 +2427,7 @@ export function useCachedIngress(clusterId: string, namespace?: string, enabled 
       ingress: [],
       count: 0,
     },
-    ...EXTENDED_LIST_QUERY_OPTIONS,
+    ...EXTENDED_QUERY_OPTIONS,
   });
 }
 
@@ -2324,7 +2444,29 @@ export function useDeleteIngress() {
   return useMutation({
     mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
       deleteIngressApi(clusterId, namespace, name),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-ingress-cached", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-ingress-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useUpdateIngress() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      clusterId: string;
+      namespace: string;
+      name: string;
+      rules: Array<{ host?: string; paths: Array<{ path: string; path_type: string; service_name: string; service_port: number }> }>;
+      tls?: Array<{ hosts?: string[]; secret_name: string }> | null;
+      ingressClass?: string | null;
+    }) => updateIngressApi(vars.clusterId, vars.namespace, vars.name, vars.rules, vars.tls, vars.ingressClass),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-ingress-cached", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-ingress-detail", v.clusterId, v.namespace, v.name] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2333,7 +2475,6 @@ export function useIngressDetail(clusterId: string, namespace: string, name: str
     queryKey: ["aks-ingress-detail", clusterId, namespace, name],
     queryFn: () => fetchIngressDetail(clusterId, namespace, name),
     enabled: enabled && !!clusterId && !!namespace && !!name,
-    ...EXTENDED_DETAIL_QUERY_OPTIONS,
   });
 }
 
@@ -2346,8 +2487,9 @@ export function useHelmReleases(clusterId: string, namespace?: string) {
       releases: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -2358,7 +2500,10 @@ export function useUninstallHelmRelease() {
   return useMutation({
     mutationFn: ({ clusterId, releaseName, namespace }: { clusterId: string; releaseName: string; namespace: string }) =>
       uninstallHelmRelease(clusterId, releaseName, namespace),
-    onSuccess: (_, v) => qc.invalidateQueries({ queryKey: ["aks-helm-releases", v.clusterId] }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["aks-helm-releases", v.clusterId] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 
@@ -2367,12 +2512,14 @@ export function useAksNamespaces(clusterId: string | undefined, enabled = true) 
     queryKey: ["aks-namespaces", clusterId],
     queryFn: () => fetchAksNamespaces(clusterId!),
     enabled: !!clusterId && enabled,
-    placeholderData: {
+    placeholderData: (prev) => prev ?? {
       namespaces: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    retry: false,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
+    retry: 2,
     refetchOnWindowFocus: false,
   });
 }
@@ -2385,8 +2532,9 @@ export function useAksAuditHistory(clusterId?: string, namespace?: string) {
       history: [],
       count: 0,
     },
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
     retry: false,
     refetchOnWindowFocus: false,
   });

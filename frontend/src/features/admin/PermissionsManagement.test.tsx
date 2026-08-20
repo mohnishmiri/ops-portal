@@ -15,6 +15,7 @@ import React from "react";
 vi.mock("../../services/permissionsApi", () => ({
   useResources: vi.fn(),
   usePermissions: vi.fn(),
+  useTeams: vi.fn(),
   useCreateResource: vi.fn(),
   useCreatePermission: vi.fn(),
   useDeleteResource: vi.fn(),
@@ -57,6 +58,7 @@ function setup() {
   const mutationStub = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, isError: false };
   vi.mocked(permApi.useResources).mockReturnValue({ data: MOCK_RESOURCES, isLoading: false } as any);
   vi.mocked(permApi.usePermissions).mockReturnValue({ data: MOCK_PERMISSIONS, isLoading: false } as any);
+  vi.mocked(permApi.useTeams).mockReturnValue({ data: [], isLoading: false } as any);
   vi.mocked(permApi.useCreateResource).mockReturnValue(mutationStub as any);
   vi.mocked(permApi.useCreatePermission).mockReturnValue(mutationStub as any);
   vi.mocked(permApi.useDeleteResource).mockReturnValue(mutationStub as any);

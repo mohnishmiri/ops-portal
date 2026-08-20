@@ -40,12 +40,13 @@ export interface ResourceUpdatePayload {
 
 export interface PermissionItem {
   id: number;
-  subject_type: "user" | "role" | string;
+  subject_type: "user" | "role" | "group" | string;
   subject_id: string;
   resource_id: number;
   resource_name?: string | null;
   resource_type?: string | null;
   permission_type: "view" | "edit" | string;
+  environment_scope?: "all" | "prod" | "nonprod" | string;
   created_at?: string;
 }
 
@@ -54,6 +55,7 @@ export interface PermissionCreatePayload {
   subject_id: string;
   resource_id: number;
   permission_type: string;
+  environment_scope?: string;
 }
 
 // ── Resource hooks ────────────────────────────────────────────────────────────
@@ -189,5 +191,100 @@ export function useMyPermissions() {
     },
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
+  });
+}
+
+// ── Team types and hooks ──────────────────────────────────────────────────────
+
+export interface TeamMember {
+  id: number;
+  user_id: string;
+  user_email?: string | null;
+  created_at?: string | null;
+}
+
+export interface TeamItem {
+  id: number;
+  team_name: string;
+  description?: string | null;
+  member_count: number;
+  members: TeamMember[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TeamCreatePayload {
+  team_name: string;
+  description?: string;
+}
+
+export interface TeamMemberPayload {
+  user_id: string;
+  user_email?: string;
+}
+
+export function useTeams() {
+  return useQuery<TeamItem[]>({
+    queryKey: ["permissions", "teams"],
+    queryFn: async () => {
+      const resp = await apiClient.get<TeamItem[]>("/permissions/teams");
+      return resp.data;
+    },
+  });
+}
+
+export function useCreateTeam() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: TeamCreatePayload) => {
+      const resp = await apiClient.post<TeamItem>("/permissions/teams", payload);
+      return resp.data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["permissions", "teams"] }),
+  });
+}
+
+export function useDeleteTeam() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (teamId: number) => {
+      await apiClient.delete(`/permissions/teams/${teamId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["permissions", "teams"] }),
+  });
+}
+
+export function useAddTeamMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ teamId, ...payload }: { teamId: number } & TeamMemberPayload) => {
+      const resp = await apiClient.post(`/permissions/teams/${teamId}/members`, payload);
+      return resp.data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["permissions", "teams"] }),
+  });
+}
+
+export function useRemoveTeamMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ teamId, userId }: { teamId: number; userId: string }) => {
+      await apiClient.delete(`/permissions/teams/${teamId}/members/${userId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["permissions", "teams"] }),
+  });
+}
+
+export function useSyncResources() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const resp = await apiClient.post("/permissions/resources/sync");
+      return resp.data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["permissions", "resources"] });
+      qc.invalidateQueries({ queryKey: ["auth", "my-permissions"] });
+    },
   });
 }

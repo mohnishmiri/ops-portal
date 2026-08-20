@@ -28,7 +28,9 @@ import KeyVaultPage from "./pages/KeyVaultPage";
 import AKSOperationsPage from "./pages/AKSOperationsPage";
 import CompliancePage from "./pages/CompliancePage";
 import InfraAlertPage from "./pages/InfraAlertPage";
+import CertificatesPage from "./pages/CertificatesPage";
 import AmortizedCostDashboard from "./pages/AmortizedCostDashboard";
+import EnvironmentSchedulerPage from "./pages/EnvironmentSchedulerPage";
 import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
@@ -48,7 +50,7 @@ const queryClient = new QueryClient({
 
 // ── Brand ──────────────────────────────────────────────────────────────────────
 
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 const BRAND_LOGO_PATH = "/att-globe.svg?v=20260413c";
 
 const BrandMark: React.FC<{ sizeClassName?: string; imageClassName?: string }> = ({
@@ -80,9 +82,11 @@ const ALL_NAV_ITEMS: NavItem[] = [
   { to: "/",           label: "Cost Forecast", module: "cost_management",  page: "leadership_dashboard" },
   { to: "/env-costs",  label: "Amortized Costs",      module: "cost_management",  page: "amortized_costs" },
   { to: "/keyvault",   label: "Key Vault",             module: "keyvault",         page: "keyvault_main" },
+  { to: "/certificates", label: "Certificates",         module: "certificates",     page: "certificates_main" },
   { to: "/aks",        label: "AKS Operations",        module: "aks_operations",   page: "aks_main" },
   { to: "/compliance", label: "Compliance",            module: "compliance",       page: "compliance_main" },
   { to: "/infra-alerts", label: "Infra Alerts",        module: "infra_alerts",     page: "infra_alerts_main" },
+  { to: "/env-scheduler", label: "Env Scheduler",      module: "aks_operations",   page: "env_scheduler" },
 ];
 
 const Navigation: React.FC = () => {
@@ -328,6 +332,26 @@ const MainContent: React.FC = () => (
             element={
               <ProtectedRoute module="infra_alerts" page="infra_alerts_main" label="Infrastructure Alerts">
                 <InfraAlertPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Certificates */}
+          <Route
+            path="/certificates"
+            element={
+              <ProtectedRoute module="certificates" page="certificates_main" label="Certificate Management">
+                <CertificatesPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Environment Scheduler */}
+          <Route
+            path="/env-scheduler"
+            element={
+              <ProtectedRoute module="aks_operations" page="env_scheduler" label="Environment Scheduler">
+                <EnvironmentSchedulerPage />
               </ProtectedRoute>
             }
           />

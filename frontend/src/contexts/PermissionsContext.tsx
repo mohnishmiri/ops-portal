@@ -29,10 +29,14 @@ import { useAuth } from "./AuthContext";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/** Per-resource permission map: env_scope → list of permission types */
+export type EnvScopedPerms = Record<string, string[]>;
+
 export interface EffectivePermissions {
   is_admin: boolean;
-  modules: Record<string, string[]>; // resource_name → ["view", "edit"]
-  pages: Record<string, string[]>;
+  modules: Record<string, EnvScopedPerms>; // resource_name → { env_scope: ["view","edit"] }
+  pages: Record<string, EnvScopedPerms>;
+  teams?: string[];
 }
 
 interface PermissionsCtx {
@@ -41,8 +45,10 @@ interface PermissionsCtx {
   canViewModule: (moduleName: string) => boolean;
   /** True when the user can view a specific page. */
   canViewPage: (pageName: string) => boolean;
-  /** True when the user can perform write actions on a page. */
+  /** True when the user can perform write actions on a page (any environment). */
   canEditPage: (pageName: string) => boolean;
+  /** True when the user can perform write actions for a specific environment. */
+  canEditPageForEnv: (pageName: string, environment: string) => boolean;
   /** Raw effective permissions from the backend (null while loading). */
   effectivePermissions: EffectivePermissions | null;
 }
@@ -54,7 +60,8 @@ const FULL_ACCESS_CTX: PermissionsCtx = {
   canViewModule: () => true,
   canViewPage: () => true,
   canEditPage: () => true,
-  effectivePermissions: { is_admin: true, modules: {}, pages: {} },
+  canEditPageForEnv: () => true,
+  effectivePermissions: { is_admin: true, modules: {}, pages: {}, teams: [] },
 };
 
 const PermissionsContext = createContext<PermissionsCtx>(FULL_ACCESS_CTX);
@@ -91,26 +98,46 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
         canViewModule: () => false,
         canViewPage: () => false,
         canEditPage: () => false,
+        canEditPageForEnv: () => false,
         effectivePermissions: null,
       };
     }
 
     const { modules, pages } = data;
 
+    /** Check if a resource has a given perm across any environment scope. */
+    const hasPermAnyEnv = (scopedPerms: EnvScopedPerms | undefined, perm: string): boolean => {
+      if (!scopedPerms) return false;
+      return Object.values(scopedPerms).some((perms) => perms.includes(perm));
+    };
+
+    /** Check if a resource has a given perm for a specific environment. */
+    const hasPermForEnv = (scopedPerms: EnvScopedPerms | undefined, perm: string, env: string): boolean => {
+      if (!scopedPerms) return false;
+      // 'all' scope always applies
+      if (scopedPerms["all"]?.includes(perm)) return true;
+      // Check specific env scope
+      return scopedPerms[env]?.includes(perm) ?? false;
+    };
+
     return {
       isLoading: false,
       effectivePermissions: data,
       canViewModule: (name) => {
         if (data.is_admin) return true;
-        return (modules[name] ?? []).includes("view") || (modules[name] ?? []).includes("edit");
+        return hasPermAnyEnv(modules[name], "view") || hasPermAnyEnv(modules[name], "edit");
       },
       canViewPage: (name) => {
         if (data.is_admin) return true;
-        return (pages[name] ?? []).includes("view") || (pages[name] ?? []).includes("edit");
+        return hasPermAnyEnv(pages[name], "view") || hasPermAnyEnv(pages[name], "edit");
       },
       canEditPage: (name) => {
         if (data.is_admin) return true;
-        return (pages[name] ?? []).includes("edit");
+        return hasPermAnyEnv(pages[name], "edit");
+      },
+      canEditPageForEnv: (name, env) => {
+        if (data.is_admin) return true;
+        return hasPermForEnv(pages[name], "edit", env);
       },
     };
   }, [isAdmin, isLoading, data]);

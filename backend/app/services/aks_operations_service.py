@@ -16,13 +16,15 @@ from typing import Any
 import httpx
 import structlog
 import urllib3
-from azure.identity import DefaultAzureCredential
+import yaml
+from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.azure_auth import get_azure_credential
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AKSClusterSnapshot,
@@ -61,7 +63,7 @@ class AKSOperationsService(AKSResourceOperationsMixin):
 
     def __init__(self, db_session: AsyncSession | None):
         self.db = db_session
-        self.credential = DefaultAzureCredential()
+        self.credential = get_azure_credential()
         # Cached K8s clients with creation timestamps for TTL eviction
         self._k8s_clients: dict[
             str,
@@ -165,10 +167,10 @@ class AKSOperationsService(AKSResourceOperationsMixin):
 
                 for cluster in cluster_list:
                     node_pools = []
-                    total_node_count = 0
+                    profile_node_count = 0
                     if include_nodepools and cluster.agent_pool_profiles:
                         for np in cluster.agent_pool_profiles:
-                            total_node_count += np.count or 0
+                            profile_node_count += np.count or 0
                             node_pools.append(
                                 {
                                     "name": np.name,
@@ -185,6 +187,22 @@ class AKSOperationsService(AKSResourceOperationsMixin):
                                     "mode": np.mode,
                                 }
                             )
+
+                    # agent_pool_profiles[].count is the last-set/desired value and goes
+                    # stale once the cluster autoscaler resizes a pool. Prefer the real
+                    # running node count from the backing VM Scale Sets.
+                    total_node_count = profile_node_count
+                    if include_nodepools and cluster.node_resource_group:
+                        actual_total, actual_pool_counts = await asyncio.to_thread(
+                            self._actual_node_counts_from_vmss,
+                            sub["id"],
+                            cluster.node_resource_group,
+                        )
+                        if actual_total is not None:
+                            total_node_count = actual_total
+                            for pool in node_pools:
+                                if pool["name"] in actual_pool_counts:
+                                    pool["count"] = actual_pool_counts[pool["name"]]
 
                     cluster_tags = dict(cluster.tags) if cluster.tags else {}
                     cluster_data = {
@@ -629,6 +647,32 @@ class AKSOperationsService(AKSResourceOperationsMixin):
                 await self._db_commit()
             raise
 
+    async def get_deployment_detail(
+        self,
+        cluster_id: str,
+        namespace: str,
+        deployment_name: str,
+    ) -> dict[str, Any]:
+        """Get live deployment details plus a YAML manifest view."""
+        apps_v1, _, _ = await self._get_k8s_clients(cluster_id)
+
+        deployment = await asyncio.to_thread(
+            apps_v1.read_namespaced_deployment,
+            deployment_name,
+            namespace,
+        )
+        deployment_dict = deployment.to_dict()
+        return {
+            "name": deployment.metadata.name,
+            "namespace": deployment.metadata.namespace,
+            "yaml": yaml.safe_dump(
+                deployment_dict,
+                sort_keys=False,
+                default_flow_style=False,
+                allow_unicode=False,
+            ),
+        }
+
     async def create_deployment(
         self,
         cluster_id: str,
@@ -867,12 +911,14 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         pods = []
 
         try:
-            # Get pods
-            pod_list = (
-                await asyncio.to_thread(core_v1.list_namespaced_pod, namespace)
-                if namespace
-                else await asyncio.to_thread(core_v1.list_pod_for_all_namespaces)
-            )
+            # Get pods — use a timeout for all-namespaces to avoid blocking
+            if namespace:
+                pod_list = await asyncio.to_thread(core_v1.list_namespaced_pod, namespace)
+            else:
+                pod_list = await asyncio.wait_for(
+                    asyncio.to_thread(core_v1.list_pod_for_all_namespaces),
+                    timeout=45.0,
+                )
 
             # Filter by deployment if specified
             for pod in pod_list.items:
@@ -971,6 +1017,39 @@ class AKSOperationsService(AKSResourceOperationsMixin):
 
                 pods.append(pod_data)
 
+        except TimeoutError:
+            logger.warning(
+                "get_pod_metrics_timeout_fallback_to_db",
+                cluster_id=cluster_id,
+                namespace=namespace,
+            )
+            # Fall back to DB-cached pod inventory data
+            db_pods = await self.get_pods_from_db(cluster_id, namespace)
+            return [
+                {
+                    "pod_name": p.get("name", ""),
+                    "namespace": p.get("namespace", ""),
+                    "phase": p.get("phase", "Unknown"),
+                    "node": p.get("node", ""),
+                    "started_at": p.get("created_at"),
+                    "qos_class": None,
+                    "pod_ip": None,
+                    "host_ip": None,
+                    "service_account": None,
+                    "restart_policy": None,
+                    "labels": {},
+                    "conditions": {},
+                    "containers": [],
+                    "total_cpu_request": 0.0,
+                    "total_cpu_limit": 0.0,
+                    "total_memory_request_mb": 0.0,
+                    "total_memory_limit_mb": 0.0,
+                    "total_cpu_millicores": 0.0,
+                    "total_memory_mb": 0.0,
+                    "total_restarts": p.get("restarts", 0),
+                }
+                for p in db_pods
+            ]
         except ApiException as e:
             logger.error("get_pod_metrics_failed", cluster_id=cluster_id, error=str(e))
             raise
@@ -2005,32 +2084,22 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         cluster_id: str,
         namespace: str,
         name: str,
-        bypass_cache: bool = False,
     ) -> dict[str, Any]:
         """Get detailed ConfigMap content including data."""
-        db_detail = await self._get_configmap_detail_from_db(cluster_id, namespace, name)
-        if db_detail is not None and not bypass_cache:
-            return db_detail
-
-        cache_key = CacheKeys.configmap_detail(cluster_id, namespace, name)
         try:
-            if not bypass_cache:
-                cached, _tier = await data_cache.get_or_fetch(
-                    key=cache_key,
-                    ttl=TTL.K8S_RESOURCE_DETAIL,
-                    fetch_fn=lambda: self._fetch_configmap_detail_live(cluster_id, namespace, name),
-                )
-                return cached
-            return await self._fetch_configmap_detail_live(cluster_id, namespace, name)
+            _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+            cm = await asyncio.to_thread(core_v1.read_namespaced_config_map, name, namespace)
+            return {
+                "name": cm.metadata.name,
+                "namespace": cm.metadata.namespace,
+                "data": dict(cm.data) if cm.data else {},
+                "binary_data_keys": (list(cm.binary_data.keys()) if cm.binary_data else []),
+                "labels": dict(cm.metadata.labels) if cm.metadata.labels else {},
+                "annotations": (dict(cm.metadata.annotations) if cm.metadata.annotations else {}),
+                "created_at": (cm.metadata.creation_timestamp.isoformat() if cm.metadata.creation_timestamp else None),
+                "detail_source": "live",
+            }
         except Exception as e:
-            if db_detail is not None:
-                logger.warning(
-                    "configmap_detail_live_failed_using_db_fallback",
-                    name=name,
-                    namespace=namespace,
-                    error=str(e),
-                )
-                return db_detail
             logger.warning(
                 "configmap_detail_live_failed_returning_placeholder",
                 name=name,
@@ -2048,72 +2117,6 @@ class AKSOperationsService(AKSResourceOperationsMixin):
                 "detail_source": "unavailable",
                 "data_unavailable_reason": str(e),
             }
-
-    async def _get_configmap_detail_from_db(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-    ) -> dict[str, Any] | None:
-        if not self.db:
-            return None
-
-        resource_id = f"{cluster_id}/configmap/{namespace}/{name}"
-        try:
-            query = select(AzureResourceInventory).where(
-                AzureResourceInventory.resource_type == "aks_configmap",
-                AzureResourceInventory.resource_id == resource_id,
-            )
-            result = await self.db.execute(query)
-            record = result.scalars().first()
-            if record is None:
-                return None
-
-            details = dict(record.resource_details or {})
-            details.pop("_cluster_id", None)
-            data = details.get("data") if isinstance(details.get("data"), dict) else {}
-            return {
-                "name": details.get("name", name),
-                "namespace": details.get("namespace", namespace),
-                "data": data,
-                "binary_data_keys": list(details.get("binary_data_keys") or []),
-                "labels": details.get("labels") if isinstance(details.get("labels"), dict) else {},
-                "annotations": details.get("annotations") if isinstance(details.get("annotations"), dict) else {},
-                "created_at": details.get("created_at"),
-                "detail_source": "db",
-                "_last_sync": record.last_sync.isoformat() if record.last_sync else None,
-            }
-        except Exception as e:
-            logger.warning(
-                "configmap_detail_db_fallback_failed",
-                cluster_id=cluster_id,
-                namespace=namespace,
-                name=name,
-                error=str(e),
-            )
-            return None
-
-    async def _fetch_configmap_detail_live(
-        self,
-        cluster_id: str,
-        namespace: str,
-        name: str,
-    ) -> dict[str, Any]:
-        _, core_v1, _ = await self._get_k8s_clients(cluster_id)
-        cm = await asyncio.wait_for(
-            asyncio.to_thread(core_v1.read_namespaced_config_map, name, namespace),
-            timeout=15,
-        )
-        return {
-            "name": cm.metadata.name,
-            "namespace": cm.metadata.namespace,
-            "data": dict(cm.data) if cm.data else {},
-            "binary_data_keys": (list(cm.binary_data.keys()) if cm.binary_data else []),
-            "labels": dict(cm.metadata.labels) if cm.metadata.labels else {},
-            "annotations": (dict(cm.metadata.annotations) if cm.metadata.annotations else {}),
-            "created_at": (cm.metadata.creation_timestamp.isoformat() if cm.metadata.creation_timestamp else None),
-            "detail_source": "live",
-        }
 
     # =========================================================================
     # F. NODE POOL OPERATIONS
@@ -2155,6 +2158,20 @@ class AKSOperationsService(AKSResourceOperationsMixin):
 
             aks_client = ContainerServiceClient(self.credential, subscription_id)
             pool_list = await asyncio.to_thread(lambda: list(aks_client.agent_pools.list(resource_group, cluster_name)))
+
+            # Real running node counts from the backing VM Scale Sets — the agent pool
+            # "count" is stale for autoscaling pools.
+            actual_pool_counts: dict[str, int] = {}
+            try:
+                managed_cluster = await asyncio.to_thread(aks_client.managed_clusters.get, resource_group, cluster_name)
+                node_rg = managed_cluster.node_resource_group
+            except Exception as e:
+                node_rg = None
+                logger.warning("node_pools_cluster_lookup_failed", cluster=cluster_name, error=str(e))
+            if node_rg:
+                _, actual_pool_counts = await asyncio.to_thread(
+                    self._actual_node_counts_from_vmss, subscription_id, node_rg
+                )
 
             # Fetch node-level data (pod counts, labels) from K8s API
             node_pod_counts: dict[str, int] = {}
@@ -2206,7 +2223,7 @@ class AKSOperationsService(AKSResourceOperationsMixin):
                     {
                         "name": pool.name,
                         "vm_size": pool.vm_size,
-                        "count": pool.count or 0,
+                        "count": actual_pool_counts.get(pool.name, pool.count or 0),
                         "min_count": pool.min_count,
                         "max_count": pool.max_count,
                         "enable_auto_scaling": pool.enable_auto_scaling or False,
@@ -2643,6 +2660,47 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".crt") as f:
             f.write(cert_bytes)
             return f.name
+
+    def _actual_node_counts_from_vmss(
+        self, subscription_id: str, node_resource_group: str
+    ) -> tuple[int | None, dict[str, int]]:
+        """Return real running node counts from a cluster's backing VM Scale Sets.
+
+        Azure ``agent_pool_profiles[].count`` (and the agent pool ``count``) reports
+        the last-set/desired value, which goes stale once the cluster autoscaler
+        resizes a pool. The VMSS instance capacity in the node resource group is the
+        authoritative count of running nodes.
+
+        Returns ``(total_nodes, {pool_name: node_count})``, or ``(None, {})`` when the
+        scale sets cannot be read (e.g. missing permissions) so callers can fall back
+        to the profile count. Performs blocking Azure SDK calls — invoke via
+        ``asyncio.to_thread``.
+        """
+        try:
+            compute_client = ComputeManagementClient(self.credential, subscription_id)
+            pool_counts: dict[str, int] = {}
+            total = 0
+            for vmss in compute_client.virtual_machine_scale_sets.list(node_resource_group):
+                capacity = (vmss.sku.capacity if vmss.sku else 0) or 0
+                total += capacity
+                tags = vmss.tags or {}
+                pool_name = tags.get("aks-managed-poolName") or tags.get("poolName")
+                if not pool_name and vmss.name:
+                    # AKS names scale sets "aks-<poolName>-<hash>-vmss"; pool names are
+                    # alphanumeric with no hyphens.
+                    segments = vmss.name.split("-")
+                    if len(segments) >= 2:
+                        pool_name = segments[1]
+                if pool_name:
+                    pool_counts[pool_name] = pool_counts.get(pool_name, 0) + capacity
+            return total, pool_counts
+        except Exception as e:
+            logger.warning(
+                "vmss_node_count_fetch_failed",
+                node_resource_group=node_resource_group,
+                error=str(e),
+            )
+            return None, {}
 
     def _extract_resource_group(self, resource_id: str) -> str:
         """Extract resource group from Azure resource ID."""

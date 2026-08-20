@@ -9,7 +9,7 @@ from app.auth import get_current_user
 from app.core.database import get_db
 from app.core.subscription_scope import resolve_effective_subscription_ids
 from app.models.auth import UserContext
-from app.models.database import Permission, Resource
+from app.models.database import Permission, Resource, TeamMembership
 from app.services.user_preference_service import UserPreferenceService
 
 router = APIRouter()
@@ -71,32 +71,50 @@ async def get_my_permissions(
         # Admin sees everything — fetch all resources and grant full access
         result = await db.execute(select(Resource))
         resources = result.scalars().all()
-        modules: dict[str, list[str]] = {}
-        pages: dict[str, list[str]] = {}
+        modules: dict[str, dict[str, list[str]]] = {}
+        pages: dict[str, dict[str, list[str]]] = {}
         for r in resources:
             target = modules if r.resource_type == "module" else pages
-            target[r.resource_name] = ["view", "edit"]
-        return {"is_admin": True, "modules": modules, "pages": pages}
+            target[r.resource_name] = {"all": ["edit", "view"]}
+        return {"is_admin": True, "modules": modules, "pages": pages, "teams": []}
 
     # ── Collect direct permission records ─────────────────────────────────
     role_subject_ids = [role.value for role in user.roles]
 
+    # Find teams this user belongs to
+    team_result = await db.execute(select(TeamMembership.team_id).where(TeamMembership.user_id == user.user_id))
+    user_team_ids = [row.team_id for row in team_result]
+
+    # Get team names for group permission matching
+    team_names: list[str] = []
+    if user_team_ids:
+        from app.models.database import Team
+
+        team_name_result = await db.execute(select(Team.team_name).where(Team.id.in_(user_team_ids)))
+        team_names = [row.team_name for row in team_name_result]
+
+    # Query permissions: user-specific + role-based + group-based (team)
+    conditions = [
+        ((Permission.subject_type == "user") & (Permission.subject_id == user.user_id)),
+        ((Permission.subject_type == "role") & Permission.subject_id.in_(role_subject_ids)),
+    ]
+    if team_names:
+        conditions.append((Permission.subject_type == "group") & Permission.subject_id.in_(team_names))
+
+    from sqlalchemy import or_
+
     result = await db.execute(
-        select(Permission, Resource)
-        .join(Resource, Permission.resource_id == Resource.id)
-        .where(
-            ((Permission.subject_type == "user") & (Permission.subject_id == user.user_id))
-            | ((Permission.subject_type == "role") & Permission.subject_id.in_(role_subject_ids))
-        )
+        select(Permission, Resource).join(Resource, Permission.resource_id == Resource.id).where(or_(*conditions))
     )
     rows = result.all()
 
-    # ── Build raw access map: resource_id → set of permission types ───────
-    resource_access: dict[int, set[str]] = {}
+    # ── Build raw access map: resource_id → {env_scope: set of permission types}
+    resource_access: dict[int, dict[str, set[str]]] = {}
     resource_map: dict[int, Resource] = {}
     for perm, resource in rows:
         resource_map[resource.id] = resource
-        resource_access.setdefault(resource.id, set()).add(perm.permission_type)
+        env_scope = perm.environment_scope or "all"
+        resource_access.setdefault(resource.id, {}).setdefault(env_scope, set()).add(perm.permission_type)
 
     # ── Load all resources to resolve parent inheritance ──────────────────
     all_res_result = await db.execute(select(Resource))
@@ -106,28 +124,32 @@ async def get_my_permissions(
     # Module access inherits to all child pages
     for r in all_resources:
         if r.parent_id and r.parent_id in resource_access:
-            # Parent module has access → child page inherits
-            resource_access.setdefault(r.id, set()).update(resource_access[r.parent_id])
+            # Parent module has access → child page inherits (per env scope)
+            parent_scopes = resource_access[r.parent_id]
+            child_scopes = resource_access.setdefault(r.id, {})
+            for env_scope, perms in parent_scopes.items():
+                child_scopes.setdefault(env_scope, set()).update(perms)
             resource_map[r.id] = r
 
     # ── Split into modules / pages ────────────────────────────────────────
-    modules_out: dict[str, list[str]] = {}
-    pages_out: dict[str, list[str]] = {}
+    modules_out: dict[str, dict[str, list[str]]] = {}
+    pages_out: dict[str, dict[str, list[str]]] = {}
 
-    for res_id, perms in resource_access.items():
+    for res_id, env_scopes in resource_access.items():
         resource = id_to_resource.get(res_id)
         if not resource:
             continue
-        perms_sorted = sorted(perms)  # deterministic order
-        if resource.resource_type == "module":
-            modules_out[resource.resource_name] = perms_sorted
-        else:
-            pages_out[resource.resource_name] = perms_sorted
+        target = modules_out if resource.resource_type == "module" else pages_out
+        scope_map: dict[str, list[str]] = {}
+        for env_scope, perms in env_scopes.items():
+            scope_map[env_scope] = sorted(perms)
+        target[resource.resource_name] = scope_map
 
     return {
         "is_admin": False,
         "modules": modules_out,
         "pages": pages_out,
+        "teams": team_names,
     }
 
 

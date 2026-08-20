@@ -157,12 +157,12 @@ export function ExtendedTabToolbar({
       </div>
       <div className="flex flex-wrap items-center gap-2">
         {namespaceSelect}
-        {canWrite && onSync && (
+        {onSync && (
           <button
             type="button"
             onClick={onSync}
             disabled={syncing}
-            className="flex items-center gap-2 px-4 py-2 bg-att-500 text-white rounded-lg hover:bg-att-600 disabled:opacity-50 text-sm"
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
           >
             {syncing ? "Syncing..." : "Sync from Azure"}
           </button>

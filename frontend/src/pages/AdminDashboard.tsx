@@ -22,6 +22,11 @@ import {
   SubscriptionInfo,
 } from "../services/costApi";
 import {
+  useAllCollections,
+  useEnabledCollections,
+  useSetEnabledCollections,
+} from "../services/certificatesApi";
+import {
   usePortalTimezone,
   useUpdatePortalTimezone,
   TIMEZONE_OPTIONS,
@@ -460,6 +465,113 @@ const PageFooterArea: React.FC = () => (
 );
 
 // Add AdminUtilities into the dashboard lower down — simple link to permissions UI
+
+// ── Certificate Collections Admin ─────────────────────────────────
+
+const CertificateCollectionsAdmin: React.FC = () => {
+  const { data: allCollections, isLoading: loadingAll } = useAllCollections();
+  const { data: enabledConfig, isLoading: loadingEnabled } = useEnabledCollections();
+  const setEnabled = useSetEnabledCollections();
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [initialized, setInitialized] = useState(false);
+  const [search, setSearch] = useState("");
+
+  // Initialize selection from config
+  useEffect(() => {
+    if (enabledConfig && !initialized) {
+      setSelected(new Set(enabledConfig.collection_ids));
+      setInitialized(true);
+    }
+  }, [enabledConfig, initialized]);
+
+  const toggleCollection = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    if (allCollections) setSelected(new Set(allCollections.map((c) => c.id)));
+  };
+  const deselectAll = () => setSelected(new Set());
+
+  const handleSave = async () => {
+    await setEnabled.mutateAsync(Array.from(selected));
+  };
+
+  const filteredCollections = (allCollections ?? []).filter(
+    (c) => !search.trim() || c.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const isLoading = loadingAll || loadingEnabled;
+
+  return (
+    <div className="mt-6 bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="flex items-center justify-between border-b border-gray-100 bg-gray-50/70 px-5 py-4">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900">Certificate Collections</h3>
+          <p className="text-xs text-gray-500 mt-0.5">Select which Keyfactor collections are visible in the Certificate module. Unselected collections will be hidden from all users.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">{selected.size} of {allCollections?.length ?? 0} enabled</span>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={setEnabled.isPending}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {setEnabled.isPending ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-3">
+        <input
+          type="text"
+          placeholder="Search collections…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+        />
+        <button type="button" onClick={selectAll} className="text-xs font-medium text-blue-600 hover:underline">Select All</button>
+        <button type="button" onClick={deselectAll} className="text-xs font-medium text-red-600 hover:underline">Deselect All</button>
+      </div>
+
+      <div className="max-h-[320px] overflow-y-auto px-5 py-3">
+        {isLoading ? (
+          <p className="text-sm text-gray-500 py-4 text-center">Loading collections from Keyfactor…</p>
+        ) : !filteredCollections.length ? (
+          <p className="text-sm text-gray-500 py-4 text-center">No collections found.</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {filteredCollections.map((c) => (
+              <label key={c.id} className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 cursor-pointer transition ${
+                selected.has(c.id) ? "border-blue-300 bg-blue-50" : "border-gray-200 hover:bg-gray-50"
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(c.id)}
+                  onChange={() => toggleCollection(c.id)}
+                  className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-sm text-gray-800 truncate">{c.name}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {enabledConfig?.mode === "all" && selected.size === 0 && (
+        <div className="px-5 py-2 bg-amber-50 border-t border-amber-100 text-xs text-amber-700">
+          No collections selected — all collections will be visible. Select specific collections to restrict access.
+        </div>
+      )}
+    </div>
+  );
+};
 
 // ── Admin Utilities Link ─────────────────────────────────────────────
 
@@ -970,8 +1082,11 @@ const AdminDashboard: React.FC = () => {
     <div className="py-6 space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Admin Dashboard</h1>
-        <p className="text-sm text-gray-500">
+        <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+          <svg className="h-8 w-8 text-att-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+          Admin Dashboard
+        </h1>
+        <p className="mt-1 text-sm text-gray-500">
           Last updated {formatDate(data.generated_at)}
         </p>
       </div>
@@ -1036,6 +1151,9 @@ const AdminDashboard: React.FC = () => {
 
       {/* Subscription Table */}
       <SubscriptionTable subs={data.subscriptions} onShowAdd={() => setShowAddForm(true)} />
+
+      {/* Certificate Collections Admin */}
+      <CertificateCollectionsAdmin />
 
       {/* Admin Utilities — links to RBAC/permissions management */}
       <AdminUtilities />

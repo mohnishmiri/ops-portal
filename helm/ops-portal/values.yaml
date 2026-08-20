@@ -62,6 +62,9 @@ backend:
       - envName: AZURE_SUBSCRIPTION_IDS
         akvSecretName: opsportal-backend-azure-subscription-ids
         kubernetesSecretName: ops-portal-backend-azure-subscription-ids
+      - envName: REDIS_URL
+        akvSecretName: opsportal-backend-redis-url
+        kubernetesSecretName: ops-portal-backend-redis-url
       - envName: DATABASE_URL
         akvSecretName: opsportal-backend-database-url
         kubernetesSecretName: ops-portal-backend-database-url
@@ -110,21 +113,58 @@ backend:
       - envName: OLLAMA_AUTH_HEADER_VALUE
         akvSecretName: opsportal-backend-ollama-auth-header-value
         kubernetesSecretName: ops-portal-backend-ollama-auth-header-value
-      - envName: AGENT_LLM_BASE_URL
-        akvSecretName: opsportal-backend-agent-llm-base-url
-        kubernetesSecretName: ops-portal-backend-agent-llm-base-url
-      - envName: AGENT_LLM_MODEL
-        akvSecretName: opsportal-backend-agent-llm-model
-        kubernetesSecretName: ops-portal-backend-agent-llm-model
-      - envName: AGENT_LLM_TIMEOUT_SECONDS
-        akvSecretName: opsportal-backend-agent-llm-timeout-seconds
-        kubernetesSecretName: ops-portal-backend-agent-llm-timeout-seconds
-      - envName: AGENT_LLM_AUTH_HEADER_NAME
-        akvSecretName: opsportal-backend-agent-llm-auth-header-name
-        kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-name
-      - envName: AGENT_LLM_AUTH_HEADER_VALUE
-        akvSecretName: opsportal-backend-agent-llm-auth-header-value
-        kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-value
+      - envName: K8S_DASHBOARD_TOKEN_PROD
+        akvSecretName: opsportal-backend-k8s-dashboard-token-prod
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-prod
+      - envName: K8S_DASHBOARD_TOKEN_PREPROD
+        akvSecretName: opsportal-backend-k8s-dashboard-token-preprod
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-preprod
+      - envName: K8S_DASHBOARD_TOKEN_PERF
+        akvSecretName: opsportal-backend-k8s-dashboard-token-perf
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-perf
+      - envName: K8S_DASHBOARD_TOKEN_UAT
+        akvSecretName: opsportal-backend-k8s-dashboard-token-uat
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-uat
+      - envName: K8S_DASHBOARD_TOKEN_DEV
+        akvSecretName: opsportal-backend-k8s-dashboard-token-dev
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-dev
+      - envName: K8S_DASHBOARD_TOKEN_DR
+        akvSecretName: opsportal-backend-k8s-dashboard-token-dr
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-dr
+      - envName: K8S_DASHBOARD_SESSION_SECRET
+        akvSecretName: opsportal-backend-k8s-dashboard-session-secret
+        kubernetesSecretName: ops-portal-backend-k8s-dashboard-session-secret
+      # ── Keyfactor Command (Certificate Management) ──
+      - envName: KEYFACTOR_BASE_URL
+        akvSecretName: opsportal-backend-keyfactor-base-url
+        kubernetesSecretName: ops-portal-backend-keyfactor-base-url
+      - envName: KEYFACTOR_TENANT_ID
+        akvSecretName: opsportal-backend-keyfactor-tenant-id
+        kubernetesSecretName: ops-portal-backend-keyfactor-tenant-id
+      - envName: KEYFACTOR_CLIENT_ID
+        akvSecretName: opsportal-backend-keyfactor-client-id
+        kubernetesSecretName: ops-portal-backend-keyfactor-client-id
+      - envName: KEYFACTOR_CLIENT_SECRET
+        akvSecretName: opsportal-backend-keyfactor-client-secret
+        kubernetesSecretName: ops-portal-backend-keyfactor-client-secret
+      - envName: KEYFACTOR_OAUTH_SCOPE
+        akvSecretName: opsportal-backend-keyfactor-oauth-scope
+        kubernetesSecretName: ops-portal-backend-keyfactor-oauth-scope
+      - envName: KEYFACTOR_API_VERSION
+        akvSecretName: opsportal-backend-keyfactor-api-version
+        kubernetesSecretName: ops-portal-backend-keyfactor-api-version
+      - envName: KEYFACTOR_TIMEOUT_SECONDS
+        akvSecretName: opsportal-backend-keyfactor-timeout-seconds
+        kubernetesSecretName: ops-portal-backend-keyfactor-timeout-seconds
+      - envName: KEYFACTOR_VERIFY_SSL
+        akvSecretName: opsportal-backend-keyfactor-verify-ssl
+        kubernetesSecretName: ops-portal-backend-keyfactor-verify-ssl
+      - envName: KEYFACTOR_DEFAULT_CA
+        akvSecretName: opsportal-backend-keyfactor-default-ca
+        kubernetesSecretName: ops-portal-backend-keyfactor-default-ca
+      - envName: KEYFACTOR_DEFAULT_TEMPLATE
+        akvSecretName: opsportal-backend-keyfactor-default-template
+        kubernetesSecretName: ops-portal-backend-keyfactor-default-template
 
   # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.
   secretProvider:
@@ -243,6 +283,22 @@ ingress:
     - secretName: ops-portal-tls
       hosts:
         - attccopsportal.stage.att.com
+
+# ── Redis ──────────────────────────────────────────────────────
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
 
 # ── Network Policy ─────────────────────────────────────────────
 

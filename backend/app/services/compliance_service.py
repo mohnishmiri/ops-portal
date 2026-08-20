@@ -23,12 +23,12 @@ from zoneinfo import ZoneInfo
 import httpx
 import structlog
 from apscheduler.triggers.cron import CronTrigger
-from azure.identity import DefaultAzureCredential
 from azure.mgmt.synapse import SynapseManagementClient
 from kubernetes.client.rest import ApiException
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.azure_auth import get_azure_credential
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AKSPodChecksum,
@@ -66,7 +66,7 @@ class ComplianceService:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
         try:
-            self.credential = DefaultAzureCredential()
+            self.credential = get_azure_credential()
         except Exception as exc:
             logger.warning(
                 "azure_credential_init_failed",

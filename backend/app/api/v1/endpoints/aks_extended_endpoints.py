@@ -121,23 +121,36 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         user: UserContext = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ) -> dict:
-        if db is None:
-            return {"history": [], "count": 0}
-        since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
-        stmt = (
-            select(AuditLog)
-            .where(AuditLog.timestamp >= since)
-            .where(AuditLog.details["page"].astext == "AKSOperationsPage")
-            .order_by(desc(AuditLog.timestamp))
-            .limit(limit)
-        )
+        # Try reading from database first
+        if db is not None:
+            try:
+                since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
+                stmt = (
+                    select(AuditLog)
+                    .where(AuditLog.timestamp >= since)
+                    .where(AuditLog.details["page"].astext == "AKSOperationsPage")
+                    .order_by(desc(AuditLog.timestamp))
+                    .limit(limit)
+                )
+                if cluster_id:
+                    stmt = stmt.where(AuditLog.details["cluster_id"].astext == cluster_id)
+                if namespace:
+                    stmt = stmt.where(AuditLog.details["namespace"].astext == namespace)
+                result = await db.execute(stmt)
+                history = [serialize_audit(entry) for entry in result.scalars().all()]
+                return {"history": history, "count": len(history)}
+            except Exception as exc:
+                logger.warning("audit_history_db_query_failed", error=str(exc))
+
+        # Fallback: read from in-memory audit store
+        from app.api.v1.endpoints.aks_operations import _in_memory_audit_log
+
+        history = list(_in_memory_audit_log)
         if cluster_id:
-            stmt = stmt.where(AuditLog.details["cluster_id"].astext == cluster_id)
+            history = [h for h in history if h.get("cluster_id") == cluster_id]
         if namespace:
-            stmt = stmt.where(AuditLog.details["namespace"].astext == namespace)
-        result = await db.execute(stmt)
-        history = [serialize_audit(entry) for entry in result.scalars().all()]
-        return {"history": history, "count": len(history)}
+            history = [h for h in history if h.get("namespace") == namespace]
+        return {"history": history[:limit], "count": len(history[:limit])}
 
     @router.websocket("/watch")
     async def aks_live_watch(websocket: WebSocket, access_token: str | None = Query(default=None)) -> None:
@@ -429,6 +442,37 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         )
         return result
 
+    @router.put("/services")
+    async def update_service(
+        request: CreateServiceRequest,
+        http_request: Request,
+        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        service=Depends(get_service),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        result = await service.update_service(
+            request.cluster_id,
+            request.namespace,
+            request.name,
+            request.port,
+            request.target_port,
+            request.selector,
+            request.service_type,
+        )
+        await write_audit(
+            db,
+            request=http_request,
+            user=user,
+            action="update_service",
+            resource_type="service",
+            resource_name=request.name,
+            cluster_id=request.cluster_id,
+            namespace=request.namespace,
+            status="success",
+            details={"port": request.port, "type": request.service_type},
+        )
+        return result
+
     # ── ConfigMaps (extended) ──────────────────────────────────────────
 
     @router.get("/configmaps/cached")
@@ -610,6 +654,33 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
             request=http_request,
             user=user,
             action="create_ingress",
+            resource_type="ingress",
+            resource_name=request.name,
+            cluster_id=request.cluster_id,
+            namespace=request.namespace,
+            status="success",
+            details={"rule_count": len(request.rules)},
+        )
+        return result
+
+    @router.put("/ingress")
+    async def update_ingress(
+        request: CreateIngressRequest,
+        http_request: Request,
+        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        service=Depends(get_service),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        rules = [{"host": r.host, "paths": [p.model_dump() for p in r.paths]} for r in request.rules]
+        tls = [t.model_dump() for t in request.tls] if request.tls else None
+        result = await service.update_ingress(
+            request.cluster_id, request.namespace, request.name, rules, tls, request.ingress_class
+        )
+        await write_audit(
+            db,
+            request=http_request,
+            user=user,
+            action="update_ingress",
             resource_type="ingress",
             resource_name=request.name,
             cluster_id=request.cluster_id,

@@ -1433,10 +1433,11 @@ const LeadershipDashboard: React.FC = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <svg className="h-8 w-8 text-att-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M3 3v18h18" /><path d="M18 17V9" /><path d="M13 17V5" /><path d="M8 17v-3" /></svg>
             Cost Forecast
           </h1>
-          <p className="text-sm text-gray-500">
+          <p className="mt-1 text-sm text-gray-500">
             Cost Forecast — Updated{" "}
             {formatDate(dashboard.report_date)}
           </p>

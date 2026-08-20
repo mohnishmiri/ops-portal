@@ -184,13 +184,16 @@ async def test_grant_user_edit_permission(admin_client):
 
 
 @pytest.mark.anyio
-async def test_invalid_subject_type_returns_400(admin_client):
-    res = await _create_resource(admin_client, "bad_subject_module")
+async def test_group_subject_type_is_valid(admin_client):
+    res = await _create_resource(admin_client, "group_subject_module")
     resp = await admin_client.post(
         "/api/v1/permissions/permissions",
-        json={"subject_type": "group", "subject_id": "grp1", "resource_id": res["id"], "permission_type": "view"},
+        json={"subject_type": "group", "subject_id": "dev-team", "resource_id": res["id"], "permission_type": "view"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["subject_type"] == "group"
+    assert data["subject_id"] == "dev-team"
 
 
 @pytest.mark.anyio
@@ -262,7 +265,9 @@ async def test_my_permissions_admin_gets_all_resources(admin_client, db_session)
     data = resp.json()
     assert data["is_admin"] is True
     assert "admin_mod_x" in data["modules"]
-    assert sorted(data["modules"]["admin_mod_x"]) == ["edit", "view"]
+    # New shape: resource_name → { env_scope: [perms] }
+    assert "all" in data["modules"]["admin_mod_x"]
+    assert sorted(data["modules"]["admin_mod_x"]["all"]) == ["edit", "view"]
 
 
 @pytest.mark.anyio
@@ -296,7 +301,9 @@ async def test_my_permissions_reader_sees_granted_resources(app, db_session):
         data = resp.json()
         assert data["is_admin"] is False
         assert "reader_accessible_mod" in data["modules"]
-        assert "view" in data["modules"]["reader_accessible_mod"]
+        # New shape: resource_name → { env_scope: [perms] }
+        assert "all" in data["modules"]["reader_accessible_mod"]
+        assert "view" in data["modules"]["reader_accessible_mod"]["all"]
     finally:
         app.dependency_overrides.clear()
 
@@ -333,7 +340,9 @@ async def test_my_permissions_reader_inherits_module_access_to_page(app, db_sess
         data = resp.json()
         # Page should inherit access from parent module
         assert "inherit_page" in data["pages"], f"Page inheritance failed. pages={data['pages']}"
-        assert "view" in data["pages"]["inherit_page"]
+        # New shape: page → { env_scope: [perms] }
+        assert "all" in data["pages"]["inherit_page"]
+        assert "view" in data["pages"]["inherit_page"]["all"]
     finally:
         app.dependency_overrides.clear()
 
@@ -454,3 +463,380 @@ async def test_audit_log_non_admin_cannot_access(reader_client, monkeypatch):
     monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
     resp = await reader_client.get("/api/v1/permissions/audit-log")
     assert resp.status_code == 403
+
+
+# ── Phase 1: AD Group Blocking Validation ──────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_no_role_user_blocked_in_production(app, db_session, monkeypatch):
+    """Users with no recognized app roles get 403 in production."""
+    import app.auth as auth_module
+
+    monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
+
+    from app.schemas.auth import UserContext
+
+    async def make_norole_user() -> UserContext:
+        return UserContext(
+            user_id="no-role-user",
+            object_id="22222222-2222-2222-2222-222222222222",
+            display_name="No Role User",
+            email="norole@example.com",
+            roles=[],
+            raw_roles=[],
+            tenant_id="tenant-test",
+            allowed_subscriptions=[],
+        )
+
+    from app.auth import get_current_user
+    from app.core.database import get_db
+
+    async def _get_db_override():
+        yield db_session
+
+    # Override with a user that has empty roles — the require_role
+    # decorator on admin endpoints should reject this
+    app.dependency_overrides[get_db] = _get_db_override
+    app.dependency_overrides[get_current_user] = make_norole_user
+
+    try:
+        from httpx import ASGITransport, AsyncClient
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.get("/api/v1/permissions/resources")
+        assert resp.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_read_role_user_can_access_auth_me(app, db_session):
+    """Users with at least READ role can access /auth/me."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.auth import get_current_user
+    from app.core.database import get_db
+    from tests.conftest import make_read_user
+
+    async def _get_db_override():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _get_db_override
+    app.dependency_overrides[get_current_user] = make_read_user
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.get("/api/v1/auth/me")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_id"] == "test-reader"
+        assert "read" in data["roles"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_unauthenticated_request_returns_401(app, monkeypatch):
+    """Requests without a Bearer token get 401 in production mode."""
+    import app.auth as auth_module
+
+    monkeypatch.setattr(auth_module.settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(auth_module.settings, "DEV_AUTH_BYPASS", False)
+
+    from httpx import ASGITransport, AsyncClient
+
+    # Clear all overrides so actual auth fires
+    app.dependency_overrides.clear()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": ""},
+        )
+    # In production mode, missing/invalid token → 401 or 403
+    assert resp.status_code in (401, 403)
+
+
+# ── Phase 2: Environment-scoped permissions ────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_create_permission_with_environment_scope(admin_client):
+    """Permissions can be created with a specific environment scope."""
+    res = await _create_resource(admin_client, "env_scope_module")
+    resp = await admin_client.post(
+        "/api/v1/permissions/permissions",
+        json={
+            "subject_type": "group",
+            "subject_id": "dev-team",
+            "resource_id": res["id"],
+            "permission_type": "view",
+            "environment_scope": "prod",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["environment_scope"] == "prod"
+    assert data["subject_type"] == "group"
+
+
+@pytest.mark.anyio
+async def test_create_permission_defaults_to_all_scope(admin_client):
+    """Omitting environment_scope defaults to 'all'."""
+    res = await _create_resource(admin_client, "default_scope_mod")
+    resp = await admin_client.post(
+        "/api/v1/permissions/permissions",
+        json={
+            "subject_type": "role",
+            "subject_id": "write",
+            "resource_id": res["id"],
+            "permission_type": "edit",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["environment_scope"] == "all"
+
+
+@pytest.mark.anyio
+async def test_invalid_environment_scope_returns_400(admin_client):
+    """Invalid environment_scope value returns 400."""
+    res = await _create_resource(admin_client, "bad_env_scope_mod")
+    resp = await admin_client.post(
+        "/api/v1/permissions/permissions",
+        json={
+            "subject_type": "role",
+            "subject_id": "read",
+            "resource_id": res["id"],
+            "permission_type": "view",
+            "environment_scope": "staging",
+        },
+    )
+    assert resp.status_code == 400
+    assert "environment_scope" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_invalid_subject_type_returns_400(admin_client):
+    """Invalid subject_type returns 400."""
+    res = await _create_resource(admin_client, "invalid_subj_mod")
+    resp = await admin_client.post(
+        "/api/v1/permissions/permissions",
+        json={"subject_type": "unknown", "subject_id": "x", "resource_id": res["id"], "permission_type": "view"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_my_permissions_includes_env_scope(app, db_session):
+    """Effective permissions response includes environment scope."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.auth import get_current_user
+    from app.core.database import get_db
+    from app.models.database import Permission as Perm
+    from app.models.database import Resource as Res
+    from tests.conftest import make_read_user
+
+    mod = Res(resource_type="module", resource_name="env_scoped_mod", is_system=False)
+    db_session.add(mod)
+    await db_session.flush()
+    # Give 'read' role view access only on prod
+    perm = Perm(
+        subject_type="role", subject_id="read", resource_id=mod.id, permission_type="view", environment_scope="prod"
+    )
+    db_session.add(perm)
+    await db_session.commit()
+
+    async def _override_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_current_user] = make_read_user
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.get("/api/v1/auth/my-permissions")
+        data = resp.json()
+        assert "env_scoped_mod" in data["modules"]
+        assert "prod" in data["modules"]["env_scoped_mod"]
+        assert "view" in data["modules"]["env_scoped_mod"]["prod"]
+        # Should NOT have 'all' or 'nonprod' scope
+        assert "all" not in data["modules"]["env_scoped_mod"]
+        assert "nonprod" not in data["modules"]["env_scoped_mod"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ── Phase 3: Team management ──────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_create_team(admin_client):
+    """Admin can create a team."""
+    resp = await admin_client.post(
+        "/api/v1/permissions/teams",
+        json={"team_name": "dev-team", "description": "Development team"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["team_name"] == "dev-team"
+    assert data["description"] == "Development team"
+    assert "id" in data
+
+
+@pytest.mark.anyio
+async def test_list_teams(admin_client):
+    """Admin can list teams."""
+    await admin_client.post("/api/v1/permissions/teams", json={"team_name": "team-a"})
+    await admin_client.post("/api/v1/permissions/teams", json={"team_name": "team-b"})
+    resp = await admin_client.get("/api/v1/permissions/teams")
+    assert resp.status_code == 200
+    names = [t["team_name"] for t in resp.json()]
+    assert "team-a" in names
+    assert "team-b" in names
+
+
+@pytest.mark.anyio
+async def test_add_and_remove_team_member(admin_client):
+    """Admin can add/remove members from a team."""
+    team_resp = await admin_client.post(
+        "/api/v1/permissions/teams",
+        json={"team_name": "member-test-team"},
+    )
+    team_id = team_resp.json()["id"]
+
+    # Add member
+    add_resp = await admin_client.post(
+        f"/api/v1/permissions/teams/{team_id}/members",
+        json={"user_id": "user-xyz", "user_email": "xyz@example.com"},
+    )
+    assert add_resp.status_code == 200
+    assert add_resp.json()["user_id"] == "user-xyz"
+
+    # Verify member in team
+    get_resp = await admin_client.get(f"/api/v1/permissions/teams/{team_id}")
+    assert get_resp.status_code == 200
+    members = get_resp.json()["members"]
+    assert any(m["user_id"] == "user-xyz" for m in members)
+
+    # Remove member
+    del_resp = await admin_client.delete(f"/api/v1/permissions/teams/{team_id}/members/user-xyz")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["deleted"] is True
+
+
+@pytest.mark.anyio
+async def test_duplicate_team_member_returns_409(admin_client):
+    """Adding the same user to a team twice returns 409."""
+    team_resp = await admin_client.post(
+        "/api/v1/permissions/teams",
+        json={"team_name": "dup-member-team"},
+    )
+    team_id = team_resp.json()["id"]
+
+    await admin_client.post(
+        f"/api/v1/permissions/teams/{team_id}/members",
+        json={"user_id": "dup-user"},
+    )
+    resp = await admin_client.post(
+        f"/api/v1/permissions/teams/{team_id}/members",
+        json={"user_id": "dup-user"},
+    )
+    assert resp.status_code == 409
+
+
+@pytest.mark.anyio
+async def test_delete_team(admin_client):
+    """Admin can delete a team."""
+    team_resp = await admin_client.post(
+        "/api/v1/permissions/teams",
+        json={"team_name": "deletable-team"},
+    )
+    team_id = team_resp.json()["id"]
+
+    del_resp = await admin_client.delete(f"/api/v1/permissions/teams/{team_id}")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["deleted"] is True
+
+    # Verify it's gone
+    get_resp = await admin_client.get(f"/api/v1/permissions/teams/{team_id}")
+    assert get_resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_team_permissions_flow(app, db_session):
+    """User in a team inherits team-granted group permissions."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.auth import get_current_user
+    from app.core.database import get_db
+    from app.models.database import Permission as Perm
+    from app.models.database import Resource as Res
+    from app.models.database import Team, TeamMembership
+    from app.schemas.auth import UserContext, UserRole
+
+    # Create a module resource
+    mod = Res(resource_type="module", resource_name="team_perm_mod", is_system=False)
+    db_session.add(mod)
+    await db_session.flush()
+
+    # Create a team and add the reader user
+    team = Team(team_name="ops-team", description="Operations team")
+    db_session.add(team)
+    await db_session.flush()
+    db_session.add(TeamMembership(team_id=team.id, user_id="test-reader", user_email="reader@example.com"))
+
+    # Grant group permission to the team
+    perm = Perm(
+        subject_type="group",
+        subject_id="ops-team",
+        resource_id=mod.id,
+        permission_type="edit",
+        environment_scope="nonprod",
+    )
+    db_session.add(perm)
+    await db_session.commit()
+
+    async def _override_db():
+        yield db_session
+
+    async def make_team_user() -> UserContext:
+        return UserContext(
+            user_id="test-reader",
+            object_id="11111111-1111-1111-1111-111111111111",
+            display_name="Test Reader",
+            email="reader@example.com",
+            roles=[UserRole.READ],
+            raw_roles=["read"],
+            tenant_id="tenant-test",
+            allowed_subscriptions=[],
+        )
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_current_user] = make_team_user
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.get("/api/v1/auth/my-permissions")
+        data = resp.json()
+        assert "team_perm_mod" in data["modules"]
+        # Team grants edit on nonprod
+        assert "nonprod" in data["modules"]["team_perm_mod"]
+        assert "edit" in data["modules"]["team_perm_mod"]["nonprod"]
+        # User's teams are included in response
+        assert "ops-team" in data["teams"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ── Phase 4: Resource sync endpoint ───────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_resource_sync_endpoint(admin_client):
+    """Admin can trigger resource sync and get updated list."""
+    resp = await admin_client.post("/api/v1/permissions/resources/sync")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["synced"] is True
+    assert len(data["resources"]) > 0

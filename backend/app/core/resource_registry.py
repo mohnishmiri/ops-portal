@@ -70,6 +70,14 @@ RESOURCE_SEEDS: list[dict] = [
         "parent_name": None,
         "is_system": True,
     },
+    {
+        "resource_type": "module",
+        "resource_name": "certificates",
+        "description": "Certificate lifecycle management via Keyfactor Command",
+        "route_path": "/certificates",
+        "parent_name": None,
+        "is_system": True,
+    },
     # ── Pages under cost_management ──────────────────────────────────────
     {
         "resource_type": "page",
@@ -93,6 +101,70 @@ RESOURCE_SEEDS: list[dict] = [
         "resource_name": "aks_main",
         "description": "AKS cluster overview and workload management",
         "route_path": "/aks",
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "env_scheduler",
+        "description": "Environment scaling, scheduling, and sequence management",
+        "route_path": "/env-scheduler",
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard",
+        "description": "Kubernetes Dashboard one-click SSO access",
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard_prod",
+        "description": "Production K8s Dashboard access",
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard_preprod",
+        "description": "PreProd K8s Dashboard access",
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard_perf",
+        "description": "Performance K8s Dashboard access",
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard_uat",
+        "description": "UAT K8s Dashboard access",
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard_dev",
+        "description": "Development K8s Dashboard access",
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    },
+    {
+        "resource_type": "page",
+        "resource_name": "k8s_dashboard_dr",
+        "description": "DR K8s Dashboard access",
+        "route_path": None,
         "parent_name": "aks_operations",
         "is_system": True,
     },
@@ -121,6 +193,15 @@ RESOURCE_SEEDS: list[dict] = [
         "description": "Infrastructure alert dashboard",
         "route_path": "/infra-alerts",
         "parent_name": "infra_alerts",
+        "is_system": True,
+    },
+    # ── Pages under certificates ─────────────────────────────────────────
+    {
+        "resource_type": "page",
+        "resource_name": "certificates_main",
+        "description": "Certificate lifecycle dashboard (list, enroll, renew, revoke, delete)",
+        "route_path": "/certificates",
+        "parent_name": "certificates",
         "is_system": True,
     },
     # ── Admin module ─────────────────────────────────────────────────────
@@ -159,15 +240,20 @@ async def seed_resources(db: AsyncSession) -> None:
     Safe to call on every startup — existing records are updated in-place,
     new ones are inserted.  The ``is_system`` flag is always forced to True
     for seed entries so they cannot be deleted via the API.
+
+    Collects seeds from both RESOURCE_SEEDS (static) and plugin-declared
+    resources registered via register_plugin_resources().
     """
     from app.models.database import Resource  # local import to avoid circular deps
+
+    all_seeds = get_all_resource_seeds()
 
     # Build a name→id map for existing records in one query
     result = await db.execute(select(Resource.resource_name, Resource.id))
     existing: dict[str, int] = {row.resource_name: row.id for row in result}
 
     # First pass: insert/update all resources (parent_id resolved in second pass)
-    for seed in RESOURCE_SEEDS:
+    for seed in all_seeds:
         name = seed["resource_name"]
         if name in existing:
             await db.execute(
@@ -197,7 +283,7 @@ async def seed_resources(db: AsyncSession) -> None:
     name_to_id: dict[str, int] = {row.resource_name: row.id for row in result2}
 
     # Second pass: resolve parent_id
-    for seed in RESOURCE_SEEDS:
+    for seed in all_seeds:
         parent_name = seed.get("parent_name")
         if parent_name and parent_name in name_to_id:
             child_id = name_to_id.get(seed["resource_name"])
@@ -207,7 +293,7 @@ async def seed_resources(db: AsyncSession) -> None:
                 )
 
     await db.commit()
-    logger.info("resource_seeds_applied", total=len(RESOURCE_SEEDS))
+    logger.info("resource_seeds_applied", total=len(all_seeds))
 
 
 # Default role → resource permission grants.
@@ -233,6 +319,8 @@ DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     ("read", "compliance_main", "view"),
     ("read", "keyvault_main", "view"),
     ("read", "infra_alerts_main", "view"),
+    ("read", "certificates", "view"),
+    ("read", "certificates_main", "view"),
     # write role — view + edit on all non-admin resources
     ("write", "cost_management", "view"),
     ("write", "cost_management", "edit"),
@@ -256,6 +344,10 @@ DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     ("write", "keyvault_main", "edit"),
     ("write", "infra_alerts_main", "view"),
     ("write", "infra_alerts_main", "edit"),
+    ("write", "certificates", "view"),
+    ("write", "certificates", "edit"),
+    ("write", "certificates_main", "view"),
+    ("write", "certificates_main", "edit"),
 ]
 
 
@@ -304,3 +396,32 @@ async def seed_permissions(db: AsyncSession) -> None:
     if inserted:
         await db.commit()
     logger.info("permission_seeds_applied", inserted=inserted, skipped=len(DEFAULT_PERMISSION_SEEDS) - inserted)
+
+
+# ---------------------------------------------------------------------------
+# Plugin-declared resource collection
+# ---------------------------------------------------------------------------
+
+# Plugins and routers can register resources by appending to this list at
+# import time.  The seeder picks them up on startup alongside RESOURCE_SEEDS.
+_plugin_resources: list[dict] = []
+
+
+def register_plugin_resources(resources: list[dict]) -> None:
+    """Register plugin-declared resources for auto-seeding.
+
+    Call this from a plugin's __init__.py or create_plugin() entry point:
+
+        from app.core.resource_registry import register_plugin_resources
+        register_plugin_resources([
+            {"resource_type": "module", "resource_name": "my_plugin", ...},
+            {"resource_type": "page", "resource_name": "my_page", "parent_name": "my_plugin", ...},
+        ])
+    """
+    _plugin_resources.extend(resources)
+    logger.info("plugin_resources_registered", count=len(resources))
+
+
+def get_all_resource_seeds() -> list[dict]:
+    """Return combined static + plugin-declared resource definitions."""
+    return RESOURCE_SEEDS + _plugin_resources

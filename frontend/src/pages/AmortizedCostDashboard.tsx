@@ -343,8 +343,11 @@ const AmortizedCostDashboard: React.FC = () => {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Amortized Cost Dashboard</h1>
-          <p className="text-sm text-gray-500">
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <svg className="h-8 w-8 text-att-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" /></svg>
+            Amortized Cost Dashboard
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">
             {hasData
               ? `Auto-synced from Azure • ${summary?.date_range.start} to ${summary?.date_range.end} • ${summary?.row_count.toLocaleString()} line items`
               : "Auto-synced from Azure • no cached amortized rows available yet"}

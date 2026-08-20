@@ -124,6 +124,26 @@ async def _startup_keyvault_sync() -> None:
         logger.error("keyvault_startup_sync_failed", error=str(exc)[:300])
 
 
+async def _startup_certificate_sync() -> None:
+    """Run initial certificate sync (Keyfactor → DB) in background on startup."""
+    try:
+        await asyncio.sleep(10)
+        from app.core.database import get_db_session
+        from app.services.certificate_sync_service import CertificateSyncService
+
+        async for db in get_db_session():
+            sync_svc = CertificateSyncService(db)
+            result = await sync_svc.full_sync(triggered_by="startup")
+            logger.info(
+                "certificate_startup_sync_completed",
+                collections=result.get("collections_synced", 0),
+                certificates=result.get("certificates_synced", 0),
+                status=result.get("status"),
+            )
+    except Exception as exc:
+        logger.warning("certificate_startup_sync_failed", error=str(exc)[:300])
+
+
 async def _startup_amortized_cost_sync() -> None:
     """Run initial amortized cost sync (Azure Cost API -> DB) in background on startup."""
     try:
@@ -278,6 +298,22 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
                     logger.info("keyvault_startup_sync_skipped", reason="data_fresh")
     except Exception as exc:
         logger.warning("keyvault_startup_check_failed", error=str(exc)[:200])
+
+    # Auto-sync certificate data (Keyfactor → DB) on startup if empty or stale
+    try:
+        if not skip_background and (settings.KEYFACTOR_BASE_URL or "").strip():
+            from app.core.database import get_db_session
+            from app.services.certificate_sync_service import CertificateSyncService
+
+            async for db in get_db_session():
+                sync_svc = CertificateSyncService(db)
+                if await sync_svc.is_data_stale():
+                    logger.info("certificate_startup_sync_triggered", reason="data_stale_or_missing")
+                    asyncio.create_task(_startup_certificate_sync())
+                else:
+                    logger.info("certificate_startup_sync_skipped", reason="data_fresh")
+    except Exception as exc:
+        logger.warning("certificate_startup_check_failed", error=str(exc)[:200])
 
     # Auto-sync AKS cluster inventory on startup
     try:

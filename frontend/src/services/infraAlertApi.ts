@@ -14,6 +14,7 @@ import apiClient from "./apiClient";
 export type AlertSeverity = "warning" | "critical";
 export type AlertStatus = "active" | "acknowledged" | "resolved" | "snoozed";
 export type ExpiryAlertType = "mech_id" | "certificate" | "aaf_account" | "database_account" | "itservices_domain";
+export type EnvClassification = "prod" | "non_prod";
 
 export interface VMThresholdConfig {
   id: number;
@@ -56,6 +57,7 @@ export interface ExpiryConfig {
   resource_name: string;
   resource_identifier: string;
   description: string | null;
+  environment: EnvClassification | null;
   expiry_date: string;
   warning_days_before: number;
   critical_days_before: number;
@@ -304,6 +306,7 @@ export interface CreateExpiryConfigRequest {
   resource_identifier: string;
   expiry_date: string;
   description?: string;
+  environment?: EnvClassification;
   warning_days_before?: number;
   critical_days_before?: number;
   notification_emails?: string[];
@@ -313,6 +316,7 @@ export interface CreateExpiryConfigRequest {
 export interface UpdateExpiryConfigRequest {
   resource_name?: string;
   description?: string;
+  environment?: EnvClassification;
   expiry_date?: string;
   warning_days_before?: number;
   critical_days_before?: number;
@@ -1030,6 +1034,12 @@ export const getAlertTypeLabel = (type: ExpiryAlertType): string => {
     itservices_domain: "ITServices Domain Expiry",
   };
   return labels[type] || type;
+};
+
+export const getEnvLabel = (env?: EnvClassification | null): string => {
+  if (env === "prod") return "PROD";
+  if (env === "non_prod") return "NPROD";
+  return "\u2014";
 };
 
 export const getSeverityColor = (severity: AlertSeverity): string => {

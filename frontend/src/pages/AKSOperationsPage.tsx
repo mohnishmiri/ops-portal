@@ -18,7 +18,8 @@ import {
   useClusters,
   useCachedClusters,
   useCachedDeployments,
-  useCachedPodMetrics,
+  useDeploymentStatusPoll,
+  usePodMetrics,
 
   useNodePools,
   useCachedNodePools,
@@ -33,6 +34,7 @@ import {
   useDeleteCronJob,
   useTriggerCronJob,
   useCronJobDetail,
+  useDeploymentDetail,
   useConfigMapDetail,
   useCachedCronJobs,
   useScaleNodePool,
@@ -49,6 +51,7 @@ import {
   usePodContainers,
   AKSCluster,
   Deployment,
+  DeploymentDetail,
   PodMetrics,
   CronJob,
   CronJobDetail,
@@ -57,6 +60,7 @@ import {
   NodeDetail,
   PodLogSearchResult,
 } from "../services/aksApi";
+import { useAksLiveWatch } from "../hooks/useAksLiveWatch";
 import {
   SecretsTab,
   ServicesTab,
@@ -192,15 +196,6 @@ function BackgroundRefreshStatus({ sync }: { sync: AksBackgroundSyncState }) {
   if (sync.isRetrying) {
     return <span className="text-sm text-amber-600">Refresh delayed, retrying...</span>;
   }
-  if (sync.isRunning) {
-    return <span className="text-sm text-blue-600">Refreshing in background...</span>;
-  }
-  if (sync.error) {
-    return <span className="text-sm text-red-600">Last refresh failed. Cached data is still shown.</span>;
-  }
-  if (sync.status === "completed") {
-    return <span className="text-sm text-green-600">Background refresh complete.</span>;
-  }
   return null;
 }
 
@@ -225,16 +220,17 @@ function useSearchPagination<T>(items: T[], searchFn: (item: T, q: string) => bo
 
 /** Search toolbar — sits at the top of the grid shell */
 function GridSearchBar({
-  search, onSearch, onPage, totalItems, shownItems, placeholder,
+  search, onSearch, onPage, totalItems, shownItems, placeholder, isSyncing,
 }: {
   search: string; onSearch: (v: string) => void;
   onPage: (p: number) => void; totalItems: number; shownItems: number; placeholder?: string;
+  isSyncing?: boolean;
 }) {
   return (
     <div className={gridStyles.panelHeader}>
       <div className="flex items-center gap-3">
         <span className={gridStyles.countBadge}>{shownItems} of {totalItems}</span>
-        <AutoRefreshIndicator />
+        <AutoRefreshIndicator label={isSyncing ? "Syncing..." : "Auto-refresh on"} />
       </div>
       <input
         type="text"
@@ -276,6 +272,7 @@ const AKSOperationsPage: React.FC = () => {
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
   const [scaleDialog, setScaleDialog] = useState<{ deployment: Deployment; replicas: number } | null>(null);
+  const [statusPollBurst, setStatusPollBurst] = useState(false); // 5s poll during active mutations
   const [nodePoolScaleDialog, setNodePoolScaleDialog] = useState<{
     pool: NodePoolDetails;
     nodeCount: number;
@@ -295,6 +292,7 @@ const AKSOperationsPage: React.FC = () => {
 
   // Deployment CRUD dialogs
   const [createDeploymentDialog, setCreateDeploymentDialog] = useState(false);
+  const [viewDeploymentDialog, setViewDeploymentDialog] = useState<{ cluster_id: string; namespace: string; name: string } | null>(null);
   const [editDeploymentDialog, setEditDeploymentDialog] = useState<Deployment | null>(null);
   const [deleteDeploymentConfirm, setDeleteDeploymentConfirm] = useState<Deployment | null>(null);
 
@@ -373,19 +371,18 @@ const AKSOperationsPage: React.FC = () => {
   const loadNodePools = !!selectedCluster && activeTab === "nodepools";
   const loadScaleHistory = activeTab === "history";
 
-  // Queries — use DB-cached clusters for fast load
+  // Queries — use DB-cached clusters for fast load (auto-refresh only on clusters tab)
   const {
     data: clustersData,
     isLoading: loadingClusters,
-    isFetching: fetchingClusters,
     refetch: refetchClusters,
-  } = useCachedClusters();
+  } = useCachedClusters(undefined, activeTab === "clusters");
   const { data: deploymentsData, isLoading: loadingDeployments, isError: deploymentsError, error: deploymentsErr } = useCachedDeployments(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadDeployments
   );
-  const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = useCachedPodMetrics(
+  const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = usePodMetrics(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadPodMetrics
@@ -407,7 +404,7 @@ const AKSOperationsPage: React.FC = () => {
     selectedCluster?.id || "",
     loadNodePools
   );
-  const { data: namespacesData } = useAksNamespaces(selectedCluster?.id, needsNamespaces);
+  const { data: namespacesData } = useAksNamespaces(selectedCluster?.id, !!selectedCluster);
 
   const namespaceOptions = useMemo(() => {
     return [...(namespacesData?.namespaces || [])].sort();
@@ -422,7 +419,26 @@ const AKSOperationsPage: React.FC = () => {
     clusterId: selectedCluster?.id,
     namespace: selectedNamespace || undefined,
     enabled: loadDeployments,
+    throttleMs: 10_000, // sync from K8s every 10s for near-real-time
   });
+
+  // Lightweight 5s status-only poll — uses live K8s API during active mutations
+  useDeploymentStatusPoll(
+    selectedCluster?.id || "",
+    selectedNamespace || undefined,
+    loadDeployments,
+    5_000,
+    statusPollBurst
+  );
+
+  // WebSocket real-time push for instant status updates after syncs/events
+  useAksLiveWatch({
+    clusterId: selectedCluster?.id,
+    namespace: selectedNamespace || undefined,
+    resources: ["deployments"],
+    enabled: loadDeployments,
+  });
+
   const podMetricsRefresh = useAksBackgroundSync({
     resourceType: "pods",
     clusterId: selectedCluster?.id,
@@ -577,6 +593,9 @@ const AKSOperationsPage: React.FC = () => {
         replicas,
       });
       updateMutationActivity(activityId, { status: "scaling", message: `0/${replicas} pods ready` });
+      // Force immediate K8s sync so DB reflects the new state
+      deploymentsRefresh.start(true);
+      setStatusPollBurst(true);
     } catch (e: any) {
       updateMutationActivity(activityId, { status: "failed", message: e?.response?.data?.detail || "Scale failed" });
       showToast(e?.response?.data?.detail || "Scale failed", "error");
@@ -599,6 +618,9 @@ const AKSOperationsPage: React.FC = () => {
             deploymentName: deployment.name,
           });
           showToast(`Restarting ${deployment.name}`);
+          // Force immediate K8s sync so DB reflects the new state
+          deploymentsRefresh.start(true);
+          setStatusPollBurst(true);
         } catch (e: any) {
           showToast(e?.response?.data?.detail || "Restart failed", "error");
         }
@@ -955,7 +977,7 @@ const AKSOperationsPage: React.FC = () => {
 
   // ── Sorting state (per grid) ────────────────────────────────────────
   type DepSortKey = "name" | "namespace" | "image" | "replicas" | "status";
-  type PodSortKey = "pod_name" | "namespace" | "phase" | "node" | "cpu" | "memory" | "restarts";
+  type PodSortKey = "pod_name" | "namespace" | "phase" | "node" | "cpu" | "memory" | "restarts" | "started";
   type CJSortKey = "name" | "namespace" | "schedule" | "suspended" | "last_schedule_time";
   type NPSortKey = "name" | "mode" | "vm_size" | "count" | "total_pods" | "provisioning_state";
   type HistSortKey = "timestamp" | "cluster_name" | "deployment_name" | "action" | "user_email";
@@ -1001,6 +1023,7 @@ const AKSOperationsPage: React.FC = () => {
       case "cpu": return p.total_cpu_millicores;
       case "memory": return p.total_memory_mb;
       case "restarts": return p.total_restarts || 0;
+      case "started": return p.started_at || "";
       default: return "";
     }
   }, []);
@@ -1078,7 +1101,11 @@ const AKSOperationsPage: React.FC = () => {
   // Poll deployment status for each active scaling activity
   useEffect(() => {
     const active = mutationActivities.filter((a) => a.status === "pending" || a.status === "scaling");
-    if (!active.length || !selectedCluster) return;
+    if (!active.length || !selectedCluster) {
+      // No active mutations — disable burst mode
+      if (statusPollBurst) setStatusPollBurst(false);
+      return;
+    }
 
     const pollInterval = setInterval(() => {
       setMutationActivities((prev) =>
@@ -1104,7 +1131,7 @@ const AKSOperationsPage: React.FC = () => {
     }, 2000);
 
     return () => clearInterval(pollInterval);
-  }, [mutationActivities, allDeps, selectedCluster]);
+  }, [mutationActivities, allDeps, selectedCluster, statusPollBurst]);
 
   // ── Render Tabs ─────────────────────────────────────────────────────
 
@@ -1138,19 +1165,18 @@ const AKSOperationsPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={() => refetchClusters()}
-            disabled={fetchingClusters}
+            disabled={loadingClusters}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
           >
-            {Icons.refresh(fetchingClusters ? "w-4 h-4 animate-spin" : "w-4 h-4")} {fetchingClusters ? "Refreshing..." : "Refresh"}
+            {Icons.refresh(loadingClusters ? "w-4 h-4 animate-spin" : "w-4 h-4")} Refresh
           </button>
           {canWrite && (
           <button
             onClick={() => clustersRefresh.start(true)}
-            disabled={clustersRefresh.isRunning}
-            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
           >
             {Icons.refresh(clustersRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-            {clustersRefresh.isRunning ? "Syncing..." : "Sync from Azure"}
+            Sync from Azure
           </button>
           )}
         </div>
@@ -1389,11 +1415,10 @@ const AKSOperationsPage: React.FC = () => {
               {canWrite && (
               <button
                 onClick={() => deploymentsRefresh.start(true)}
-                disabled={deploymentsRefresh.isRunning}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
               >
                 {Icons.refresh(deploymentsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-                {deploymentsRefresh.isRunning ? "Syncing..." : "Sync from Kubernetes"}
+                Sync from Kubernetes
               </button>
               )}
               {canWrite && (
@@ -1402,6 +1427,14 @@ const AKSOperationsPage: React.FC = () => {
                 className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
               >
                 + Create Deployment
+              </button>
+              )}
+              {canWrite && (
+              <button
+                onClick={() => window.location.href = "/env-scheduler"}
+                className="flex items-center gap-2 px-4 py-2 bg-att-500 text-white rounded-lg hover:bg-att-600 text-sm"
+              >
+                Environment Scale
               </button>
               )}
             </div>
@@ -1554,18 +1587,29 @@ const AKSOperationsPage: React.FC = () => {
                     })()}
                   </td>
                   <td className={gridStyles.centerCell}>
-                    {deployment.ready_replicas === deployment.replicas ? (
-                      <span className="inline-flex items-center gap-1 text-green-600">
+                    {deployment.replicas === 0 ? (
+                      <span className="inline-flex items-center gap-1 text-gray-500 transition-all duration-500 ease-in-out">
+                        {Icons.scale()} Scaled down
+                      </span>
+                    ) : deployment.ready_replicas === deployment.replicas ? (
+                      <span className="inline-flex items-center gap-1 text-green-600 transition-all duration-500 ease-in-out">
                         {Icons.check("w-4 h-4")} Ready
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 text-yellow-600">
-                        {Icons.warning("w-4 h-4")} Degraded
+                      <span className="inline-flex items-center gap-1 text-yellow-600 transition-all duration-500 ease-in-out">
+                        {Icons.warning("w-4 h-4")} {deployment.ready_replicas}/{deployment.replicas} Pending
                       </span>
                     )}
                   </td>
                   <td className={gridStyles.centerCell}>
                     <div className="flex justify-center gap-1">
+                      <button
+                        onClick={() => setViewDeploymentDialog({ cluster_id: selectedCluster!.id, namespace: deployment.namespace, name: deployment.name })}
+                        className="p-2 text-slate-600 hover:bg-slate-50 rounded-lg"
+                        title="View Deployment YAML"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+                      </button>
                       <button
                         onClick={() => handleViewDeploymentPods(deployment)}
                         className="p-2 text-teal-600 hover:bg-teal-50 rounded-lg"
@@ -1639,6 +1683,22 @@ const AKSOperationsPage: React.FC = () => {
             </p>
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">Replicas</label>
+                <div className="mb-3 flex gap-2">
+                  {[0, 1].map((replicaTarget) => (
+                    <button
+                      key={replicaTarget}
+                      type="button"
+                      onClick={() => setScaleDialog({ ...scaleDialog, replicas: replicaTarget })}
+                      className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+                        scaleDialog.replicas === replicaTarget
+                          ? "border-blue-600 bg-blue-50 text-blue-700"
+                          : "border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      {replicaTarget}
+                    </button>
+                  ))}
+                </div>
               <input
                 type="number"
                 min={0}
@@ -1682,7 +1742,13 @@ const AKSOperationsPage: React.FC = () => {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Namespace *</label>
-                  <input type="text" value={depForm.namespace} onChange={e => setDepForm({ ...depForm, namespace: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm" />
+                  {namespaceOptions.length > 0 ? (
+                    <select value={depForm.namespace} onChange={e => setDepForm({ ...depForm, namespace: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm">
+                      {namespaceOptions.map((ns) => <option key={ns} value={ns}>{ns}</option>)}
+                    </select>
+                  ) : (
+                    <input type="text" value={depForm.namespace} onChange={e => setDepForm({ ...depForm, namespace: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm" />
+                  )}
                 </div>
               </div>
               <div>
@@ -1811,37 +1877,34 @@ const AKSOperationsPage: React.FC = () => {
           Pod Metrics {selectedCluster && `- ${selectedCluster.name}`}
         </h2>
         {selectedCluster && (
-          <select
-            value={selectedNamespace}
-            onChange={(e) => setSelectedNamespace(e.target.value)}
-            className="px-3 py-2 border rounded-lg text-sm"
-          >
-            <option value="">All Namespaces</option>
-            {podNamespaces.map((ns) => (
-              <option key={ns} value={ns}>
-                {ns}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedNamespace}
+              onChange={(e) => setSelectedNamespace(e.target.value)}
+              className="px-3 py-2 border rounded-lg text-sm"
+            >
+              <option value="">All Namespaces</option>
+              {podNamespaces.map((ns) => (
+                <option key={ns} value={ns}>
+                  {ns}
+                </option>
+              ))}
+            </select>
+            {canWrite && (
+            <button
+              onClick={() => podMetricsRefresh.start(true)}
+              disabled={podMetricsRefresh.isRunning}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-60"
+            >
+              {Icons.refresh(podMetricsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
+              Sync from Kubernetes
+            </button>
+            )}
+          </div>
         )}
       </div>
       {selectedCluster && (
         <div className="flex items-center gap-3">
-          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-            podMetricsData?.source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
-          }`}>
-            Source: {podMetricsData?.source === "db" ? "Database" : "Kubernetes Live"}
-          </span>
-          {podMetricsData?.last_sync && (
-            <span className="text-sm text-gray-500">
-              Last synced: {formatDate(podMetricsData.last_sync)}
-            </span>
-          )}
-          {!podMetricsData?.last_sync && (
-            <span className="text-sm text-yellow-600">
-              Not synced yet — cached table will update after background refresh
-            </span>
-          )}
           <BackgroundRefreshStatus sync={podMetricsRefresh} />
         </div>
       )}
@@ -1850,12 +1913,12 @@ const AKSOperationsPage: React.FC = () => {
         <div className="text-center py-16 text-gray-500">
           Select a cluster from the Clusters tab to view pod metrics
         </div>
-      ) : podMetricsError && allPods.length === 0 ? (
+      ) : podMetricsError ? (
         <div className="text-center py-12">
           <div className="text-red-600 font-medium mb-2">{Icons.warning("w-6 h-6 mx-auto mb-2")}Failed to load pod metrics</div>
           <div className="text-sm text-gray-500 max-w-md mx-auto">{(podMetricsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
         </div>
-      ) : loadingPodMetrics && allPods.length === 0 ? (
+      ) : loadingPodMetrics ? (
         <div className="text-center py-8 text-gray-500">Loading pod metrics...</div>
       ) : (
         <>
@@ -1873,6 +1936,7 @@ const AKSOperationsPage: React.FC = () => {
                   <th className={gridStyles.headerCell} style={{ minWidth: 180 }}><SortableHeader label="CPU (Use / Req / Lim)" active={podSort.key === "cpu"} direction={podSort.direction} onClick={() => setPodSort(nextSortState(podSort, "cpu"))} /></th>
                   <th className={gridStyles.headerCell} style={{ minWidth: 180 }}><SortableHeader label="Memory (Use / Req / Lim)" active={podSort.key === "memory"} direction={podSort.direction} onClick={() => setPodSort(nextSortState(podSort, "memory"))} /></th>
                   <th className={gridStyles.headerCellCenter}><SortableHeader label="Restarts" active={podSort.key === "restarts"} direction={podSort.direction} onClick={() => setPodSort(nextSortState(podSort, "restarts"))} align="center" /></th>
+                  <th className={gridStyles.headerCellCenter}><SortableHeader label="Age" active={podSort.key === "started"} direction={podSort.direction} onClick={() => setPodSort(nextSortState(podSort, "started"))} align="center" /></th>
                   <th className={gridStyles.headerCellCenter}>Actions</th>
                 </tr>
               </thead>
@@ -1953,6 +2017,23 @@ const AKSOperationsPage: React.FC = () => {
                       </span>
                     </td>
                     <td className={gridStyles.centerCell}>
+                      {pod.started_at ? (() => {
+                        const started = new Date(pod.started_at);
+                        const now = new Date();
+                        const diffMs = now.getTime() - started.getTime();
+                        const diffSec = Math.floor(diffMs / 1000);
+                        const days = Math.floor(diffSec / 86400);
+                        const hours = Math.floor((diffSec % 86400) / 3600);
+                        const mins = Math.floor((diffSec % 3600) / 60);
+                        const age = days > 0 ? `${days}d ${hours}h` : hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+                        return (
+                          <span className="font-mono text-xs text-gray-700" title={started.toLocaleString()}>
+                            {age}
+                          </span>
+                        );
+                      })() : <span className="text-gray-400">—</span>}
+                    </td>
+                    <td className={gridStyles.centerCell}>
                       <div className="flex items-center justify-center gap-1">
                         <button onClick={() => setPodLogDialog(pod)} title="View Logs" className="p-1 rounded hover:bg-blue-50 text-blue-600">
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
@@ -2006,11 +2087,10 @@ const AKSOperationsPage: React.FC = () => {
             {canWrite && (
             <button
               onClick={() => cronJobsRefresh.start(true)}
-              disabled={cronJobsRefresh.isRunning}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
             >
               {Icons.refresh(cronJobsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-              {cronJobsRefresh.isRunning ? "Syncing..." : "Sync from Kubernetes"}
+              Sync from Kubernetes
             </button>
             )}
             {canWrite && (
@@ -2346,11 +2426,10 @@ const AKSOperationsPage: React.FC = () => {
             {canWrite && (
             <button
               onClick={() => nodePoolsRefresh.start(true)}
-              disabled={nodePoolsRefresh.isRunning}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm"
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
             >
               {Icons.refresh(nodePoolsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-              {nodePoolsRefresh.isRunning ? "Syncing..." : "Sync from Azure"}
+              Sync from Azure
             </button>
             )}
           </div>
@@ -2809,10 +2888,11 @@ const AKSOperationsPage: React.FC = () => {
     <div className="py-6 space-y-6">
         {/* Header */}
         <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-gray-900">AKS Operations Center</h1>
-          </div>
-          <p className="text-sm text-gray-500 mt-1">Multi-cluster management, deployment control, and observability</p>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            {Icons.cluster("h-8 w-8 text-att-500")}
+            AKS Operations Center
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">Multi-cluster management, deployment control, and observability</p>
         </div>
 
         {/* Tabs */}
@@ -2873,6 +2953,9 @@ const AKSOperationsPage: React.FC = () => {
           <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
         )}
 
+      {/* View Deployment Detail Dialog */}
+      {viewDeploymentDialog && <DeploymentDetailDialog {...viewDeploymentDialog} onClose={() => setViewDeploymentDialog(null)} />}
+
       {/* Generic Confirmation Modal */}
       {confirmDialog && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setConfirmDialog(null)}>
@@ -2923,31 +3006,41 @@ const AKSOperationsPage: React.FC = () => {
 
       {/* ── Pod Logs Viewer Modal ──────────────────────────────────── */}
       {podLogDialog && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col">
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1e1e1e] rounded-lg shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col border border-gray-700">
+            {/* Header with live status */}
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700 bg-[#2d2d2d] rounded-t-lg">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 cursor-pointer" onClick={() => setPodLogDialog(null)} />
+                  <span className="w-3 h-3 rounded-full bg-yellow-500" />
+                  <span className="w-3 h-3 rounded-full bg-green-500" />
                 </div>
-                <div>
-                  <h3 className="text-white font-semibold text-sm">Pod Logs</h3>
+                <div className="ml-2">
+                  <h3 className="text-white font-semibold text-sm flex items-center gap-2">
+                    Pod Logs
+                    {podLogAutoRefresh && (
+                      <span className="flex items-center gap-1 text-[10px] font-normal bg-green-900/40 text-green-400 px-2 py-0.5 rounded-full">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                        LIVE
+                      </span>
+                    )}
+                  </h3>
                   <p className="text-gray-400 text-xs font-mono">{podLogDialog.namespace}/{podLogDialog.pod_name}</p>
                 </div>
               </div>
-              <button onClick={() => setPodLogDialog(null)} className="text-gray-400 hover:text-white p-1">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              <button onClick={() => setPodLogDialog(null)} className="text-gray-400 hover:text-white p-1 rounded hover:bg-gray-600">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
             </div>
 
             {/* Controls Bar */}
-            <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-b border-gray-700 bg-gray-800">
+            <div className="flex flex-wrap items-center gap-3 px-5 py-2.5 border-b border-gray-700/50 bg-[#252526]">
               {/* Container select */}
               <div className="flex items-center gap-2">
-                <label className="text-gray-400 text-xs">Container:</label>
+                <label className="text-gray-500 text-[10px] uppercase tracking-wider">Container</label>
                 <select value={podLogContainer} onChange={(e) => setPodLogContainer(e.target.value)}
-                  className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600 focus:ring-1 focus:ring-blue-500">
+                  className="bg-[#3c3c3c] text-gray-200 text-xs px-2 py-1.5 rounded border border-gray-600 focus:ring-1 focus:ring-blue-500">
                   <option value="">All</option>
                   {(podContainersData?.containers || podLogDialog.containers || []).map((c: any) => (
                     <option key={c.name} value={c.name}>{c.name}</option>
@@ -2955,20 +3048,24 @@ const AKSOperationsPage: React.FC = () => {
                 </select>
               </div>
 
+              <div className="h-4 w-px bg-gray-700" />
+
               {/* Tail lines */}
               <div className="flex items-center gap-2">
-                <label className="text-gray-400 text-xs">Tail:</label>
+                <label className="text-gray-500 text-[10px] uppercase tracking-wider">Tail</label>
                 <select value={podLogTailLines} onChange={(e) => setPodLogTailLines(Number(e.target.value))}
-                  className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600">
+                  className="bg-[#3c3c3c] text-gray-200 text-xs px-2 py-1.5 rounded border border-gray-600">
                   {[100, 500, 1000, 2000, 5000].map((n) => <option key={n} value={n}>{n} lines</option>)}
                 </select>
               </div>
 
+              <div className="h-4 w-px bg-gray-700" />
+
               {/* Time filter */}
               <div className="flex items-center gap-2">
-                <label className="text-gray-400 text-xs">Since:</label>
+                <label className="text-gray-500 text-[10px] uppercase tracking-wider">Since</label>
                 <select value={podLogSinceSeconds ?? ""} onChange={(e) => setPodLogSinceSeconds(e.target.value ? Number(e.target.value) : undefined)}
-                  className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600">
+                  className="bg-[#3c3c3c] text-gray-200 text-xs px-2 py-1.5 rounded border border-gray-600">
                   <option value="">All time</option>
                   <option value="300">Last 5m</option>
                   <option value="900">Last 15m</option>
@@ -2978,27 +3075,44 @@ const AKSOperationsPage: React.FC = () => {
                 </select>
               </div>
 
-              {/* Auto-refresh */}
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input type="checkbox" checked={podLogAutoRefresh} onChange={() => setPodLogAutoRefresh(!podLogAutoRefresh)}
-                  className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500" />
-                <span className="text-gray-400 text-xs">Auto-refresh</span>
-                {podLogAutoRefresh && <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
-              </label>
+              <div className="h-4 w-px bg-gray-700" />
+
+              {/* Auto-refresh / Live toggle */}
+              <button onClick={() => setPodLogAutoRefresh(!podLogAutoRefresh)}
+                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded font-medium transition-all ${
+                  podLogAutoRefresh
+                    ? "bg-green-600/20 text-green-400 border border-green-500/50 shadow-[0_0_8px_rgba(34,197,94,0.2)]"
+                    : "bg-[#3c3c3c] text-gray-400 border border-gray-600 hover:bg-[#4c4c4c] hover:text-gray-200"
+                }`}>
+                {podLogAutoRefresh ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                    Streaming
+                  </>
+                ) : (
+                  <>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+                    Start Stream
+                  </>
+                )}
+              </button>
 
               <div className="flex-1" />
 
               {/* Search Errors toggle */}
               <button onClick={() => setPodLogSearchActive(!podLogSearchActive)}
-                className={`text-xs px-3 py-1.5 rounded font-medium transition-colors ${
-                  podLogSearchActive ? "bg-red-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                className={`text-xs px-3 py-1.5 rounded font-medium transition-colors flex items-center gap-1 ${
+                  podLogSearchActive ? "bg-red-600 text-white" : "bg-[#3c3c3c] text-gray-300 hover:bg-[#4c4c4c] border border-gray-600"
                 }`}>
-                {podLogSearchActive ? "← Back to Logs" : "🔍 Search Errors"}
+                {podLogSearchActive ? "← Logs" : (
+                  <><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Search</>
+                )}
               </button>
 
               {!podLogSearchActive && (
-                <button onClick={() => refetchPodLogs()} className="text-xs px-3 py-1.5 bg-gray-700 text-gray-300 rounded hover:bg-gray-600">
-                  ↻ Refresh
+                <button onClick={() => refetchPodLogs()} className="text-xs px-3 py-1.5 bg-[#3c3c3c] text-gray-300 rounded hover:bg-[#4c4c4c] border border-gray-600 flex items-center gap-1">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  Refresh
                 </button>
               )}
 
@@ -3018,20 +3132,19 @@ const AKSOperationsPage: React.FC = () => {
                   URL.revokeObjectURL(url);
                 }}
                 disabled={!podLogsData?.logs && !(podLogSearchActive && podLogSearchData?.matches?.length)}
-                className="text-xs px-3 py-1.5 bg-gray-700 text-gray-300 rounded hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                className="text-xs px-3 py-1.5 bg-[#3c3c3c] text-gray-300 rounded hover:bg-[#4c4c4c] border border-gray-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
                 title="Download logs as .log file"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Download
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               </button>
             </div>
 
             {/* Error search bar (when search mode active) */}
             {podLogSearchActive && (
-              <div className="flex items-center gap-3 px-5 py-2 bg-gray-850 border-b border-gray-700 bg-gray-800/50">
+              <div className="flex items-center gap-3 px-5 py-2 border-b border-gray-700/50 bg-[#252526]">
                 <input type="text" value={podLogSearchPattern} onChange={(e) => setPodLogSearchPattern(e.target.value)}
                   placeholder="Regex pattern (e.g. error|exception|fail)"
-                  className="flex-1 bg-gray-700 text-white text-xs px-3 py-1.5 rounded border border-gray-600 font-mono focus:ring-1 focus:ring-red-500" />
+                  className="flex-1 bg-[#3c3c3c] text-white text-xs px-3 py-1.5 rounded border border-gray-600 font-mono focus:ring-1 focus:ring-red-500" />
                 {podLogSearchData && (
                   <div className="flex items-center gap-2 text-xs">
                     <span className="px-2 py-0.5 rounded bg-red-900/50 text-red-400 font-medium">{podLogSearchData.severity_counts?.error || 0} errors</span>
@@ -3044,9 +3157,15 @@ const AKSOperationsPage: React.FC = () => {
             )}
 
             {/* Log Content */}
-            <div className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed min-h-[300px] max-h-[60vh]">
+            <div className="flex-1 overflow-auto px-4 py-3 font-mono text-xs leading-relaxed min-h-[300px] max-h-[60vh] bg-[#1e1e1e]">
               {(loadingPodLogs || loadingPodLogSearch) ? (
-                <div className="text-gray-500 text-center py-8">Loading logs...</div>
+                <div className="flex flex-col items-center justify-center py-12 gap-3">
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-gray-400 text-sm">Fetching logs...</span>
+                  </div>
+                  <span className="text-gray-600 text-xs">Connecting to {podLogDialog.pod_name}</span>
+                </div>
               ) : podLogSearchActive && podLogSearchData ? (
                 /* Search results view */
                 podLogSearchData.matches && podLogSearchData.matches.length > 0 ? (
@@ -3068,7 +3187,7 @@ const AKSOperationsPage: React.FC = () => {
                     ))}
                   </div>
                 ) : (
-                  <div className="text-green-400 text-center py-8">✓ No matches found for pattern "{podLogSearchPattern}"</div>
+                  <div className="text-green-400 text-center py-8">✓ No matches found for pattern &quot;{podLogSearchPattern}&quot;</div>
                 )
               ) : podLogsData?.logs ? (
                 /* Raw logs view */
@@ -3087,17 +3206,44 @@ const AKSOperationsPage: React.FC = () => {
                       </div>
                     );
                   })}
+                  {podLogAutoRefresh && (
+                    <div className="flex items-center gap-2 mt-2 text-gray-500 py-1">
+                      <div className="w-2 h-2 border border-green-500 border-t-transparent rounded-full animate-spin" />
+                      <span className="text-[11px]">Waiting for new logs...</span>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div className="text-gray-500 text-center py-8">No logs available</div>
+                <div className="flex flex-col items-center justify-center py-16 gap-4">
+                  <svg className="w-16 h-16 text-gray-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+                  </svg>
+                  <div className="text-center">
+                    <p className="text-gray-400 text-sm">No logs available</p>
+                    <p className="text-gray-600 text-xs mt-1">Try adjusting the time range or enable streaming to watch for new logs</p>
+                  </div>
+                  <button onClick={() => setPodLogAutoRefresh(true)}
+                    className="flex items-center gap-1.5 text-xs px-4 py-2 rounded bg-green-600/20 text-green-400 border border-green-500/50 hover:bg-green-600/30 transition-colors mt-2">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+                    Start Live Stream
+                  </button>
+                </div>
               )}
               <div ref={logEndRef} />
             </div>
 
-            {/* Footer */}
-            <div className="flex items-center justify-between px-5 py-2 border-t border-gray-700 text-xs text-gray-500">
-              <span>{podLogsData?.line_count ?? 0} lines loaded</span>
-              <span>Container: {podLogsData?.container || "all"}</span>
+            {/* Footer with real-time status */}
+            <div className="flex items-center justify-between px-5 py-2 border-t border-gray-700 bg-[#252526] text-xs rounded-b-lg">
+              <div className="flex items-center gap-3">
+                <span className="text-gray-400">{podLogsData?.line_count ?? 0} lines</span>
+                {podLogAutoRefresh && (
+                  <span className="flex items-center gap-1 text-green-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                    Auto-refreshing every 5s
+                  </span>
+                )}
+              </div>
+              <span className="text-gray-500">Container: {podLogsData?.container || "all"}</span>
             </div>
           </div>
         </div>
@@ -3105,79 +3251,98 @@ const AKSOperationsPage: React.FC = () => {
 
       {/* ── Pod Exec Dialog ──────────────────────────────────────── */}
       {podExecDialog && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col">
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1e1e1e] rounded-lg shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col border border-gray-700">
+            {/* Terminal Title Bar */}
+            <div className="flex items-center justify-between px-4 py-2 bg-[#2d2d2d] rounded-t-lg border-b border-gray-700">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-green-600 flex items-center justify-center">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 cursor-pointer" onClick={() => setPodExecDialog(null)} />
+                  <span className="w-3 h-3 rounded-full bg-yellow-500" />
+                  <span className="w-3 h-3 rounded-full bg-green-500" />
                 </div>
-                <div>
-                  <h3 className="text-white font-semibold text-sm">Pod Terminal</h3>
-                  <p className="text-gray-400 text-xs font-mono">{podExecDialog.namespace}/{podExecDialog.pod_name}</p>
-                </div>
+                <span className="text-gray-300 text-xs font-medium ml-2">
+                  Shell in {execContainer || (podContainersData?.containers?.[0]?.name || "container")} — in {podExecDialog.pod_name}
+                </span>
               </div>
-              <button onClick={() => setPodExecDialog(null)} className="text-gray-400 hover:text-white p-1">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              </button>
-            </div>
-
-            {/* Container + Quick Commands */}
-            <div className="flex flex-wrap items-center gap-3 px-5 py-2 border-b border-gray-700 bg-gray-800">
               <div className="flex items-center gap-2">
-                <label className="text-gray-400 text-xs">Container:</label>
                 <select value={execContainer} onChange={(e) => setExecContainer(e.target.value)}
-                  className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600">
+                  className="bg-[#3c3c3c] text-gray-300 text-xs px-2 py-1 rounded border border-gray-600 focus:ring-1 focus:ring-green-500">
                   <option value="">Default</option>
                   {(podContainersData?.containers || podExecDialog.containers || []).map((c: any) => (
                     <option key={c.name} value={c.name}>{c.name}</option>
                   ))}
                 </select>
+                <button onClick={() => setPodExecDialog(null)} className="text-gray-400 hover:text-white p-1 rounded hover:bg-gray-600">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
               </div>
-              <div className="h-4 w-px bg-gray-600" />
-              <span className="text-gray-500 text-xs">Quick:</span>
+            </div>
+
+            {/* Quick Commands - collapsible toolbar */}
+            <div className="flex items-center gap-2 px-4 py-1.5 bg-[#252526] border-b border-gray-700/50 overflow-x-auto">
+              <span className="text-gray-500 text-[10px] uppercase tracking-wider flex-shrink-0">Quick:</span>
               {["ls -la", "env", "df -h", "ps aux", "cat /etc/os-release", "whoami", "hostname"].map((cmd) => (
                 <button key={cmd} onClick={() => { setExecCommand(cmd); }}
-                  className="text-xs px-2 py-1 bg-gray-700 text-gray-300 rounded hover:bg-gray-600 font-mono">{cmd}</button>
+                  className="text-[11px] px-2 py-0.5 bg-[#3c3c3c] text-gray-400 rounded hover:bg-[#4c4c4c] hover:text-gray-200 font-mono flex-shrink-0 transition-colors">{cmd}</button>
               ))}
             </div>
 
-            {/* Output Area */}
-            <div className="flex-1 overflow-auto p-4 font-mono text-xs min-h-[250px] max-h-[50vh]">
+            {/* Terminal Output Area */}
+            <div className="flex-1 overflow-auto px-4 py-3 font-mono text-sm min-h-[300px] max-h-[55vh] bg-[#1e1e1e]">
               {execHistory.length === 0 ? (
-                <div className="text-gray-500 text-center py-8">
-                  <svg className="w-12 h-12 mx-auto mb-3 text-gray-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                  <p>Enter a command below to execute in this pod</p>
-                  <p className="text-gray-600 mt-1">Or use the quick commands above</p>
+                <div className="text-gray-400">
+                  <span className="text-green-400">root@{podExecDialog.pod_name}</span>
+                  <span className="text-gray-400">:</span>
+                  <span className="text-blue-400">~</span>
+                  <span className="text-gray-400"># </span>
+                  <span className="inline-block w-2 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle" />
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-1">
                   {execHistory.map((entry, i) => (
                     <div key={i}>
-                      <div className="flex items-center gap-2 text-green-400">
-                        <span className="text-gray-500">$</span>
-                        <span>{entry.command}</span>
+                      <div className="flex items-center">
+                        <span className="text-green-400">root@{podExecDialog.pod_name}</span>
+                        <span className="text-gray-400">:</span>
+                        <span className="text-blue-400">~</span>
+                        <span className="text-gray-400"># </span>
+                        <span className="text-gray-100">{entry.command}</span>
                       </div>
-                      <pre className={`whitespace-pre-wrap mt-1 pl-4 ${entry.success ? "text-gray-300" : "text-red-400"}`}>{entry.output || "(no output)"}</pre>
+                      <pre className={`whitespace-pre-wrap ml-0 mt-0.5 mb-2 ${entry.success ? "text-gray-300" : "text-red-400"}`}>{entry.output || ""}</pre>
                     </div>
                   ))}
+                  {/* Active prompt line */}
+                  {!execPodMutation.isPending && (
+                    <div className="flex items-center">
+                      <span className="text-green-400">root@{podExecDialog.pod_name}</span>
+                      <span className="text-gray-400">:</span>
+                      <span className="text-blue-400">~</span>
+                      <span className="text-gray-400"># </span>
+                      <span className="inline-block w-2 h-4 bg-gray-400 animate-pulse align-middle" />
+                    </div>
+                  )}
+                  {execPodMutation.isPending && (
+                    <div className="flex items-center text-yellow-400">
+                      <span className="animate-pulse">Executing...</span>
+                    </div>
+                  )}
                 </div>
               )}
               <div ref={execEndRef} />
             </div>
 
-            {/* Command Input */}
-            <div className="flex items-center gap-2 px-5 py-3 border-t border-gray-700 bg-gray-800">
-              <span className="text-green-400 font-mono text-sm">$</span>
+            {/* Command Input - styled like real terminal prompt */}
+            <div className="flex items-center gap-0 px-4 py-2 border-t border-gray-700 bg-[#252526]">
+              <span className="text-green-400 font-mono text-sm flex-shrink-0">root@{podExecDialog.pod_name}:~# </span>
               <input type="text" value={execCommand} onChange={(e) => setExecCommand(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") handleExecCommand(); }}
-                placeholder="Enter command..."
-                className="flex-1 bg-gray-700 text-white text-sm px-3 py-2 rounded border border-gray-600 font-mono focus:ring-1 focus:ring-green-500 focus:border-green-500" />
-              <button onClick={handleExecCommand} disabled={!execCommand.trim() || execPodMutation.isPending}
-                className="px-4 py-2 bg-green-600 text-white rounded text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                {execPodMutation.isPending ? "Running..." : "Run"}
-              </button>
+                placeholder=""
+                autoFocus
+                className="flex-1 bg-transparent text-gray-100 text-sm px-1 py-1 font-mono focus:outline-none border-none" />
+              {execPodMutation.isPending && (
+                <span className="text-yellow-500 text-xs font-mono flex-shrink-0 animate-pulse">running...</span>
+              )}
             </div>
           </div>
         </div>
@@ -3534,12 +3699,48 @@ function CronJobDetailDialog({ cluster_id, namespace, name, onClose }: { cluster
   );
 }
 
+function DeploymentDetailDialog({ cluster_id, namespace, name, onClose }: { cluster_id: string; namespace: string; name: string; onClose: () => void }) {
+  const { data, isLoading, isError, error } = useDeploymentDetail(cluster_id, namespace, name);
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg p-6 w-[760px] max-h-[85vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-4">
+          <div>
+            <h3 className="text-lg font-semibold">Deployment YAML: {name}</h3>
+            <p className="text-sm text-gray-500">Namespace: {namespace}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+        {isLoading ? (
+          <div className="text-center py-8 text-gray-500">Loading deployment YAML...</div>
+        ) : isError ? (
+          <div className="text-center py-8">
+            <div className="text-red-500 font-medium">Failed to load deployment YAML.</div>
+            <div className="text-xs text-gray-400 mt-2">{(error as Error)?.message || "Unknown error"}</div>
+          </div>
+        ) : data ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <div className="text-gray-500">Deployment</div><div className="font-medium">{data.name}</div>
+              <div className="text-gray-500">Namespace</div><div className="font-medium">{data.namespace}</div>
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-medium text-gray-700">YAML Manifest</div>
+              <pre className="max-h-[55vh] overflow-auto rounded-lg bg-slate-950 p-4 text-xs leading-6 text-slate-100"><code>{data.yaml}</code></pre>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 // ── ConfigMap Content Viewer (lazy-loaded) ────────────────────────────
 
 function ConfigMapContent({ cluster_id, namespace, name }: { cluster_id: string; namespace: string; name: string }) {
   const { data, isLoading, isError } = useConfigMapDetail(cluster_id, namespace, name);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
 
   if (isLoading) return <div className="px-3 py-4 text-center text-xs text-gray-400">Loading ConfigMap...</div>;
   if (isError) return <div className="px-3 py-4 text-center text-xs text-red-400">Failed to load ConfigMap</div>;
@@ -3553,48 +3754,27 @@ function ConfigMapContent({ cluster_id, namespace, name }: { cluster_id: string;
   }
   if (!data || !data.data || Object.keys(data.data).length === 0) return <div className="px-3 py-4 text-center text-xs text-gray-400">No data keys</div>;
 
-  const entries = Object.entries(data.data);
-  const q = search.trim().toLowerCase();
-  const filtered = q
-    ? entries.filter(([key, value]) => key.toLowerCase().includes(q) || value.toLowerCase().includes(q))
-    : entries;
-
   return (
     <div className="border-t">
-      {entries.length > 3 ? (
-        <div className="px-3 py-2 border-b bg-att-50/40">
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search config keys..."
-            className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-att-400"
-          />
+      {Object.entries(data.data).map(([key, value]) => (
+        <div key={key} className="border-b last:border-b-0">
+          <button
+            onClick={() => setExpandedKey(expandedKey === key ? null : key)}
+            className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-blue-50 text-xs"
+          >
+            <span className="font-mono text-blue-700">{key}</span>
+            <span className="text-gray-400 flex items-center gap-1">
+              {value.length > 100 ? `${(value.length / 1024).toFixed(1)} KB` : `${value.length} chars`}
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={10} height={10} className={`transition-transform ${expandedKey === key ? "rotate-180" : ""}`}><polyline points="6 9 12 15 18 9"/></svg>
+            </span>
+          </button>
+          {expandedKey === key && (
+            <div className="px-3 pb-2">
+              <pre className="font-mono text-xs bg-gray-900 text-green-300 p-3 rounded overflow-x-auto max-h-[300px] overflow-y-auto whitespace-pre-wrap">{value}</pre>
+            </div>
+          )}
         </div>
-      ) : null}
-      {filtered.length === 0 ? (
-        <div className="px-3 py-4 text-center text-xs text-gray-400">No keys match your search</div>
-      ) : (
-        filtered.map(([key, value]) => (
-          <div key={key} className="border-b last:border-b-0">
-            <button
-              onClick={() => setExpandedKey(expandedKey === key ? null : key)}
-              className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-att-50 text-xs"
-            >
-              <span className="font-mono text-att-700">{key}</span>
-              <span className="text-gray-400 flex items-center gap-1">
-                {value.length > 100 ? `${(value.length / 1024).toFixed(1)} KB` : `${value.length} chars`}
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={10} height={10} className={`transition-transform ${expandedKey === key ? "rotate-180" : ""}`}><polyline points="6 9 12 15 18 9"/></svg>
-              </span>
-            </button>
-            {expandedKey === key && (
-              <div className="px-3 pb-2">
-                <pre className="font-mono text-xs bg-gray-900 text-green-300 p-3 rounded overflow-x-auto max-h-[300px] overflow-y-auto whitespace-pre-wrap">{value}</pre>
-              </div>
-            )}
-          </div>
-        ))
-      )}
+      ))}
       {data.binary_data_keys && data.binary_data_keys.length > 0 && (
         <div className="px-3 py-2 text-xs text-gray-400">
           Binary data keys: {data.binary_data_keys.join(", ")}

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.core.database import get_db
 from app.core.subscription_resolver import get_monitored_subscription_ids
-from app.models.auth import UserContext
+from app.models.auth import UserContext, UserRole
 
 logger = structlog.get_logger(__name__)
 
@@ -86,7 +86,7 @@ async def get_scoped_subscription_ids() -> list[str]:
 
 async def bind_subscription_scope(
     request: Request,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext | None = Depends(get_current_user),
     subscription_ids: list[str] | None = Query(
         default=None,
         description="Optional subscription scope filter (repeat param for multiple)",
@@ -94,6 +94,25 @@ async def bind_subscription_scope(
     db: AsyncSession | None = Depends(get_db),
 ) -> list[str]:
     """FastAPI dependency: authenticate, resolve scope, store on context for services."""
+    if user is None:
+        path = request.url.path
+        if path.startswith("/api/v1/aks/dashboard/") and ("/launch/" in path or "/proxy" in path):
+            user = UserContext(
+                user_id="k8s-dashboard-browser-session",
+                object_id="00000000-0000-0000-0000-000000000000",
+                display_name="K8s Dashboard Browser Session",
+                email="k8s-dashboard@localhost",
+                roles=[UserRole.READ],
+                raw_roles=["dashboard-session"],
+                tenant_id="dashboard-session",
+                allowed_subscriptions=[],
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Not authenticated",
+            )
+
     selected = subscription_ids
     if selected is None and db is not None:
         try:

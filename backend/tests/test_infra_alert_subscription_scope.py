@@ -302,6 +302,63 @@ async def test_create_tables_backfills_alert_schedule_pg_threshold_column(monkey
 
 
 @pytest.mark.anyio
+async def test_create_tables_backfills_expiry_environment_column(monkeypatch):
+    fake_connection = _FakeConnection()
+    monkeypatch.setattr(database_core, "_engine", _FakeEngine(fake_connection))
+
+    await database_core.create_tables()
+
+    assert any("ALTER TABLE IF EXISTS custom_expiry_alert_configs" in sql for sql in fake_connection.executed_sql)
+    assert any("ADD COLUMN IF NOT EXISTS environment" in sql for sql in fake_connection.executed_sql)
+
+
+@pytest.mark.anyio
+async def test_create_expiry_config_persists_environment():
+    fake_db = _SeedableDbSession()
+    service = InfraAlertService(fake_db)
+
+    result = await service.create_expiry_config(
+        alert_type="database_account",
+        resource_name="attcc-db-account",
+        resource_identifier="db-acct-001",
+        expiry_date=datetime.datetime(2027, 1, 1),
+        created_by="tester@example.com",
+        environment="prod",
+    )
+
+    assert result["status"] == "created"
+    assert len(fake_db.added) == 1
+    assert fake_db.added[0].environment == "prod"
+
+
+@pytest.mark.anyio
+async def test_list_expiry_configs_returns_environment():
+    row = SimpleNamespace(
+        id=1,
+        alert_type="database_account",
+        resource_name="attcc-db-account",
+        resource_identifier="db-acct-001",
+        description=None,
+        environment="prod",
+        expiry_date=datetime.datetime(2027, 1, 1),
+        warning_days_before=30,
+        critical_days_before=7,
+        is_enabled=True,
+        notification_emails=[],
+        extra_data={},
+        created_at=datetime.datetime(2026, 1, 1),
+        created_by="tester@example.com",
+    )
+    fake_db = _CapturingDbSession(rows=[row])
+    service = InfraAlertService(fake_db)
+
+    configs = await service.list_expiry_configs()
+
+    assert len(configs) == 1
+    assert configs[0]["environment"] == "prod"
+
+
+@pytest.mark.anyio
 async def test_notification_history_excludes_checksum_entries_by_default():
     fake_db = _CapturingDbSession()
     service = EmailNotificationService(fake_db)

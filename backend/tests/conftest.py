@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.auth import get_current_user
 from app.core.database import get_db
 from app.main import create_application
-from app.models.database import Permission, Resource
+from app.models.database import Permission, Resource, Team, TeamMembership
 from app.schemas.auth import UserContext, UserRole
 
 # audit_logs uses JSONB which SQLite can't compile.  We create an equivalent
@@ -57,6 +57,8 @@ async def db_engine():
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Resource.__table__.create(c, checkfirst=True))
         await conn.run_sync(lambda c: Permission.__table__.create(c, checkfirst=True))
+        await conn.run_sync(lambda c: Team.__table__.create(c, checkfirst=True))
+        await conn.run_sync(lambda c: TeamMembership.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
     yield engine
     await engine.dispose()

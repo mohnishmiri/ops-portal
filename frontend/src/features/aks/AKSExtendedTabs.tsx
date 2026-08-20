@@ -21,10 +21,12 @@ import {
   useDeleteService,
   useDeleteConfigMap,
   useDeleteIngress,
+  useUpdateIngress,
   useUninstallHelmRelease,
   useCreateSecret,
   useUpdateSecret,
   useCreateService,
+  useUpdateService,
   useCreateConfigMap,
   useUpdateConfigMap,
 } from "../../services/aksApi";
@@ -42,11 +44,13 @@ import {
   ConfigMapEditModal,
   ConfigMapViewModal,
   DeleteConfirmModal,
+  IngressEditModal,
   IngressViewModal,
   SecretCreateModal,
   SecretEditModal,
   SecretViewModal,
   ServiceCreateModal,
+  ServiceEditModal,
   ServiceViewModal,
 } from "./K8sResourceModals";
 
@@ -73,13 +77,10 @@ function BackgroundRefreshStatus({ sync }: { sync?: AksBackgroundSyncState }) {
     return <span className="text-sm text-amber-600">Refresh delayed, retrying...</span>;
   }
   if (sync.isRunning) {
-    return <span className="text-sm text-blue-600">Refreshing in background...</span>;
+    return <span className="text-sm text-blue-600">Syncing from Kubernetes...</span>;
   }
   if (sync.error) {
-    return <span className="text-sm text-red-600">Last refresh failed. Cached data is still shown.</span>;
-  }
-  if (sync.status === "completed") {
-    return <span className="text-sm text-green-600">Background refresh complete.</span>;
+    return <span className="text-sm text-red-600">{sync.error}</span>;
   }
   return null;
 }
@@ -191,6 +192,7 @@ export const SecretsTab: React.FC<TabProps> = ({
     resourceType: "secrets",
     clusterId: cluster.id,
     namespace: nsFilter,
+    auto: false,
   });
   const deleteMut = useDeleteSecret();
   const createMut = useCreateSecret();
@@ -216,7 +218,7 @@ export const SecretsTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => backgroundSync.start(true)}
+        onSync={() => backgroundSync.start(false)}
         syncing={backgroundSync.isRunning}
         backgroundSync={backgroundSync}
         onCreate={() => setShowCreate(true)}
@@ -254,7 +256,6 @@ export const SecretsTab: React.FC<TabProps> = ({
           clusterId={cluster.id}
           namespace={viewTarget.namespace}
           name={viewTarget.name}
-          initialKeys={items.find((s) => s.namespace === viewTarget.namespace && s.name === viewTarget.name)?.keys}
           canWrite={canWrite}
           onClose={() => setViewTarget(null)}
         />
@@ -293,6 +294,7 @@ export const SecretsTab: React.FC<TabProps> = ({
       {showCreate && (
         <SecretCreateModal
           defaultNamespace={defaultNs}
+          namespaces={namespaces}
           saving={createMut.isPending}
           onClose={() => setShowCreate(false)}
           onSave={(vars) => createMut.mutate(
@@ -317,12 +319,15 @@ export const ServicesTab: React.FC<TabProps> = ({
     resourceType: "services",
     clusterId: cluster.id,
     namespace: nsFilter,
+    auto: false,
   });
   const deleteMut = useDeleteService();
   const createMut = useCreateService();
+  const updateMut = useUpdateService();
   const items = data?.services || [];
 
   const [viewTarget, setViewTarget] = useState<ResourceRef | null>(null);
+  const [editTarget, setEditTarget] = useState<ResourceRef | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ResourceRef | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
@@ -340,7 +345,7 @@ export const ServicesTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => backgroundSync.start(true)}
+        onSync={() => backgroundSync.start(false)}
         syncing={backgroundSync.isRunning}
         backgroundSync={backgroundSync}
         onCreate={() => setShowCreate(true)}
@@ -367,8 +372,9 @@ export const ServicesTab: React.FC<TabProps> = ({
             <td className={gridStyles.centerCell}>
               <ResourceActionButtons
                 canWrite={canWrite}
-                showEdit={false}
+                showEdit={true}
                 onView={() => setViewTarget({ namespace: s.namespace, name: s.name })}
+                onEdit={() => setEditTarget({ namespace: s.namespace, name: s.name })}
                 onDelete={() => setDeleteTarget({ namespace: s.namespace, name: s.name })}
               />
             </td>
@@ -381,6 +387,22 @@ export const ServicesTab: React.FC<TabProps> = ({
           namespace={viewTarget.namespace}
           name={viewTarget.name}
           onClose={() => setViewTarget(null)}
+        />
+      )}
+      {editTarget && (
+        <ServiceEditModal
+          clusterId={cluster.id}
+          namespace={editTarget.namespace}
+          name={editTarget.name}
+          saving={updateMut.isPending}
+          onClose={() => setEditTarget(null)}
+          onSave={(vars) => updateMut.mutate(
+            { clusterId: cluster.id, ...vars },
+            {
+              onSuccess: () => { showToast("Service updated"); setEditTarget(null); },
+              onError: () => showToast("Update failed", "error"),
+            }
+          )}
         />
       )}
       {deleteTarget && (
@@ -401,6 +423,7 @@ export const ServicesTab: React.FC<TabProps> = ({
       {showCreate && (
         <ServiceCreateModal
           defaultNamespace={defaultNs}
+          namespaces={namespaces}
           saving={createMut.isPending}
           onClose={() => setShowCreate(false)}
           onSave={(vars) => createMut.mutate(
@@ -425,6 +448,7 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
     resourceType: "configmaps",
     clusterId: cluster.id,
     namespace: nsFilter,
+    auto: false,
   });
   const deleteMut = useDeleteConfigMap();
   const createMut = useCreateConfigMap();
@@ -450,7 +474,7 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => backgroundSync.start(true)}
+        onSync={() => backgroundSync.start(false)}
         syncing={backgroundSync.isRunning}
         backgroundSync={backgroundSync}
         onCreate={() => setShowCreate(true)}
@@ -525,6 +549,7 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
       {showCreate && (
         <ConfigMapCreateModal
           defaultNamespace={defaultNs}
+          namespaces={namespaces}
           saving={createMut.isPending}
           onClose={() => setShowCreate(false)}
           onSave={(vars) => createMut.mutate(
@@ -549,11 +574,14 @@ export const IngressTab: React.FC<TabProps> = ({
     resourceType: "ingress",
     clusterId: cluster.id,
     namespace: nsFilter,
+    auto: false,
   });
   const deleteMut = useDeleteIngress();
+  const updateMut = useUpdateIngress();
   const items = data?.ingress || [];
 
   const [viewTarget, setViewTarget] = useState<ResourceRef | null>(null);
+  const [editTarget, setEditTarget] = useState<ResourceRef | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ResourceRef | null>(null);
 
   const searchFn = useCallback((i: K8sIngress, q: string) => i.name.toLowerCase().includes(q), []);
@@ -569,7 +597,7 @@ export const IngressTab: React.FC<TabProps> = ({
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
-        onSync={() => backgroundSync.start(true)}
+        onSync={() => backgroundSync.start(false)}
         syncing={backgroundSync.isRunning}
         backgroundSync={backgroundSync}
         isLoading={isLoading}
@@ -582,7 +610,6 @@ export const IngressTab: React.FC<TabProps> = ({
             <th className={gridStyles.headerCell}>Hosts</th>
             <th className={gridStyles.headerCell}>Services</th>
             <th className={gridStyles.headerCell}>Address</th>
-            <th className={gridStyles.headerCell}>Updated</th>
           </>
         }
         renderRow={(i) => (
@@ -592,12 +619,12 @@ export const IngressTab: React.FC<TabProps> = ({
             <td className={gridStyles.cell}>{(i.hosts || []).join(", ") || "—"}</td>
             <td className={gridStyles.cell}>{(i.backend_services || []).join(", ") || "—"}</td>
             <td className={gridStyles.cell}>{i.address || "—"}</td>
-            <td className={gridStyles.cell}>{i.updated ? formatDate(i.updated) : "—"}</td>
             <td className={gridStyles.centerCell}>
               <ResourceActionButtons
                 canWrite={canWrite}
-                showEdit={false}
+                showEdit={true}
                 onView={() => setViewTarget({ namespace: i.namespace, name: i.name })}
+                onEdit={() => setEditTarget({ namespace: i.namespace, name: i.name })}
                 onDelete={() => setDeleteTarget({ namespace: i.namespace, name: i.name })}
               />
             </td>
@@ -610,6 +637,22 @@ export const IngressTab: React.FC<TabProps> = ({
           namespace={viewTarget.namespace}
           name={viewTarget.name}
           onClose={() => setViewTarget(null)}
+        />
+      )}
+      {editTarget && (
+        <IngressEditModal
+          clusterId={cluster.id}
+          namespace={editTarget.namespace}
+          name={editTarget.name}
+          saving={updateMut.isPending}
+          onClose={() => setEditTarget(null)}
+          onSave={(vars) => updateMut.mutate(
+            { clusterId: cluster.id, ...vars },
+            {
+              onSuccess: () => { showToast(`Updated ${editTarget.name}`); setEditTarget(null); },
+              onError: () => showToast("Update failed", "error"),
+            }
+          )}
         />
       )}
       {deleteTarget && (

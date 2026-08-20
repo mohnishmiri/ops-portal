@@ -17,6 +17,7 @@ Scheduled/startup jobs never pass ``subscription_ids``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 
@@ -50,6 +51,115 @@ _AKS_RESOURCE_TYPES = {
     "ingress",
 }
 _STALE_RUNNING_MINUTES = 30
+
+
+def _get_aks_sync_fn(svc, resource_type: str, cluster_id: str | None, namespace: str | None):
+    """Return the appropriate sync callable for a given AKS resource_type."""
+    if resource_type == "clusters":
+        return svc.sync_clusters_to_db
+    if resource_type == "nodepools":
+        return lambda: svc.sync_node_pools_to_db(str(cluster_id))
+    if resource_type == "deployments":
+        return lambda: svc.sync_deployments_to_db(str(cluster_id), namespace)
+    if resource_type == "pods":
+        return lambda: svc.sync_pods_to_db(str(cluster_id), namespace)
+    if resource_type == "cronjobs":
+        return lambda: svc.sync_cronjobs_to_db(str(cluster_id), namespace)
+    if resource_type == "services":
+        return lambda: svc.sync_services_to_db(str(cluster_id), namespace)
+    if resource_type == "secrets":
+        return lambda: svc.sync_secrets_to_db(str(cluster_id), namespace)
+    if resource_type == "configmaps":
+        return lambda: svc.sync_configmaps_to_db(str(cluster_id), namespace)
+    if resource_type == "ingress":
+        return lambda: svc.sync_ingress_to_db(str(cluster_id), namespace)
+    return None
+
+
+async def _run_aks_sync_inline(job_id: int, payload: dict) -> None:
+    """Process an aks_resource_sync job directly (no background worker needed).
+
+    Runs as a fire-and-forget asyncio task in the same process, avoiding
+    the ghost-process race condition that plagues the background worker.
+    """
+    from app.core.database import get_db_session
+    from app.core.subscription_scope import reset_scoped_subscription_ids, set_scoped_subscription_ids
+    from app.services.aks_operations_service import get_aks_operations_service
+
+    resource_type = str(payload.get("resource_type") or "").lower()
+    cluster_id = payload.get("cluster_id")
+    namespace = payload.get("namespace") or None
+    raw_subscription_ids = payload.get("subscription_ids")
+    subscription_ids = [str(item) for item in raw_subscription_ids] if isinstance(raw_subscription_ids, list) else None
+
+    try:
+        async for session in get_db_session():
+            # Claim the job (set to running)
+            await session.execute(
+                update(SyncJob)
+                .where(SyncJob.id == job_id, SyncJob.status == "queued")
+                .values(status="running", started_at=datetime.utcnow(), attempts=1)
+            )
+            await session.commit()
+
+            svc = get_aks_operations_service(session)
+            sync_fn = _get_aks_sync_fn(svc, resource_type, cluster_id, namespace)
+            if sync_fn is None:
+                await session.execute(
+                    update(SyncJob)
+                    .where(SyncJob.id == job_id)
+                    .values(
+                        status="failed",
+                        completed_at=datetime.utcnow(),
+                        last_error=f"unsupported AKS resource_type: {resource_type}",
+                    )
+                )
+                await session.commit()
+                return
+
+            scope_token = set_scoped_subscription_ids(subscription_ids) if subscription_ids else None
+            try:
+                started = datetime.utcnow()
+                result = await sync_fn()
+                result = {
+                    **(result or {}),
+                    "status": "completed",
+                    "job_type": "aks_resource_sync",
+                    "resource_type": resource_type,
+                    "cluster_id": cluster_id,
+                    "namespace": namespace,
+                    "duration_ms": int((datetime.utcnow() - started).total_seconds() * 1000),
+                }
+                await session.execute(
+                    update(SyncJob)
+                    .where(SyncJob.id == job_id)
+                    .values(
+                        status="completed",
+                        completed_at=datetime.utcnow(),
+                        result=json.dumps(result, default=str),
+                    )
+                )
+                await session.commit()
+                logger.info("aks_sync_inline_completed", job_id=job_id, resource_type=resource_type)
+            finally:
+                if scope_token is not None:
+                    reset_scoped_subscription_ids(scope_token)
+    except Exception as exc:
+        logger.error("aks_sync_inline_failed", job_id=job_id, error=str(exc)[:300])
+        try:
+            async for session in get_db_session():
+                await session.execute(
+                    update(SyncJob)
+                    .where(SyncJob.id == job_id)
+                    .values(
+                        status="failed",
+                        completed_at=datetime.utcnow(),
+                        last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
+                    )
+                )
+                await session.commit()
+        except Exception:
+            pass
 
 
 class EnqueueRequest(BaseModel):
@@ -221,6 +331,16 @@ async def enqueue_sync_job(
     )
 
     reused = pre_existing_id == job_id
+
+    # For aks_resource_sync: process inline to avoid dependency on the
+    # background sync worker (which can fail due to ghost processes or
+    # connection-pool starvation during startup).
+    if body.job_type == "aks_resource_sync" and not reused:
+        asyncio.create_task(
+            _run_aks_sync_inline(job_id, payload),
+            name=f"aks-sync-{job_id}",
+        )
+
     # Fetch a snapshot for the response.
     result = await db.execute(select(SyncJob).where(SyncJob.id == job_id))
     job = result.scalars().first()

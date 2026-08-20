@@ -1,0 +1,50 @@
+[
+  {
+    "env_key": "prod",
+    "display_name": "Production",
+    "url": "https://attccdashboard.web.att.com",
+    "cluster_name": "attcc-prod-aks",
+    "namespace": "default",
+    "token_env_var": "K8S_DASHBOARD_TOKEN_PROD"
+  },
+  {
+    "env_key": "preprod",
+    "display_name": "PreProd",
+    "url": "https://attccdashboardpreprod.stage.att.com",
+    "cluster_name": "attcc-preprod-aks",
+    "namespace": "default",
+    "token_env_var": "K8S_DASHBOARD_TOKEN_PREPROD"
+  },
+  {
+    "env_key": "perf",
+    "display_name": "Performance",
+    "url": "https://attccdashboardperf.test.att.com",
+    "cluster_name": "attcc-perf-aks",
+    "namespace": "default",
+    "token_env_var": "K8S_DASHBOARD_TOKEN_PERF"
+  },
+  {
+    "env_key": "uat",
+    "display_name": "UAT",
+    "url": "https://attccdashboarduat.stage.att.com",
+    "cluster_name": "attcc-uat-aks",
+    "namespace": "default",
+    "token_env_var": "K8S_DASHBOARD_TOKEN_UAT"
+  },
+  {
+    "env_key": "dev",
+    "display_name": "Development",
+    "url": "https://attccdashboardcnr.dev.att.com",
+    "cluster_name": "attcc-dev-aks",
+    "namespace": "default",
+    "token_env_var": "K8S_DASHBOARD_TOKEN_DEV"
+  },
+  {
+    "env_key": "dr",
+    "display_name": "DR",
+    "url": "https://attccdashboarddr.web.att.com",
+    "cluster_name": "attcc-dr-aks",
+    "namespace": "default",
+    "token_env_var": "K8S_DASHBOARD_TOKEN_DR"
+  }
+]

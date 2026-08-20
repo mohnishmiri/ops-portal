@@ -9,6 +9,7 @@ Full management interface for Azure Kubernetes Service operations:
 - 3-Tier cached data retrieval (Redis L1 → DB L2 → Live API L3)
 """
 
+from collections import deque
 from datetime import UTC, datetime
 
 import structlog
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.aks_extended_endpoints import register_extended_routes
 from app.auth import get_current_user, require_role
-from app.core.database import get_db
+from app.core.database import get_db, get_standalone_session
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
 from app.services.aks_operations_service import (
@@ -29,6 +30,11 @@ from app.services.data_cache_service import data_cache
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
+
+# In-memory audit store — used when PostgreSQL is unavailable (local dev).
+# Capped at 500 entries to avoid unbounded memory growth.
+_in_memory_audit_log: deque[dict] = deque(maxlen=500)
+_next_audit_id: int = 1
 
 
 def _get_service(db: AsyncSession = Depends(get_db)) -> AKSOperationsService:
@@ -57,11 +63,13 @@ def _audit_summary(action: str, resource_type: str, resource_name: str) -> str:
         "update_configmap": "Updated",
         "delete_configmap": "Deleted",
         "create_ingress": "Created",
+        "update_ingress": "Updated",
         "delete_ingress": "Deleted",
         "create_cronjob": "Created",
         "update_cronjob": "Updated",
         "delete_cronjob": "Deleted",
         "suspend_cronjob": "Suspended",
+        "resume_cronjob": "Resumed",
         "trigger_cronjob": "Triggered",
         "start_cluster": "Started",
         "stop_cluster": "Stopped",
@@ -111,36 +119,83 @@ async def _write_aks_audit_log(
     status: str,
     details: dict,
 ) -> None:
-    """Write an AuditLog entry for AKS operations."""
-    if db is None:
-        return
-    try:
-        entry = AuditLog(
-            user_id=user.user_id,
-            user_email=user.email,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_name,
-            details={
-                "page": "AKSOperationsPage",
-                "feature": "aks_audit_history",
-                "cluster_id": cluster_id,
-                "cluster_name": _cluster_name_from_id(cluster_id) if cluster_id else "",
-                "namespace": namespace,
-                "resource_name": resource_name,
-                "resource_type": resource_type,
-                "summary": details.get("summary") or _audit_summary(action, resource_type, resource_name),
-                **details,
-            },
-            ip_address=request.client.host if request and request.client else None,
-            status=status,
-            timestamp=datetime.now(UTC),
-        )
-        db.add(entry)
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        logger.warning("aks_audit_log_failed", action=action, resource=resource_name, error=str(exc))
+    """Write an AuditLog entry for AKS operations.
+
+    Uses a dedicated session to avoid conflicts with the request's session.
+    Falls back to in-memory storage when the DB is entirely unavailable.
+    """
+    global _next_audit_id
+
+    timestamp = datetime.now(UTC).replace(tzinfo=None)
+    audit_details = {
+        "page": "AKSOperationsPage",
+        "feature": "aks_audit_history",
+        "cluster_id": cluster_id,
+        "cluster_name": _cluster_name_from_id(cluster_id) if cluster_id else "",
+        "namespace": namespace,
+        "resource_name": resource_name,
+        "resource_type": resource_type,
+        "summary": details.get("summary") or _audit_summary(action, resource_type, resource_name),
+        **details,
+    }
+    ip_address = request.client.host if request and request.client else None
+
+    # Try writing to PostgreSQL using a dedicated session
+    session = await get_standalone_session()
+    if session is not None:
+        try:
+            entry = AuditLog(
+                user_id=user.user_id,
+                user_email=user.email,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_name,
+                details=audit_details,
+                ip_address=ip_address,
+                status=status,
+                timestamp=timestamp,
+            )
+            session.add(entry)
+            await session.commit()
+            logger.info(
+                "aks_audit_log_written",
+                action=action,
+                resource=resource_name,
+                status=status,
+            )
+            return
+        except Exception as exc:
+            await session.rollback()
+            logger.warning(
+                "aks_audit_log_db_failed",
+                action=action,
+                resource=resource_name,
+                error=str(exc),
+            )
+        finally:
+            await session.close()
+
+    # Fallback: store in memory when DB is unavailable
+    entry_dict = {
+        "id": _next_audit_id,
+        "timestamp": timestamp.isoformat(),
+        "user_id": user.user_id,
+        "user_email": user.email,
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": resource_name,
+        "resource_name": resource_name,
+        "cluster_id": cluster_id,
+        "cluster_name": _cluster_name_from_id(cluster_id) if cluster_id else "",
+        "namespace": namespace,
+        "status": status,
+        "summary": audit_details["summary"],
+        "details": audit_details,
+        "ip_address": ip_address,
+    }
+    _next_audit_id += 1
+    _in_memory_audit_log.appendleft(entry_dict)
+    logger.info("aks_audit_log_memory", action=action, resource=resource_name, status=status)
 
 
 # ── Request/Response Models ────────────────────────────────────────────
@@ -430,6 +485,41 @@ async def list_cached_deployments(
         }
 
 
+@router.get(
+    "/deployments/status",
+    summary="Lightweight deployment status poll",
+    description="Returns only name, namespace, replicas, and ready_replicas for each deployment. "
+    "Use live=true to fetch directly from Kubernetes instead of DB cache.",
+)
+async def list_deployment_status(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    namespace: str = Query(default=None, description="Filter by namespace"),
+    live: bool = Query(default=False, description="Fetch live status from Kubernetes instead of DB"),
+    user: UserContext = Depends(get_current_user),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """Lightweight status-only endpoint for smooth real-time updates."""
+    try:
+        if live:
+            # Fetch directly from Kubernetes for immediate status after mutations
+            deployments = await service.list_deployments(cluster_id, namespace, bypass_cache=True)
+        else:
+            deployments = await service.get_deployments_from_db(cluster_id, namespace)
+        statuses = [
+            {
+                "name": d.get("name"),
+                "namespace": d.get("namespace"),
+                "replicas": d.get("replicas", 0),
+                "ready_replicas": d.get("ready_replicas", 0),
+            }
+            for d in deployments
+        ]
+        return {"statuses": statuses, "count": len(statuses)}
+    except Exception as e:
+        logger.warning("deployment_status_poll_failed", cluster_id=cluster_id, error=str(e))
+        return {"statuses": [], "count": 0}
+
+
 @router.post(
     "/deployments/sync",
     summary="Sync Deployments from Kubernetes to DB",
@@ -467,6 +557,26 @@ async def list_deployments(
     except Exception as e:
         logger.error("list_deployments_failed", cluster_id=cluster_id, error=str(e))
         raise HTTPException(status_code=502, detail=f"Failed to connect to cluster: {str(e)}") from e
+
+
+@router.get(
+    "/deployments/details",
+    summary="Get deployment details",
+    description="Get a live YAML manifest view for a specific deployment.",
+)
+async def get_deployment_detail(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    namespace: str = Query(..., description="Kubernetes namespace"),
+    name: str = Query(..., description="Deployment name"),
+    user: UserContext = Depends(get_current_user),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """Get live deployment detail including YAML manifest."""
+    try:
+        return await service.get_deployment_detail(cluster_id, namespace, name)
+    except Exception as e:
+        logger.error("get_deployment_detail_failed", name=name, namespace=namespace, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Failed to fetch deployment detail: {str(e)}") from e
 
 
 @router.post(
@@ -690,37 +800,6 @@ async def delete_deployment(
 
 
 # ── Pod Observability ──────────────────────────────────────────────────
-
-
-@router.get(
-    "/pods/metrics/cached",
-    summary="List pod metrics from DB cache (fast)",
-    description="Get pod metrics from database inventory. Background sync keeps data fresh.",
-)
-async def list_cached_pod_metrics(
-    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
-    namespace: str = Query(default=None, description="Filter by namespace"),
-    user: UserContext = Depends(get_current_user),
-    service: AKSOperationsService = Depends(_get_service),
-) -> dict:
-    """Get pod metrics from DB cache — fast, no Kubernetes API call."""
-    try:
-        pods = await service.get_pod_metrics_from_db(cluster_id, namespace)
-        last_sync = await service.get_pods_last_sync_time(cluster_id)
-        return {
-            "source": "db",
-            "last_sync": last_sync,
-            "pods": pods,
-            "count": len(pods),
-        }
-    except Exception as e:
-        logger.warning("cached_pod_metrics_db_failed", cluster_id=cluster_id, error=str(e))
-        return {
-            "source": "db",
-            "last_sync": None,
-            "pods": [],
-            "count": 0,
-        }
 
 
 @router.get(
@@ -1048,8 +1127,10 @@ async def list_cronjobs(
 )
 async def suspend_cronjob(
     request: SuspendCronJobRequest,
+    http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Suspend or resume a CronJob."""
     result = await service.suspend_cronjob(
@@ -1061,7 +1142,22 @@ async def suspend_cronjob(
         user_email=user.email,
     )
 
-    if not result.get("success"):
+    success = result.get("success", False)
+    action = "suspend_cronjob" if request.suspend else "resume_cronjob"
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action=action,
+        resource_type="cronjob",
+        resource_name=request.cronjob_name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={"suspend": request.suspend, "error": result.get("error")},
+    )
+
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Operation failed"))
 
     return result
@@ -1074,8 +1170,10 @@ async def suspend_cronjob(
 )
 async def create_cronjob(
     request: CreateCronJobRequest,
+    http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Create a new CronJob."""
     result = await service.create_cronjob(
@@ -1103,7 +1201,25 @@ async def create_cronjob(
         user_email=user.email,
     )
 
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="create_cronjob",
+        resource_type="cronjob",
+        resource_name=request.name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={
+            "schedule": request.schedule,
+            "image": request.image,
+            "error": result.get("error"),
+        },
+    )
+
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Create failed"))
 
     return result
@@ -1137,8 +1253,10 @@ async def get_cronjob_detail(
 )
 async def update_cronjob(
     request: UpdateCronJobRequest,
+    http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Update an existing CronJob."""
     result = await service.update_cronjob(
@@ -1153,7 +1271,25 @@ async def update_cronjob(
         user_id=user.user_id,
         user_email=user.email,
     )
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="update_cronjob",
+        resource_type="cronjob",
+        resource_name=request.name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={
+            "schedule": request.schedule,
+            "image": request.image,
+            "suspended": request.suspended,
+            "error": result.get("error"),
+        },
+    )
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Update failed"))
     return result
 
@@ -1167,8 +1303,10 @@ async def delete_cronjob(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
     namespace: str = Query(..., description="Kubernetes namespace"),
     name: str = Query(..., description="CronJob name"),
+    http_request: Request = None,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete a CronJob."""
     result = await service.delete_cronjob(
@@ -1178,7 +1316,20 @@ async def delete_cronjob(
         user_id=user.user_id,
         user_email=user.email,
     )
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="delete_cronjob",
+        resource_type="cronjob",
+        resource_name=name,
+        cluster_id=cluster_id,
+        namespace=namespace,
+        status="success" if success else "failed",
+        details={"error": result.get("error")},
+    )
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Delete failed"))
     return result
 
@@ -1190,8 +1341,10 @@ async def delete_cronjob(
 )
 async def trigger_cronjob(
     request: TriggerCronJobRequest,
+    http_request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Manually trigger a CronJob."""
     result = await service.trigger_cronjob(
@@ -1201,7 +1354,20 @@ async def trigger_cronjob(
         user_id=user.user_id,
         user_email=user.email,
     )
-    if not result.get("success"):
+    success = result.get("success", False)
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="trigger_cronjob",
+        resource_type="cronjob",
+        resource_name=request.cronjob_name,
+        cluster_id=request.cluster_id,
+        namespace=request.namespace,
+        status="success" if success else "failed",
+        details={"job_name": result.get("job_name"), "error": result.get("error")},
+    )
+    if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Trigger failed"))
     return result
 

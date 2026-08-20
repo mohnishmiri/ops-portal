@@ -6,12 +6,15 @@ from fastapi import APIRouter, Depends
 
 from app.api.v1.endpoints import (
     admin,
+    aks_dashboard,
     aks_operations,
     auth,
+    certificates,
     checksum_schedules,
     compliance,
     costs,
     dashboards,
+    environment,
     infra_alerts,
     keyvault,
     notifications,
@@ -35,9 +38,14 @@ api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(keyvault.router, prefix="/keyvault", tags=["keyvault"])
+api_router.include_router(certificates.router, prefix="/certificates", tags=["certificates"])
 
 # Module 2: AKS Operations & Control Center
 api_router.include_router(aks_operations.router, prefix="/aks", tags=["aks-operations"])
+api_router.include_router(aks_dashboard.router, prefix="/aks/dashboard", tags=["aks-dashboard"])
+
+# Module 6: Environment Scaling & Scheduling
+api_router.include_router(environment.router, prefix="/environment", tags=["environment-scaling"])
 
 # Module 3: Compliance & Drift Detection
 api_router.include_router(compliance.router, prefix="/compliance", tags=["compliance"])

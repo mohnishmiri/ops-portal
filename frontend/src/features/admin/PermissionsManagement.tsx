@@ -21,9 +21,16 @@ import {
   useDeleteResource,
   useDeletePermission,
   usePermissionsAuditLog,
+  useTeams,
+  useCreateTeam,
+  useDeleteTeam,
+  useAddTeamMember,
+  useRemoveTeamMember,
+  useSyncResources,
   ResourceItem,
   PermissionItem,
   AuditLogEntry,
+  TeamItem,
 } from "../../services/permissionsApi";
 
 // ── Resource display-name mapping ─────────────────────────────────────────────
@@ -55,7 +62,7 @@ const getDesc = (name: string, fallback?: string | null): string =>
 
 // ── Shared UI primitives ──────────────────────────────────────────────────────
 
-const Badge: React.FC<{ children: React.ReactNode; variant?: "module" | "page" | "role" | "user" | "view" | "edit" | "system" }> = ({
+const Badge: React.FC<{ children: React.ReactNode; variant?: "module" | "page" | "role" | "user" | "group" | "view" | "edit" | "system" }> = ({
   children,
   variant = "page",
 }) => {
@@ -64,6 +71,7 @@ const Badge: React.FC<{ children: React.ReactNode; variant?: "module" | "page" |
     page: "bg-sky-100 text-sky-700",
     role: "bg-purple-100 text-purple-700",
     user: "bg-teal-100 text-teal-700",
+    group: "bg-orange-100 text-orange-700",
     view: "bg-green-100 text-green-700",
     edit: "bg-amber-100 text-amber-700",
     system: "bg-gray-100 text-gray-500",
@@ -290,6 +298,7 @@ const ResourcesTab: React.FC = () => {
 const PermissionsTab: React.FC = () => {
   const { data: resources = [] } = useResources();
   const { data: permissions = [], isLoading } = usePermissions();
+  const { data: teams = [] } = useTeams();
   const createPerm = useCreatePermission();
   const deletePerm = useDeletePermission();
 
@@ -297,6 +306,7 @@ const PermissionsTab: React.FC = () => {
   const [subjectId, setSubjectId] = useState("");
   const [resourceId, setResourceId] = useState<number | "">("");
   const [permType, setPermType] = useState("view");
+  const [envScope, setEnvScope] = useState("all");
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -306,6 +316,7 @@ const PermissionsTab: React.FC = () => {
       subject_id: subjectId.trim(),
       resource_id: Number(resourceId),
       permission_type: permType,
+      environment_scope: envScope,
     });
     setSubjectId(""); setResourceId("");
   };
@@ -318,18 +329,19 @@ const PermissionsTab: React.FC = () => {
       {/* Grant permission form */}
       <div className="bg-white rounded-xl p-6 shadow-sm border">
         <h2 className="text-base font-semibold text-gray-800 mb-4">Grant Permission</h2>
-        <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+        <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Subject Type</label>
-            <select value={subjectType} onChange={(e) => setSubjectType(e.target.value)}
+            <select value={subjectType} onChange={(e) => { setSubjectType(e.target.value); setSubjectId(""); }}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400">
               <option value="role">Role</option>
               <option value="user">User (by ID)</option>
+              <option value="group">Team / Group</option>
             </select>
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">
-              {subjectType === "role" ? "Role" : "User ID"} <span className="text-red-500">*</span>
+              {subjectType === "role" ? "Role" : subjectType === "group" ? "Team" : "User ID"} <span className="text-red-500">*</span>
             </label>
             {subjectType === "role" ? (
               <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)}
@@ -338,6 +350,14 @@ const PermissionsTab: React.FC = () => {
                 <option value="read">read</option>
                 <option value="write">write</option>
                 <option value="admin">admin</option>
+              </select>
+            ) : subjectType === "group" ? (
+              <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400">
+                <option value="">— select team —</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.team_name}>{t.team_name}</option>
+                ))}
               </select>
             ) : (
               <input value={subjectId} onChange={(e) => setSubjectId(e.target.value)} required
@@ -370,7 +390,16 @@ const PermissionsTab: React.FC = () => {
               <option value="edit">View + Edit</option>
             </select>
           </div>
-          <div className="md:col-span-2 lg:col-span-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Environment Scope</label>
+            <select value={envScope} onChange={(e) => setEnvScope(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400">
+              <option value="all">All Environments</option>
+              <option value="prod">Production Only</option>
+              <option value="nonprod">Non-Production Only</option>
+            </select>
+          </div>
+          <div className="md:col-span-2 lg:col-span-5">
             <button type="submit" disabled={createPerm.isPending || !subjectId.trim() || !resourceId}
               className="px-5 py-2 bg-att-400 text-white rounded-lg text-sm font-semibold hover:bg-att-500 disabled:opacity-50 transition">
               {createPerm.isPending ? "Granting…" : "Grant Permission"}
@@ -395,14 +424,15 @@ const PermissionsTab: React.FC = () => {
                 <th className="py-2 px-3">Resource</th>
                 <th className="py-2 px-3">Resource Type</th>
                 <th className="py-2 px-3 text-center">Access</th>
+                <th className="py-2 px-3 text-center">Env Scope</th>
                 <th className="py-2 px-3 text-center">Revoke</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={5} className="py-4 text-center text-gray-400">Loading…</td></tr>
+                <tr><td colSpan={6} className="py-4 text-center text-gray-400">Loading…</td></tr>
               ) : permissions.length === 0 ? (
-                <tr><td colSpan={5} className="py-4 text-center text-gray-300">No permissions granted yet</td></tr>
+                <tr><td colSpan={6} className="py-4 text-center text-gray-300">No permissions granted yet</td></tr>
               ) : permissions.map((p) => (
                 <tr key={p.id} className="border-t hover:bg-gray-50">
                   <td className="py-2 px-3">
@@ -419,6 +449,15 @@ const PermissionsTab: React.FC = () => {
                   </td>
                   <td className="py-2 px-3 text-center">
                     <Badge variant={p.permission_type as any}>{p.permission_type}</Badge>
+                  </td>
+                  <td className="py-2 px-3 text-center">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                      p.environment_scope === "prod" ? "bg-red-100 text-red-700" :
+                      p.environment_scope === "nonprod" ? "bg-blue-100 text-blue-700" :
+                      "bg-gray-100 text-gray-600"
+                    }`}>
+                      {p.environment_scope ?? "all"}
+                    </span>
                   </td>
                   <td className="py-2 px-3 text-center">
                     <ConfirmButton
@@ -680,13 +719,187 @@ const AuditLogTab: React.FC = () => {
   );
 };
 
+// ── Tab 5 — Teams ─────────────────────────────────────────────────────────────
+
+const TeamsTab: React.FC = () => {
+  const { data: teams = [], isLoading, refetch } = useTeams();
+  const createTeam = useCreateTeam();
+  const deleteTeam = useDeleteTeam();
+  const addMember = useAddTeamMember();
+  const removeMember = useRemoveTeamMember();
+  const syncResources = useSyncResources();
+
+  const [newTeamName, setNewTeamName] = useState("");
+  const [newTeamDesc, setNewTeamDesc] = useState("");
+  const [expandedTeam, setExpandedTeam] = useState<number | null>(null);
+  const [newMemberUserId, setNewMemberUserId] = useState("");
+  const [newMemberEmail, setNewMemberEmail] = useState("");
+
+  const handleCreateTeam = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTeamName.trim()) return;
+    await createTeam.mutateAsync({ team_name: newTeamName.trim(), description: newTeamDesc.trim() || undefined });
+    setNewTeamName(""); setNewTeamDesc("");
+  };
+
+  const handleAddMember = async (teamId: number) => {
+    if (!newMemberUserId.trim()) return;
+    await addMember.mutateAsync({ teamId, user_id: newMemberUserId.trim(), user_email: newMemberEmail.trim() || undefined });
+    setNewMemberUserId(""); setNewMemberEmail("");
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Create team + Sync resources */}
+      <div className="bg-white rounded-xl p-6 shadow-sm border">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-800">Team Management</h2>
+          <button
+            onClick={() => syncResources.mutate()}
+            disabled={syncResources.isPending}
+            className="px-4 py-2 text-xs font-semibold border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-50"
+          >
+            {syncResources.isPending ? "Syncing…" : "Sync Resources"}
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Create teams (Dev, Ops, etc.) and assign users. Then grant permissions to teams on the Permissions tab using "Team / Group" subject type.
+        </p>
+        <form onSubmit={handleCreateTeam} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Team Name <span className="text-red-500">*</span></label>
+            <input value={newTeamName} onChange={(e) => setNewTeamName(e.target.value)} required
+              placeholder="e.g. dev-team"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+            <input value={newTeamDesc} onChange={(e) => setNewTeamDesc(e.target.value)}
+              placeholder="Development team"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400" />
+          </div>
+          <div>
+            <button type="submit" disabled={createTeam.isPending || !newTeamName.trim()}
+              className="w-full px-4 py-2 bg-att-400 text-white rounded-lg text-sm font-semibold hover:bg-att-500 disabled:opacity-50 transition">
+              {createTeam.isPending ? "Creating…" : "Create Team"}
+            </button>
+          </div>
+        </form>
+        {createTeam.isError && (
+          <p className="mt-2 text-xs text-red-600">{(createTeam.error as any)?.response?.data?.detail ?? "Failed to create team"}</p>
+        )}
+      </div>
+
+      {/* Teams list */}
+      <div className="bg-white rounded-xl p-6 shadow-sm border">
+        <h3 className="text-sm font-semibold text-gray-700 mb-3">Teams ({teams.length})</h3>
+        {isLoading ? (
+          <p className="text-center text-gray-400 py-6">Loading…</p>
+        ) : teams.length === 0 ? (
+          <p className="text-center text-gray-300 py-6">No teams created yet</p>
+        ) : (
+          <div className="space-y-3">
+            {teams.map((team) => (
+              <div key={team.id} className="border rounded-lg">
+                <div
+                  className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-50"
+                  onClick={() => setExpandedTeam(expandedTeam === team.id ? null : team.id)}
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="font-semibold text-gray-800">{team.team_name}</span>
+                    <span className="text-xs text-gray-500">{team.description}</span>
+                    <Badge variant="system">{team.member_count} members</Badge>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <ConfirmButton
+                      onConfirm={() => deleteTeam.mutate(team.id)}
+                      disabled={deleteTeam.isPending}
+                      label="Delete team"
+                    />
+                    <svg className={`h-4 w-4 text-gray-400 transition-transform ${expandedTeam === team.id ? "rotate-180" : ""}`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
+
+                {expandedTeam === team.id && (
+                  <div className="border-t px-4 py-3 bg-gray-50">
+                    {/* Add member form */}
+                    <div className="flex items-end gap-2 mb-3">
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">User ID</label>
+                        <input value={newMemberUserId} onChange={(e) => setNewMemberUserId(e.target.value)}
+                          placeholder="Azure AD user ID"
+                          className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                      </div>
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Email (optional)</label>
+                        <input value={newMemberEmail} onChange={(e) => setNewMemberEmail(e.target.value)}
+                          placeholder="user@att.com"
+                          className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                      </div>
+                      <button
+                        onClick={() => handleAddMember(team.id)}
+                        disabled={addMember.isPending || !newMemberUserId.trim()}
+                        className="px-4 py-1.5 bg-att-400 text-white rounded-lg text-xs font-semibold hover:bg-att-500 disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </div>
+
+                    {/* Members list */}
+                    {team.members.length === 0 ? (
+                      <p className="text-xs text-gray-400">No members yet</p>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-gray-500 font-semibold">
+                            <th className="text-left py-1">User ID</th>
+                            <th className="text-left py-1">Email</th>
+                            <th className="text-left py-1">Added</th>
+                            <th className="text-center py-1">Remove</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {team.members.map((m) => (
+                            <tr key={m.id} className="border-t">
+                              <td className="py-1.5 font-mono text-gray-700">{m.user_id}</td>
+                              <td className="py-1.5 text-gray-500">{m.user_email ?? "—"}</td>
+                              <td className="py-1.5 text-gray-400">{m.created_at ? fmtTs(m.created_at) : "—"}</td>
+                              <td className="py-1.5 text-center">
+                                <button
+                                  onClick={() => removeMember.mutate({ teamId: team.id, userId: m.user_id })}
+                                  disabled={removeMember.isPending}
+                                  className="text-red-500 hover:text-red-700 text-xs font-semibold"
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ── Main component ────────────────────────────────────────────────────────────
 
-type TabKey = "resources" | "permissions" | "matrix" | "audit";
+type TabKey = "resources" | "permissions" | "teams" | "matrix" | "audit";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "resources",   label: "Resources" },
   { key: "permissions", label: "Permissions" },
+  { key: "teams",       label: "Teams" },
   { key: "matrix",      label: "Access Matrix" },
   { key: "audit",       label: "Audit Log" },
 ];
@@ -725,6 +938,7 @@ const PermissionsManagement: React.FC = () => {
       {/* Tab content */}
       {activeTab === "resources" && <ResourcesTab />}
       {activeTab === "permissions" && <PermissionsTab />}
+      {activeTab === "teams" && <TeamsTab />}
       {activeTab === "matrix" && <MatrixTab />}
       {activeTab === "audit" && <AuditLogTab />}
     </div>

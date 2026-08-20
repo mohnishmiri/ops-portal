@@ -59,19 +59,51 @@ class Resource(Base):
 
 
 class Permission(Base):
-    """Grants a user or role access to a resource (module/page) with a specific permission type."""
+    """Grants a user, role, or group access to a resource (module/page) with a specific permission type."""
 
     __tablename__ = "permissions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    subject_type = Column(String(10), nullable=False)  # 'user' or 'role'
-    subject_id = Column(String(255), nullable=False)  # user_id or role name
+    subject_type = Column(String(10), nullable=False)  # 'user', 'role', or 'group'
+    subject_id = Column(String(255), nullable=False)  # user_id, role name, or team name
     resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False)
     permission_type = Column(String(50), nullable=False)  # e.g., 'view', 'edit'
+    # Environment scope: 'all' (default), 'prod', or 'nonprod'
+    environment_scope = Column(String(20), nullable=False, default="all")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     resource = relationship("Resource", back_populates="permissions")
+
+
+class Team(Base):
+    """App-managed team for group-based permission grants."""
+
+    __tablename__ = "teams"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    team_name = Column(String(255), nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    members = relationship("TeamMembership", back_populates="team", cascade="all, delete-orphan")
+
+
+class TeamMembership(Base):
+    """Maps a user to a team."""
+
+    __tablename__ = "team_memberships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    user_email = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    team = relationship("Team", back_populates="members")
+
+    __table_args__ = (UniqueConstraint("team_id", "user_id", name="uq_team_user"),)
 
 
 # =============================================================================
@@ -634,6 +666,9 @@ class CustomExpiryAlertConfig(Base):
     resource_name = Column(String(255), nullable=False, index=True)
     resource_identifier = Column(String(500), nullable=False)  # Unique ID for the resource
     description = Column(Text, nullable=True)
+
+    # Environment classification so operators can tell prod vs non-prod accounts apart
+    environment = Column(String(20), nullable=True)  # prod, non_prod
 
     # Expiry information
     expiry_date = Column(DateTime, nullable=False, index=True)
@@ -1386,6 +1421,84 @@ class ComplianceSyncStatus(Base):
 # =============================================================================
 
 
+# =============================================================================
+# MODULE: CERTIFICATE MANAGEMENT (Cached from Keyfactor Command for fast loads)
+# =============================================================================
+
+
+class CertificateCollectionSnapshot(Base):
+    """Cached Keyfactor certificate collection for fast listing."""
+
+    __tablename__ = "cert_collections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    collection_id = Column(Integer, nullable=False, unique=True, index=True)
+    name = Column(String(500), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    query = Column(Text, nullable=True)
+    certificate_count = Column(Integer, default=0)
+    synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CertificateSnapshot(Base):
+    """Cached Keyfactor certificate (scoped per collection) for fast listing."""
+
+    __tablename__ = "cert_certificates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    collection_id = Column(Integer, nullable=False, index=True)
+    certificate_id = Column(Integer, nullable=False, index=True)  # Keyfactor certificate Id
+    common_name = Column(String(500), nullable=True, index=True)
+    subject_dn = Column(Text, nullable=True)
+    issuer_dn = Column(Text, nullable=True)
+    serial_number = Column(String(255), nullable=True)
+    thumbprint = Column(String(100), nullable=True, index=True)
+    template = Column(String(500), nullable=True)
+    certificate_authority = Column(String(500), nullable=True)
+    not_before = Column(String(50), nullable=True)
+    not_after = Column(String(50), nullable=True, index=True)
+    import_date = Column(String(50), nullable=True)
+    effective_date = Column(String(50), nullable=True)
+    sans = Column(JSONB, default=list)
+    san_count = Column(Integer, default=0)
+    revoked = Column(Boolean, default=False)
+    revocation_reason = Column(Integer, nullable=True)
+    status = Column(String(30), nullable=True, index=True)
+    cert_metadata = Column(JSONB, default=dict)
+    key_algorithm = Column(String(50), nullable=True)
+    key_size = Column(Integer, default=0)
+    key_usage = Column(String(500), nullable=True)
+    extended_key_usage = Column(String(500), nullable=True)
+    signing_algorithm = Column(String(100), nullable=True)
+    requester = Column(String(255), nullable=True)
+    principal_name = Column(String(255), nullable=True)
+    locations = Column(JSONB, default=list)
+    location_count = Column(Integer, default=0)
+    collection = Column(String(500), nullable=True)
+    synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("collection_id", "certificate_id", name="uq_cert_collection_cert"),
+        Index("ix_cert_certs_cn_status", "common_name", "status"),
+    )
+
+
+class CertificateSyncStatus(Base):
+    """Tracks the last certificate sync job (Keyfactor → PostgreSQL)."""
+
+    __tablename__ = "cert_sync_status"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sync_type = Column(String(50), nullable=False, index=True)  # 'full', 'collection'
+    status = Column(String(20), nullable=False, default="running")  # running, completed, partial, failed
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    collections_synced = Column(Integer, default=0)
+    certificates_synced = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    triggered_by = Column(String(100), nullable=True)  # 'scheduler', 'manual', 'mutation', 'startup'
+
+
 class PageCache(Base):
     """Key-value cache stored in PostgreSQL, replacing Redis for page/application caching."""
 
@@ -1407,6 +1520,100 @@ class StartupTaskLock(Base):
     task_name = Column(String(255), nullable=False, unique=True, index=True)
     locked_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     expires_at = Column(DateTime, nullable=False)
+
+
+# =============================================================================
+# MODULE 6: ENVIRONMENT SCALING & SCHEDULING
+# =============================================================================
+
+
+class EnvironmentSchedule(Base):
+    """Scheduled environment scaling jobs."""
+
+    __tablename__ = "environment_schedules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_name = Column(String(255), nullable=False, index=True)
+    cluster_id = Column(String(500), nullable=False, index=True)
+    namespace = Column(String(255), nullable=False, index=True)
+    operation = Column(String(50), nullable=False)  # scale_up, scale_down
+    replica_count = Column(Integer, nullable=False, default=1)
+    schedule_type = Column(String(50), nullable=False)  # one_time, daily, weekly, monthly, cron
+    cron_expression = Column(String(255), nullable=True)
+    timezone = Column(String(100), nullable=False, default="UTC")
+    start_date = Column(DateTime, nullable=True)
+    end_date = Column(DateTime, nullable=True)
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    retry_count = Column(Integer, nullable=False, default=3)
+    failure_notification = Column(String(500), nullable=True)  # email or webhook
+    sequence_id = Column(Integer, ForeignKey("environment_sequences.id"), nullable=True)
+    created_by = Column(String(255), nullable=False)
+    created_by_email = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_run_at = Column(DateTime, nullable=True)
+    next_run_at = Column(DateTime, nullable=True)
+    last_run_status = Column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_env_schedule_cluster_ns", "cluster_id", "namespace"),
+        Index("ix_env_schedule_enabled", "is_enabled", "next_run_at"),
+    )
+
+
+class EnvironmentSequence(Base):
+    """Startup/shutdown sequence definitions for ordered deployment scaling."""
+
+    __tablename__ = "environment_sequences"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False, index=True)
+    cluster_id = Column(String(500), nullable=False, index=True)
+    namespace = Column(String(255), nullable=False, index=True)
+    sequence_type = Column(String(50), nullable=False)  # startup, shutdown
+    steps = Column(JSONB, nullable=False)  # [{order, deployment_name, replicas, wait_condition, timeout_seconds}]
+    rollback_on_failure = Column(Boolean, nullable=False, default=True)
+    created_by = Column(String(255), nullable=False)
+    created_by_email = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("name", "cluster_id", "namespace", name="uq_env_sequence_name_cluster_ns"),
+        Index("ix_env_sequence_cluster_ns", "cluster_id", "namespace"),
+    )
+
+
+class EnvironmentExecutionHistory(Base):
+    """Execution history for environment scaling operations."""
+
+    __tablename__ = "environment_execution_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_type = Column(String(50), nullable=False)  # manual, scheduled, sequence
+    cluster_id = Column(String(500), nullable=False, index=True)
+    namespace = Column(String(255), nullable=False, index=True)
+    operation = Column(String(50), nullable=False)  # scale_up, scale_down, sequence_start, sequence_stop
+    status = Column(String(50), nullable=False, default="running")  # running, completed, failed, rolled_back
+    total_deployments = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+    replica_count = Column(Integer, nullable=True)
+    schedule_id = Column(Integer, nullable=True)
+    sequence_id = Column(Integer, nullable=True)
+    step_details = Column(JSONB, nullable=True)  # [{deployment, status, old_replicas, new_replicas, error}]
+    initiated_by = Column(String(255), nullable=False)
+    initiated_by_email = Column(String(255), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_env_exec_cluster_ns", "cluster_id", "namespace"),
+        Index("ix_env_exec_started", "started_at"),
+    )
 
 
 # =============================================================================

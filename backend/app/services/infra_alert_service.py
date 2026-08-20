@@ -11,12 +11,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
-from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.monitor import MonitorManagementClient
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.azure_auth import get_azure_credential
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AlertScheduleConfig,
@@ -45,7 +45,7 @@ class InfraAlertService:
 
     def __init__(self, db_session: AsyncSession | None):
         self.db = db_session
-        self.credential = DefaultAzureCredential()
+        self.credential = get_azure_credential()
         self._compute_clients: dict[str, ComputeManagementClient] = {}
         self._monitor_clients: dict[str, MonitorManagementClient] = {}
 
@@ -480,6 +480,7 @@ class InfraAlertService:
                 "resource_name": c.resource_name,
                 "resource_identifier": c.resource_identifier,
                 "description": c.description,
+                "environment": c.environment,
                 "expiry_date": c.expiry_date.isoformat(),
                 "warning_days_before": c.warning_days_before,
                 "critical_days_before": c.critical_days_before,
@@ -504,6 +505,7 @@ class InfraAlertService:
         critical_days_before: int = 7,
         notification_emails: list[str] | None = None,
         metadata: dict | None = None,
+        environment: str | None = None,
     ) -> dict[str, Any]:
         """Create a new custom expiry alert configuration."""
         valid_types = [
@@ -521,6 +523,7 @@ class InfraAlertService:
             resource_name=resource_name,
             resource_identifier=resource_identifier,
             description=description,
+            environment=environment,
             expiry_date=expiry_date,
             warning_days_before=warning_days_before,
             critical_days_before=critical_days_before,
@@ -556,6 +559,7 @@ class InfraAlertService:
         allowed_fields = {
             "resource_name",
             "description",
+            "environment",
             "expiry_date",
             "warning_days_before",
             "critical_days_before",
