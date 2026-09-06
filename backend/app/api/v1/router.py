@@ -23,9 +23,19 @@ from app.api.v1.endpoints import (
     reports,
     sync_jobs,
 )
+from app.core.authz import enforce_module_access, enforce_portal_access
 from app.core.subscription_scope import bind_subscription_scope
 
-api_router = APIRouter(dependencies=[Depends(bind_subscription_scope)])
+# Order matters. The portal gate rejects an unentitled identity, then the
+# module gate rejects a module the identity has no access to, and only then is
+# privileged per-request state (subscription scope) resolved for it.
+api_router = APIRouter(
+    dependencies=[
+        Depends(enforce_portal_access),
+        Depends(enforce_module_access),
+        Depends(bind_subscription_scope),
+    ]
+)
 
 # Auth — user context & role introspection
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])

@@ -48,6 +48,7 @@ import { DeleteCertificateModal } from "../features/certificates/DeleteCertifica
 import { UpdateMetadataModal } from "../features/certificates/UpdateMetadataModal";
 import { CertificateDetailsModal } from "../features/certificates/CertificateDetailsModal";
 import { DownloadCertificateModal } from "../features/certificates/DownloadCertificateModal";
+import { LoadToAkvModal } from "../features/certificates/LoadToAkvModal";
 import { CertificateMultiSelect } from "../features/certificates/CertificateMultiSelect";
 
 const PAGE_SIZE = 25;
@@ -68,6 +69,8 @@ const Icons = {
   edit: <svg {...svgProps}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>,
   slash: <svg {...svgProps}><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>,
   trash: <svg {...svgProps}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>,
+  more: <svg {...svgProps}><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg>,
+  keyvault: <svg {...svgProps}><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>,
 };
 
 const actionTones = {
@@ -80,6 +83,30 @@ const actionTones = {
 const ActionBtn: React.FC<{ title: string; tone: keyof typeof actionTones; onClick: () => void; disabled?: boolean; children: React.ReactNode }> = ({ title, tone, onClick, disabled, children }) => (
   <button type="button" onClick={onClick} disabled={disabled} title={title} className={`rounded-lg p-2 transition disabled:cursor-not-allowed disabled:opacity-40 ${actionTones[tone]}`}>{children}</button>
 );
+
+// ── Expiry date badge with color-coded urgency ─────────────────────────
+
+const expiryColor = (not_after: string | null): { text: string; dot: string; label: string } => {
+  if (!not_after) return { text: "text-gray-500", dot: "bg-gray-400", label: "" };
+  const days = Math.ceil((new Date(not_after).getTime() - Date.now()) / 86_400_000);
+  if (days < 0) return { text: "text-red-700 font-semibold", dot: "bg-red-500", label: "Expired" };
+  if (days <= 30) return { text: "text-red-600 font-semibold", dot: "bg-red-500", label: `${days}d` };
+  if (days <= 60) return { text: "text-amber-600 font-semibold", dot: "bg-amber-500", label: `${days}d` };
+  if (days <= 90) return { text: "text-yellow-600", dot: "bg-yellow-400", label: `${days}d` };
+  return { text: "text-green-700", dot: "bg-green-500", label: `${days}d` };
+};
+
+const ExpiryBadge: React.FC<{ not_after: string | null }> = ({ not_after }) => {
+  const { text, dot, label } = expiryColor(not_after);
+  return (
+    <span className={`inline-flex items-center gap-1.5 ${text}`}>
+      <span className={`h-2 w-2 rounded-full ${dot} shrink-0`} />
+      <span>{formatDate(not_after)}</span>
+      {label && <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[11px] font-semibold opacity-80">{label}</span>}
+    </span>
+  );
+};
+
 // ── CSV export button (shared across all tab grids) ───────────────────
 
 const ExportIcon = (
@@ -998,7 +1025,7 @@ const AlertsPanel: React.FC = () => {
 
 // ── Main Page Component ───────────────────────────────────────────────
 
-type ModalKind = "enroll" | "view" | "renew" | "revoke" | "delete" | "metadata" | "download" | null;
+type ModalKind = "enroll" | "view" | "renew" | "revoke" | "delete" | "metadata" | "download" | "load_to_akv" | null;
 
 const CertificatesPage: React.FC = () => {
   const { isAdmin } = useAuth();
@@ -1020,6 +1047,14 @@ const CertificatesPage: React.FC = () => {
   const [selected, setSelected] = useState<Certificate | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [openActionMenu, setOpenActionMenu] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (openActionMenu === null) return;
+    const close = () => setOpenActionMenu(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [openActionMenu]);
 
   const showToast = useCallback((message: string, type: ToastType = "success") => setToast({ message, type }), []);
 
@@ -1231,20 +1266,19 @@ const CertificatesPage: React.FC = () => {
                 <th className={gridStyles.headerCell}><SortableHeader label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "status"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="ENV" active={sort.key === "environment"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "environment"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Thumbprint" active={sort.key === "thumbprint"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "thumbprint"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Valid From" active={sort.key === "not_before"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "not_before"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Expires" active={sort.key === "not_after"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "not_after"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Expiry Date" active={sort.key === "not_after"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "not_after"))} /></th>
                 <th className={gridStyles.headerCellCenter}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">Loading certificates…</td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">Loading certificates…</td></tr>
               ) : isError ? (
-                <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-red-600" role="alert">{(error as Error)?.message || "Failed to load certificates."} <button type="button" className="underline" onClick={() => refetch()}>Retry</button></td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-red-600" role="alert">{(error as Error)?.message || "Failed to load certificates."} <button type="button" className="underline" onClick={() => refetch()}>Retry</button></td></tr>
               ) : collectionId == null ? (
-                <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">Select a collection from the tiles above to view certificates.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">Select a collection from the tiles above to view certificates.</td></tr>
               ) : items.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">No certificates found in this collection.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">No certificates found in this collection.</td></tr>
               ) : (
                 items.map((cert) => (
                   <tr key={cert.id} className={gridStyles.row}>
@@ -1252,16 +1286,49 @@ const CertificatesPage: React.FC = () => {
                     <td className={gridStyles.cell}><StatusBadge status={cert.status} /></td>
                     <td className={gridStyles.cell}><EnvBadge cert={cert} /></td>
                     <td className={gridStyles.cell}><span className="font-mono text-xs" title={cert.thumbprint}>{cert.thumbprint || "—"}</span></td>
-                    <td className={gridStyles.cell}>{formatDate(cert.not_before)}</td>
-                    <td className={gridStyles.cell}>{formatDate(cert.not_after)}</td>
+                    <td className={gridStyles.cell}><ExpiryBadge not_after={cert.not_after} /></td>
                     <td className={gridStyles.centerCell}>
-                      <div className="flex items-center justify-center gap-0.5">
-                        <ActionBtn title="View" tone="blue" onClick={() => openModal("view", cert)}>{Icons.eye}</ActionBtn>
-                        <ActionBtn title="Download" tone="blue" onClick={() => openModal("download", cert)}>{Icons.download}</ActionBtn>
-                        {canWrite && <ActionBtn title="Renew" tone="green" onClick={() => openModal("renew", cert)}>{Icons.refresh}</ActionBtn>}
-                        {canWrite && <ActionBtn title="Edit Metadata" tone="blue" onClick={() => openModal("metadata", cert)}>{Icons.edit}</ActionBtn>}
-                        {canWrite && <ActionBtn title="Revoke" tone="orange" onClick={() => openModal("revoke", cert)}>{Icons.slash}</ActionBtn>}
-                        {canWrite && <ActionBtn title="Delete" tone="red" onClick={() => openModal("delete", cert)}>{Icons.trash}</ActionBtn>}
+                      <div className="relative flex items-center justify-center">
+                        <button
+                          type="button"
+                          title="Certificate actions"
+                          className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100 hover:text-gray-800"
+                          onClick={(e) => { e.stopPropagation(); setOpenActionMenu(openActionMenu === cert.id ? null : cert.id); }}
+                        >
+                          {Icons.more}
+                        </button>
+                        {openActionMenu === cert.id && (
+                          <div
+                            className="absolute right-0 top-8 z-30 min-w-[180px] rounded-xl border border-att-100 bg-white py-1 shadow-xl"
+                            onMouseLeave={() => setOpenActionMenu(null)}
+                          >
+                            <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("view", cert); }}>
+                              {Icons.eye} <span>View Certificate</span>
+                            </button>
+                            <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("download", cert); }}>
+                              {Icons.download} <span>Download</span>
+                            </button>
+                            {canWrite && <>
+                              <div className="my-1 border-t border-att-100" />
+                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-green-700 hover:bg-green-50" onClick={() => { setOpenActionMenu(null); openModal("renew", cert); }}>
+                                {Icons.refresh} <span>Renew Certificate</span>
+                              </button>
+                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-att-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("load_to_akv", cert); }}>
+                                {Icons.keyvault} <span>Load to AKV</span>
+                              </button>
+                              <div className="my-1 border-t border-att-100" />
+                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("metadata", cert); }}>
+                                {Icons.edit} <span>Edit Metadata</span>
+                              </button>
+                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-orange-700 hover:bg-orange-50" onClick={() => { setOpenActionMenu(null); openModal("revoke", cert); }}>
+                                {Icons.slash} <span>Revoke</span>
+                              </button>
+                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-red-700 hover:bg-red-50" onClick={() => { setOpenActionMenu(null); openModal("delete", cert); }}>
+                                {Icons.trash} <span>Delete</span>
+                              </button>
+                            </>}
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1282,7 +1349,8 @@ const CertificatesPage: React.FC = () => {
       {modal === "metadata" && selected && <UpdateMetadataModal certificate={selected} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       {modal === "revoke" && selected && <RevokeCertificateModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       {modal === "delete" && selected && <DeleteCertificateModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
-      {modal === "download" && selected && <DownloadCertificateModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
+      {modal === "download" && selected && <DownloadCertificateModal certificate={selected} collectionId={collectionId} canWrite={canWrite} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
+      {modal === "load_to_akv" && selected && <LoadToAkvModal certificate={selected} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       </>)}
 
       {activeTab === "auto-renewal" && <AutoRenewalPanel onToast={showToast} />}

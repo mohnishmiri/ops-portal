@@ -14,11 +14,13 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
+from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.aks_extended_endpoints import register_extended_routes
 from app.auth import get_current_user, require_role
+from app.core.authz import require_capability
 from app.core.database import get_db, get_standalone_session
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
@@ -356,7 +358,7 @@ async def list_clusters(
     subscription_ids: list[str] | None = Query(default=None, description="Filter by subscription IDs"),
     environment: str | None = Query(default=None, description="Filter by environment tag"),
     refresh: bool = Query(default=False, description="Bypass cache and fetch fresh data"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_capability("aks_view", permission_type="view", fallback_role=UserRole.READ)),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Get all AKS clusters with metadata."""
@@ -378,7 +380,7 @@ async def list_clusters(
 )
 async def list_cached_clusters(
     environment: str | None = Query(default=None, description="Filter by environment tag"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_capability("aks_view", permission_type="view", fallback_role=UserRole.READ)),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Get all AKS clusters from DB cache — fast, no Azure API call."""
@@ -587,7 +589,7 @@ async def get_deployment_detail(
 async def scale_deployment(
     request: ScaleDeploymentRequest,
     http_request: Request,
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    user: UserContext = Depends(require_capability("aks_deployment_scale")),
     service: AKSOperationsService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -637,7 +639,7 @@ async def scale_deployment(
 async def restart_deployment(
     request: RestartDeploymentRequest,
     http_request: Request,
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    user: UserContext = Depends(require_capability("aks_deployment_scale")),
     service: AKSOperationsService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -770,7 +772,7 @@ async def delete_deployment(
     namespace: str = Query(..., description="Kubernetes namespace"),
     name: str = Query(..., description="Deployment name"),
     http_request: Request = None,
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    user: UserContext = Depends(require_capability("aks_deployment_scale")),
     service: AKSOperationsService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -811,7 +813,9 @@ async def get_pod_metrics(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
     namespace: str = Query(default=None, description="Filter by namespace"),
     refresh: bool = Query(default=False, description="Bypass cache and fetch fresh data"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(
+        require_capability("aks_pod_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Get pod CPU/memory metrics."""
@@ -824,6 +828,135 @@ async def get_pod_metrics(
     except Exception as e:
         logger.error("get_pod_metrics_failed", cluster_id=cluster_id, error=str(e))
         raise HTTPException(status_code=502, detail=f"Failed to connect to cluster: {str(e)}") from e
+
+
+@router.delete(
+    "/pods/{namespace}/{pod_name}",
+    summary="Delete pod",
+    description=(
+        "Delete a Kubernetes pod. Requires the aks_pod_delete capability. "
+        "Pods owned by a controller (Deployment, Job, StatefulSet) will be "
+        "recreated by Kubernetes."
+    ),
+)
+async def delete_pod(
+    namespace: str,
+    pod_name: str,
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    grace_period_seconds: int | None = Query(
+        default=None,
+        ge=0,
+        description="Override the pod's termination grace period (0 forces immediate deletion)",
+    ),
+    http_request: Request = None,
+    user: UserContext = Depends(require_capability("aks_pod_delete")),
+    service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a pod, translating Kubernetes failures into precise HTTP statuses.
+
+    Authorization is enforced here by ``require_capability`` and does not rely
+    on the caller having been offered the action in the UI.
+    """
+    try:
+        result = await service.delete_pod(
+            cluster_id=cluster_id,
+            namespace=namespace,
+            pod_name=pod_name,
+            grace_period_seconds=grace_period_seconds,
+        )
+    except ApiException as exc:
+        # Map the Kubernetes API status onto a meaningful HTTP response rather
+        # than collapsing every failure into a 400/502.
+        status_map = {
+            404: (404, f"Pod '{pod_name}' was not found in namespace '{namespace}'."),
+            403: (403, "The portal's cluster credentials are not permitted to delete this pod."),
+            409: (409, f"Pod '{pod_name}' is being modified by another operation. Try again."),
+        }
+        code, detail = status_map.get(exc.status, (502, "Unable to delete pod. Kubernetes API returned an error."))
+        await _write_aks_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="delete_pod",
+            resource_type="pod",
+            resource_name=pod_name,
+            cluster_id=cluster_id,
+            namespace=namespace,
+            status="failed",
+            details={"error": detail, "k8s_status": exc.status},
+        )
+        logger.error(
+            "delete_pod_api_error",
+            cluster_id=cluster_id,
+            namespace=namespace,
+            pod=pod_name,
+            k8s_status=exc.status,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=code, detail=detail) from exc
+    except TimeoutError as exc:
+        await _write_aks_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="delete_pod",
+            resource_type="pod",
+            resource_name=pod_name,
+            cluster_id=cluster_id,
+            namespace=namespace,
+            status="failed",
+            details={"error": "timeout"},
+        )
+        raise HTTPException(
+            status_code=504,
+            detail="The cluster did not respond in time. The pod may still have been deleted.",
+        ) from exc
+    except Exception as exc:
+        # Cluster unreachable, Azure credential failure, kubeconfig retrieval
+        # failure — all surface as an upstream error with no internal detail.
+        await _write_aks_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="delete_pod",
+            resource_type="pod",
+            resource_name=pod_name,
+            cluster_id=cluster_id,
+            namespace=namespace,
+            status="failed",
+            details={"error": "cluster_unavailable"},
+        )
+        logger.error(
+            "delete_pod_failed",
+            cluster_id=cluster_id,
+            namespace=namespace,
+            pod=pod_name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to reach the cluster to delete the pod.",
+        ) from exc
+
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="delete_pod",
+        resource_type="pod",
+        resource_name=pod_name,
+        cluster_id=cluster_id,
+        namespace=namespace,
+        status="success",
+        details={
+            "phase": result.get("phase"),
+            "owner": result.get("owner"),
+            "grace_period_seconds": grace_period_seconds,
+        },
+    )
+    return result
 
 
 @router.get(
@@ -904,7 +1037,9 @@ async def get_pod_logs(
         le=86400,
         description="Only return logs newer than this many seconds",
     ),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(
+        require_capability("aks_pod_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Get pod logs."""
@@ -990,36 +1125,75 @@ async def exec_pod_command(
     namespace: str = Path(..., description="Pod namespace"),
     pod_name: str = Path(..., description="Pod name"),
     body: PodExecRequest = Body(...),
-    user: UserContext = Depends(get_current_user),
+    http_request: Request = None,
+    # Executing arbitrary commands inside a running container is a privileged
+    # operation — it previously required only an authenticated user, meaning any
+    # read-only account could run commands in production pods, unaudited.
+    user: UserContext = Depends(require_capability("aks_pod_exec")),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Execute a command in a pod."""
+    """Execute a command in a pod.
+
+    Every outcome is audited — including rejected and failed attempts. An
+    in-pod exec is the most sensitive operation the portal exposes, and a
+    blocked attempt is precisely the event an auditor needs to see.
+    """
+
+    async def _audit(status: str, details: dict) -> None:
+        await _write_aks_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="exec_pod_command",
+            resource_type="pod",
+            resource_name=pod_name,
+            cluster_id=body.cluster_id,
+            namespace=namespace,
+            status=status,
+            details={"command": body.command, "container": body.container, **details},
+        )
+
+    import shlex
+
     try:
-        # Parse command string into list
-        import shlex
-
         cmd_list = shlex.split(body.command)
-        if not cmd_list:
-            raise HTTPException(status_code=400, detail="Command cannot be empty")
+    except ValueError as e:
+        await _audit("failed", {"error": "unparseable_command"})
+        raise HTTPException(status_code=400, detail="Command could not be parsed.") from e
 
-        # Security: block dangerous commands
-        dangerous = {"rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb"}
-        cmd_lower = body.command.lower()
-        if any(d in cmd_lower for d in dangerous):
-            raise HTTPException(status_code=403, detail="Command blocked for safety")
+    if not cmd_list:
+        await _audit("failed", {"error": "empty_command"})
+        raise HTTPException(status_code=400, detail="Command cannot be empty")
 
-        return await service.exec_pod_command(
+    # Security: block obviously destructive commands.
+    dangerous = {"rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb"}
+    cmd_lower = body.command.lower()
+    if any(d in cmd_lower for d in dangerous):
+        await _audit("blocked", {"error": "blocked_by_safety_list"})
+        logger.warning(
+            "exec_pod_command_blocked",
+            pod=pod_name,
+            namespace=namespace,
+            user_id=user.user_id,
+        )
+        raise HTTPException(status_code=403, detail="Command blocked for safety")
+
+    try:
+        result = await service.exec_pod_command(
             body.cluster_id,
             namespace,
             pod_name,
             command=cmd_list,
             container=body.container,
         )
-    except HTTPException:
-        raise
     except Exception as e:
+        await _audit("failed", {"error": "exec_failed"})
         logger.error("exec_pod_command_failed", pod=pod_name, error=str(e))
-        raise HTTPException(status_code=502, detail=f"Failed to execute command: {str(e)}") from e
+        raise HTTPException(status_code=502, detail="Failed to execute command in pod.") from e
+
+    await _audit("success" if result.get("success", True) else "failed", {})
+    return result
 
 
 @router.get(
@@ -1031,7 +1205,9 @@ async def get_pod_containers(
     namespace: str = Path(..., description="Pod namespace"),
     pod_name: str = Path(..., description="Pod name"),
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(
+        require_capability("aks_pod_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Get pod container list."""
@@ -1058,7 +1234,9 @@ async def get_pod_containers(
 async def list_cached_cronjobs(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
     namespace: str = Query(default=None, description="Filter by namespace"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(
+        require_capability("aks_cronjob_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Get CronJobs from DB cache — fast, no Kubernetes API call."""
@@ -1105,7 +1283,9 @@ async def list_cronjobs(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
     namespace: str = Query(default=None, description="Filter by namespace"),
     refresh: bool = Query(default=False, description="Bypass cache and fetch fresh data"),
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(
+        require_capability("aks_cronjob_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """List Kubernetes CronJobs."""
@@ -1342,11 +1522,15 @@ async def delete_cronjob(
 async def trigger_cronjob(
     request: TriggerCronJobRequest,
     http_request: Request,
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    user: UserContext = Depends(require_capability("aks_cronjob_trigger")),
     service: AKSOperationsService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Manually trigger a CronJob."""
+    """Manually trigger a CronJob.
+
+    The response carries the created Job's name and namespace so the UI can
+    offer a "View Job" action that deep-links into the Jobs tab.
+    """
     result = await service.trigger_cronjob(
         cluster_id=request.cluster_id,
         namespace=request.namespace,
@@ -1365,7 +1549,13 @@ async def trigger_cronjob(
         cluster_id=request.cluster_id,
         namespace=request.namespace,
         status="success" if success else "failed",
-        details={"job_name": result.get("job_name"), "error": result.get("error")},
+        details={
+            "job_name": result.get("job_name"),
+            # Records that a repeated click reused an existing Job rather than
+            # launching the workload twice.
+            "deduplicated": result.get("deduplicated", False),
+            "error": result.get("error"),
+        },
     )
     if not success:
         raise HTTPException(status_code=400, detail=result.get("error", "Trigger failed"))
@@ -1373,6 +1563,176 @@ async def trigger_cronjob(
 
 
 # ── ConfigMaps ─────────────────────────────────────────────────────────
+
+
+# ── Jobs ───────────────────────────────────────────────────────────────
+
+
+def _job_api_error(exc: ApiException, *, job_name: str, namespace: str) -> HTTPException:
+    """Translate a Kubernetes error on a Job into a precise HTTP response."""
+    status_map = {
+        404: (404, f"Job '{job_name}' was not found in namespace '{namespace}'."),
+        403: (403, "The portal's cluster credentials are not permitted to act on this Job."),
+        409: (409, f"Job '{job_name}' is being modified by another operation. Try again."),
+    }
+    code, detail = status_map.get(exc.status, (502, "Unable to complete the operation. Kubernetes returned an error."))
+    return HTTPException(status_code=code, detail=detail)
+
+
+@router.get(
+    "/jobs",
+    summary="List Kubernetes Jobs",
+    description="List Jobs across a cluster or a single namespace. Pass refresh=true to bypass cache.",
+)
+async def list_jobs(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    namespace: str = Query(default=None, description="Filter by namespace"),
+    refresh: bool = Query(default=False, description="Bypass cache and fetch fresh data"),
+    user: UserContext = Depends(
+        require_capability("aks_job_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """List Jobs for the Jobs tab."""
+    try:
+        jobs = await service.get_jobs(cluster_id, namespace, bypass_cache=refresh)
+        return {"jobs": jobs, "count": len(jobs)}
+    except ApiException as e:
+        logger.error("list_jobs_failed", cluster_id=cluster_id, k8s_status=e.status, error=str(e))
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to list Jobs. Kubernetes API returned an error.",
+        ) from e
+    except Exception as e:
+        logger.error("list_jobs_failed", cluster_id=cluster_id, error=str(e))
+        raise HTTPException(status_code=502, detail="Failed to connect to cluster.") from e
+
+
+@router.get(
+    "/jobs/detail",
+    summary="Get Job detail",
+    description="Full detail for a single Job, including its execution counters and pods.",
+)
+async def get_job_detail(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    namespace: str = Query(..., description="Kubernetes namespace"),
+    name: str = Query(..., description="Job name"),
+    user: UserContext = Depends(
+        require_capability("aks_job_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """Get one Job's full detail."""
+    try:
+        return await service.get_job_detail(cluster_id, namespace, name)
+    except ApiException as e:
+        raise _job_api_error(e, job_name=name, namespace=namespace) from e
+    except Exception as e:
+        logger.error("get_job_detail_failed", job=name, namespace=namespace, error=str(e))
+        raise HTTPException(status_code=502, detail="Failed to connect to cluster.") from e
+
+
+@router.get(
+    "/jobs/{namespace}/{job_name}/pods",
+    summary="List pods for a Job",
+    description="Pods created by a Job, for log access and per-pod actions.",
+)
+async def get_job_pods(
+    namespace: str = Path(..., description="Job namespace"),
+    job_name: str = Path(..., description="Job name"),
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    user: UserContext = Depends(
+        require_capability("aks_job_view", permission_type="view", fallback_role=UserRole.READ)
+    ),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """List a Job's pods."""
+    try:
+        pods = await service.get_job_pods(cluster_id, namespace, job_name)
+        return {"pods": pods, "count": len(pods)}
+    except ApiException as e:
+        raise _job_api_error(e, job_name=job_name, namespace=namespace) from e
+    except Exception as e:
+        logger.error("get_job_pods_failed", job=job_name, namespace=namespace, error=str(e))
+        raise HTTPException(status_code=502, detail="Failed to connect to cluster.") from e
+
+
+@router.delete(
+    "/jobs/{namespace}/{job_name}",
+    summary="Delete a Job",
+    description=(
+        "Delete a Kubernetes Job. Requires the aks_job_delete capability. "
+        "The default Background propagation policy also deletes the Job's pods; "
+        "pass propagation_policy=Orphan to retain them."
+    ),
+)
+async def delete_job(
+    namespace: str = Path(..., description="Job namespace"),
+    job_name: str = Path(..., description="Job name"),
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    propagation_policy: str = Query(
+        default="Background",
+        pattern="^(Background|Foreground|Orphan)$",
+        description="Kubernetes deletion propagation policy",
+    ),
+    http_request: Request = None,
+    user: UserContext = Depends(require_capability("aks_job_delete")),
+    service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a Job, auditing the outcome either way."""
+
+    async def _audit(status: str, details: dict) -> None:
+        await _write_aks_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="delete_job",
+            resource_type="job",
+            resource_name=job_name,
+            cluster_id=cluster_id,
+            namespace=namespace,
+            status=status,
+            details=details,
+        )
+
+    try:
+        result = await service.delete_job(
+            cluster_id=cluster_id,
+            namespace=namespace,
+            job_name=job_name,
+            propagation_policy=propagation_policy,
+        )
+    except ApiException as e:
+        http_exc = _job_api_error(e, job_name=job_name, namespace=namespace)
+        await _audit("failed", {"error": http_exc.detail, "k8s_status": e.status})
+        logger.error("delete_job_api_error", job=job_name, namespace=namespace, k8s_status=e.status)
+        raise http_exc from e
+    except TimeoutError as e:
+        await _audit("failed", {"error": "timeout"})
+        raise HTTPException(
+            status_code=504,
+            detail="The cluster did not respond in time. The Job may still have been deleted.",
+        ) from e
+    except Exception as e:
+        await _audit("failed", {"error": "cluster_unavailable"})
+        logger.error(
+            "delete_job_failed",
+            job=job_name,
+            namespace=namespace,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        raise HTTPException(status_code=502, detail="Unable to reach the cluster to delete the Job.") from e
+
+    await _audit(
+        "success",
+        {
+            "previous_status": result.get("previous_status"),
+            "propagation_policy": propagation_policy,
+        },
+    )
+    return result
 
 
 @router.get(

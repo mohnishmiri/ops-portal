@@ -1,21 +1,30 @@
 /**
- * Renew/Reissue Certificate modal — matches Keyfactor Command renewal dialog.
+ * Renew/Reissue Certificate modal — multi-step flow.
  *
- * Offers three renewal modes:
- * - CONTINUE (one-click renewal using existing cert parameters)
- * - CONFIGURE WITH PFX (opens PFX config options)
- * - CONFIGURE WITH CSR (paste a new CSR)
+ * Step 1: Select renewal mode (one-click, PFX, or CSR)
+ * Step 2 (optional): Configure PFX or CSR parameters
+ * Step 3: Show renewal result + offer Load to AKV
+ *
+ * If renewal succeeds but AKV upload fails, clearly separates the two outcomes
+ * and allows AKV upload retry without re-renewing.
  */
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   Certificate,
+  EnrollResult,
+  AkvUploadRequest,
   certificateErrorMessage,
   useRenewCertificate,
+  useLoadCertificateToAkv,
 } from "../../services/certificatesApi";
 import { CertificateModal, fieldInput, fieldLabel, modalButton } from "./CertificateModal";
+import { formatDate } from "../../utils/dateFormat";
+import { useSubscriptionScope } from "../../contexts/SubscriptionContext";
+import { useKeyVaults } from "../../services/costApi";
 
 type RenewMode = "select" | "one_click" | "pfx" | "csr";
+type Step = "configure" | "result";
 
 interface RenewCertificateModalProps {
   certificate: Certificate;
@@ -24,6 +33,179 @@ interface RenewCertificateModalProps {
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 }
+
+// ── AKV upload sub-form (with cascade Subscription → RG → Vault) ────────────
+
+interface AkvFormProps {
+  certificateId: number;
+  renewalResult: EnrollResult;
+  onSuccess: () => void;
+  onFailure: (msg: string) => void;
+}
+
+const AkvUploadForm: React.FC<AkvFormProps> = ({ certificateId, renewalResult, onSuccess, onFailure }) => {
+  const load = useLoadCertificateToAkv();
+  const { effectiveSubscriptionIds, availableSubscriptions } = useSubscriptionScope();
+  const { data: allVaults = [] } = useKeyVaults();
+
+  // Cascade selection
+  const [selectedSubId, setSelectedSubId] = useState("");
+  const [selectedRg, setSelectedRg] = useState("");
+
+  // Form fields
+  const [subscriptionId, setSubscriptionId] = useState("");
+  const [resourceGroup, setResourceGroup] = useState("");
+  const [vaultName, setVaultName] = useState("");
+  const [certName, setCertName] = useState("");
+  const [certPassword, setCertPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+
+  const certData = renewalResult.pfx_base64 || renewalResult.certificate || "";
+
+  // Scoped vaults
+  const scopedVaults = useMemo(
+    () => (effectiveSubscriptionIds.length ? allVaults.filter((v) => effectiveSubscriptionIds.includes(v.subscription_id)) : allVaults),
+    [allVaults, effectiveSubscriptionIds]
+  );
+
+  const uniqueSubscriptions = useMemo(() => {
+    const seen = new Set<string>();
+    const subs: { id: string; name: string }[] = [];
+    for (const v of scopedVaults) {
+      if (v.subscription_id && !seen.has(v.subscription_id)) {
+        seen.add(v.subscription_id);
+        const found = availableSubscriptions.find((s) => s.subscription_id === v.subscription_id);
+        subs.push({ id: v.subscription_id, name: found?.subscription_name || v.subscription_id });
+      }
+    }
+    return subs.sort((a, b) => a.name.localeCompare(b.name));
+  }, [scopedVaults, availableSubscriptions]);
+
+  const filteredRgs = useMemo(() => {
+    if (!selectedSubId) return [];
+    const seen = new Set<string>();
+    return scopedVaults
+      .filter((v) => v.subscription_id === selectedSubId && v.resource_group && !seen.has(v.resource_group) && seen.add(v.resource_group))
+      .map((v) => v.resource_group)
+      .sort();
+  }, [scopedVaults, selectedSubId]);
+
+  const filteredVaults = useMemo(
+    () => (selectedSubId && selectedRg ? scopedVaults.filter((v) => v.subscription_id === selectedSubId && v.resource_group === selectedRg).sort((a, b) => a.name.localeCompare(b.name)) : []),
+    [scopedVaults, selectedSubId, selectedRg]
+  );
+
+  const handleSubChange = (subId: string) => { setSelectedSubId(subId); setSelectedRg(""); setSubscriptionId(subId); setResourceGroup(""); setVaultName(""); };
+  const handleRgChange = (rg: string) => { setSelectedRg(rg); setResourceGroup(rg); setVaultName(""); };
+  const handleVaultChange = (vName: string) => setVaultName(vName);
+
+  const certNameValid = !certName || /^[a-zA-Z0-9-]+$/.test(certName.trim());
+  const isValid = subscriptionId.trim() && resourceGroup.trim() && vaultName.trim() && certName.trim() && certNameValid && certData;
+
+  const handleUpload = async () => {
+    if (!isValid) return;
+    try {
+      await load.mutateAsync({
+        id: certificateId,
+        data: {
+          subscription_id: subscriptionId.trim(),
+          resource_group: resourceGroup.trim(),
+          vault_name: vaultName.trim(),
+          certificate_name: certName.trim(),
+          certificate_data: certData,
+          ...(certPassword ? { certificate_password: certPassword } : {}),
+        },
+      });
+      onSuccess();
+    } catch (err) {
+      onFailure(certificateErrorMessage(err, "Failed to load certificate into Azure Key Vault"));
+    }
+  };
+
+  if (!certData) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+        Certificate data is not available for AKV upload. Download the certificate and upload manually.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 rounded-xl border border-att-100 bg-att-50/30 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-att-600">Azure Key Vault Target</p>
+
+      {/* Cascade selectors */}
+      {scopedVaults.length > 0 && (
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className={fieldLabel}>Subscription</label>
+            <select className={fieldInput} value={selectedSubId} onChange={(e) => handleSubChange(e.target.value)}>
+              <option value="">Select…</option>
+              {uniqueSubscriptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={fieldLabel}>Resource Group</label>
+            <select className={fieldInput} value={selectedRg} onChange={(e) => handleRgChange(e.target.value)} disabled={!selectedSubId}>
+              <option value="">{selectedSubId ? "Select…" : "—"}</option>
+              {filteredRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={fieldLabel}>Key Vault</label>
+            <select className={fieldInput} value={vaultName} onChange={(e) => handleVaultChange(e.target.value)} disabled={!selectedRg}>
+              <option value="">{selectedRg ? "Select…" : "—"}</option>
+              {filteredVaults.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* Manual text fields */}
+      <div className="grid grid-cols-2 gap-2">
+        <div className="col-span-2">
+          <label className={fieldLabel}>Subscription ID <span className="text-red-500">*</span></label>
+          <input className={fieldInput} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={subscriptionId} onChange={(e) => setSubscriptionId(e.target.value)} />
+        </div>
+        <div>
+          <label className={fieldLabel}>Resource Group <span className="text-red-500">*</span></label>
+          <input className={fieldInput} placeholder="my-resource-group" value={resourceGroup} onChange={(e) => setResourceGroup(e.target.value)} />
+        </div>
+        <div>
+          <label className={fieldLabel}>Key Vault Name <span className="text-red-500">*</span></label>
+          <input className={fieldInput} placeholder="my-key-vault" value={vaultName} onChange={(e) => setVaultName(e.target.value)} />
+        </div>
+        <div className="col-span-2">
+          <label className={fieldLabel}>Certificate Name in AKV <span className="text-red-500">*</span></label>
+          <input className={fieldInput + (!certName || certNameValid ? "" : " border-red-400")} placeholder="my-certificate" value={certName} onChange={(e) => setCertName(e.target.value)} />
+          {certName && !certNameValid && <p className="mt-1 text-xs text-red-600">Only alphanumeric characters and hyphens allowed.</p>}
+        </div>
+        {renewalResult.pfx_base64 && (
+          <div className="col-span-2">
+            <label className={fieldLabel}>PFX Password</label>
+            <div className="relative">
+              <input type={showPassword ? "text" : "password"} className={fieldInput + " pr-10"} placeholder="Password used during renewal" value={certPassword} onChange={(e) => setCertPassword(e.target.value)} autoComplete="new-password" />
+              <button type="button" className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600" onClick={() => setShowPassword((v) => !v)} tabIndex={-1}>
+                {showPassword ? (
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+                ) : (
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                )}
+              </button>
+            </div>
+            <p className="mt-1 text-xs text-gray-400">Never logged or stored.</p>
+          </div>
+        )}
+      </div>
+
+      <button type="button" className={modalButton.primary + " w-full"} disabled={load.isPending || !isValid} onClick={handleUpload}>
+        {load.isPending ? "Loading to AKV…" : "Load to Azure Key Vault"}
+      </button>
+    </div>
+  );
+};
+
+// ── Main component ─────────────────────────────────────────────────────
 
 export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
   certificate,
@@ -34,18 +216,23 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
 }) => {
   const renew = useRenewCertificate();
   const [mode, setMode] = useState<RenewMode>("select");
+  const [step, setStep] = useState<Step>("configure");
   const [ca, setCa] = useState(certificate.certificate_authority || "");
   const [template, setTemplate] = useState(certificate.template || "");
   const [password, setPassword] = useState("");
-  const [keyType] = useState("RSA");
+  const [showPassword, setShowPassword] = useState(false);
   const [keyLength, setKeyLength] = useState(4096);
   const [ownerRoleName, setOwnerRoleName] = useState("");
   const [csr, setCsr] = useState("");
+  const [renewalResult, setRenewalResult] = useState<EnrollResult | null>(null);
+  const [akvStatus, setAkvStatus] = useState<"idle" | "success" | "failed">("idle");
+  const [akvError, setAkvError] = useState("");
+
   const pfxPasswordValid = password.trim().length >= 12;
 
   const handleSubmit = async (submitMode: "one_click" | "pfx" | "csr") => {
     try {
-      await renew.mutateAsync({
+      const result = await renew.mutateAsync({
         id: certificate.id,
         data: {
           mode: submitMode,
@@ -53,39 +240,127 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
           template: template.trim() || undefined,
           collection_id: collectionId,
           ...(submitMode === "pfx"
-            ? {
-                password,
-                key_type: keyType,
-                key_length: keyLength,
-                ...(ownerRoleName.trim() ? { owner_role_name: ownerRoleName.trim() } : {}),
-              }
+            ? { password, key_type: "RSA", key_length: keyLength, ...(ownerRoleName.trim() ? { owner_role_name: ownerRoleName.trim() } : {}) }
             : {}),
           ...(submitMode === "csr" ? { csr: csr.trim() } : {}),
         },
       });
-      onSuccess(`Certificate ${certificate.id} renewed`);
-      onClose();
+      setRenewalResult(result);
+      setStep("result");
+      onSuccess(`Certificate ${certificate.common_name} renewed successfully`);
     } catch (err) {
       onError(certificateErrorMessage(err, "Renewal failed"));
     }
   };
 
-  // Mode selection view (matches Keyfactor's "Renew/Reissue Certificate" dialog)
+  // ── Result / AKV upload step ───────────────────────────────────────────
+  if (step === "result" && renewalResult) {
+    return (
+      <CertificateModal
+        title="Renewal Result"
+        onClose={onClose}
+        footer={
+          <button type="button" className={modalButton.primary} onClick={onClose}>Done</button>
+        }
+      >
+        <div className="space-y-4">
+          {/* Renewal success card */}
+          <div className="flex items-start gap-3 rounded-xl border border-green-200 bg-green-50 p-4">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-green-100 text-green-600">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+            </div>
+            <div>
+              <p className="font-semibold text-green-900">Certificate Renewed Successfully</p>
+              <p className="text-sm text-green-700">{certificate.common_name}</p>
+            </div>
+          </div>
+
+          {/* Renewal details */}
+          <dl className="grid grid-cols-2 gap-3 rounded-xl border border-att-100 bg-att-50/30 p-4 text-sm">
+            {renewalResult.thumbprint && (
+              <div className="col-span-2">
+                <dt className="text-xs font-semibold uppercase text-gray-400">New Thumbprint</dt>
+                <dd className="font-mono text-xs text-gray-700 break-all">{renewalResult.thumbprint}</dd>
+              </div>
+            )}
+            {renewalResult.serial_number && (
+              <div>
+                <dt className="text-xs font-semibold uppercase text-gray-400">Serial Number</dt>
+                <dd className="font-mono text-xs text-gray-700">{renewalResult.serial_number}</dd>
+              </div>
+            )}
+            {renewalResult.certificate_id != null && (
+              <div>
+                <dt className="text-xs font-semibold uppercase text-gray-400">Keyfactor ID</dt>
+                <dd className="font-mono text-xs text-gray-700">{renewalResult.certificate_id}</dd>
+              </div>
+            )}
+          </dl>
+
+          {/* AKV upload status */}
+          {akvStatus === "success" && (
+            <div className="flex items-center gap-3 rounded-xl border border-green-200 bg-green-50 p-3">
+              <svg className="h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              <span className="text-sm font-medium text-green-800">Certificate loaded to Azure Key Vault successfully.</span>
+            </div>
+          )}
+
+          {akvStatus === "failed" && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
+              <div className="flex items-center gap-2 text-amber-800">
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                <span className="font-semibold text-sm">Certificate renewed successfully, but loading into Azure Key Vault failed.</span>
+              </div>
+              <p className="text-xs text-amber-700">{akvError}</p>
+            </div>
+          )}
+
+          {/* AKV upload form (shown when not yet succeeded) */}
+          {akvStatus !== "success" && (
+            <>
+              <div className="border-t border-att-100 pt-4">
+                <p className="mb-3 text-sm font-semibold text-gray-700">
+                  {akvStatus === "failed" ? "Retry: Load to Azure Key Vault" : "Load to Azure Key Vault (optional)"}
+                </p>
+                <AkvUploadForm
+                  certificateId={certificate.id}
+                  renewalResult={renewalResult}
+                  onSuccess={() => setAkvStatus("success")}
+                  onFailure={(msg) => { setAkvStatus("failed"); setAkvError(msg); }}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      </CertificateModal>
+    );
+  }
+
+  // ── Mode selection ─────────────────────────────────────────────────────
   if (mode === "select") {
     return (
       <CertificateModal title="Renew/Reissue Certificate" onClose={onClose}>
         <div className="space-y-4">
-          <p className="text-sm text-gray-700">
-            One click renewal is available for this certificate.
-          </p>
+          {/* Certificate summary */}
+          <div className="rounded-lg border border-att-100 bg-att-50/40 p-3 text-sm">
+            <div className="grid grid-cols-2 gap-2">
+              <div><span className="text-xs font-semibold uppercase text-gray-400">Common Name</span><p className="font-medium text-gray-800">{certificate.common_name}</p></div>
+              <div><span className="text-xs font-semibold uppercase text-gray-400">Expires</span><p className="font-medium text-gray-800">{formatDate(certificate.not_after)}</p></div>
+              <div><span className="text-xs font-semibold uppercase text-gray-400">Issuer</span><p className="text-xs text-gray-600 truncate">{certificate.certificate_authority || certificate.issuer_dn}</p></div>
+              <div><span className="text-xs font-semibold uppercase text-gray-400">Thumbprint</span><p className="font-mono text-xs text-gray-600 truncate">{certificate.thumbprint}</p></div>
+            </div>
+          </div>
+
+          <p className="text-sm text-gray-700">Select the renewal method:</p>
+
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
-              className="rounded-lg border-2 border-att-500 bg-white px-5 py-2.5 text-sm font-semibold text-att-700 hover:bg-att-50"
+              className="rounded-lg border-2 border-att-500 bg-white px-5 py-2.5 text-sm font-semibold text-att-700 hover:bg-att-50 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={renew.isPending}
               onClick={() => handleSubmit("one_click")}
             >
-              {renew.isPending ? "Renewing…" : "CONTINUE"}
+              {renew.isPending ? "Renewing…" : "ONE-CLICK RENEW"}
             </button>
             <button
               type="button"
@@ -114,7 +389,7 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
     );
   }
 
-  // PFX configuration
+  // ── PFX configuration ──────────────────────────────────────────────────
   if (mode === "pfx") {
     return (
       <CertificateModal
@@ -151,8 +426,30 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
               </select>
             </div>
             <div>
-              <label className={fieldLabel} htmlFor="renew-pfx-password">Password (min 12 chars)</label>
-              <input id="renew-pfx-password" type="password" className={fieldInput} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="PFX password" minLength={12} required />
+              <label className={fieldLabel} htmlFor="renew-pfx-password">Password (min 12 chars) <span className="text-red-500">*</span></label>
+              <div className="relative">
+                <input
+                  id="renew-pfx-password"
+                  type={showPassword ? "text" : "password"}
+                  className={fieldInput + " pr-10"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="PFX password"
+                  minLength={12}
+                  autoComplete="new-password"
+                  required
+                />
+                <button type="button" className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600" onClick={() => setShowPassword((v) => !v)} tabIndex={-1}>
+                  {showPassword ? (
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+                  ) : (
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                  )}
+                </button>
+              </div>
+              {password.length > 0 && !pfxPasswordValid && (
+                <p className="mt-1 text-xs text-red-600">Password must be at least 12 characters.</p>
+              )}
             </div>
             <div className="col-span-2">
               <label className={fieldLabel} htmlFor="renew-owner-role">Owner Role Name</label>
@@ -164,7 +461,7 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
     );
   }
 
-  // CSR configuration
+  // ── CSR configuration ──────────────────────────────────────────────────
   return (
     <CertificateModal
       title="Renew with CSR"

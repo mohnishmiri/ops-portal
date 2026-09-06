@@ -139,6 +139,7 @@ def normalize_certificate(cert: dict[str, Any]) -> dict[str, Any]:
         "locations": locations,
         "location_count": len(locations),
         "collection": cert.get("CertificateCollectionName") or cert.get("Collection") or "",
+        "has_private_key": bool(cert.get("HasPrivateKey", False)),
     }
 
 
@@ -398,9 +399,10 @@ class CertificateService:
         include_chain: bool = True,
         chain_order: str = "EndEntityFirst",
         collection_id: int | None = None,
+        pfx_password: str | None = None,
     ) -> bytes:
         """Download a certificate in the specified format."""
-        allowed_formats = ("PEM", "CER", "CRT", "DER", "P7B")
+        allowed_formats = ("PEM", "CER", "CRT", "DER", "P7B", "PFX")
         if file_format.upper() not in allowed_formats:
             raise CertificateServiceError(
                 f"Invalid format '{file_format}'. Allowed: {', '.join(allowed_formats)}.",
@@ -418,6 +420,7 @@ class CertificateService:
                 include_chain=include_chain,
                 chain_order=chain_order,
                 collection_id=collection_id,
+                pfx_password=pfx_password,
             )
         )
 

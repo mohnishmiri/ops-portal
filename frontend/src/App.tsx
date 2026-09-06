@@ -35,6 +35,7 @@ import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
 import { SubscriptionProvider } from "./contexts/SubscriptionContext";
+import { PortalAccessGate } from "./contexts/SessionContext";
 import SubscriptionScopePicker from "./components/SubscriptionScopePicker";
 import ProtectedRoute from "./components/ProtectedRoute";
 
@@ -417,17 +418,25 @@ const App: React.FC = () => {
         </UnauthenticatedTemplate>
 
         <AuthenticatedTemplate>
-          <AuthProvider>
-            <PermissionsProvider>
-              <SubscriptionProvider>
-                <TimezoneProvider>
-                  <ErrorBoundary>
-                    <MainContent />
-                  </ErrorBoundary>
-                </TimezoneProvider>
-              </SubscriptionProvider>
-            </PermissionsProvider>
-          </AuthProvider>
+          {/*
+            PortalAccessGate is the authorization boundary and must stay
+            outermost: an authenticated-but-unauthorized identity gets Access
+            Denied without any provider below it mounting, so no subscription,
+            cluster, or cost data is ever fetched for them.
+          */}
+          <PortalAccessGate>
+            <AuthProvider>
+              <PermissionsProvider>
+                <SubscriptionProvider>
+                  <TimezoneProvider>
+                    <ErrorBoundary>
+                      <MainContent />
+                    </ErrorBoundary>
+                  </TimezoneProvider>
+                </SubscriptionProvider>
+              </PermissionsProvider>
+            </AuthProvider>
+          </PortalAccessGate>
         </AuthenticatedTemplate>
       </QueryClientProvider>
     </MsalProvider>

@@ -296,6 +296,60 @@ async def seed_resources(db: AsyncSession) -> None:
     logger.info("resource_seeds_applied", total=len(all_seeds))
 
 
+# ---------------------------------------------------------------------------
+# Operation capabilities (fine-grained, per-operation authorization)
+# ---------------------------------------------------------------------------
+# Registered as ordinary Resource rows with resource_type="operation" so the
+# existing admin Permissions UI and matrix manage them — no new tables, no
+# parallel RBAC system.  ``permission_type`` is "edit" for state-changing
+# operations and "view" for read capabilities.
+#
+# Format: (capability_name, description, permission_type, default_roles)
+#
+# The default_roles column reproduces the coarse role checks that guarded
+# these operations before the capability layer existed, so seeding introduces
+# no behaviour change for existing users.  Admins can then tighten or widen
+# individual capabilities through the UI — for example revoking
+# aks_pod_delete from the write role without affecting any other operation.
+CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...]]] = [
+    ("aks_view", "View AKS clusters and workloads", "view", ("read", "write")),
+    ("aks_pod_view", "View pods and pod metrics", "view", ("read", "write")),
+    ("aks_pod_delete", "Delete pods", "edit", ("write",)),
+    ("aks_pod_exec", "Execute commands inside a running pod", "edit", ("write",)),
+    ("aks_job_view", "View Kubernetes Jobs", "view", ("read", "write")),
+    ("aks_job_delete", "Delete Kubernetes Jobs", "edit", ("write",)),
+    ("aks_cronjob_view", "View CronJobs", "view", ("read", "write")),
+    ("aks_cronjob_trigger", "Manually trigger a CronJob", "edit", ("write",)),
+    ("aks_deployment_scale", "Scale, restart, and delete deployments", "edit", ("write",)),
+    ("aks_secret_view", "Reveal Kubernetes secret values", "view", ("write",)),
+    ("aks_secret_update", "Create, update, or delete Kubernetes secrets", "edit", ("write",)),
+]
+
+# Expand the capability catalogue into resource + permission seed entries.
+RESOURCE_SEEDS.extend(
+    {
+        "resource_type": "operation",
+        "resource_name": capability,
+        "description": description,
+        "route_path": None,
+        "parent_name": "aks_operations",
+        "is_system": True,
+    }
+    for capability, description, _perm_type, _roles in CAPABILITY_SEEDS
+)
+
+_CAPABILITY_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
+    (role, capability, perm_type) for capability, _description, perm_type, roles in CAPABILITY_SEEDS for role in roles
+]
+
+# capability name → the permission_type that grants it.  Consulted by
+# app.core.authz so a capability is reported as held only when the permission
+# row actually matches what the enforcement check requires.
+CAPABILITY_PERMISSION_TYPES: dict[str, str] = {
+    capability: perm_type for capability, _description, perm_type, _roles in CAPABILITY_SEEDS
+}
+
+
 # Default role → resource permission grants.
 # These are inserted ONCE (skip if already exists).  Admins can change them
 # freely through the UI — this list is only consulted when no matching
@@ -307,6 +361,7 @@ async def seed_resources(db: AsyncSession) -> None:
 _ADMIN_SKIP = {"admin", "admin_dashboard", "admin_permissions"}
 
 DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
+    *_CAPABILITY_PERMISSION_SEEDS,
     # read role — view-only on all non-admin resources
     ("read", "cost_management", "view"),
     ("read", "aks_operations", "view"),

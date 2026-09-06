@@ -18,12 +18,19 @@ class Settings(BaseSettings):
 
     # ── Application ───────────────────────────────────────────────────
     APP_VERSION: str = "1.3.0"
-    ENVIRONMENT: str = Field(default="development", description="development | staging | production")
+    # Defaults to "production" deliberately: a missing or mis-provisioned
+    # ENVIRONMENT value must never silently degrade the portal into the
+    # permissive development auth path.
+    ENVIRONMENT: str = Field(default="production", description="development | staging | production")
     LOG_LEVEL: str = "INFO"
     DEBUG: bool = False
     DEV_AUTH_BYPASS: bool = Field(
         default=False,
-        description="When true in development, allow synthetic admin without a Bearer token",
+        description=(
+            "When true in development ONLY, allow a synthetic admin for requests that carry "
+            "no Bearer token at all. Never upgrades an invalid or expired token. Startup "
+            "refuses to boot if this is set outside development."
+        ),
     )
 
     # ── Azure AD / Entra ID ───────────────────────────────────────────

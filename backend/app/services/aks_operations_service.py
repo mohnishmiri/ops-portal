@@ -9,7 +9,7 @@ Provides enterprise-grade AKS operational capabilities using:
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -1056,6 +1056,71 @@ class AKSOperationsService(AKSResourceOperationsMixin):
 
         return pods
 
+    # ── Pod lifecycle ──────────────────────────────────────────────────
+
+    async def delete_pod(
+        self,
+        cluster_id: str,
+        namespace: str,
+        pod_name: str,
+        grace_period_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Delete a single pod.
+
+        Reads the pod first so the audit trail records what was actually
+        removed (phase and owning workload) rather than just a name, and so a
+        missing pod surfaces as 404 rather than a generic failure.
+
+        Returns a ``success`` dict on completion; raises ``ApiException`` for
+        the caller to translate into an HTTP status.
+        """
+        _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+
+        try:
+            pod = await asyncio.to_thread(core_v1.read_namespaced_pod, pod_name, namespace)
+            phase = pod.status.phase if pod.status else None
+            owner_refs = pod.metadata.owner_references or []
+            owner = f"{owner_refs[0].kind}/{owner_refs[0].name}" if owner_refs else None
+
+            kwargs: dict[str, Any] = {"name": pod_name, "namespace": namespace}
+            if grace_period_seconds is not None:
+                kwargs["grace_period_seconds"] = grace_period_seconds
+
+            await asyncio.to_thread(core_v1.delete_namespaced_pod, **kwargs)
+
+            # Drop the pod from the DB inventory and bust the Redis tier so the
+            # UI reflects the deletion without a manual refresh.
+            await self._delete_inventory_item(cluster_id, "pod", namespace, pod_name)
+            await data_cache.invalidate_for_pods(cluster_id)
+
+            logger.info(
+                "pod_deleted",
+                cluster_id=cluster_id,
+                namespace=namespace,
+                pod=pod_name,
+                phase=phase,
+                owner=owner,
+            )
+            return {
+                "success": True,
+                "pod_name": pod_name,
+                "namespace": namespace,
+                "phase": phase,
+                "owner": owner,
+                # Surfaced to the user: a pod owned by a controller comes back.
+                "will_be_recreated": bool(owner_refs),
+            }
+        except ApiException as e:
+            logger.error(
+                "delete_pod_failed",
+                cluster_id=cluster_id,
+                namespace=namespace,
+                pod=pod_name,
+                status=e.status,
+                error=str(e),
+            )
+            raise
+
     # ── Pod Logs & Exec ────────────────────────────────────────────────
 
     async def get_pod_logs(
@@ -1461,6 +1526,275 @@ class AKSOperationsService(AKSResourceOperationsMixin):
             raise
 
         return cronjobs
+
+    # ── Jobs ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _job_status(job: Any) -> str:
+        """Derive a single display status from a Job's spec and status.
+
+        Kubernetes does not expose a Job "status" field; it exposes conditions
+        plus counters. The precedence below matches how kubectl reports Jobs:
+        an explicit Complete/Failed condition wins, then suspension, then
+        whether any pod is currently active.
+        """
+        spec = job.spec
+        status = job.status
+
+        for condition in status.conditions or []:
+            if condition.status != "True":
+                continue
+            if condition.type == "Complete":
+                return "Completed"
+            if condition.type == "Failed":
+                return "Failed"
+
+        if getattr(spec, "suspend", False):
+            return "Suspended"
+        if (status.active or 0) > 0:
+            return "Running"
+        # A Job with no active pods and no terminal condition has either not
+        # been scheduled yet or is between retries.
+        if (status.succeeded or 0) > 0:
+            return "Completed"
+        if (status.failed or 0) > 0:
+            return "Failed"
+        return "Unknown"
+
+    @classmethod
+    def _serialize_job(cls, job: Any) -> dict[str, Any]:
+        """Flatten a V1Job into the payload the Jobs grid consumes."""
+        meta = job.metadata
+        spec = job.spec
+        status = job.status
+        labels = dict(meta.labels) if meta.labels else {}
+        annotations = dict(meta.annotations) if meta.annotations else {}
+
+        owner_refs = meta.owner_references or []
+        owning_cronjob = next((ref.name for ref in owner_refs if ref.kind == "CronJob"), None)
+
+        # A manually triggered Job is labelled by trigger_cronjob(); fall back
+        # to the owner reference for Jobs the scheduler created.
+        created_by = labels.get("cronjob-name") or owning_cronjob
+        trigger = "manual" if labels.get("triggered-by") == "manual" else ("schedule" if created_by else None)
+
+        return {
+            "name": meta.name,
+            "namespace": meta.namespace,
+            "uid": meta.uid,
+            "status": cls._job_status(job),
+            "completions": spec.completions,
+            "succeeded": status.succeeded or 0,
+            "failed": status.failed or 0,
+            "active": status.active or 0,
+            "parallelism": spec.parallelism,
+            "backoff_limit": spec.backoff_limit,
+            "completion_mode": getattr(spec, "completion_mode", None),
+            "ttl_seconds_after_finished": getattr(spec, "ttl_seconds_after_finished", None),
+            "suspended": bool(getattr(spec, "suspend", False)),
+            "start_time": status.start_time.isoformat() if status.start_time else None,
+            "completion_time": (status.completion_time.isoformat() if status.completion_time else None),
+            "created_at": (meta.creation_timestamp.isoformat() if meta.creation_timestamp else None),
+            "created_by": created_by,
+            "trigger": trigger,
+            "labels": labels,
+            "annotations": annotations,
+            "image": (
+                spec.template.spec.containers[0].image
+                if spec.template and spec.template.spec and spec.template.spec.containers
+                else None
+            ),
+        }
+
+    async def get_jobs(
+        self,
+        cluster_id: str,
+        namespace: str | None = None,
+        bypass_cache: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List Jobs, served from the Redis tier unless a refresh is requested."""
+        cache_key = CacheKeys.jobs(cluster_id, namespace)
+        if not bypass_cache:
+            cached, _tier = await data_cache.get_or_fetch(
+                key=cache_key,
+                ttl=TTL.JOBS,
+                fetch_fn=lambda: self._fetch_jobs_live(cluster_id, namespace),
+            )
+            return cached
+
+        return await self._fetch_jobs_live(cluster_id, namespace)
+
+    async def _fetch_jobs_live(
+        self,
+        cluster_id: str,
+        namespace: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Live K8s API call to list Jobs (L3)."""
+        _, _, batch_v1 = await self._get_k8s_clients(cluster_id)
+
+        try:
+            if namespace:
+                job_list = await asyncio.to_thread(batch_v1.list_namespaced_job, namespace)
+            else:
+                job_list = await asyncio.wait_for(
+                    asyncio.to_thread(batch_v1.list_job_for_all_namespaces),
+                    timeout=45.0,
+                )
+        except ApiException as e:
+            logger.error("list_jobs_failed", cluster_id=cluster_id, namespace=namespace, error=str(e))
+            raise
+
+        return [self._serialize_job(job) for job in job_list.items]
+
+    async def get_job_detail(
+        self,
+        cluster_id: str,
+        namespace: str,
+        job_name: str,
+    ) -> dict[str, Any]:
+        """Full detail for a single Job, including its pods."""
+        cache_key = CacheKeys.job_detail(cluster_id, namespace, job_name)
+        cached, _tier = await data_cache.get_or_fetch(
+            key=cache_key,
+            ttl=TTL.JOB_DETAIL,
+            fetch_fn=lambda: self._fetch_job_detail_live(cluster_id, namespace, job_name),
+        )
+        return cached
+
+    async def _fetch_job_detail_live(
+        self,
+        cluster_id: str,
+        namespace: str,
+        job_name: str,
+    ) -> dict[str, Any]:
+        _, _, batch_v1 = await self._get_k8s_clients(cluster_id)
+
+        try:
+            job = await asyncio.to_thread(batch_v1.read_namespaced_job, job_name, namespace)
+        except ApiException as e:
+            logger.error("get_job_detail_failed", job=job_name, namespace=namespace, error=str(e))
+            raise
+
+        detail = self._serialize_job(job)
+        detail["conditions"] = [
+            {
+                "type": c.type,
+                "status": c.status,
+                "reason": c.reason,
+                "message": c.message,
+                "last_transition_time": (c.last_transition_time.isoformat() if c.last_transition_time else None),
+            }
+            for c in (job.status.conditions or [])
+        ]
+        detail["pods"] = await self.get_job_pods(cluster_id, namespace, job_name, job_uid=job.metadata.uid)
+        return detail
+
+    async def get_job_pods(
+        self,
+        cluster_id: str,
+        namespace: str,
+        job_name: str,
+        job_uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Pods belonging to a Job.
+
+        Selects on the ``job-name`` label rather than the generated
+        ``controller-uid`` selector so it also works for Jobs created by older
+        controllers, then filters by owner UID when one is supplied to guard
+        against a recycled Job name matching a previous run's pods.
+        """
+        _, core_v1, _ = await self._get_k8s_clients(cluster_id)
+
+        try:
+            pod_list = await asyncio.to_thread(
+                core_v1.list_namespaced_pod,
+                namespace,
+                label_selector=f"job-name={job_name}",
+            )
+        except ApiException as e:
+            logger.warning(
+                "get_job_pods_failed",
+                job=job_name,
+                namespace=namespace,
+                error=str(e),
+            )
+            return []
+
+        pods = []
+        for pod in pod_list.items:
+            if job_uid:
+                owner_uids = {ref.uid for ref in (pod.metadata.owner_references or [])}
+                if owner_uids and job_uid not in owner_uids:
+                    continue
+
+            statuses = pod.status.container_statuses or []
+            pods.append(
+                {
+                    "pod_name": pod.metadata.name,
+                    "namespace": pod.metadata.namespace,
+                    "phase": pod.status.phase,
+                    "node": pod.spec.node_name,
+                    "pod_ip": pod.status.pod_ip,
+                    "started_at": (pod.status.start_time.isoformat() if pod.status.start_time else None),
+                    "restarts": sum(cs.restart_count or 0 for cs in statuses),
+                    "containers": [cs.name for cs in statuses] or [c.name for c in (pod.spec.containers or [])],
+                }
+            )
+        return pods
+
+    async def delete_job(
+        self,
+        cluster_id: str,
+        namespace: str,
+        job_name: str,
+        propagation_policy: str = "Background",
+    ) -> dict[str, Any]:
+        """Delete a Job.
+
+        ``propagation_policy`` defaults to ``Background``, which also removes
+        the Job's pods. ``Orphan`` keeps them for post-mortem inspection.
+        """
+        _, _, batch_v1 = await self._get_k8s_clients(cluster_id)
+
+        try:
+            job = await asyncio.to_thread(batch_v1.read_namespaced_job, job_name, namespace)
+            status = self._job_status(job)
+
+            await asyncio.to_thread(
+                batch_v1.delete_namespaced_job,
+                name=job_name,
+                namespace=namespace,
+                propagation_policy=propagation_policy,
+            )
+
+            await data_cache.invalidate_for_jobs(cluster_id)
+            await data_cache.invalidate_for_pods(cluster_id)
+
+            logger.info(
+                "job_deleted",
+                cluster_id=cluster_id,
+                namespace=namespace,
+                job=job_name,
+                job_status=status,
+                propagation_policy=propagation_policy,
+            )
+            return {
+                "success": True,
+                "job_name": job_name,
+                "namespace": namespace,
+                "previous_status": status,
+                "propagation_policy": propagation_policy,
+            }
+        except ApiException as e:
+            logger.error(
+                "delete_job_failed",
+                cluster_id=cluster_id,
+                namespace=namespace,
+                job=job_name,
+                status=e.status,
+                error=str(e),
+            )
+            raise
 
     async def suspend_cronjob(
         self,
@@ -1987,11 +2321,34 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         user_id: str = "",
         user_email: str = "",
     ) -> dict[str, Any]:
-        """Manually trigger a CronJob by creating a Job from its jobTemplate."""
+        """Manually trigger a CronJob by creating a Job from its jobTemplate.
+
+        Idempotent within a short window: a double-clicked button or a retried
+        request returns the Job already created for this CronJob instead of
+        launching a second copy of the workload. The generated name only has
+        second resolution, so without this two clicks a second apart would
+        otherwise produce two concurrent runs.
+        """
         _, _, batch_v1 = await self._get_k8s_clients(cluster_id)
 
         try:
             cj = await asyncio.to_thread(batch_v1.read_namespaced_cron_job, cronjob_name, namespace)
+
+            recent = await self._recent_manual_job(cluster_id, namespace, cronjob_name)
+            if recent is not None:
+                logger.info(
+                    "cronjob_trigger_deduplicated",
+                    cronjob=cronjob_name,
+                    job=recent["name"],
+                    user=user_email,
+                )
+                return {
+                    "success": True,
+                    "cronjob": cronjob_name,
+                    "job_name": recent["name"],
+                    "namespace": namespace,
+                    "deduplicated": True,
+                }
 
             timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             job_name = f"{cronjob_name}-manual-{timestamp}"
@@ -2038,6 +2395,8 @@ class AKSOperationsService(AKSResourceOperationsMixin):
             await self._db_add_and_commit(history)
 
             await data_cache.invalidate_for_cronjobs(cluster_id)
+            # Bust the Jobs tier too so the new Job is visible immediately.
+            await data_cache.invalidate_for_jobs(cluster_id)
             await self._refresh_cronjob_db_cache(cluster_id, namespace)
             logger.info("cronjob_triggered", cronjob=cronjob_name, job=job_name, user=user_email)
 
@@ -2046,10 +2405,74 @@ class AKSOperationsService(AKSResourceOperationsMixin):
                 "cronjob": cronjob_name,
                 "job_name": job_name,
                 "namespace": namespace,
+                "deduplicated": False,
             }
         except ApiException as e:
+            # Two requests racing past the dedup window can collide on the
+            # generated name. The Job the other request created is the correct
+            # answer, so report success rather than a spurious failure.
+            if e.status == 409:
+                logger.info("cronjob_trigger_already_exists", cronjob=cronjob_name, job=job_name)
+                return {
+                    "success": True,
+                    "cronjob": cronjob_name,
+                    "job_name": job_name,
+                    "namespace": namespace,
+                    "deduplicated": True,
+                }
             logger.error("cronjob_trigger_failed", cronjob=cronjob_name, error=str(e))
             raise
+
+    # Window in which a repeated manual trigger is treated as the same request.
+    # Deliberately short: this guards against a double-clicked button or a
+    # retried HTTP request, not against a deliberate re-run. A longer window
+    # would silently swallow an operator's intentional second run.
+    _MANUAL_TRIGGER_DEDUP_SECONDS = 10
+
+    async def _recent_manual_job(
+        self,
+        cluster_id: str,
+        namespace: str,
+        cronjob_name: str,
+    ) -> dict[str, Any] | None:
+        """Most recent *still-running* manually-triggered Job for this CronJob,
+        if it was created inside the dedup window.
+
+        A finished Job is never treated as a duplicate: re-running a CronJob
+        after a short run completed is a legitimate operation, and reporting it
+        as "already running" would drop work the operator asked for.
+
+        Returns None on any lookup failure — a dedup check must never be the
+        reason a legitimate trigger fails.
+        """
+        _, _, batch_v1 = await self._get_k8s_clients(cluster_id)
+        try:
+            job_list = await asyncio.to_thread(
+                batch_v1.list_namespaced_job,
+                namespace,
+                label_selector=f"cronjob-name={cronjob_name},triggered-by=manual",
+            )
+        except Exception as exc:
+            logger.warning(
+                "manual_job_dedup_check_failed",
+                cronjob=cronjob_name,
+                error=str(exc)[:200],
+            )
+            return None
+
+        cutoff = datetime.now(UTC) - timedelta(seconds=self._MANUAL_TRIGGER_DEDUP_SECONDS)
+        newest: Any | None = None
+        for job in job_list.items:
+            created = job.metadata.creation_timestamp
+            if created is None or created < cutoff:
+                continue
+            # Only an unfinished Job represents "the run you just started".
+            if self._job_status(job) in ("Completed", "Failed"):
+                continue
+            if newest is None or created > newest.metadata.creation_timestamp:
+                newest = job
+
+        return {"name": newest.metadata.name} if newest is not None else None
 
     # ── ConfigMap Operations ───────────────────────────────────────────
 

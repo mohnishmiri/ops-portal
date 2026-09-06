@@ -508,6 +508,140 @@ export async function fetchPodMetrics(
   return data;
 }
 
+// ── Jobs ──────────────────────────────────────────────────────────────
+
+export type JobStatus = "Running" | "Completed" | "Failed" | "Suspended" | "Unknown";
+
+export interface K8sJob {
+  name: string;
+  namespace: string;
+  uid: string;
+  status: JobStatus;
+  completions: number | null;
+  succeeded: number;
+  failed: number;
+  active: number;
+  parallelism: number | null;
+  backoff_limit: number | null;
+  completion_mode: string | null;
+  ttl_seconds_after_finished: number | null;
+  suspended: boolean;
+  start_time: string | null;
+  completion_time: string | null;
+  created_at: string | null;
+  /** Owning CronJob name, when the Job came from one. */
+  created_by: string | null;
+  trigger: "manual" | "schedule" | null;
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  image: string | null;
+}
+
+export interface JobPod {
+  pod_name: string;
+  namespace: string;
+  phase: string | null;
+  node: string | null;
+  pod_ip: string | null;
+  started_at: string | null;
+  restarts: number;
+  containers: string[];
+}
+
+export interface JobCondition {
+  type: string;
+  status: string;
+  reason: string | null;
+  message: string | null;
+  last_transition_time: string | null;
+}
+
+export interface JobDetail extends K8sJob {
+  conditions: JobCondition[];
+  pods: JobPod[];
+}
+
+export async function fetchJobs(
+  clusterId: string,
+  namespace?: string,
+  refresh?: boolean
+): Promise<{ jobs: K8sJob[]; count: number }> {
+  const params = new URLSearchParams({ cluster_id: clusterId });
+  if (namespace) params.set("namespace", namespace);
+  if (refresh) params.set("refresh", "true");
+  const { data } = await apiClient.get(`${API_PREFIX}/jobs`, { params, timeout: 60000 });
+  return data;
+}
+
+export async function fetchJobDetail(
+  clusterId: string,
+  namespace: string,
+  name: string
+): Promise<JobDetail> {
+  const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
+  const { data } = await apiClient.get(`${API_PREFIX}/jobs/detail`, { params });
+  return data;
+}
+
+export async function fetchJobPods(
+  clusterId: string,
+  namespace: string,
+  jobName: string
+): Promise<{ pods: JobPod[]; count: number }> {
+  const params = new URLSearchParams({ cluster_id: clusterId });
+  const { data } = await apiClient.get(
+    `${API_PREFIX}/jobs/${encodeURIComponent(namespace)}/${encodeURIComponent(jobName)}/pods`,
+    { params }
+  );
+  return data;
+}
+
+export async function deleteJob(
+  clusterId: string,
+  namespace: string,
+  jobName: string,
+  propagationPolicy: "Background" | "Orphan" = "Background"
+): Promise<{
+  success: boolean;
+  job_name: string;
+  namespace: string;
+  previous_status: string;
+  propagation_policy: string;
+}> {
+  const params = new URLSearchParams({
+    cluster_id: clusterId,
+    propagation_policy: propagationPolicy,
+  });
+  const { data } = await apiClient.delete(
+    `${API_PREFIX}/jobs/${encodeURIComponent(namespace)}/${encodeURIComponent(jobName)}`,
+    { params }
+  );
+  return data;
+}
+
+export interface DeletePodResult {
+  success: boolean;
+  pod_name: string;
+  namespace: string;
+  phase: string | null;
+  owner: string | null;
+  /** True when the pod is controller-owned and Kubernetes will replace it. */
+  will_be_recreated: boolean;
+}
+
+export async function deletePod(
+  clusterId: string,
+  namespace: string,
+  podName: string
+): Promise<DeletePodResult> {
+  const params = new URLSearchParams({ cluster_id: clusterId });
+  const { data } = await apiClient.delete(
+    `${API_PREFIX}/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(podName)}`,
+    { params }
+  );
+  return data;
+}
+
 export async function fetchPodUtilizationHistory(
   clusterId: string,
   namespace?: string,
@@ -782,7 +916,14 @@ export async function triggerCronJob(
   clusterId: string,
   namespace: string,
   cronjobName: string
-): Promise<{ success: boolean; cronjob: string; job_name: string }> {
+): Promise<{
+  success: boolean;
+  cronjob: string;
+  job_name: string;
+  namespace: string;
+  /** True when a repeated request reused an existing Job instead of creating one. */
+  deduplicated?: boolean;
+}> {
   const { data } = await apiClient.post(`${API_PREFIX}/cronjobs/trigger`, {
     cluster_id: clusterId,
     namespace,
@@ -1369,6 +1510,87 @@ export function usePodMetrics(clusterId: string, namespace?: string, enabled = t
     refetchInterval: safeInterval(5_000), // refetch every 5s for real-time pod metrics
     retry: 1,
     refetchOnWindowFocus: false,
+  });
+}
+
+export function useJobs(clusterId: string, namespace?: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-jobs", clusterId, namespace],
+    queryFn: () => fetchJobs(clusterId, namespace),
+    enabled: !!clusterId && enabled,
+    // No placeholderData: an empty placeholder would make isLoading false for
+    // the whole first fetch, so the grid would render "No Jobs found" instead
+    // of a loading state, and would carry the previous namespace's rows across
+    // a filter change.
+    staleTime: 4_000,
+    gcTime: 60_000,
+    // Jobs are short-lived; poll so a running Job's counters advance and a
+    // freshly triggered Job shows up without the user hitting Refresh.
+    refetchInterval: safeInterval(10_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useJobDetail(
+  clusterId: string,
+  namespace: string | undefined,
+  name: string | undefined,
+  enabled = true
+) {
+  return useQuery({
+    queryKey: ["aks-job-detail", clusterId, namespace, name],
+    queryFn: () => fetchJobDetail(clusterId, namespace!, name!),
+    enabled: !!clusterId && !!namespace && !!name && enabled,
+    staleTime: 4_000,
+    refetchInterval: safeInterval(10_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useDeleteJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      clusterId,
+      namespace,
+      jobName,
+      propagationPolicy,
+    }: {
+      clusterId: string;
+      namespace: string;
+      jobName: string;
+      propagationPolicy?: "Background" | "Orphan";
+    }) => deleteJob(clusterId, namespace, jobName, propagationPolicy),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["aks-jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-job-detail"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useDeletePod() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      clusterId,
+      namespace,
+      podName,
+    }: {
+      clusterId: string;
+      namespace: string;
+      podName: string;
+    }) => deletePod(clusterId, namespace, podName),
+    onSuccess: () => {
+      // Refresh the grid immediately so the user sees the pod terminating (or
+      // its replacement appear) without reloading the browser.
+      queryClient.invalidateQueries({ queryKey: ["aks-pod-metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-pods-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 

@@ -61,6 +61,10 @@ class CacheTTL:
     POD_METRICS: int = 60  # 1 min — most volatile
     CRONJOBS: int = 120  # 2 min
     CRONJOB_DETAIL: int = 120  # 2 min
+    # Jobs are short-lived and their status changes as pods run, so they are
+    # cached only briefly — a manually triggered Job must appear promptly.
+    JOBS: int = 30
+    JOB_DETAIL: int = 30
     NODE_POOLS: int = 300  # 5 min — rarely changes
     SUBSCRIPTIONS: int = 600  # 10 min — almost static
     UNDERUTILIZED: int = 600  # 10 min — DB aggregation cache
@@ -110,6 +114,14 @@ class CacheKeys:
     @staticmethod
     def cronjob_detail(cluster_id: str, namespace: str, name: str) -> str:
         return f"{CacheKeys.PREFIX}:cronjobs:detail:{_hash_params(cluster_id, namespace, name)}"
+
+    @staticmethod
+    def jobs(cluster_id: str, namespace: str | None = None) -> str:
+        return f"{CacheKeys.PREFIX}:jobs:list:{_hash_params(cluster_id, namespace)}"
+
+    @staticmethod
+    def job_detail(cluster_id: str, namespace: str, name: str) -> str:
+        return f"{CacheKeys.PREFIX}:jobs:detail:{_hash_params(cluster_id, namespace, name)}"
 
     @staticmethod
     def node_pools(cluster_id: str) -> str:
@@ -260,6 +272,18 @@ class DataCacheService:
         count = await cache_manager.invalidate("aks:secrets:*")
         self._stats["invalidations"] += count
         logger.info("cache_invalidated", scope="secrets", cluster_id=cluster_id[:60], keys=count)
+        return count
+
+    async def invalidate_for_jobs(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:jobs:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="jobs", cluster_id=cluster_id[:60], keys=count)
+        return count
+
+    async def invalidate_for_pods(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:pods:metrics:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="pods", cluster_id=cluster_id[:60], keys=count)
         return count
 
     async def invalidate_for_services(self, cluster_id: str) -> int:

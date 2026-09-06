@@ -14,7 +14,7 @@ import {
   useServiceDetail,
 } from "../../services/aksApi";
 
-function ModalShell({
+export function ModalShell({
   title,
   onClose,
   children,
@@ -899,7 +899,9 @@ export function DeleteConfirmModal({
 }) {
   return (
     <ModalShell title={title} onClose={onClose}>
-      <p className="text-sm text-gray-600 mb-4">{message}</p>
+      {/* whitespace-pre-line so callers can separate the question from status
+          and consequence details with blank lines. */}
+      <p className="text-sm text-gray-600 mb-4 whitespace-pre-line">{message}</p>
       <div className="flex justify-end gap-2">
         <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
         <button

@@ -9,6 +9,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, get_current_user_from_token, require_role
+from app.core.authz import assert_capability, require_capability
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
@@ -221,8 +222,18 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         service=Depends(get_service),
         db: AsyncSession = Depends(get_db),
     ) -> dict:
-        if reveal and not user.has_role(UserRole.WRITE) and not user.is_admin:
-            raise HTTPException(status_code=403, detail="WRITE role required to reveal secret values")
+        if reveal:
+            # Revealing plaintext secret values is gated by its own capability
+            # so it can be withheld from an account that otherwise has write
+            # access to the cluster.
+            await assert_capability(
+                db,
+                request=http_request,
+                user=user,
+                capability="aks_secret_view",
+                permission_type="view",
+                fallback_role=UserRole.WRITE,
+            )
         detail = await service.get_secret_detail(cluster_id, namespace, name, reveal=reveal)
         if reveal:
             await write_audit(
@@ -243,7 +254,7 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
     async def create_secret(
         request: CreateSecretRequest,
         http_request: Request,
-        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        user: UserContext = Depends(require_capability("aks_secret_update")),
         service=Depends(get_service),
         db: AsyncSession = Depends(get_db),
     ) -> dict:
@@ -283,7 +294,7 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
     async def update_secret(
         request: UpdateSecretRequest,
         http_request: Request,
-        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        user: UserContext = Depends(require_capability("aks_secret_update")),
         service=Depends(get_service),
         db: AsyncSession = Depends(get_db),
     ) -> dict:
@@ -311,7 +322,7 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         namespace: str = Query(...),
         name: str = Query(...),
         http_request: Request = None,
-        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        user: UserContext = Depends(require_capability("aks_secret_update")),
         service=Depends(get_service),
         db: AsyncSession = Depends(get_db),
     ) -> dict:

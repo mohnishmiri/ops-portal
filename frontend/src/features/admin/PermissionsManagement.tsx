@@ -62,13 +62,14 @@ const getDesc = (name: string, fallback?: string | null): string =>
 
 // ── Shared UI primitives ──────────────────────────────────────────────────────
 
-const Badge: React.FC<{ children: React.ReactNode; variant?: "module" | "page" | "role" | "user" | "group" | "view" | "edit" | "system" }> = ({
+const Badge: React.FC<{ children: React.ReactNode; variant?: "module" | "page" | "operation" | "role" | "user" | "group" | "view" | "edit" | "system" }> = ({
   children,
   variant = "page",
 }) => {
   const colors: Record<string, string> = {
     module: "bg-indigo-100 text-indigo-700",
     page: "bg-sky-100 text-sky-700",
+    operation: "bg-rose-100 text-rose-700",
     role: "bg-purple-100 text-purple-700",
     user: "bg-teal-100 text-teal-700",
     group: "bg-orange-100 text-orange-700",
@@ -225,6 +226,7 @@ const ResourcesTab: React.FC = () => {
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400">
               <option value="module">Module</option>
               <option value="page">Page</option>
+              <option value="operation">Operation</option>
             </select>
           </div>
           <div>
@@ -323,6 +325,9 @@ const PermissionsTab: React.FC = () => {
 
   const byModule = resources.filter((r) => r.resource_type === "module");
   const byPage = resources.filter((r) => r.resource_type === "page");
+  // Operation capabilities (delete a pod, trigger a CronJob, ...) are ordinary
+  // resources, so they are granted through this same form.
+  const byOperation = resources.filter((r) => r.resource_type === "operation");
 
   return (
     <div className="space-y-6">
@@ -378,6 +383,11 @@ const PermissionsTab: React.FC = () => {
               {byPage.length > 0 && (
                 <optgroup label="Pages">
                   {byPage.map((r) => <option key={r.id} value={r.id}>{getLabel(r.resource_name)}</option>)}
+                </optgroup>
+              )}
+              {byOperation.length > 0 && (
+                <optgroup label="Operations">
+                  {byOperation.map((r) => <option key={r.id} value={r.id}>{getLabel(r.resource_name)}</option>)}
                 </optgroup>
               )}
             </select>
@@ -485,6 +495,7 @@ const MatrixTab: React.FC = () => {
   const roles = ["admin", "write", "read"];
   const modules = resources.filter((r) => r.resource_type === "module");
   const pages = resources.filter((r) => r.resource_type === "page");
+  const operations = resources.filter((r) => r.resource_type === "operation");
 
   const permSet = new Set(
     permissions
@@ -543,11 +554,11 @@ const MatrixTab: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {[...modules, ...pages].map((resource) => (
+            {[...modules, ...pages, ...operations].map((resource) => (
               <tr key={resource.id} className={`border-t ${resource.resource_type === "module" ? "bg-gray-50/60" : ""}`}>
                 <td className="py-2 px-3">
                   <div className="flex items-center gap-1">
-                    {resource.resource_type === "page" && (
+                    {resource.resource_type !== "module" && (
                       <span className="text-gray-300 mr-1">└</span>
                     )}
                     <div>

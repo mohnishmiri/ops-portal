@@ -37,6 +37,8 @@ export interface EffectivePermissions {
   modules: Record<string, EnvScopedPerms>; // resource_name → { env_scope: ["view","edit"] }
   pages: Record<string, EnvScopedPerms>;
   teams?: string[];
+  /** Upper-cased operation capabilities, e.g. ["AKS_POD_DELETE"]. */
+  capabilities?: string[];
 }
 
 interface PermissionsCtx {
@@ -49,6 +51,15 @@ interface PermissionsCtx {
   canEditPage: (pageName: string) => boolean;
   /** True when the user can perform write actions for a specific environment. */
   canEditPageForEnv: (pageName: string, environment: string) => boolean;
+  /**
+   * True when the backend granted the named operation capability
+   * (e.g. "AKS_POD_DELETE"). Case-insensitive.
+   *
+   * Use this to hide destructive actions the user cannot perform. Hiding is
+   * a UX affordance only — the backend independently authorizes every
+   * protected operation, so a hidden button is not a security control.
+   */
+  hasCapability: (capability: string) => boolean;
   /** Raw effective permissions from the backend (null while loading). */
   effectivePermissions: EffectivePermissions | null;
 }
@@ -61,7 +72,8 @@ const FULL_ACCESS_CTX: PermissionsCtx = {
   canViewPage: () => true,
   canEditPage: () => true,
   canEditPageForEnv: () => true,
-  effectivePermissions: { is_admin: true, modules: {}, pages: {}, teams: [] },
+  hasCapability: () => true,
+  effectivePermissions: { is_admin: true, modules: {}, pages: {}, teams: [], capabilities: [] },
 };
 
 const PermissionsContext = createContext<PermissionsCtx>(FULL_ACCESS_CTX);
@@ -99,6 +111,7 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
         canViewPage: () => false,
         canEditPage: () => false,
         canEditPageForEnv: () => false,
+        hasCapability: () => false,
         effectivePermissions: null,
       };
     }
@@ -120,9 +133,15 @@ export const PermissionsProvider: React.FC<{ children: ReactNode }> = ({ childre
       return scopedPerms[env]?.includes(perm) ?? false;
     };
 
+    const capabilities = new Set((data.capabilities ?? []).map((c) => c.toUpperCase()));
+
     return {
       isLoading: false,
       effectivePermissions: data,
+      hasCapability: (capability) => {
+        if (data.is_admin) return true;
+        return capabilities.has(capability.toUpperCase());
+      },
       canViewModule: (name) => {
         if (data.is_admin) return true;
         return hasPermAnyEnv(modules[name], "view") || hasPermAnyEnv(modules[name], "edit");

@@ -1475,6 +1475,7 @@ class CertificateSnapshot(Base):
     locations = Column(JSONB, default=list)
     location_count = Column(Integer, default=0)
     collection = Column(String(500), nullable=True)
+    has_private_key = Column(Boolean, nullable=True, default=False)
     synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (

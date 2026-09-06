@@ -177,11 +177,49 @@ class RenewRequest(BaseModel):
 
 
 class DownloadRequest(BaseModel):
-    file_format: str = Field(default="PEM", description="PEM, CER, CRT, DER, or P7B")
+    file_format: str = Field(default="PEM", description="PEM, CER, CRT, DER, P7B, or PFX")
     include_chain: bool = Field(default=True)
     chain_order: str = Field(default="EndEntityFirst", description="EndEntityFirst or RootFirst")
     include_subject_header: bool = Field(default=True)
     collection_id: int | None = Field(default=None, description="Collection context for the download")
+    pfx_password: str | None = Field(
+        default=None,
+        description="Password for PFX download (min 12 chars); only used when file_format='PFX'",
+    )
+
+    @model_validator(mode="after")
+    def _validate_pfx_password(self) -> DownloadRequest:
+        if self.file_format.upper() == "PFX" and (not self.pfx_password or len(self.pfx_password.strip()) < 12):
+            raise ValueError("pfx_password must contain at least 12 non-blank characters for PFX download")
+        return self
+
+
+class LoadToAkvRequest(BaseModel):
+    """Load a certificate into Azure Key Vault after renewal or standalone."""
+
+    subscription_id: str = Field(..., min_length=1, description="Azure Subscription ID")
+    resource_group: str = Field(..., min_length=1, description="Resource group containing the Key Vault")
+    vault_name: str = Field(..., min_length=1, description="Key Vault name")
+    certificate_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=127,
+        description="Certificate name in Key Vault (alphanumeric and hyphens)",
+    )
+    certificate_data: str = Field(..., description="Base64-encoded PFX or PEM certificate data")
+    certificate_password: str | None = Field(
+        default=None,
+        description="Password for PFX data; never logged",
+    )
+
+    @field_validator("certificate_name")
+    @classmethod
+    def _valid_cert_name(cls, v: str) -> str:
+        import re
+
+        if not re.match(r"^[a-zA-Z0-9-]+$", v):
+            raise ValueError("certificate_name must contain only alphanumeric characters and hyphens")
+        return v
 
 
 class RevokeRequest(BaseModel):
@@ -573,6 +611,7 @@ async def get_certificate_audit_history(
         "delete_certificate",
         "download_certificate",
         "cert_auto_renewal_run",
+        "load_certificate_to_akv",
     )
     since = datetime.utcnow() - timedelta(days=days)
 
@@ -1204,8 +1243,18 @@ async def download_certificate(
     service: CertificateService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """Download a certificate in the specified format."""
+    """Download a certificate in the specified format.
+
+    PFX/PKCS#12 (private-key-containing) downloads require at least WRITE role.
+    """
     from fastapi.responses import Response
+
+    # PFX downloads contain private key material — require WRITE role.
+    if payload.file_format.upper() == "PFX" and not (user.is_admin or user.can_write):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Downloading PFX/PKCS#12 format requires at least WRITE role.",
+        )
 
     try:
         content = await service.download_certificate(
@@ -1214,6 +1263,7 @@ async def download_certificate(
             include_chain=payload.include_chain,
             chain_order=payload.chain_order,
             collection_id=payload.collection_id,
+            pfx_password=payload.pfx_password if payload.file_format.upper() == "PFX" else None,
         )
     except CertificateServiceError as exc:
         _raise_http(exc)
@@ -1227,6 +1277,7 @@ async def download_certificate(
         summary=f"Downloaded certificate {certificate_id} ({payload.file_format})",
         outcome="success",
         details={"file_format": payload.file_format, "include_chain": payload.include_chain},
+        # Never log pfx_password
     )
 
     ext = payload.file_format.lower()
@@ -1236,6 +1287,7 @@ async def download_certificate(
         "crt": "application/x-x509-ca-cert",
         "der": "application/x-x509-ca-cert",
         "p7b": "application/x-pkcs7-certificates",
+        "pfx": "application/x-pkcs12",
     }.get(ext, "application/octet-stream")
 
     return Response(
@@ -1243,3 +1295,90 @@ async def download_certificate(
         media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="certificate.{ext}"'},
     )
+
+
+@router.post("/{certificate_id}/load-to-akv")
+async def load_certificate_to_akv(
+    certificate_id: int,
+    payload: LoadToAkvRequest,
+    request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Import a certificate into Azure Key Vault.
+
+    The caller must supply the base64-encoded certificate data (PFX or PEM)
+    and target Key Vault coordinates. Private key material and passwords are
+    never written to logs or the audit record.
+    """
+    import base64
+
+    from app.services.keyvault_service import KeyVaultService
+
+    # Decode the certificate data (may be PFX or PEM).
+    try:
+        cert_bytes = base64.b64decode(payload.certificate_data)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="certificate_data must be valid base64-encoded certificate content.",
+        )
+
+    kv_service = KeyVaultService()
+    vault_url = f"https://{payload.vault_name}.vault.azure.net"
+
+    try:
+        result = await kv_service.import_certificate(
+            vault_url=vault_url,
+            name=payload.certificate_name,
+            certificate_bytes=cert_bytes,
+            password=payload.certificate_password,
+        )
+    except Exception as exc:
+        err_msg = str(exc)[:500]
+        # Audit the failure (no secrets in details)
+        await _write_audit(
+            db,
+            request=request,
+            user=user,
+            action="load_certificate_to_akv",
+            resource_id=str(certificate_id),
+            summary=f"Failed to load certificate {certificate_id} to AKV {payload.vault_name}/{payload.certificate_name}",
+            outcome="failed",
+            details={
+                "vault_name": payload.vault_name,
+                "certificate_name": payload.certificate_name,
+                "subscription_id": payload.subscription_id,
+                "resource_group": payload.resource_group,
+                "error": err_msg,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to load certificate into Azure Key Vault: {err_msg}",
+        )
+
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="load_certificate_to_akv",
+        resource_id=str(certificate_id),
+        summary=f"Loaded certificate {certificate_id} to AKV {payload.vault_name}/{payload.certificate_name}",
+        outcome="success",
+        details={
+            "vault_name": payload.vault_name,
+            "certificate_name": payload.certificate_name,
+            "subscription_id": payload.subscription_id,
+            "resource_group": payload.resource_group,
+        },
+        # Never log certificate_data or certificate_password
+    )
+
+    return {
+        "status": "success",
+        "vault_name": payload.vault_name,
+        "certificate_name": payload.certificate_name,
+        "akv_id": result.get("id", ""),
+        "enabled": result.get("attributes", {}).get("enabled", True),
+    }

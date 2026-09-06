@@ -352,8 +352,9 @@ class KeyfactorClient:
         include_chain: bool = True,
         chain_order: str = "EndEntityFirst",
         collection_id: int | None = None,
+        pfx_password: str | None = None,
     ) -> bytes:
-        """Download a certificate in the specified format (PEM, CER, CRT, DER, P7B)."""
+        """Download a certificate in the specified format (PEM, CER, CRT, DER, P7B, PFX)."""
         payload: dict[str, Any] = {
             "CertID": certificate_id,
             "IncludeChain": include_chain,
@@ -361,6 +362,8 @@ class KeyfactorClient:
         }
         if collection_id is not None:
             payload["CollectionId"] = collection_id
+        if file_format.upper() == "PFX" and pfx_password:
+            payload["Password"] = pfx_password
         url = f"{self._base_url()}/Certificates/Download"
         # Collection-scoped permissions are evaluated off the collectionId query param.
         params = {"collectionId": collection_id} if collection_id is not None else None

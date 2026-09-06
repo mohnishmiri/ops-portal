@@ -11,6 +11,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
+import { usePermissions } from "../contexts/PermissionsContext";
 import Toast, { type ToastState } from "../components/Toast";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
 import { AutoRefreshIndicator, gridStyles, SortState, nextSortState, SortableHeader } from "../components/gridStyles";
@@ -32,6 +33,7 @@ import {
   useCreateCronJob,
   useUpdateCronJob,
   useDeleteCronJob,
+  useDeletePod,
   useTriggerCronJob,
   useCronJobDetail,
   useDeploymentDetail,
@@ -53,6 +55,7 @@ import {
   Deployment,
   DeploymentDetail,
   PodMetrics,
+  JobPod,
   CronJob,
   CronJobDetail,
   ConfigMapDetail,
@@ -69,6 +72,7 @@ import {
   HelmTab,
   AuditHistoryTab,
 } from "../features/aks/AKSExtendedTabs";
+import { JobsTab, JobFocus } from "../features/aks/JobsTab";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import {
   BarChart,
@@ -108,6 +112,11 @@ const Icons = {
   cronjob: (cls = "") => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
       <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+    </svg>
+  ),
+  job: (cls = "") => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
+      <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
     </svg>
   ),
   scale: (cls = "") => (
@@ -165,12 +174,37 @@ const Icons = {
   ),
 };
 
+/**
+ * Adapt a Job's pod into the PodMetrics shape used by the page's existing log
+ * viewer and delete-pod flow, so the Jobs tab reuses those dialogs instead of
+ * duplicating them. Only identity and display fields are populated — the
+ * resource-usage fields are not known here and are not read by either dialog.
+ */
+function jobPodToPodMetrics(pod: JobPod): PodMetrics {
+  return {
+    namespace: pod.namespace,
+    pod_name: pod.pod_name,
+    containers: pod.containers.map((name) => ({
+      name,
+      cpu_millicores: 0,
+      memory_mb: 0,
+    })),
+    total_cpu_millicores: 0,
+    total_memory_mb: 0,
+    phase: pod.phase ?? undefined,
+    node: pod.node ?? undefined,
+    pod_ip: pod.pod_ip ?? undefined,
+    started_at: pod.started_at ?? undefined,
+    total_restarts: pod.restarts,
+  };
+}
+
 // ── Tab Types ─────────────────────────────────────────────────────────
 
 type TabKey =
   | "clusters" | "nodepools" | "deployments" | "pods"
   | "services" | "secrets" | "configmaps" | "ingress" | "helm"
-  | "cronjobs" | "history" | "audit";
+  | "cronjobs" | "jobs" | "history" | "audit";
 
 // ── Color Constants ───────────────────────────────────────────────────
 
@@ -268,6 +302,9 @@ const AKSOperationsPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { formatDate } = usePortalTimezone();
   const { canWrite } = useAuth();
+  // Capability checks hide actions the backend would reject anyway. Hiding is
+  // UX only — every one of these operations is authorized server-side.
+  const { hasCapability } = usePermissions();
   const [activeTab, setActiveTab] = useState<TabKey>("clusters");
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
@@ -322,6 +359,16 @@ const AKSOperationsPage: React.FC = () => {
   const [podLogDialog, setPodLogDialog] = useState<PodMetrics | null>(null);
   const [podExecDialog, setPodExecDialog] = useState<PodMetrics | null>(null);
   const [podMetricsDialog, setPodMetricsDialog] = useState<PodMetrics | null>(null);
+  // Set when the user follows "View Job" after triggering a CronJob — the Jobs
+  // tab consumes it once to pre-select and open that Job.
+  const [jobFocus, setJobFocus] = useState<JobFocus>(null);
+  // Result of a CronJob trigger, surfaced as a banner offering "View Job".
+  const [triggeredJob, setTriggeredJob] = useState<{
+    cronjobName: string;
+    jobName: string;
+    namespace: string;
+    deduplicated: boolean;
+  } | null>(null);
   const [podLogTailLines, setPodLogTailLines] = useState(500);
   const [podLogSinceSeconds, setPodLogSinceSeconds] = useState<number | undefined>(undefined);
   const [podLogContainer, setPodLogContainer] = useState("");
@@ -361,7 +408,7 @@ const AKSOperationsPage: React.FC = () => {
 
   // Load only the data needed for the active tab — avoids parallel K8s/Azure storms.
   const clusterScopedTabs = new Set<TabKey>([
-    "nodepools", "deployments", "pods", "cronjobs",
+    "nodepools", "deployments", "pods", "cronjobs", "jobs",
     "services", "secrets", "configmaps", "ingress", "helm",
   ]);
   const needsNamespaces = !!selectedCluster && clusterScopedTabs.has(activeTab);
@@ -468,6 +515,7 @@ const AKSOperationsPage: React.FC = () => {
   const updateCronJobMutation = useUpdateCronJob();
   const deleteCronJobMutation = useDeleteCronJob();
   const triggerCronJobMutation = useTriggerCronJob();
+  const deletePodMutation = useDeletePod();
   const scaleNodePoolMutation = useScaleNodePool();
   const updateAutoscalingMutation = useUpdateAutoscaling();
   const startClusterMutation = useStartCluster();
@@ -668,9 +716,62 @@ const AKSOperationsPage: React.FC = () => {
             namespace: cronjob.namespace,
             cronjobName: cronjob.name,
           });
-          showToast(`Triggered ${cronjob.name} → Job: ${result.job_name}`);
+          // Offer a direct handoff into the Jobs tab so the user can watch the
+          // run they just started instead of hunting for it.
+          setTriggeredJob({
+            cronjobName: cronjob.name,
+            jobName: result.job_name,
+            namespace: result.namespace || cronjob.namespace,
+            deduplicated: !!result.deduplicated,
+          });
         } catch (e: any) {
           showToast(e?.response?.data?.detail || "Trigger failed", "error");
+        }
+      },
+    });
+  };
+
+  // Stable identity so the Jobs tab's focus effect runs once per handoff
+  // rather than on every parent re-render.
+  const clearJobFocus = useCallback(() => setJobFocus(null), []);
+
+  // Jump to the Jobs tab with the freshly created Job pre-selected.
+  const handleViewTriggeredJob = () => {
+    if (!triggeredJob) return;
+    setSelectedNamespace(triggeredJob.namespace);
+    setJobFocus({ namespace: triggeredJob.namespace, name: triggeredJob.jobName });
+    setActiveTab("jobs");
+    setTriggeredJob(null);
+  };
+
+  // Handle Delete Pod
+  const handleDeletePod = (pod: PodMetrics) => {
+    if (!selectedCluster) return;
+    const clusterName = selectedCluster.name;
+    setConfirmDialog({
+      title: "Delete Pod",
+      message:
+        `Are you sure you want to delete pod "${pod.pod_name}" from namespace ` +
+        `"${pod.namespace}" in cluster "${clusterName}"?\n\n` +
+        `Current status: ${pod.phase || "Unknown"}\n\n` +
+        `Deleting this pod may cause Kubernetes to recreate it, depending on the ` +
+        `owning workload (Deployment, StatefulSet, or Job).`,
+      confirmLabel: "Delete Pod",
+      variant: "danger",
+      onConfirm: async () => {
+        try {
+          const result = await deletePodMutation.mutateAsync({
+            clusterId: selectedCluster.id,
+            namespace: pod.namespace,
+            podName: pod.pod_name,
+          });
+          showToast(
+            result.will_be_recreated
+              ? `Deleted ${pod.pod_name} — ${result.owner ?? "its controller"} will recreate it`
+              : `Deleted ${pod.pod_name}`
+          );
+        } catch (e: any) {
+          showToast(e?.response?.data?.detail || "Failed to delete pod", "error");
         }
       },
     });
@@ -1146,6 +1247,7 @@ const AKSOperationsPage: React.FC = () => {
     { key: "ingress", label: "Ingress", icon: Icons.cluster() },
     { key: "helm", label: "Helm", icon: Icons.scale() },
     { key: "cronjobs", label: "CronJobs", icon: Icons.cronjob() },
+    { key: "jobs", label: "Jobs", icon: Icons.job() },
     { key: "history", label: "Scale History", icon: Icons.history() },
     { key: "audit", label: "Audit History", icon: Icons.history() },
   ];
@@ -2044,6 +2146,16 @@ const AKSOperationsPage: React.FC = () => {
                         <button onClick={() => setPodMetricsDialog(pod)} title="Pod Metrics" className="p-1 rounded hover:bg-purple-50 text-purple-600">
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
                         </button>
+                        {canWrite && hasCapability("AKS_POD_DELETE") && (
+                          <button
+                            onClick={() => handleDeletePod(pod)}
+                            disabled={deletePodMutation.isPending}
+                            title="Delete Pod"
+                            className="p-1 rounded hover:bg-red-50 text-red-600 disabled:opacity-50"
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -2921,6 +3033,26 @@ const AKSOperationsPage: React.FC = () => {
         {activeTab === "deployments" && renderDeploymentsTab()}
         {activeTab === "pods" && renderPodMetricsTab()}
         {activeTab === "cronjobs" && renderCronJobsTab()}
+        {activeTab === "jobs" && (
+          selectedCluster ? (
+            <JobsTab
+              cluster={selectedCluster}
+              namespace={selectedNamespace}
+              namespaces={namespaceOptions}
+              onNamespaceChange={setSelectedNamespace}
+              showToast={showToast}
+              formatDate={formatDate}
+              canDeleteJob={canWrite && hasCapability("AKS_JOB_DELETE")}
+              canDeletePod={canWrite && hasCapability("AKS_POD_DELETE")}
+              focusJob={jobFocus}
+              onFocusConsumed={clearJobFocus}
+              onViewPodLogs={(pod) => setPodLogDialog(jobPodToPodMetrics(pod))}
+              onDeletePod={(pod) => handleDeletePod(jobPodToPodMetrics(pod))}
+            />
+          ) : (
+            <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
+          )
+        )}
         {activeTab === "history" && renderHistoryTab()}
         {activeTab === "audit" && (
           <AuditHistoryTab clusterId={selectedCluster?.id} namespace={selectedNamespace || undefined} />
@@ -2957,6 +3089,45 @@ const AKSOperationsPage: React.FC = () => {
       {viewDeploymentDialog && <DeploymentDetailDialog {...viewDeploymentDialog} onClose={() => setViewDeploymentDialog(null)} />}
 
       {/* Generic Confirmation Modal */}
+      {/* CronJob → Job handoff. A toast auto-dismisses, so the "View Job"
+          affordance lives in a banner the user can act on at their own pace. */}
+      {triggeredJob && (
+        <div className="fixed bottom-6 right-6 z-[90] max-w-md rounded-xl border border-green-200 bg-white shadow-lg">
+          <div className="flex items-start gap-3 p-4">
+            <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-green-100">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-600"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-gray-900">
+                {triggeredJob.deduplicated ? "Job already running" : "CronJob triggered"}
+              </p>
+              <p className="mt-0.5 text-sm text-gray-600">
+                {triggeredJob.deduplicated
+                  ? `${triggeredJob.cronjobName} was triggered moments ago — reusing the existing Job rather than starting a second run.`
+                  : `Created Job from ${triggeredJob.cronjobName}.`}
+              </p>
+              <p className="mt-1 font-mono text-xs text-gray-500 break-all">{triggeredJob.jobName}</p>
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleViewTriggeredJob}
+                  className="rounded-lg bg-att-400 px-3 py-1.5 text-sm font-semibold text-white hover:bg-att-500"
+                >
+                  View Job
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTriggeredJob(null)}
+                  className="rounded-lg border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {confirmDialog && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setConfirmDialog(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md transform transition-all animate-in fade-in zoom-in-95" onClick={(e) => e.stopPropagation()}>
@@ -2976,7 +3147,9 @@ const AKSOperationsPage: React.FC = () => {
               </div>
               <div className="flex-1">
                 <h3 className="text-lg font-semibold text-gray-900">{confirmDialog.title}</h3>
-                <p className="text-sm text-gray-500 mt-1 leading-relaxed">{confirmDialog.message}</p>
+                {/* whitespace-pre-line so callers can use blank lines to
+                    separate the question from status and warning details. */}
+                <p className="text-sm text-gray-500 mt-1 leading-relaxed whitespace-pre-line">{confirmDialog.message}</p>
               </div>
             </div>
             {/* Actions */}

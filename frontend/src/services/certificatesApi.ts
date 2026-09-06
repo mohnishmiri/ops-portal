@@ -72,6 +72,7 @@ export interface Certificate {
   locations: { store_path: string; agent_pool: string; alias: string }[];
   location_count: number;
   collection: string;
+  has_private_key?: boolean | null;
 }
 
 export interface CertificateListResponse {
@@ -747,10 +748,10 @@ export const certificateErrorMessage = (error: unknown, fallback = "Operation fa
 
 // ── Download ───────────────────────────────────────────────────────────────
 
-export type DownloadFormat = "PEM" | "CER" | "CRT" | "DER" | "P7B";
+export type DownloadFormat = "PEM" | "CER" | "CRT" | "DER" | "P7B" | "PFX";
 export type ChainOrder = "EndEntityFirst" | "RootFirst";
 
-export const DOWNLOAD_FORMATS: DownloadFormat[] = ["PEM", "CER", "CRT", "DER", "P7B"];
+export const DOWNLOAD_FORMATS: DownloadFormat[] = ["PEM", "CER", "CRT", "DER", "P7B", "PFX"];
 
 export interface DownloadRequest {
   file_format: DownloadFormat;
@@ -758,6 +759,7 @@ export interface DownloadRequest {
   chain_order: ChainOrder;
   include_subject_header: boolean;
   collection_id?: number;
+  pfx_password?: string;
 }
 
 export const downloadCertificate = async (id: number, data: DownloadRequest): Promise<Blob> => {
@@ -833,3 +835,44 @@ export const useAuthorities = () =>
     queryFn: fetchAuthorities,
     staleTime: 5 * 60_000,
   });
+
+// ── Load Certificate to Azure Key Vault ───────────────────────────────
+
+export interface AkvUploadRequest {
+  subscription_id: string;
+  resource_group: string;
+  vault_name: string;
+  certificate_name: string;
+  certificate_data: string;   // base64-encoded PFX or PEM
+  certificate_password?: string;
+}
+
+export interface AkvUploadResult {
+  status: string;
+  vault_name: string;
+  certificate_name: string;
+  akv_id: string;
+  enabled: boolean;
+}
+
+export const loadCertificateToAkv = async (
+  certificateId: number,
+  data: AkvUploadRequest
+): Promise<AkvUploadResult> => {
+  const response = await apiClient.post<AkvUploadResult>(
+    `${API_BASE}/${certificateId}/load-to-akv`,
+    data
+  );
+  return response.data;
+};
+
+export const useLoadCertificateToAkv = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: number; data: AkvUploadRequest }) =>
+      loadCertificateToAkv(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["certificates", "audit-history"] });
+    },
+  });
+};

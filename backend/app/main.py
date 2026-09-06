@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app
 
+from app.api.v1.endpoints.session import router as session_router
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.database import close_db, init_db
@@ -217,6 +218,22 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown events."""
     setup_logging()
     logger.info("Starting OpsPortal", version=settings.APP_VERSION)
+
+    # Fail closed: the development auth bypass grants a synthetic admin to
+    # unauthenticated requests.  If it is ever enabled outside development
+    # (mis-provisioned Key Vault secret, stray env var) the portal must refuse
+    # to serve rather than silently run without authentication.
+    if settings.DEV_AUTH_BYPASS and settings.ENVIRONMENT != "development":
+        raise RuntimeError(
+            "DEV_AUTH_BYPASS is enabled but ENVIRONMENT is "
+            f"'{settings.ENVIRONMENT}'. Refusing to start: this combination "
+            "would allow unauthenticated administrative access."
+        )
+    if settings.DEV_AUTH_BYPASS:
+        logger.warning(
+            "dev_auth_bypass_enabled",
+            detail="Unauthenticated requests receive a synthetic admin. Development only.",
+        )
 
     # Initialize database
     await init_db()
@@ -486,6 +503,12 @@ def create_application() -> FastAPI:
     metrics_app = make_asgi_app()
     application.mount("/metrics", metrics_app)
 
+    # Session bootstrap — mounted outside api_router so it is NOT behind the
+    # portal access gate.  An authenticated-but-unauthorized user must be able
+    # to learn that fact in order to render Access Denied; every other
+    # /api/v1 route returns 403 for them.
+    application.include_router(session_router, prefix="/api/v1/auth", tags=["auth"])
+
     # Core API router
     application.include_router(api_router, prefix="/api/v1")
 
@@ -501,9 +524,12 @@ def create_application() -> FastAPI:
             error_type=type(exc).__name__,
             traceback="".join(tb),
         )
+        # Detailed diagnostics go to the structured log above; the client
+        # receives a generic message so exception types, messages, and stack
+        # traces are never disclosed to callers.
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Internal Server Error: {type(exc).__name__}: {str(exc)}"},
+            content={"detail": "Internal server error."},
         )
 
     # Health check

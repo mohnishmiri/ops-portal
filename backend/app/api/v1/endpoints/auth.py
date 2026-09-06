@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
+from app.core.authz import granted_capabilities
 from app.core.database import get_db
 from app.core.subscription_scope import resolve_effective_subscription_ids
 from app.models.auth import UserContext
@@ -74,9 +75,17 @@ async def get_my_permissions(
         modules: dict[str, dict[str, list[str]]] = {}
         pages: dict[str, dict[str, list[str]]] = {}
         for r in resources:
+            if r.resource_type == "operation":
+                continue  # capabilities are reported separately
             target = modules if r.resource_type == "module" else pages
             target[r.resource_name] = {"all": ["edit", "view"]}
-        return {"is_admin": True, "modules": modules, "pages": pages, "teams": []}
+        return {
+            "is_admin": True,
+            "modules": modules,
+            "pages": pages,
+            "teams": [],
+            "capabilities": [c.upper() for c in await granted_capabilities(db, user)],
+        }
 
     # ── Collect direct permission records ─────────────────────────────────
     role_subject_ids = [role.value for role in user.roles]
@@ -139,6 +148,8 @@ async def get_my_permissions(
         resource = id_to_resource.get(res_id)
         if not resource:
             continue
+        if resource.resource_type == "operation":
+            continue  # capabilities are reported separately
         target = modules_out if resource.resource_type == "module" else pages_out
         scope_map: dict[str, list[str]] = {}
         for env_scope, perms in env_scopes.items():
@@ -150,6 +161,7 @@ async def get_my_permissions(
         "modules": modules_out,
         "pages": pages_out,
         "teams": team_names,
+        "capabilities": [c.upper() for c in await granted_capabilities(db, user)],
     }
 
 

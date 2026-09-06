@@ -377,6 +377,7 @@ class CertificateSyncService:
             locations=locations if isinstance(locations, list) else [],
             location_count=int_or_none(cert.get("location_count")) or 0,
             collection=clip(cert.get("collection") or collection_name, 500),
+            has_private_key=cert.get("has_private_key", False),
             synced_at=synced_at,
         )
 
@@ -560,6 +561,7 @@ class CertificateSyncService:
             "locations": r.locations or [],
             "location_count": r.location_count or 0,
             "collection": r.collection or "",
+            "has_private_key": bool(r.has_private_key) if r.has_private_key is not None else None,
         }
 
     # ── Status / staleness ─────────────────────────────────────────────

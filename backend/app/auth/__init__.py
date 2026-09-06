@@ -168,33 +168,46 @@ def _map_roles(raw_roles: list[str]) -> list[UserRole]:
         if role and role not in mapped:
             mapped.append(role)
 
-    # In development mode, fall back to READ so local testing works
-    # without role assignment.  In staging/production, an empty list
-    # means the user has no recognised app role — access is denied.
-    if not mapped and settings.ENVIRONMENT == "development":
+    # Only when the dev bypass is explicitly opted into do we grant a
+    # fallback READ role, so local testing works without app-role
+    # assignment.  Anywhere else an empty list means "no recognised app
+    # role" and the caller must treat it as no portal access.
+    if not mapped and _dev_auth_enabled():
         mapped.append(UserRole.READ)
 
     return mapped
 
 
-async def get_current_user(
+def _is_unauthenticated_dashboard_path(path: str) -> bool:
+    """True for the signed browser-only K8s dashboard launch/proxy URLs.
+
+    Those routes carry their own HMAC-signed launch token or signed session
+    cookie and validate it themselves, so they must be reachable without a
+    Bearer header.  Everything else requires a token.
+    """
+    return path.startswith("/api/v1/aks/dashboard/") and ("/launch/" in path or "/proxy" in path)
+
+
+async def get_authenticated_identity(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-) -> UserContext:
+) -> UserContext | None:
     """
-    FastAPI dependency: Validate token and return authenticated user context.
+    FastAPI dependency: *authentication only* — proves who the caller is.
 
-    In development mode, if no Bearer token is supplied, a synthetic admin
-    user is returned so the API can be tested without Azure AD.
+    Returns a UserContext whose ``roles`` may legitimately be empty: a valid
+    corporate identity is not the same thing as portal authorization.  Callers
+    that need an authorized user must use :func:`get_current_user` instead.
 
-    Usage:
-        @router.get("/endpoint")
-        async def endpoint(user: UserContext = Depends(get_current_user)):
-            ...
+    This exists so the session endpoint can answer "you are authenticated but
+    not authorized" instead of failing with a bare 403 the UI cannot interpret.
+
+    Development bypass rules (deliberately narrow):
+      • no Bearer token at all  → synthetic local developer
+      • token present but invalid/expired → 401, never a privilege upgrade
     """
     if credentials is None:
-        path = request.url.path
-        if path.startswith("/api/v1/aks/dashboard/") and ("/launch/" in path or "/proxy" in path):
+        if _is_unauthenticated_dashboard_path(request.url.path):
             return None
         if _dev_auth_enabled():
             user = _dev_user()
@@ -206,62 +219,58 @@ async def get_current_user(
             detail="Not authenticated",
         )
 
-    try:
-        claims = await _decode_token(credentials.credentials)
+    # A token was supplied — it must validate on its own merits.  There is no
+    # dev fallback here on purpose: silently converting a rejected token into a
+    # synthetic ADMIN is a privilege-escalation path, not a convenience.
+    claims = await _decode_token(credentials.credentials)
 
-        mapped_roles = _map_roles(claims.roles)
+    user = UserContext(
+        user_id=claims.sub,
+        object_id=claims.oid,
+        display_name=claims.name,
+        email=claims.email or claims.preferred_username,
+        roles=_map_roles(claims.roles),
+        raw_roles=claims.roles,
+        tenant_id=claims.tenant_id,
+    )
 
-        # Reject authenticated users that have no recognised app role
-        if not mapped_roles and settings.ENVIRONMENT != "development":
-            logger.warning(
-                "access_denied_no_roles",
-                user_id=claims.sub,
-                raw_roles=claims.roles,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No app role assigned. Contact your administrator to request access.",
-            )
-
-        user = UserContext(
-            user_id=claims.sub,
-            object_id=claims.oid,
-            display_name=claims.name,
-            email=claims.email or claims.preferred_username,
-            roles=mapped_roles,
-            raw_roles=claims.roles,
-            tenant_id=claims.tenant_id,
-        )
-    except HTTPException:
-        if _dev_auth_enabled():
-            logger.warning(
-                "dev_mode_token_validation_failed_fallback",
-                detail="Token validation failed, extracting claims without signature verification",
-            )
-            # Try to extract real user claims from the token without
-            # signature verification so that created_by / updated_by
-            # fields reflect the actual logged-in user even when JWKS
-            # validation fails behind a corporate proxy.
-            try:
-                unverified = jwt.get_unverified_claims(credentials.credentials)
-                user = UserContext(
-                    user_id=unverified.get("sub", "dev-user-00000000"),
-                    object_id=unverified.get("oid", "00000000-0000-0000-0000-000000000000"),
-                    display_name=unverified.get("name", "Local Developer"),
-                    email=unverified.get("email") or unverified.get("preferred_username") or "dev@localhost",
-                    roles=[UserRole.ADMIN],
-                    raw_roles=unverified.get("roles", ["admin"]),
-                    tenant_id=unverified.get("tid", "development"),
-                )
-            except Exception:
-                user = _dev_user()
-        else:
-            raise
-
-    # Attach to request state for audit middleware
+    # Attach to request state for audit logging
     request.state.user = user
-
     return user
+
+
+async def get_current_user(
+    request: Request,
+    identity: UserContext | None = Depends(get_authenticated_identity),
+) -> UserContext:
+    """
+    FastAPI dependency: authenticated **and** portal-authorized user context.
+
+    Authentication is delegated to :func:`get_authenticated_identity`; this
+    dependency adds the portal authorization gate — an identity holding no
+    recognised app role is rejected with 403.
+
+    Usage:
+        @router.get("/endpoint")
+        async def endpoint(user: UserContext = Depends(get_current_user)):
+            ...
+    """
+    if identity is None:
+        # Signed dashboard launch/proxy route — it performs its own validation.
+        return None
+
+    if not identity.roles:
+        logger.warning(
+            "access_denied_no_roles",
+            user_id=identity.user_id,
+            raw_roles=identity.raw_roles,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No app role assigned. Contact your administrator to request access.",
+        )
+
+    return identity
 
 
 def require_role(*roles: UserRole):  # noqa: ANN201
@@ -300,7 +309,12 @@ def require_role(*roles: UserRole):  # noqa: ANN201
 
 
 async def get_current_user_from_token(token: str | None) -> UserContext:
-    """Validate Bearer token for WebSocket connections (query param or first message)."""
+    """Validate Bearer token for WebSocket connections (query param or first message).
+
+    Mirrors the HTTP path: a missing token may fall back to the synthetic
+    developer only when the dev bypass is enabled, but a token that is
+    present and invalid is always rejected — never upgraded.
+    """
     if not token:
         if _dev_auth_enabled():
             return _dev_user()
@@ -309,36 +323,20 @@ async def get_current_user_from_token(token: str | None) -> UserContext:
             detail="Not authenticated",
         )
 
-    try:
-        claims = await _decode_token(token)
-        mapped_roles = _map_roles(claims.roles)
-        if not mapped_roles and settings.ENVIRONMENT != "development":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No app role assigned.",
-            )
-        return UserContext(
-            user_id=claims.sub,
-            object_id=claims.oid,
-            display_name=claims.name,
-            email=claims.email or claims.preferred_username,
-            roles=mapped_roles or ([UserRole.READ] if settings.ENVIRONMENT == "development" else []),
-            raw_roles=claims.roles,
-            tenant_id=claims.tenant_id,
+    claims = await _decode_token(token)
+    mapped_roles = _map_roles(claims.roles)
+    if not mapped_roles:
+        logger.warning("ws_access_denied_no_roles", user_id=claims.sub, raw_roles=claims.roles)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No app role assigned.",
         )
-    except HTTPException:
-        if _dev_auth_enabled():
-            try:
-                unverified = jwt.get_unverified_claims(token)
-                return UserContext(
-                    user_id=unverified.get("sub", "dev-user-00000000"),
-                    object_id=unverified.get("oid", "00000000-0000-0000-0000-000000000000"),
-                    display_name=unverified.get("name", "Local Developer"),
-                    email=unverified.get("email") or unverified.get("preferred_username") or "dev@localhost",
-                    roles=[UserRole.ADMIN],
-                    raw_roles=unverified.get("roles", ["admin"]),
-                    tenant_id=unverified.get("tid", "development"),
-                )
-            except Exception:
-                return _dev_user()
-        raise
+    return UserContext(
+        user_id=claims.sub,
+        object_id=claims.oid,
+        display_name=claims.name,
+        email=claims.email or claims.preferred_username,
+        roles=mapped_roles,
+        raw_roles=claims.roles,
+        tenant_id=claims.tenant_id,
+    )
