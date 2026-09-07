@@ -40,6 +40,7 @@ class FakeService:
         self.last_renew_kwargs: dict | None = None
         self.last_download_kwargs: dict | None = None
         self.download_calls: list[dict] = []
+        self.renew_result: dict | None = None
 
     def _maybe_raise(self):
         if self.error:
@@ -49,7 +50,7 @@ class FakeService:
         self._maybe_raise()
         self.last_query = query
         self.last_collection_id = collection_id
-        return {"items": [CERT], "total": 1, "page": page, "page_size": page_size}
+        return {"items": [{**CERT}], "total": 1, "page": page, "page_size": page_size}
 
     async def get_certificate(self, certificate_id):
         self._maybe_raise()
@@ -66,7 +67,7 @@ class FakeService:
     async def renew_certificate(self, **kwargs):
         self._maybe_raise()
         self.last_renew_kwargs = kwargs
-        return {"thumbprint": "NEW"}
+        return self.renew_result if self.renew_result is not None else {"thumbprint": "NEW"}
 
     async def download_certificate(self, certificate_id, **kwargs):
         self._maybe_raise()
@@ -602,3 +603,279 @@ async def test_reader_cannot_delete(app, reader_client, _enforce_rbac):
 async def test_reader_cannot_run_auto_renewal(app, reader_client, _enforce_rbac):
     resp = await reader_client.post("/api/v1/certificates/auto-renewal/configs/1/run")
     assert resp.status_code == 403
+
+
+# ── Private-key escrow ─────────────────────────────────────────────────
+
+
+class _FakeEscrowVault:
+    """In-memory stand-in for the escrow Key Vault."""
+
+    def __init__(self) -> None:
+        self.secrets: dict[str, str] = {}
+
+    async def create_or_update_secret(self, vault_uri, name, value, **kwargs):
+        self.secrets[name] = value
+        return {"name": name, "id": f"{vault_uri}secrets/{name}/1"}
+
+    async def get_secret_value(self, vault_uri, name):
+        if name not in self.secrets:
+            raise RuntimeError("SecretNotFound")
+        return {"name": name, "value": self.secrets[name]}
+
+    async def delete_secret(self, vault_uri, name):
+        self.secrets.pop(name, None)
+        return {"deleted": True}
+
+
+@pytest.fixture
+def escrow_vault(monkeypatch):
+    """Enable escrow and back it with an in-memory vault."""
+    fake = _FakeEscrowVault()
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_ENABLED", True)
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_VAULT", "escrow-kv")
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_VAULT_URI", "")
+    monkeypatch.setattr("app.services.certificate_escrow_service.KeyVaultService", lambda: fake)
+    return fake
+
+
+async def _seed_escrow(db_session, *, certificate_id: int, thumbprint: str, pfx: bytes, password: str):
+    import base64
+
+    from app.services.certificate_escrow_service import CertificateEscrowService
+
+    pointer = await CertificateEscrowService(db_session).escrow(
+        certificate_id=certificate_id,
+        thumbprint=thumbprint,
+        common_name="a.example.com",
+        pfx_base64=base64.b64encode(pfx).decode(),
+        password=password,
+        source="renew",
+        actor="admin@example.com",
+    )
+    assert pointer is not None
+    return pointer
+
+
+async def test_load_to_akv_prefers_the_escrowed_key(app, admin_client, db_session, fake_keyvault, escrow_vault):
+    # The whole point of escrow: no live Keyfactor export is needed, so the same
+    # certificate can still be loaded into a second environment's vault later.
+    svc = FakeService()
+    _use_service(app, svc)
+    await _seed_escrow(db_session, certificate_id=1, thumbprint="ABC", pfx=b"ESCROWED-PFX", password="escrow-pw")
+
+    resp = await admin_client.post("/api/v1/certificates/1/load-to-akv", json=_AKV_TARGET)
+
+    assert resp.status_code == 200
+    assert resp.json()["key_source"] == "escrow"
+    assert svc.last_download_kwargs is None  # Keyfactor never contacted
+    assert fake_keyvault.imports[0]["cert_bytes"] == b"ESCROWED-PFX"
+    assert fake_keyvault.imports[0]["password"] == "escrow-pw"
+
+
+async def test_load_to_akv_escrowed_key_serves_repeated_loads(
+    app, admin_client, db_session, fake_keyvault, escrow_vault
+):
+    # A multi-env certificate is loaded one vault at a time; every load must work.
+    _use_service(app, FakeService())
+    await _seed_escrow(db_session, certificate_id=1, thumbprint="ABC", pfx=b"ESCROWED-PFX", password="escrow-pw")
+
+    for vault_name in ("attcc-eastus2-perf-kv", "attcc-eastus2-uat-kv"):
+        resp = await admin_client.post(
+            "/api/v1/certificates/1/load-to-akv",
+            json={**_AKV_TARGET, "vault_name": vault_name},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["key_source"] == "escrow"
+
+    assert len(fake_keyvault.imports) == 2
+    assert {i["cert_bytes"] for i in fake_keyvault.imports} == {b"ESCROWED-PFX"}
+
+
+async def test_load_to_akv_falls_back_to_keyfactor_without_escrow(app, admin_client, fake_keyvault, escrow_vault):
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.post("/api/v1/certificates/1/load-to-akv", json=_AKV_TARGET)
+    assert resp.status_code == 200
+    assert resp.json()["key_source"] == "keyfactor"
+    assert svc.last_download_kwargs["file_format"] == "PFX"
+
+
+async def test_load_to_akv_key_source_escrow_never_falls_back(app, admin_client, fake_keyvault, escrow_vault):
+    # Explicitly asking for the escrowed key must fail loudly rather than quietly
+    # exporting from Keyfactor, which would only work for key-archived certs.
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "key_source": "escrow"},
+    )
+    assert resp.status_code == 409
+    assert "no escrowed private key" in resp.json()["detail"].lower()
+    assert svc.last_download_kwargs is None
+    assert fake_keyvault.imports == []
+
+
+async def test_load_to_akv_key_source_keyfactor_bypasses_escrow(
+    app, admin_client, db_session, fake_keyvault, escrow_vault
+):
+    svc = FakeService()
+    _use_service(app, svc)
+    await _seed_escrow(db_session, certificate_id=1, thumbprint="ABC", pfx=b"ESCROWED-PFX", password="escrow-pw")
+
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "key_source": "keyfactor"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["key_source"] == "keyfactor"
+    assert fake_keyvault.imports[0]["cert_bytes"] == b"CERTIFICATE"
+
+
+async def test_load_to_akv_rejects_unknown_key_source(app, admin_client, fake_keyvault):
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "key_source": "somewhere-else"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_load_to_akv_export_failure_mentions_escrow(app, admin_client, fake_keyvault, escrow_vault):
+    _use_service(app, FakeService(error=CertificateServiceError("Private key is not available.", status_code=400)))
+    resp = await admin_client.post("/api/v1/certificates/1/load-to-akv", json=_AKV_TARGET)
+    assert resp.status_code == 409
+    assert "escrow" in resp.json()["detail"].lower()
+
+
+async def test_renew_escrows_the_issued_pfx(app, admin_client, db_session, escrow_vault):
+    from sqlalchemy import select
+
+    from app.models.database import CertificateKeyEscrow
+
+    svc = FakeService()
+    svc.renew_result = {"thumbprint": "NEWTHUMB", "certificate_id": 77, "pfx_base64": "UEZY"}
+    _use_service(app, svc)
+
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/renew",
+        json={"mode": "pfx", "password": "a-long-enough-password"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["key_escrowed"] is True
+
+    row = (await db_session.execute(select(CertificateKeyEscrow))).scalar_one()
+    assert row.thumbprint == "newthumb"
+    assert row.certificate_id == 77
+    assert row.source == "renew"
+    # The secret carries the material; the pointer row does not.
+    assert escrow_vault.secrets["cert-pfx-newthumb"]
+
+
+async def test_renew_without_escrow_configured_is_unchanged(app, admin_client, monkeypatch):
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_ENABLED", False)
+    svc = FakeService()
+    svc.renew_result = {"thumbprint": "NEWTHUMB", "certificate_id": 77, "pfx_base64": "UEZY"}
+    _use_service(app, svc)
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/renew",
+        json={"mode": "pfx", "password": "a-long-enough-password"},
+    )
+    assert resp.status_code == 200
+    assert "key_escrowed" not in resp.json()
+
+
+async def test_renew_survives_an_escrow_failure(app, admin_client, monkeypatch):
+    # The certificate is already issued by then — escrow problems must never
+    # turn a successful renewal into an error.
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_ENABLED", True)
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_VAULT", "escrow-kv")
+
+    class _BrokenVault:
+        async def create_or_update_secret(self, *a, **k):
+            raise RuntimeError("vault unreachable")
+
+    monkeypatch.setattr("app.services.certificate_escrow_service.KeyVaultService", lambda: _BrokenVault())
+    svc = FakeService()
+    svc.renew_result = {"thumbprint": "NEWTHUMB", "certificate_id": 77, "pfx_base64": "UEZY"}
+    _use_service(app, svc)
+
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/renew",
+        json={"mode": "pfx", "password": "a-long-enough-password"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["thumbprint"] == "NEWTHUMB"
+    assert "key_escrowed" not in resp.json()
+
+
+async def test_enroll_pfx_escrows_the_issued_key(app, admin_client, db_session, escrow_vault):
+    from sqlalchemy import select
+
+    from app.models.database import CertificateKeyEscrow
+
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={
+            "enrollment_type": "pfx",
+            "certificate_authority": "ca",
+            "template": "WebServer",
+            "common_name": "new.example.com",
+            "password": "a-long-enough-password",
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["key_escrowed"] is True
+
+    row = (await db_session.execute(select(CertificateKeyEscrow))).scalar_one()
+    assert row.thumbprint == "def"
+    assert row.source == "enroll"
+    assert row.common_name == "new.example.com"
+
+
+async def test_enroll_csr_has_nothing_to_escrow(app, admin_client, db_session, escrow_vault):
+    from sqlalchemy import select
+
+    from app.models.database import CertificateKeyEscrow
+
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={
+            "enrollment_type": "csr",
+            "certificate_authority": "ca",
+            "template": "WebServer",
+            "csr": "-----BEGIN CERTIFICATE REQUEST-----",
+        },
+    )
+    assert resp.status_code == 201
+    # CSR enrollment keeps the key on the requester's side — no PFX exists.
+    assert (await db_session.execute(select(CertificateKeyEscrow))).scalars().all() == []
+    assert escrow_vault.secrets == {}
+
+
+async def test_list_certificates_flags_escrowed_keys(app, admin_client, db_session, escrow_vault):
+    _use_service(app, FakeService())
+    await _seed_escrow(db_session, certificate_id=1, thumbprint="ABC", pfx=b"PFX", password="pw")
+
+    resp = await admin_client.get("/api/v1/certificates")
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["key_escrowed"] is True
+
+
+async def test_list_certificates_reports_missing_escrow_explicitly(app, admin_client, escrow_vault):
+    # With escrow on, an un-escrowed certificate must say so rather than stay silent.
+    _use_service(app, FakeService())
+    resp = await admin_client.get("/api/v1/certificates")
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["key_escrowed"] is False
+
+
+async def test_list_certificates_omits_escrow_flag_when_disabled(app, admin_client, monkeypatch):
+    # Deployments without escrow must not show a misleading "no key" state.
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_ENABLED", False)
+    _use_service(app, FakeService())
+    resp = await admin_client.get("/api/v1/certificates")
+    assert resp.status_code == 200
+    assert "key_escrowed" not in resp.json()["items"][0]

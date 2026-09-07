@@ -211,9 +211,18 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
 
           {/* AKV upload status */}
           {akvStatus === "success" && (
-            <div className="flex items-center gap-3 rounded-xl border border-green-200 bg-green-50 p-3">
-              <svg className="h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-              <span className="text-sm font-medium text-green-800">Certificate loaded to Azure Key Vault successfully.</span>
+            <div className="flex items-start gap-3 rounded-xl border border-green-200 bg-green-50 p-3">
+              <svg className="mt-0.5 h-5 w-5 shrink-0 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              <div>
+                <span className="text-sm font-medium text-green-800">Certificate loaded to Azure Key Vault successfully.</span>
+                {renewalResult.key_escrowed && (
+                  <p className="mt-1 text-xs text-green-700">
+                    The private key is escrowed, so this certificate can be loaded into further
+                    vaults at any time from the certificate&apos;s Load to AKV action — no second
+                    renewal needed.
+                  </p>
+                )}
+              </div>
             </div>
           )}
 

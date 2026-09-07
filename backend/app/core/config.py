@@ -233,6 +233,41 @@ class Settings(BaseSettings):
             return self.KEYFACTOR_TOKEN_URL
         return f"https://login.microsoftonline.com/{self.keyfactor_tenant_id}/oauth2/v2.0/token"
 
+    # ── Certificate private-key escrow ────────────────────────────────
+    # Keyfactor hands over a PFX only at the moment of issuance, so without
+    # escrow a certificate can be loaded into exactly one Key Vault and never
+    # again. When escrow is enabled the portal stores that one-time PFX as a
+    # secret in a dedicated Key Vault — never in PostgreSQL — so the same
+    # certificate and key can be imported into any number of vaults later.
+    CERT_KEY_ESCROW_ENABLED: bool = Field(
+        default=False,
+        description="Capture issuance-time PFX material into the escrow Key Vault for later AKV loads",
+    )
+    CERT_KEY_ESCROW_VAULT: str = Field(
+        default="",
+        description="Name of the dedicated escrow Key Vault, e.g. opsportal-cert-escrow-kv",
+    )
+    CERT_KEY_ESCROW_VAULT_URI: str = Field(
+        default="",
+        description="Optional full escrow vault URI; overrides CERT_KEY_ESCROW_VAULT (sovereign clouds)",
+    )
+
+    @property
+    def cert_key_escrow_vault_uri(self) -> str:
+        """Normalized escrow vault URI (trailing slash), or "" when unconfigured."""
+        if self.CERT_KEY_ESCROW_VAULT_URI.strip():
+            uri = self.CERT_KEY_ESCROW_VAULT_URI.strip()
+        elif self.CERT_KEY_ESCROW_VAULT.strip():
+            uri = f"https://{self.CERT_KEY_ESCROW_VAULT.strip()}.vault.azure.net"
+        else:
+            return ""
+        return uri if uri.endswith("/") else f"{uri}/"
+
+    @property
+    def cert_key_escrow_active(self) -> bool:
+        """Escrow only runs when explicitly enabled *and* pointed at a vault."""
+        return bool(self.CERT_KEY_ESCROW_ENABLED and self.cert_key_escrow_vault_uri)
+
     # ── RBAC Roles ────────────────────────────────────────────────────
     ROLE_ADMIN: str = "OpsPortal.Admin"
     ROLE_WRITE: str = "OpsPortal.Write"

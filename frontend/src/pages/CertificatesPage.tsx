@@ -87,6 +87,32 @@ const ActionBtn: React.FC<{ title: string; tone: keyof typeof actionTones; onCli
 
 // ── Expiry date badge with color-coded urgency ─────────────────────────
 
+/**
+ * Escrow state for one row. Rendered only when the backend reports the flag at
+ * all: `undefined` means escrow is not configured, and showing "no escrowed
+ * key" against every certificate in that case would be noise, not information.
+ */
+const EscrowBadge: React.FC<{ escrowed?: boolean | null }> = ({ escrowed }) => {
+  if (escrowed === undefined || escrowed === null) return null;
+  return escrowed ? (
+    <span
+      className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700"
+      title="Private key is escrowed — this certificate can be loaded into any Key Vault"
+    >
+      {Icons.keyvault}
+      <span>Escrowed</span>
+    </span>
+  ) : (
+    <span
+      className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500"
+      title="No escrowed private key — loading this certificate into a Key Vault needs a live Keyfactor export, which only works while Keyfactor still holds an exportable key"
+    >
+      {Icons.keyvault}
+      <span>No key</span>
+    </span>
+  );
+};
+
 const expiryColor = (not_after: string | null): { text: string; dot: string; label: string } => {
   if (!not_after) return { text: "text-gray-500", dot: "bg-gray-400", label: "" };
   const days = Math.ceil((new Date(not_after).getTime() - Date.now()) / 86_400_000);
@@ -1187,6 +1213,14 @@ const CertificatesPage: React.FC = () => {
   const items = useMemo(() => sortCerts(data?.items ?? [], sort), [data?.items, sort]);
   const total = data?.total ?? 0;
 
+  // The backend omits key_escrowed entirely when escrow is not configured, so
+  // the column only appears for deployments that actually use it.
+  const showEscrowColumn = useMemo(
+    () => items.some((c) => c.key_escrowed === true || c.key_escrowed === false),
+    [items]
+  );
+  const columnCount = showEscrowColumn ? 7 : 6;
+
   // Accurate, collection-wide counts for the tiles (not page-scoped).
   const { data: stats, isLoading: statsLoading } = useCollectionCertStats(collectionId);
   const fmtStat = (v: number | undefined): string =>
@@ -1387,18 +1421,19 @@ const CertificatesPage: React.FC = () => {
                 <th className={gridStyles.headerCell}><SortableHeader label="ENV" active={sort.key === "environment"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "environment"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Thumbprint" active={sort.key === "thumbprint"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "thumbprint"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Expiry Date" active={sort.key === "not_after"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "not_after"))} /></th>
+                {showEscrowColumn && <th className={gridStyles.headerCell}>Key</th>}
                 <th className={gridStyles.headerCellCenter}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">Loading certificates…</td></tr>
+                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">Loading certificates…</td></tr>
               ) : isError ? (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-red-600" role="alert">{(error as Error)?.message || "Failed to load certificates."} <button type="button" className="underline" onClick={() => refetch()}>Retry</button></td></tr>
+                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-red-600" role="alert">{(error as Error)?.message || "Failed to load certificates."} <button type="button" className="underline" onClick={() => refetch()}>Retry</button></td></tr>
               ) : collectionId == null ? (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">Select a collection from the tiles above to view certificates.</td></tr>
+                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">Select a collection from the tiles above to view certificates.</td></tr>
               ) : items.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">No certificates found in this collection.</td></tr>
+                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">No certificates found in this collection.</td></tr>
               ) : (
                 items.map((cert) => (
                   <tr key={cert.id} className={gridStyles.row}>
@@ -1407,6 +1442,9 @@ const CertificatesPage: React.FC = () => {
                     <td className={gridStyles.cell}><EnvBadge cert={cert} /></td>
                     <td className={gridStyles.cell}><span className="font-mono text-xs" title={cert.thumbprint}>{cert.thumbprint || "—"}</span></td>
                     <td className={gridStyles.cell}><ExpiryBadge not_after={cert.not_after} /></td>
+                    {showEscrowColumn && (
+                      <td className={gridStyles.cell}><EscrowBadge escrowed={cert.key_escrowed} /></td>
+                    )}
                     <td className={gridStyles.centerCell}>
                       <RowActionMenu
                         open={openActionMenu === cert.id}

@@ -5,8 +5,9 @@
  * Data is served from the existing /keyvault/vaults endpoint (DB-cached).
  *
  * AKV only accepts a certificate that carries its private key, so the portal
- * sources the key material itself: it exports the existing PFX from Keyfactor,
- * or generates a new PFX certificate when the current one has no private key.
+ * sources the key material itself, in order of preference: the escrowed key
+ * (kept at issuance, so it still works months later and for a second vault),
+ * a live PFX export from Keyfactor, or a newly generated PFX certificate.
  * Security: PFX passwords are single-use and never logged or stored.
  */
 
@@ -33,7 +34,7 @@ interface LoadToAkvModalProps {
   onError: (message: string) => void;
 }
 
-type CertificateSource = "existing" | "generate";
+type CertificateSource = "escrow" | "existing" | "generate";
 
 const RSA_KEY_SIZES = [2048, 3072, 4096, 8192];
 
@@ -75,11 +76,18 @@ export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
   // Only Keyfactor's positive "HasPrivateKey" makes a PFX export possible; unknown
   // (never-synced) must not offer an export that Keyfactor will refuse.
   const hasPrivateKey = certificate.has_private_key === true;
-  const [source, setSource] = useState<CertificateSource>(hasPrivateKey ? "existing" : "generate");
+  // An escrowed key is the only source that survives past issuance, so it wins
+  // whenever it exists — it is what makes loading into a further vault possible.
+  const hasEscrowedKey = certificate.key_escrowed === true;
+  const [source, setSource] = useState<CertificateSource>(
+    hasEscrowedKey ? "escrow" : hasPrivateKey ? "existing" : "generate"
+  );
   const [generated, setGenerated] = useState<{ data: string; password: string; certificateId?: number } | null>(null);
 
-  // "existing" needs no local data: the backend exports the PFX from Keyfactor.
-  const sourceReady = Boolean(preSuppliedData) || source === "existing" || generated !== null;
+  // "escrow" and "existing" need no local data: the backend reads the escrowed
+  // key or exports the PFX from Keyfactor.
+  const sourceReady =
+    Boolean(preSuppliedData) || source === "escrow" || source === "existing" || generated !== null;
   const isValid = isAkvTargetComplete(target) && sourceReady;
 
   const handleGenerate = async () => {
@@ -122,6 +130,10 @@ export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
         ...(localData ? { certificate_data: localData } : {}),
         ...(localPassword ? { certificate_password: localPassword } : {}),
         ...(collectionId ? { collection_id: collectionId } : {}),
+        // Only meaningful when no local PFX is attached. "escrow" fails loudly
+        // rather than silently falling back to a Keyfactor export that would
+        // succeed only for key-archived certificates.
+        ...(localData ? {} : { key_source: source === "escrow" ? ("escrow" as const) : ("keyfactor" as const) }),
       };
       const res = await load.mutateAsync({ id: generated?.certificateId ?? certificate.id, data: uploadRequest });
       setResult(res);
@@ -168,6 +180,18 @@ export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
                 ))}
               </dd>
             </div>
+            {result.key_source && (
+              <div>
+                <dt className="text-xs font-semibold uppercase text-gray-400">Key Source</dt>
+                <dd className="text-gray-800">
+                  {result.key_source === "escrow"
+                    ? "Escrowed key — loadable into further vaults at any time"
+                    : result.key_source === "keyfactor"
+                      ? "Live Keyfactor PFX export"
+                      : "Newly issued PFX"}
+                </dd>
+              </div>
+            )}
           </dl>
           {result.failed.length > 0 && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm">
@@ -234,13 +258,38 @@ export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
               material — nothing needs to be pasted.
             </p>
 
-            {!hasPrivateKey && (
+            {!hasEscrowedKey && !hasPrivateKey && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
-                Keyfactor has no retrievable private key for this certificate, so it cannot be
-                exported as a PFX. This is normal even just after a renewal: Keyfactor returns the
-                PFX only at the moment of issuance unless key archival is enabled on the template.
-                Generate a new certificate with PFX below.
+                No escrowed key for this certificate, and Keyfactor has no retrievable private key
+                either, so it cannot be exported as a PFX. This is normal even just after a renewal:
+                Keyfactor returns the PFX only at the moment of issuance unless key archival is
+                enabled on the template. Generate a new certificate with PFX below — with escrow
+                enabled its key is kept, so it can then be loaded into further vaults later.
               </div>
+            )}
+
+            {hasEscrowedKey && (
+              <label
+                className={`flex cursor-pointer gap-3 rounded-lg border p-3 ${
+                  source === "escrow" ? "border-att-300 bg-att-50/40" : "border-gray-200"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="akv-cert-source"
+                  className="mt-1"
+                  checked={source === "escrow"}
+                  onChange={() => setSource("escrow")}
+                />
+                <span>
+                  <span className="block text-sm font-medium text-att-700">Use escrowed key</span>
+                  <span className="block text-xs text-gray-500">
+                    Reads the private key captured when this certificate was issued. Works any time
+                    and any number of times, so the same certificate can be loaded into each
+                    environment&apos;s vault.
+                  </span>
+                </span>
+              </label>
             )}
 
             <label

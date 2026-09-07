@@ -21,7 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.auth import get_current_user
 from app.core.database import get_db
 from app.main import create_application
-from app.models.database import Permission, Resource, Team, TeamMembership
+from app.models.database import (
+    CertificateKeyEscrow,
+    Permission,
+    Resource,
+    Team,
+    TeamMembership,
+)
 from app.schemas.auth import UserContext, UserRole
 
 # audit_logs uses JSONB which SQLite can't compile.  We create an equivalent
@@ -48,7 +54,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 @pytest.fixture
 async def db_engine():
-    """Fresh in-memory SQLite engine — Resource, Permission, and audit_logs tables."""
+    """Fresh in-memory SQLite engine — RBAC, audit_logs and cert escrow tables."""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         echo=False,
@@ -59,6 +65,8 @@ async def db_engine():
         await conn.run_sync(lambda c: Permission.__table__.create(c, checkfirst=True))
         await conn.run_sync(lambda c: Team.__table__.create(c, checkfirst=True))
         await conn.run_sync(lambda c: TeamMembership.__table__.create(c, checkfirst=True))
+        # cert_key_escrow holds no JSONB, so it compiles on SQLite as-is.
+        await conn.run_sync(lambda c: CertificateKeyEscrow.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
     yield engine
     await engine.dispose()

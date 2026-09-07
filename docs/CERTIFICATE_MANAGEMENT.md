@@ -83,6 +83,9 @@ read from environment variables / `.env` / Key Vault.
 | `KEYFACTOR_DEFAULT_CA` | No | Optional default issuing CA to pre-fill enrollment. |
 | `KEYFACTOR_DEFAULT_TEMPLATE` | No | Optional default template to pre-fill enrollment. |
 | `KEYFACTOR_LIST_CACHE_TTL` | No | Reserved for short-lived list caching (default `60`). |
+| `CERT_KEY_ESCROW_ENABLED` | No | Capture issuance-time PFX material for later AKV loads (default `false`). |
+| `CERT_KEY_ESCROW_VAULT` | No | Name of the dedicated escrow Key Vault. Required when escrow is enabled. |
+| `CERT_KEY_ESCROW_VAULT_URI` | No | Full escrow vault URI; overrides `CERT_KEY_ESCROW_VAULT` (sovereign clouds). |
 
 ---
 
@@ -231,7 +234,76 @@ All write operations are recorded in the audit log (who, what, when, target, out
 
 ---
 
-## 6. Troubleshooting
+## 6. Private-Key Escrow (multi-vault loads)
+
+### The problem it solves
+
+Keyfactor releases a certificate's PFX **only in the enrollment/renewal
+response** ([keyfactor_service.py](../backend/app/services/keyfactor_service.py) —
+`_shape_enrollment`). Unless key archival is enabled on the template, a later
+export fails, which means an un-escrowed certificate can be loaded into exactly
+one Key Vault and never again. That blocks the common case of a multi-SAN
+certificate whose hostnames span environments, with one vault per environment
+(e.g. the same thumbprint in `attcc-eastus2-perf-kv` and `attcc-eastus2-uat-kv`
+under different entry names).
+
+With escrow enabled, that one-time PFX is kept, so **Load to AKV works any number
+of times, into any vault, long after issuance**.
+
+### Where the key lives
+
+| Store | Holds |
+| --- | --- |
+| Escrow Key Vault secret (`cert-pfx-<thumbprint>`) | The PFX and its password, as one JSON envelope |
+| PostgreSQL `cert_key_escrow` | Vault name, secret name, thumbprint, expiry — **no key material** |
+
+Key material never touches PostgreSQL, so database dumps, replicas and PITR
+snapshots stay free of private keys, and the secret inherits HSM-backed storage,
+RBAC, soft-delete/purge protection and Azure's access audit trail. Co-locating
+the PFX password with the PFX is deliberate: the vault's access control is the
+control, and a password nobody recorded is useless months later during an
+incident.
+
+### Setup
+
+1. Create a **dedicated** Key Vault, separate from the vaults certificates are
+   deployed into, with soft-delete and purge protection enabled.
+2. Grant the portal's identity `secrets: get/set/delete` on that vault **only**.
+3. Set `CERT_KEY_ESCROW_ENABLED=true` and `CERT_KEY_ESCROW_VAULT=<vault-name>`.
+4. Apply [migrations/add_cert_key_escrow.sql](../backend/migrations/add_cert_key_escrow.sql)
+   if your deployment manages schema out of band (otherwise it is created at startup).
+
+> Key escrow for internal PKI is a policy decision. Get PKI/security sign-off
+> before enabling it.
+
+### Coverage and limits
+
+- **Covered:** every certificate enrolled (PFX) or renewed (PFX mode) through the
+  portal *after* escrow is enabled.
+- **Not covered — pre-existing certificates.** Their key was never captured and
+  Keyfactor will not re-release it. One PFX-mode renewal through the portal
+  escrows the key, but issues a new thumbprint, so every vault holding the old
+  certificate needs a re-import.
+- **Not covered — renewals done outside the portal** (directly in Keyfactor or
+  other automation). The grid's `Key` column shows `No key` for these so the gap
+  is visible before someone needs the key, not during an incident.
+- **CSR enrollment has nothing to escrow** — the key never leaves the requester.
+- **Auto-renewal does not seed escrow.** The Auto-Renewal tab records schedules
+  and counts due certificates; it does not execute renewals. If it is ever made
+  to renew, it must route through the same capture point.
+
+### Lifecycle
+
+| Stage | Behaviour |
+| --- | --- |
+| Capture | `_escrow_issued_key` in the enroll/renew endpoints; best-effort, so an escrow failure never fails an issuance |
+| Use | `Load to AKV` → **Use escrowed key** (preselected when available). `key_source=escrow` fails rather than silently falling back to a Keyfactor export |
+| Reconcile | After each full sync: expiry/common-name backfilled from the snapshot |
+| Purge | Secrets for expired certificates are deleted and the row marked `purged_at`. A row with unknown expiry is never purged |
+
+---
+
+## 7. Troubleshooting
 
 | Symptom | Likely cause | Resolution |
 | --- | --- | --- |
@@ -242,18 +314,23 @@ All write operations are recorded in the audit log (who, what, when, target, out
 | `403` in the UI | Caller lacks the role | Grant the `write` (enroll/renew/update) or `admin` (revoke/delete) permission. |
 | `422` on enroll | Missing required fields | CSR enrollment needs `csr`; PFX needs `subject` and `password`. |
 | `404` on view/renew | Certificate id not in Keyfactor | Refresh the list; the record may have been deleted. |
+| `409` "No escrowed private key" | Certificate predates escrow, or was renewed outside the portal | Renew it through the portal to escrow a key, or retry with `key_source=auto` to attempt a live export. |
+| `Key` column missing from the grid | Escrow not configured | Set `CERT_KEY_ESCROW_ENABLED` / `CERT_KEY_ESCROW_VAULT`; the flag is omitted entirely when escrow is off. |
+| Escrow silently not happening | Vault write refused | Check `cert_escrow_vault_write_failed` in the logs and the identity's `secrets/set` permission on the escrow vault. |
 
 ---
 
-## 7. Related Files
+## 8. Related Files
 
 - Backend client: [backend/app/services/keyfactor_client.py](../backend/app/services/keyfactor_client.py)
 - Backend service: [backend/app/services/keyfactor_service.py](../backend/app/services/keyfactor_service.py)
+- Key escrow: [backend/app/services/certificate_escrow_service.py](../backend/app/services/certificate_escrow_service.py)
 - Backend router: [backend/app/api/v1/endpoints/certificates.py](../backend/app/api/v1/endpoints/certificates.py)
 - Config: [backend/app/core/config.py](../backend/app/core/config.py)
 - Frontend service: [frontend/src/services/certificatesApi.ts](../frontend/src/services/certificatesApi.ts)
 - Frontend page: [frontend/src/pages/CertificatesPage.tsx](../frontend/src/pages/CertificatesPage.tsx)
 - Frontend modals: [frontend/src/features/certificates/](../frontend/src/features/certificates/)
 - Tests: `backend/tests/test_keyfactor_client.py`, `backend/tests/test_keyfactor_service.py`,
-  `backend/tests/test_certificates_api.py`, `frontend/src/pages/CertificatesPage.test.tsx`,
+  `backend/tests/test_certificates_api.py`, `backend/tests/test_certificate_escrow_service.py`,
+  `frontend/src/pages/CertificatesPage.test.tsx`,
   `frontend/src/features/certificates/*.test.tsx`

@@ -76,6 +76,17 @@ class CertificateSyncService:
             if failures:
                 final_status = "partial" if certificates_synced > 0 else "failed"
                 error_message = ("Failed collections: " + ", ".join(failures))[:500]
+
+            # The fresh snapshot is the only place escrow pointers can learn a
+            # certificate's expiry, so reconcile (backfill + purge expired keys)
+            # right after it lands. Never allowed to fail the sync.
+            try:
+                from app.services.certificate_escrow_service import CertificateEscrowService
+
+                await CertificateEscrowService(self.db).reconcile()
+            except Exception as exc:
+                await self.db.rollback()
+                logger.warning("cert_escrow_reconcile_failed", error=str(exc)[:300])
         except CertificateServiceError as exc:
             await self.db.rollback()
             final_status = "failed"

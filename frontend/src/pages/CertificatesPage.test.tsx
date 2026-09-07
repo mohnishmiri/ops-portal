@@ -84,9 +84,9 @@ const CERT: certApi.Certificate = {
   collection: "",
 };
 
-function mockList(overrides: Record<string, unknown>) {
+function mockList(overrides: Record<string, unknown>, cert: certApi.Certificate = CERT) {
   vi.mocked(certApi.useCertificates).mockReturnValue({
-    data: { items: [CERT], total: 1, page: 1, page_size: 25 },
+    data: { items: [cert], total: 1, page: 1, page_size: 25 },
     isLoading: false,
     isError: false,
     error: null,
@@ -228,5 +228,33 @@ describe("CertificatesPage row action menu", () => {
     fireEvent.click(screen.getByRole("button", { name: /Certificate actions/i }));
     fireEvent.scroll(window);
     expect(screen.getByRole("button", { name: /View Certificate/i })).toBeInTheDocument();
+  });
+});
+
+describe("CertificatesPage key escrow state", () => {
+  beforeEach(() => setRole({ isAdmin: true, canEdit: true }));
+
+  it("hides the Key column when the backend reports no escrow state", () => {
+    // key_escrowed is omitted entirely when escrow is not configured; showing a
+    // column of "no key" badges then would be noise, not information.
+    mockList({});
+    renderPage();
+    expect(screen.queryByRole("columnheader", { name: "Key" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Escrowed")).not.toBeInTheDocument();
+    expect(screen.queryByText("No key")).not.toBeInTheDocument();
+  });
+
+  it("marks a certificate whose private key is escrowed", () => {
+    mockList({}, { ...CERT, key_escrowed: true });
+    renderPage();
+    expect(screen.getByRole("columnheader", { name: "Key" })).toBeInTheDocument();
+    expect(screen.getByText("Escrowed")).toBeInTheDocument();
+  });
+
+  it("flags a missing escrowed key explicitly", () => {
+    mockList({}, { ...CERT, key_escrowed: false });
+    renderPage();
+    expect(screen.getByRole("columnheader", { name: "Key" })).toBeInTheDocument();
+    expect(screen.getByText("No key")).toBeInTheDocument();
   });
 });

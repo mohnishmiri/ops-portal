@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import datetime
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -31,6 +31,7 @@ from app.core.config import settings
 from app.core.database import get_db, get_db_session
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
+from app.services.certificate_escrow_service import CertificateEscrowService
 from app.services.certificate_sync_service import CertificateSyncService
 from app.services.keyfactor_client import REVOCATION_REASONS
 from app.services.keyfactor_service import CertificateService, CertificateServiceError
@@ -224,6 +225,14 @@ class LoadToAkvRequest(BaseModel):
         default=None,
         description="Collection context used when exporting the PFX from Keyfactor",
     )
+    key_source: Literal["auto", "escrow", "keyfactor"] = Field(
+        default="auto",
+        description=(
+            "Where the private key comes from when certificate_data is omitted. "
+            "'auto' prefers the escrowed key and falls back to a live Keyfactor "
+            "export; 'escrow' fails rather than falling back; 'keyfactor' skips escrow."
+        ),
+    )
 
     @field_validator("certificate_names")
     @classmethod
@@ -346,6 +355,91 @@ async def _write_audit(
         logger.warning("certificate_audit_log_failed", action=action, error=str(exc)[:200])
 
 
+async def _escrow_issued_key(
+    db: AsyncSession,
+    *,
+    request: Request,
+    user: UserContext,
+    result: dict[str, Any],
+    password: str | None,
+    source: str,
+    common_name: str | None,
+) -> None:
+    """Capture issuance-time PFX material into the escrow Key Vault.
+
+    Keyfactor hands over the PFX only in the enrollment/renewal response, so
+    this is the one chance to keep it. Best-effort by design: the certificate
+    has already been issued by the time this runs, so an escrow failure must
+    never turn a successful enrollment into an error — it downgrades to a
+    warning and the certificate simply stays un-escrowed.
+
+    The audit row records the vault pointer only, never the PFX or password.
+    """
+    if db is None or not CertificateEscrowService.is_enabled():
+        return
+    pfx_base64 = result.get("pfx_base64")
+    thumbprint = result.get("thumbprint")
+    if not pfx_base64 or not thumbprint:
+        return
+
+    try:
+        pointer = await CertificateEscrowService(db).escrow(
+            certificate_id=result.get("certificate_id"),
+            thumbprint=str(thumbprint),
+            common_name=common_name,
+            pfx_base64=str(pfx_base64),
+            password=password,
+            source=source,
+            actor=user.email or user.user_id,
+        )
+    except Exception as exc:  # pragma: no cover - escrow must never break issuance
+        logger.warning("cert_escrow_hook_failed", source=source, error=str(exc)[:200])
+        return
+    if pointer is None:
+        return
+
+    result["key_escrowed"] = True
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="cert_key_escrow",
+        resource_id=str(result.get("certificate_id") or thumbprint),
+        summary=f"Escrowed private key for {common_name or thumbprint} ({source})",
+        outcome="success",
+        details={
+            "vault_name": pointer["vault_name"],
+            "secret_name": pointer["secret_name"],
+            "thumbprint": pointer["thumbprint"],
+            "source": source,
+        },
+        # Never log pfx_base64 or the PFX password
+    )
+
+
+async def _decorate_escrow_status(db: AsyncSession, result: dict[str, Any]) -> dict[str, Any]:
+    """Tag listed certificates with whether their private key is escrowed.
+
+    The flag is attached only when escrow is configured, so a deployment
+    without escrow shows no misleading "not escrowed" state in the grid.
+    Decorates the item dicts in place — both callers build them per request.
+    """
+    items = result.get("items")
+    if db is None or not isinstance(items, list) or not items or not CertificateEscrowService.is_enabled():
+        return result
+    try:
+        escrowed = await CertificateEscrowService(db).escrowed_thumbprints(
+            [str(i.get("thumbprint") or "") for i in items if isinstance(i, dict)]
+        )
+    except Exception as exc:  # pragma: no cover - status is advisory
+        logger.warning("cert_escrow_status_failed", error=str(exc)[:200])
+        return result
+    for item in items:
+        if isinstance(item, dict):
+            item["key_escrowed"] = str(item.get("thumbprint") or "").strip().lower() in escrowed
+    return result
+
+
 # ── Read endpoints ─────────────────────────────────────────────────────
 
 
@@ -371,7 +465,7 @@ async def list_certificates(
         try:
             sync_service = CertificateSyncService(db)
             if await sync_service.has_certificates(collection_id):
-                return await sync_service.list_certificates_from_db(
+                cached = await sync_service.list_certificates_from_db(
                     collection_id=collection_id,
                     cn=cn,
                     thumbprint=thumbprint,
@@ -381,6 +475,7 @@ async def list_certificates(
                     page=page,
                     page_size=page_size,
                 )
+                return await _decorate_escrow_status(db, cached)
         except Exception as exc:
             logger.warning("cert_list_db_fallback", error=str(exc)[:200])
 
@@ -414,7 +509,7 @@ async def list_certificates(
     # Lazy-populate the cache so the next load of this collection is instant.
     if collection_id is not None and db is not None:
         _schedule_sync(collection_id, triggered_by="lazy", skip_if_running=True)
-    return result
+    return await _decorate_escrow_status(db, result)
 
 
 # ── Reference data endpoints (must precede /{certificate_id} to avoid path collision) ──
@@ -1103,6 +1198,16 @@ async def enroll_certificate(
             "thumbprint": result.get("thumbprint"),
         },
     )
+    # Keyfactor returns the PFX only here, so escrow it now or lose it.
+    await _escrow_issued_key(
+        db,
+        request=request,
+        user=user,
+        result=result,
+        password=payload.password,
+        source="enroll",
+        common_name=payload.common_name or (target if target != "csr" else None),
+    )
     _schedule_sync(None, triggered_by="mutation")
     return result
 
@@ -1142,6 +1247,17 @@ async def renew_certificate(
         summary=f"Renewed certificate {certificate_id}",
         outcome="success",
         details={"thumbprint": result.get("thumbprint")},
+    )
+    # A PFX-mode renewal is the only moment the new key exists in the response;
+    # escrowing it here is what makes later loads into further vaults possible.
+    await _escrow_issued_key(
+        db,
+        request=request,
+        user=user,
+        result=result,
+        password=payload.password,
+        source="renew",
+        common_name=None,
     )
     _schedule_sync(None, triggered_by="mutation")
     return result
@@ -1328,10 +1444,15 @@ async def load_certificate_to_akv(
 ) -> dict[str, Any]:
     """Import a certificate into Azure Key Vault.
 
-    Azure Key Vault only accepts a certificate that carries its private key, so
-    when the caller omits ``certificate_data`` the portal exports the
-    certificate's PFX from Keyfactor under a single-use password. Private key
-    material and passwords are never written to logs or the audit record.
+    Azure Key Vault only accepts a certificate that carries its private key. When
+    the caller omits ``certificate_data`` the key comes from the escrow vault if
+    the certificate was escrowed at issuance, otherwise from a live Keyfactor PFX
+    export under a single-use password. Escrow is what makes a *second* vault
+    reachable: Keyfactor releases the PFX only at issuance, so an un-escrowed
+    certificate can be loaded exactly once.
+
+    Private key material and passwords are never written to logs or the audit
+    record; the response reports only which source was used.
     """
     import base64
     import secrets
@@ -1339,6 +1460,7 @@ async def load_certificate_to_akv(
     from app.services.keyvault_service import KeyVaultService
 
     import_password = payload.certificate_password
+    key_source = "provided"
     if payload.certificate_data:
         # Decode the caller-supplied certificate data (may be PFX or PEM).
         try:
@@ -1349,28 +1471,58 @@ async def load_certificate_to_akv(
                 detail="certificate_data must be valid base64-encoded certificate content.",
             )
     else:
-        # The one-time password only protects the PFX in transit to Key Vault.
-        import_password = secrets.token_urlsafe(24)
-        try:
-            cert_bytes = await service.download_certificate(
-                certificate_id,
-                file_format="PFX",
-                include_chain=False,
-                collection_id=payload.collection_id,
-                pfx_password=import_password,
-            )
-        except CertificateServiceError as exc:
+        # Prefer the escrowed key: unlike a Keyfactor export it stays available
+        # long after issuance, which is what allows loading the same certificate
+        # into a second (or third) environment's vault.
+        escrowed: tuple[bytes, str] | None = None
+        if payload.key_source in ("auto", "escrow") and db is not None:
+            try:
+                escrowed = await CertificateEscrowService(db).get_material(certificate_id=certificate_id)
+            except Exception as exc:  # pragma: no cover - fall back to Keyfactor
+                logger.warning(
+                    "cert_escrow_lookup_failed",
+                    certificate_id=certificate_id,
+                    error=str(exc)[:200],
+                )
+
+        if escrowed is not None:
+            cert_bytes, import_password = escrowed
+            key_source = "escrow"
+        elif payload.key_source == "escrow":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "Could not export this certificate's private key from Keyfactor "
-                    f"({exc.message}). Keyfactor returns the PFX only at the moment of issuance "
-                    "unless key archival is enabled on the template, so renewing an existing "
-                    "certificate does not make its key exportable afterwards. Azure Key Vault "
-                    "requires a certificate with its private key, so generate a new certificate "
-                    "with PFX and load that."
+                    "No escrowed private key is available for this certificate. Only "
+                    "certificates issued or renewed through the portal after key escrow "
+                    "was enabled have one; enroll or renew it here to escrow its key, or "
+                    "retry with key_source='auto' to attempt a live Keyfactor export."
                 ),
             )
+        else:
+            # The one-time password only protects the PFX in transit to Key Vault.
+            key_source = "keyfactor"
+            import_password = secrets.token_urlsafe(24)
+            try:
+                cert_bytes = await service.download_certificate(
+                    certificate_id,
+                    file_format="PFX",
+                    include_chain=False,
+                    collection_id=payload.collection_id,
+                    pfx_password=import_password,
+                )
+            except CertificateServiceError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Could not export this certificate's private key from Keyfactor "
+                        f"({exc.message}), and no escrowed key is available for it. Keyfactor "
+                        "returns the PFX only at the moment of issuance unless key archival is "
+                        "enabled on the template, so renewing an existing certificate does not "
+                        "make its key exportable afterwards. Generate a new certificate with PFX "
+                        "and load that — with escrow enabled its key is kept, so it can then be "
+                        "loaded into any number of vaults later."
+                    ),
+                )
 
     kv_service = KeyVaultService()
     vault_url = f"https://{payload.vault_name}.vault.azure.net"
@@ -1412,6 +1564,7 @@ async def load_certificate_to_akv(
                 "certificate_names": payload.certificate_names,
                 "subscription_id": payload.subscription_id,
                 "resource_group": payload.resource_group,
+                "key_source": key_source,
                 "errors": failures,
             },
         )
@@ -1436,6 +1589,7 @@ async def load_certificate_to_akv(
             "certificate_names": [i["certificate_name"] for i in imported],
             "subscription_id": payload.subscription_id,
             "resource_group": payload.resource_group,
+            "key_source": key_source,
             **({"errors": failures} if failures else {}),
         },
         # Never log certificate_data or certificate_password
@@ -1446,4 +1600,5 @@ async def load_certificate_to_akv(
         "vault_name": payload.vault_name,
         "certificates": imported,
         "failed": failures,
+        "key_source": key_source,
     }

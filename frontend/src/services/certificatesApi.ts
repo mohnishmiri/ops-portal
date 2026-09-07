@@ -73,6 +73,13 @@ export interface Certificate {
   location_count: number;
   collection: string;
   has_private_key?: boolean | null;
+  /**
+   * Whether the private key is held in the escrow Key Vault, so the certificate
+   * can be loaded into further vaults later. Undefined when escrow is not
+   * configured on the backend — distinct from `false`, which means "escrow is
+   * on and this certificate has no escrowed key".
+   */
+  key_escrowed?: boolean | null;
 }
 
 export interface CertificateListResponse {
@@ -139,6 +146,8 @@ export interface EnrollResult {
   certificate?: string;
   certificates?: string[];
   pfx_base64?: string;
+  /** True when the issuance-time PFX was captured into the escrow Key Vault. */
+  key_escrowed?: boolean;
   [key: string]: unknown;
 }
 
@@ -844,11 +853,15 @@ export interface AkvUploadRequest {
   vault_name: string;
   /** One entry per AKV name holding this certificate (multi-SAN certs use several). */
   certificate_names: string[];
-  /** Omit to have the backend export the certificate's PFX from Keyfactor. */
+  /** Omit to have the backend source the private key (escrow, then Keyfactor). */
   certificate_data?: string;
   certificate_password?: string;
   collection_id?: number;
+  /** "auto" prefers the escrowed key; "escrow" fails instead of falling back. */
+  key_source?: AkvKeySource;
 }
+
+export type AkvKeySource = "auto" | "escrow" | "keyfactor";
 
 export interface AkvUploadedCertificate {
   certificate_name: string;
@@ -861,6 +874,8 @@ export interface AkvUploadResult {
   vault_name: string;
   certificates: AkvUploadedCertificate[];
   failed: { certificate_name: string; error: string }[];
+  /** Which key source the backend actually used. */
+  key_source?: "provided" | "escrow" | "keyfactor";
 }
 
 export const loadCertificateToAkv = async (

@@ -1484,6 +1484,38 @@ class CertificateSnapshot(Base):
     )
 
 
+class CertificateKeyEscrow(Base):
+    """Pointer to a certificate's escrowed PFX in the dedicated escrow Key Vault.
+
+    Deliberately holds no key material: the PFX and the password protecting it
+    live in the Key Vault secret named by ``secret_name``, which is where the
+    HSM storage, RBAC, soft-delete and Azure audit trail come from. This table
+    is separate from ``cert_certificates`` on purpose — that snapshot is deleted
+    per collection on every sync, which would destroy escrow bookkeeping.
+
+    ``thumbprint`` is stored lowercase so lookups are case-insensitive against
+    Keyfactor (uppercase) and Key Vault secret names (lowercase).
+    """
+
+    __tablename__ = "cert_key_escrow"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    certificate_id = Column(Integer, nullable=False, index=True)  # Keyfactor certificate Id
+    thumbprint = Column(String(100), nullable=False, index=True)
+    common_name = Column(String(500), nullable=True)
+    vault_name = Column(String(255), nullable=False)
+    secret_name = Column(String(127), nullable=False)
+    # Filled in by escrow reconciliation once the certificate appears in a
+    # synced collection; purge never runs against an unknown expiry.
+    not_after = Column(String(50), nullable=True, index=True)
+    source = Column(String(20), nullable=False, default="renew")  # enroll | renew
+    escrowed_by = Column(String(255), nullable=True)
+    escrowed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    purged_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (UniqueConstraint("thumbprint", name="uq_cert_escrow_thumbprint"),)
+
+
 class CertificateSyncStatus(Base):
     """Tracks the last certificate sync job (Keyfactor → PostgreSQL)."""
 
