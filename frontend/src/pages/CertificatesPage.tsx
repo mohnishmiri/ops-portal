@@ -9,7 +9,8 @@
  * - Status badges, role-gated actions
  */
 
-import React, { useMemo, useState, useCallback, useEffect, useRef } from "react";
+import React, { useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import Toast, { type ToastState, type ToastType } from "../components/Toast";
@@ -455,6 +456,132 @@ const TablePagination: React.FC<{ currentPage: number; totalItems: number; onPag
     </div>
   );
 };
+// ── Row Action Menu ───────────────────────────────────────────────────
+
+const MENU_ITEM_BASE = "flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm transition";
+
+const menuItem = {
+  neutral: `${MENU_ITEM_BASE} text-gray-700 hover:bg-att-50`,
+  brand: `${MENU_ITEM_BASE} text-att-700 hover:bg-att-50`,
+  success: `${MENU_ITEM_BASE} text-green-700 hover:bg-green-50`,
+  warning: `${MENU_ITEM_BASE} text-orange-700 hover:bg-orange-50`,
+  danger: `${MENU_ITEM_BASE} text-red-700 hover:bg-red-50`,
+  divider: "my-1 border-t border-att-100",
+};
+
+const ACTION_MENU_WIDTH = 208;
+const ACTION_MENU_GAP = 4;
+const VIEWPORT_MARGIN = 8;
+
+interface MenuPosition {
+  top: number;
+  left: number;
+  maxHeight: number;
+}
+
+/**
+ * Kebab trigger whose menu is rendered in a portal on <body>. The grid shell clips
+ * its children (overflow-hidden + overflow-x-auto), so an absolutely positioned menu
+ * gets cut off on the last rows and on horizontally scrolled tables.
+ */
+const RowActionMenu: React.FC<{ open: boolean; onOpenChange: (open: boolean) => void; label?: string; children: React.ReactNode }> = ({ open, onOpenChange, label = "Certificate actions", children }) => {
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<MenuPosition | null>(null);
+
+  // Anchor the portalled menu to the trigger, flipping above it when the space
+  // below runs out, and re-anchor while the page scrolls or resizes underneath.
+  useLayoutEffect(() => {
+    if (!open) {
+      setPosition(null);
+      return;
+    }
+    const place = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const menuHeight = menuRef.current?.offsetHeight ?? 0;
+      const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_MARGIN;
+      const spaceAbove = rect.top - VIEWPORT_MARGIN;
+      const flipUp = menuHeight > spaceBelow && spaceAbove > spaceBelow;
+      const maxHeight = Math.max(140, flipUp ? spaceAbove : spaceBelow);
+      const next: MenuPosition = {
+        top: flipUp
+          ? Math.max(VIEWPORT_MARGIN, rect.top - Math.min(menuHeight, maxHeight) - ACTION_MENU_GAP)
+          : rect.bottom + ACTION_MENU_GAP,
+        left: Math.min(
+          Math.max(VIEWPORT_MARGIN, rect.right - ACTION_MENU_WIDTH),
+          Math.max(VIEWPORT_MARGIN, window.innerWidth - ACTION_MENU_WIDTH - VIEWPORT_MARGIN),
+        ),
+        maxHeight,
+      };
+      setPosition((prev) =>
+        prev && prev.top === next.top && prev.left === next.left && prev.maxHeight === next.maxHeight ? prev : next,
+      );
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  // Only a click outside the trigger + menu (or Escape) dismisses it.
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      onOpenChange(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      onOpenChange(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onOpenChange]);
+
+  return (
+    <div className="flex items-center justify-center">
+      <button
+        ref={triggerRef}
+        type="button"
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={`rounded-lg p-2 transition hover:bg-gray-100 hover:text-gray-800 ${open ? "bg-gray-100 text-gray-800" : "text-gray-500"}`}
+        onClick={(e) => { e.stopPropagation(); onOpenChange(!open); }}
+      >
+        {Icons.more}
+      </button>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-50 overflow-y-auto rounded-xl border border-att-100 bg-white py-1 text-left shadow-xl"
+          style={{
+            top: position?.top ?? 0,
+            left: position?.left ?? 0,
+            width: ACTION_MENU_WIDTH,
+            maxHeight: position?.maxHeight,
+            visibility: position ? "visible" : "hidden",
+          }}
+        >
+          {children}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+};
+
 // ── Audit History Panel ─────────────────────────────────────────────────
 
 const AUDIT_PAGE_SIZE = 20;
@@ -1048,18 +1175,6 @@ const CertificatesPage: React.FC = () => {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [exporting, setExporting] = useState(false);
   const [openActionMenu, setOpenActionMenu] = useState<number | null>(null);
-  const actionMenuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (openActionMenu === null) return;
-    // Only a click outside the trigger + menu dismisses it.
-    const close = (e: MouseEvent) => {
-      if (actionMenuRef.current?.contains(e.target as Node)) return;
-      setOpenActionMenu(null);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [openActionMenu]);
 
   const showToast = useCallback((message: string, type: ToastType = "success") => setToast({ message, type }), []);
 
@@ -1293,48 +1408,36 @@ const CertificatesPage: React.FC = () => {
                     <td className={gridStyles.cell}><span className="font-mono text-xs" title={cert.thumbprint}>{cert.thumbprint || "—"}</span></td>
                     <td className={gridStyles.cell}><ExpiryBadge not_after={cert.not_after} /></td>
                     <td className={gridStyles.centerCell}>
-                      <div
-                        className="relative flex items-center justify-center"
-                        ref={openActionMenu === cert.id ? actionMenuRef : undefined}
+                      <RowActionMenu
+                        open={openActionMenu === cert.id}
+                        onOpenChange={(next) => setOpenActionMenu(next ? cert.id : null)}
                       >
-                        <button
-                          type="button"
-                          title="Certificate actions"
-                          className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100 hover:text-gray-800"
-                          onClick={(e) => { e.stopPropagation(); setOpenActionMenu(openActionMenu === cert.id ? null : cert.id); }}
-                        >
-                          {Icons.more}
+                        <button type="button" className={menuItem.neutral} onClick={() => { setOpenActionMenu(null); openModal("view", cert); }}>
+                          {Icons.eye} <span>View Certificate</span>
                         </button>
-                        {openActionMenu === cert.id && (
-                          <div className="absolute right-0 top-8 z-30 min-w-[180px] rounded-xl border border-att-100 bg-white py-1 shadow-xl">
-                            <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("view", cert); }}>
-                              {Icons.eye} <span>View Certificate</span>
-                            </button>
-                            <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("download", cert); }}>
-                              {Icons.download} <span>Download</span>
-                            </button>
-                            {canWrite && <>
-                              <div className="my-1 border-t border-att-100" />
-                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-green-700 hover:bg-green-50" onClick={() => { setOpenActionMenu(null); openModal("renew", cert); }}>
-                                {Icons.refresh} <span>Renew Certificate</span>
-                              </button>
-                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-att-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("load_to_akv", cert); }}>
-                                {Icons.keyvault} <span>Load to AKV</span>
-                              </button>
-                              <div className="my-1 border-t border-att-100" />
-                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("metadata", cert); }}>
-                                {Icons.edit} <span>Edit Metadata</span>
-                              </button>
-                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-orange-700 hover:bg-orange-50" onClick={() => { setOpenActionMenu(null); openModal("revoke", cert); }}>
-                                {Icons.slash} <span>Revoke</span>
-                              </button>
-                              <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-red-700 hover:bg-red-50" onClick={() => { setOpenActionMenu(null); openModal("delete", cert); }}>
-                                {Icons.trash} <span>Delete</span>
-                              </button>
-                            </>}
-                          </div>
-                        )}
-                      </div>
+                        <button type="button" className={menuItem.neutral} onClick={() => { setOpenActionMenu(null); openModal("download", cert); }}>
+                          {Icons.download} <span>Download</span>
+                        </button>
+                        {canWrite && <>
+                          <div className={menuItem.divider} />
+                          <button type="button" className={menuItem.success} onClick={() => { setOpenActionMenu(null); openModal("renew", cert); }}>
+                            {Icons.refresh} <span>Renew Certificate</span>
+                          </button>
+                          <button type="button" className={menuItem.brand} onClick={() => { setOpenActionMenu(null); openModal("load_to_akv", cert); }}>
+                            {Icons.keyvault} <span>Load to AKV</span>
+                          </button>
+                          <div className={menuItem.divider} />
+                          <button type="button" className={menuItem.neutral} onClick={() => { setOpenActionMenu(null); openModal("metadata", cert); }}>
+                            {Icons.edit} <span>Edit Metadata</span>
+                          </button>
+                          <button type="button" className={menuItem.warning} onClick={() => { setOpenActionMenu(null); openModal("revoke", cert); }}>
+                            {Icons.slash} <span>Revoke</span>
+                          </button>
+                          <button type="button" className={menuItem.danger} onClick={() => { setOpenActionMenu(null); openModal("delete", cert); }}>
+                            {Icons.trash} <span>Delete</span>
+                          </button>
+                        </>}
+                      </RowActionMenu>
                     </td>
                   </tr>
                 ))

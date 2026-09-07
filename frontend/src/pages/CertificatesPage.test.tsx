@@ -112,6 +112,11 @@ function renderPage() {
   return result;
 }
 
+/** Row actions live behind a kebab menu that is portalled onto <body>. */
+function openRowActions() {
+  fireEvent.click(screen.getByRole("button", { name: /Certificate actions/i }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -154,6 +159,7 @@ describe("CertificatesPage role gating", () => {
     mockList({});
     renderPage();
     expect(screen.getByRole("button", { name: /Enroll Certificate/i })).toBeInTheDocument();
+    openRowActions();
     expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
   });
@@ -163,19 +169,64 @@ describe("CertificatesPage role gating", () => {
     mockList({});
     renderPage();
     expect(screen.queryByRole("button", { name: /Enroll Certificate/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Renew" })).not.toBeInTheDocument();
+    openRowActions();
+    expect(screen.queryByRole("button", { name: /Renew Certificate/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
-    // Read-only users can still view details
-    expect(screen.getByRole("button", { name: "View" })).toBeInTheDocument();
+    // Read-only users can still view details and download
+    expect(screen.getByRole("button", { name: /View Certificate/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download" })).toBeInTheDocument();
   });
 
   it("write (non-admin) user sees certificate lifecycle actions", () => {
     setRole({ isAdmin: false, canEdit: true });
     mockList({});
     renderPage();
-    expect(screen.getByRole("button", { name: "Renew" })).toBeInTheDocument();
+    openRowActions();
+    expect(screen.getByRole("button", { name: /Renew Certificate/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+});
+
+describe("CertificatesPage row action menu", () => {
+  beforeEach(() => {
+    setRole({ isAdmin: true, canEdit: true });
+    mockList({});
+  });
+
+  it("renders the menu outside the clipping grid shell and toggles it", () => {
+    renderPage();
+    const trigger = screen.getByRole("button", { name: /Certificate actions/i });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(trigger);
+    const menuItem = screen.getByRole("button", { name: /View Certificate/i });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    // Portalled to <body>, so the grid's overflow-hidden cannot clip it.
+    expect(menuItem.closest("table")).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("button", { name: /View Certificate/i })).not.toBeInTheDocument();
+  });
+
+  it("closes on outside click and on Escape", () => {
+    renderPage();
+    const trigger = screen.getByRole("button", { name: /Certificate actions/i });
+
+    fireEvent.click(trigger);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("button", { name: /View Certificate/i })).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("button", { name: /View Certificate/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the menu open while the page scrolls", () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Certificate actions/i }));
+    fireEvent.scroll(window);
+    expect(screen.getByRole("button", { name: /View Certificate/i })).toBeInTheDocument();
   });
 });
