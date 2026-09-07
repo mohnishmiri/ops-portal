@@ -15,6 +15,7 @@ vi.mock("../../services/apiClient", () => ({
 
 vi.mock("../../services/certificatesApi", () => ({
   useEnrollCertificate: vi.fn(),
+  useLoadCertificateToAkv: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
   useTemplates: vi.fn(() => ({ data: [] })),
   useAuthorities: vi.fn(() => ({ data: [] })),
   certificateErrorMessage: (err: unknown, fallback = "Operation failed") => {

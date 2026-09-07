@@ -39,6 +39,7 @@ class FakeService:
         self.last_collection_id: int | None = None
         self.last_renew_kwargs: dict | None = None
         self.last_download_kwargs: dict | None = None
+        self.download_calls: list[dict] = []
 
     def _maybe_raise(self):
         if self.error:
@@ -70,6 +71,7 @@ class FakeService:
     async def download_certificate(self, certificate_id, **kwargs):
         self._maybe_raise()
         self.last_download_kwargs = {"certificate_id": certificate_id, **kwargs}
+        self.download_calls.append(self.last_download_kwargs)
         return b"CERTIFICATE"
 
     async def revoke_certificate(self, **kwargs):
@@ -344,6 +346,157 @@ async def test_revoke_success(app, admin_client):
     resp = await admin_client.post("/api/v1/certificates/1/revoke", json={"reason": "keyCompromise", "comment": "leak"})
     assert resp.status_code == 200
     assert resp.json()["revoked"] is True
+
+
+# ── Load to Azure Key Vault ────────────────────────────────────────────
+
+
+class _FakeKeyVaultService:
+    """Captures the arguments the endpoint passes to the AKV import call."""
+
+    imports: list[dict] = []
+    deletes: list[str] = []
+    fail_names: set[str] = set()
+
+    async def import_certificate(self, vault_uri, name, cert_bytes, *, password=None, **kwargs):
+        if name in type(self).fail_names:
+            raise RuntimeError(f"boom for {name}")
+        type(self).imports.append(
+            {
+                "vault_uri": vault_uri,
+                "name": name,
+                "cert_bytes": cert_bytes,
+                "password": password,
+            }
+        )
+        return {"id": f"https://kv.vault.azure.net/certificates/{name}/1", "attributes": {"enabled": True}}
+
+    async def delete_certificate(self, vault_uri, name):
+        type(self).deletes.append(name)
+        return {"deleted": True}
+
+
+@pytest.fixture
+def fake_keyvault(monkeypatch):
+    _FakeKeyVaultService.imports = []
+    _FakeKeyVaultService.deletes = []
+    _FakeKeyVaultService.fail_names = set()
+    monkeypatch.setattr("app.services.keyvault_service.KeyVaultService", _FakeKeyVaultService)
+    return _FakeKeyVaultService
+
+
+_AKV_TARGET = {
+    "subscription_id": "sub-1",
+    "resource_group": "rg-1",
+    "vault_name": "my-vault",
+    "certificate_names": ["a-example-com"],
+}
+
+
+async def test_load_to_akv_exports_pfx_when_no_data_supplied(app, admin_client, fake_keyvault):
+    # AKV needs the private key, so omitting certificate_data must make the
+    # portal export the PFX from Keyfactor instead of demanding a paste.
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "collection_id": 31599},
+    )
+    assert resp.status_code == 200
+    assert svc.last_download_kwargs is not None
+    assert svc.last_download_kwargs["file_format"] == "PFX"
+    assert svc.last_download_kwargs["collection_id"] == 31599
+    # The generated one-time password must protect the exported PFX on import.
+    generated = svc.last_download_kwargs["pfx_password"]
+    assert generated
+    assert fake_keyvault.imports[0]["cert_bytes"] == b"CERTIFICATE"
+    assert fake_keyvault.imports[0]["password"] == generated
+    # Importing must never remove an existing AKV certificate — Key Vault versions it.
+    assert fake_keyvault.deletes == []
+
+
+async def test_load_to_akv_fans_out_to_every_named_entry(app, admin_client, fake_keyvault):
+    # A multi-SAN certificate is stored under one AKV name per SAN, and the PFX can
+    # only be exported once, so every entry must be imported from that one export.
+    svc = FakeService()
+    _use_service(app, svc)
+    names = ["attccguiperf-test-att-com", "attccelk-test-att-com", "attccgrafana-test-att-com"]
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "certificate_names": names},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert [c["certificate_name"] for c in body["certificates"]] == names
+    # One Keyfactor export shared by every import.
+    assert len(svc.download_calls) == 1
+    assert [i["name"] for i in fake_keyvault.imports] == names
+    assert {i["password"] for i in fake_keyvault.imports} == {svc.last_download_kwargs["pfx_password"]}
+
+
+async def test_load_to_akv_reports_partial_failures(app, admin_client, fake_keyvault):
+    _use_service(app, FakeService())
+    fake_keyvault.fail_names = {"b-name"}
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "certificate_names": ["a-name", "b-name"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "partial"
+    assert [c["certificate_name"] for c in body["certificates"]] == ["a-name"]
+    assert body["failed"][0]["certificate_name"] == "b-name"
+
+
+async def test_load_to_akv_rejects_invalid_entry_name(app, admin_client, fake_keyvault):
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "certificate_names": ["bad name!"]},
+    )
+    assert resp.status_code == 422
+    assert fake_keyvault.imports == []
+
+
+async def test_load_to_akv_uses_supplied_certificate_data(app, admin_client, fake_keyvault):
+    import base64
+
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={
+            **_AKV_TARGET,
+            "certificate_data": base64.b64encode(b"RENEWED-PFX").decode(),
+            "certificate_password": "renewal-password",
+        },
+    )
+    assert resp.status_code == 200
+    assert svc.last_download_kwargs is None  # no Keyfactor export needed
+    assert fake_keyvault.imports[0]["cert_bytes"] == b"RENEWED-PFX"
+    assert fake_keyvault.imports[0]["password"] == "renewal-password"
+
+
+async def test_load_to_akv_without_private_key_is_actionable(app, admin_client, fake_keyvault):
+    # No exportable private key → tell the user to generate a new PFX certificate.
+    _use_service(app, FakeService(error=CertificateServiceError("Private key is not available.", status_code=400)))
+    resp = await admin_client.post("/api/v1/certificates/1/load-to-akv", json=_AKV_TARGET)
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "private key" in detail
+    assert "generate a new certificate with pfx" in detail.lower()
+    assert fake_keyvault.imports == []
+
+
+async def test_load_to_akv_rejects_invalid_base64(app, admin_client, fake_keyvault):
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/load-to-akv",
+        json={**_AKV_TARGET, "certificate_data": "not base64!!"},
+    )
+    assert resp.status_code == 422
+    assert fake_keyvault.imports == []
 
 
 async def test_revoke_invalid_reason_returns_422(app, admin_client):

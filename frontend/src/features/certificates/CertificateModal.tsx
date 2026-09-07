@@ -62,7 +62,6 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
       className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-all duration-200 ${
         visible ? "bg-slate-900/50 backdrop-blur-sm" : "bg-transparent"
       }`}
-      onMouseDown={onClose}
     >
       <div
         role="dialog"
@@ -71,7 +70,6 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
         className={`w-full ${widthClassName} transform overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5 transition-all duration-200 ${
           visible ? "scale-100 opacity-100 translate-y-0" : "scale-95 opacity-0 translate-y-4"
         }`}
-        onMouseDown={(e) => e.stopPropagation()}
       >
         {/* Gradient accent bar */}
         <div className={`h-1 bg-gradient-to-r ${variantAccent[variant]}`} />

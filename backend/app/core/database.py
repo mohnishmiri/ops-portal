@@ -208,6 +208,14 @@ async def create_tables() -> None:
                     """
                 )
             )
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS cert_certificates
+                    ADD COLUMN IF NOT EXISTS has_private_key BOOLEAN DEFAULT FALSE
+                    """
+                )
+            )
             # Create teams table if it doesn't exist
             await conn.execute(
                 text(

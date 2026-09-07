@@ -199,15 +199,18 @@ async def test_get_certificate_sends_collection_context_for_renewal():
     }
 
 
-async def test_pfx_renew_requests_replacement_in_existing_locations():
+async def test_pfx_renew_sends_no_replace_directive():
+    # Renewal must act only on RenewalCertificateId. X-CertificateFormat selects the
+    # response format in Keyfactor, so sending "REPLACE" never meant "replace in
+    # existing locations" — it must not be sent at all.
     FakeAsyncClient.responses = [
         FakeResponse(200, {"access_token": "tok", "expires_in": 3600}),
         FakeResponse(200, {"CertificateInformation": {"Thumbprint": "NEW"}}),
     ]
     client = KeyfactorClient(token_provider=KeyfactorTokenProvider())
-    await client.enroll_pfx({"RenewalCertificateId": 1}, replace_existing=True)
+    await client.enroll_pfx({"RenewalCertificateId": 1})
     pfx_calls = [c for c in FakeAsyncClient.calls if "/Enrollment/PFX" in c[1]]
-    assert pfx_calls[-1][4]["X-CertificateFormat"] == "REPLACE"
+    assert "X-CertificateFormat" not in pfx_calls[-1][4]
 
 
 async def test_revoke_sends_collection_id_query_param():

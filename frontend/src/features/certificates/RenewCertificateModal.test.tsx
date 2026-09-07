@@ -4,6 +4,7 @@ import React from "react";
 
 vi.mock("../../services/certificatesApi", () => ({
   useRenewCertificate: vi.fn(),
+  useLoadCertificateToAkv: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
   certificateErrorMessage: (_err: unknown, fallback = "Operation failed") => fallback,
 }));
 

@@ -842,17 +842,25 @@ export interface AkvUploadRequest {
   subscription_id: string;
   resource_group: string;
   vault_name: string;
-  certificate_name: string;
-  certificate_data: string;   // base64-encoded PFX or PEM
+  /** One entry per AKV name holding this certificate (multi-SAN certs use several). */
+  certificate_names: string[];
+  /** Omit to have the backend export the certificate's PFX from Keyfactor. */
+  certificate_data?: string;
   certificate_password?: string;
+  collection_id?: number;
+}
+
+export interface AkvUploadedCertificate {
+  certificate_name: string;
+  akv_id: string;
+  enabled: boolean;
 }
 
 export interface AkvUploadResult {
   status: string;
   vault_name: string;
-  certificate_name: string;
-  akv_id: string;
-  enabled: boolean;
+  certificates: AkvUploadedCertificate[];
+  failed: { certificate_name: string; error: string }[];
 }
 
 export const loadCertificateToAkv = async (

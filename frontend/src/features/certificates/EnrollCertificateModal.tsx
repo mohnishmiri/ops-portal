@@ -17,10 +17,12 @@ import {
   EnrollmentType,
   certificateErrorMessage,
   useEnrollCertificate,
+  useLoadCertificateToAkv,
   useTemplates,
   useAuthorities,
 } from "../../services/certificatesApi";
 import { CertificateModal, fieldInput, fieldLabel, modalButton } from "./CertificateModal";
+import { AkvTarget, AkvTargetPicker, isAkvTargetComplete } from "./AkvTargetPicker";
 
 interface EnrollCertificateModalProps {
   defaultCa?: string;
@@ -86,6 +88,14 @@ export const EnrollCertificateModal: React.FC<EnrollCertificateModalProps> = ({
 
   const [csr, setCsr] = useState("");
   const [result, setResult] = useState<EnrollResult | null>(null);
+  const loadToAkv = useLoadCertificateToAkv();
+  const [akvTarget, setAkvTarget] = useState<AkvTarget>({
+    subscriptionId: "",
+    resourceGroup: "",
+    vaultName: "",
+    certificateNames: [],
+  });
+  const [akvLoaded, setAkvLoaded] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const validate = (): boolean => {
@@ -178,6 +188,27 @@ export const EnrollCertificateModal: React.FC<EnrollCertificateModalProps> = ({
   const addSan = () => { if (!newSanValue.trim()) return; setSans((p) => [...p, { type: newSanType, value: newSanValue.trim() }]); setNewSanValue(""); };
   const removeSan = (idx: number) => setSans((p) => p.filter((_, i) => i !== idx));
 
+  const handleLoadToAkv = async () => {
+    if (!result?.pfx_base64 || !isAkvTargetComplete(akvTarget)) return;
+    try {
+      await loadToAkv.mutateAsync({
+        id: result.certificate_id ?? 0,
+        data: {
+          subscription_id: akvTarget.subscriptionId.trim(),
+          resource_group: akvTarget.resourceGroup.trim(),
+          vault_name: akvTarget.vaultName.trim(),
+          certificate_names: akvTarget.certificateNames.map((n) => n.trim()),
+          certificate_data: result.pfx_base64,
+          ...(password ? { certificate_password: password } : {}),
+        },
+      });
+      setAkvLoaded(true);
+      onSuccess(`Certificate loaded to AKV: ${akvTarget.vaultName}`);
+    } catch (err) {
+      onError(certificateErrorMessage(err, "Failed to load certificate into Azure Key Vault"));
+    }
+  };
+
   if (result) {
     return (
       <CertificateModal title="Enrollment Complete" onClose={onClose} footer={<button type="button" className={modalButton.secondary} onClick={onClose}>Close</button>}>
@@ -189,6 +220,32 @@ export const EnrollCertificateModal: React.FC<EnrollCertificateModalProps> = ({
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
               <p className="text-xs text-amber-800">The PFX contains the private key — download and store securely. It is never retained by the portal.</p>
               <button type="button" className={`${modalButton.primary} mt-2`} onClick={downloadPfx}>Download PFX</button>
+            </div>
+          )}
+          {result.pfx_base64 && (
+            <div className="space-y-3 rounded-xl border border-att-100 bg-att-50/30 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-att-600">
+                Load to Azure Key Vault (optional)
+              </p>
+              {akvLoaded ? (
+                <p className="text-sm text-green-700">Certificate loaded into Azure Key Vault.</p>
+              ) : (
+                <>
+                  <p className="text-xs text-gray-500">
+                    This is the only moment the private key is available, so load it now if it is
+                    destined for a vault.
+                  </p>
+                  <AkvTargetPicker commonName={commonName} onChange={setAkvTarget} />
+                  <button
+                    type="button"
+                    className={modalButton.primary + " w-full"}
+                    disabled={loadToAkv.isPending || !isAkvTargetComplete(akvTarget)}
+                    onClick={handleLoadToAkv}
+                  >
+                    {loadToAkv.isPending ? "Loading to AKV…" : "Load to Azure Key Vault"}
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

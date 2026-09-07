@@ -321,9 +321,8 @@ class KeyfactorClient:
         resp = await self._request("POST", "/Enrollment/CSR", json_body=payload)
         return resp.json()
 
-    async def enroll_pfx(self, payload: dict[str, Any], *, replace_existing: bool = False) -> dict[str, Any]:
-        extra_headers = {"X-CertificateFormat": "REPLACE"} if replace_existing else None
-        resp = await self._request("POST", "/Enrollment/PFX", json_body=payload, extra_headers=extra_headers)
+    async def enroll_pfx(self, payload: dict[str, Any]) -> dict[str, Any]:
+        resp = await self._request("POST", "/Enrollment/PFX", json_body=payload)
         return resp.json()
 
     async def renew_certificate(self, payload: dict[str, Any], *, collection_id: int | None = None) -> dict[str, Any]:

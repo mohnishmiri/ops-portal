@@ -200,26 +200,46 @@ class LoadToAkvRequest(BaseModel):
     subscription_id: str = Field(..., min_length=1, description="Azure Subscription ID")
     resource_group: str = Field(..., min_length=1, description="Resource group containing the Key Vault")
     vault_name: str = Field(..., min_length=1, description="Key Vault name")
-    certificate_name: str = Field(
+    certificate_names: list[str] = Field(
         ...,
         min_length=1,
-        max_length=127,
-        description="Certificate name in Key Vault (alphanumeric and hyphens)",
+        description=(
+            "Key Vault certificate names to import into. A multi-SAN certificate is often stored "
+            "under one name per SAN, and the PFX exists only once, so every target is imported "
+            "from the same key material in a single call."
+        ),
     )
-    certificate_data: str = Field(..., description="Base64-encoded PFX or PEM certificate data")
+    certificate_data: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded PFX or PEM certificate data. Omit it to have the portal export the "
+            "certificate's PFX (certificate + private key) from Keyfactor."
+        ),
+    )
     certificate_password: str | None = Field(
         default=None,
         description="Password for PFX data; never logged",
     )
+    collection_id: int | None = Field(
+        default=None,
+        description="Collection context used when exporting the PFX from Keyfactor",
+    )
 
-    @field_validator("certificate_name")
+    @field_validator("certificate_names")
     @classmethod
-    def _valid_cert_name(cls, v: str) -> str:
+    def _valid_cert_names(cls, v: list[str]) -> list[str]:
         import re
 
-        if not re.match(r"^[a-zA-Z0-9-]+$", v):
-            raise ValueError("certificate_name must contain only alphanumeric characters and hyphens")
-        return v
+        cleaned: list[str] = []
+        for name in v:
+            name = name.strip()
+            if not (1 <= len(name) <= 127) or not re.match(r"^[a-zA-Z0-9-]+$", name):
+                raise ValueError("certificate names must be 1-127 alphanumeric characters or hyphens")
+            if name not in cleaned:
+                cleaned.append(name)
+        if not cleaned:
+            raise ValueError("at least one certificate name is required")
+        return cleaned
 
 
 class RevokeRequest(BaseModel):
@@ -1303,59 +1323,101 @@ async def load_certificate_to_akv(
     payload: LoadToAkvRequest,
     request: Request,
     user: UserContext = Depends(require_role(UserRole.WRITE)),
+    service: CertificateService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Import a certificate into Azure Key Vault.
 
-    The caller must supply the base64-encoded certificate data (PFX or PEM)
-    and target Key Vault coordinates. Private key material and passwords are
-    never written to logs or the audit record.
+    Azure Key Vault only accepts a certificate that carries its private key, so
+    when the caller omits ``certificate_data`` the portal exports the
+    certificate's PFX from Keyfactor under a single-use password. Private key
+    material and passwords are never written to logs or the audit record.
     """
     import base64
+    import secrets
 
     from app.services.keyvault_service import KeyVaultService
 
-    # Decode the certificate data (may be PFX or PEM).
-    try:
-        cert_bytes = base64.b64decode(payload.certificate_data)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="certificate_data must be valid base64-encoded certificate content.",
-        )
+    import_password = payload.certificate_password
+    if payload.certificate_data:
+        # Decode the caller-supplied certificate data (may be PFX or PEM).
+        try:
+            cert_bytes = base64.b64decode(payload.certificate_data)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="certificate_data must be valid base64-encoded certificate content.",
+            )
+    else:
+        # The one-time password only protects the PFX in transit to Key Vault.
+        import_password = secrets.token_urlsafe(24)
+        try:
+            cert_bytes = await service.download_certificate(
+                certificate_id,
+                file_format="PFX",
+                include_chain=False,
+                collection_id=payload.collection_id,
+                pfx_password=import_password,
+            )
+        except CertificateServiceError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Could not export this certificate's private key from Keyfactor "
+                    f"({exc.message}). Keyfactor returns the PFX only at the moment of issuance "
+                    "unless key archival is enabled on the template, so renewing an existing "
+                    "certificate does not make its key exportable afterwards. Azure Key Vault "
+                    "requires a certificate with its private key, so generate a new certificate "
+                    "with PFX and load that."
+                ),
+            )
 
     kv_service = KeyVaultService()
     vault_url = f"https://{payload.vault_name}.vault.azure.net"
 
-    try:
-        result = await kv_service.import_certificate(
-            vault_url=vault_url,
-            name=payload.certificate_name,
-            certificate_bytes=cert_bytes,
-            password=payload.certificate_password,
+    # One export, many targets: the PFX cannot be re-fetched for a second attempt.
+    imported: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for cert_name in payload.certificate_names:
+        try:
+            result = await kv_service.import_certificate(
+                vault_url,
+                cert_name,
+                cert_bytes,
+                password=import_password,
+            )
+        except Exception as exc:
+            failures.append({"certificate_name": cert_name, "error": str(exc)[:300]})
+            continue
+        imported.append(
+            {
+                "certificate_name": cert_name,
+                "akv_id": result.get("id", ""),
+                "enabled": result.get("attributes", {}).get("enabled", True),
+            }
         )
-    except Exception as exc:
-        err_msg = str(exc)[:500]
-        # Audit the failure (no secrets in details)
+
+    names_text = ", ".join(payload.certificate_names)
+    if not imported:
         await _write_audit(
             db,
             request=request,
             user=user,
             action="load_certificate_to_akv",
             resource_id=str(certificate_id),
-            summary=f"Failed to load certificate {certificate_id} to AKV {payload.vault_name}/{payload.certificate_name}",
+            summary=f"Failed to load certificate {certificate_id} to AKV {payload.vault_name}/{names_text}",
             outcome="failed",
             details={
                 "vault_name": payload.vault_name,
-                "certificate_name": payload.certificate_name,
+                "certificate_names": payload.certificate_names,
                 "subscription_id": payload.subscription_id,
                 "resource_group": payload.resource_group,
-                "error": err_msg,
+                "errors": failures,
             },
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to load certificate into Azure Key Vault: {err_msg}",
+            detail=f"Failed to load certificate into Azure Key Vault: {failures[0]['error']}",
         )
 
     await _write_audit(
@@ -1364,21 +1426,24 @@ async def load_certificate_to_akv(
         user=user,
         action="load_certificate_to_akv",
         resource_id=str(certificate_id),
-        summary=f"Loaded certificate {certificate_id} to AKV {payload.vault_name}/{payload.certificate_name}",
-        outcome="success",
+        summary=(
+            f"Loaded certificate {certificate_id} to AKV {payload.vault_name}/"
+            f"{', '.join(i['certificate_name'] for i in imported)}"
+        ),
+        outcome="partial" if failures else "success",
         details={
             "vault_name": payload.vault_name,
-            "certificate_name": payload.certificate_name,
+            "certificate_names": [i["certificate_name"] for i in imported],
             "subscription_id": payload.subscription_id,
             "resource_group": payload.resource_group,
+            **({"errors": failures} if failures else {}),
         },
         # Never log certificate_data or certificate_password
     )
 
     return {
-        "status": "success",
+        "status": "partial" if failures else "success",
         "vault_name": payload.vault_name,
-        "certificate_name": payload.certificate_name,
-        "akv_id": result.get("id", ""),
-        "enabled": result.get("attributes", {}).get("enabled", True),
+        "certificates": imported,
+        "failed": failures,
     }

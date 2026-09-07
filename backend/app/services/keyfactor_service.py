@@ -316,7 +316,9 @@ class CertificateService:
             preserve_owner(pfx_payload)
             preserve_metadata(pfx_payload)
             preserve_subject(pfx_payload)
-            result = await self._guard(self._client.enroll_pfx(pfx_payload, replace_existing=True))
+            # Renewal is scoped to RenewalCertificateId alone: no directive is sent
+            # that would replace this certificate across its existing locations.
+            result = await self._guard(self._client.enroll_pfx(pfx_payload))
             return self._shape_enrollment(result, pfx=True)
 
         if mode == "csr":

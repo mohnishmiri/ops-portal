@@ -48,8 +48,8 @@ class FakeClient:
         self.calls.append(("enroll_csr", payload))
         return {"CertificateInformation": {"Thumbprint": "ABC", "SerialNumber": "01"}}
 
-    async def enroll_pfx(self, payload, *, replace_existing=False):
-        self.calls.append(("enroll_pfx", payload, replace_existing))
+    async def enroll_pfx(self, payload):
+        self.calls.append(("enroll_pfx", payload))
         return {"CertificateInformation": {"Thumbprint": "DEF", "Pkcs12Blob": "BLOB"}}
 
     async def renew_certificate(self, payload, *, collection_id=None):
@@ -165,7 +165,7 @@ async def test_renew_passes_collection_id_to_client():
     assert client.calls[-1][2] == 42
 
 
-async def test_pfx_renew_replaces_certificate_in_existing_locations():
+async def test_pfx_renew_targets_only_the_selected_certificate():
     client = FakeClient()
     svc = CertificateService(client=client)
     await svc.renew_certificate(
@@ -203,9 +203,38 @@ async def test_pfx_renew_replaces_certificate_in_existing_locations():
             "Subject": "CN=a.example.com,O=AT&T Services, Inc.,L=Dallas,ST=Texas,C=US",
             "PopulateMissingValuesFromAD": False,
         },
-        True,
     )
     assert client.calls[-2] == ("get", 7, 42)
+
+
+async def test_renew_runs_only_the_selected_mode():
+    # One-click renewal must not also trigger PFX/CSR enrollment, and must target
+    # just the chosen certificate id.
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="one_click",
+        certificate_authority=None,
+        template=None,
+        collection_id=42,
+    )
+    assert [c[0] for c in client.calls] == ["renew"]
+    assert client.calls[-1][1]["CertificateId"] == 7
+
+
+async def test_csr_renew_runs_only_the_selected_mode():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="csr",
+        certificate_authority="ca",
+        template="template",
+        csr="-----BEGIN CERTIFICATE REQUEST-----",
+    )
+    assert [c[0] for c in client.calls] == ["get", "enroll_csr"]
+    assert client.calls[-1][1]["RenewalCertificateId"] == 7
 
 
 async def test_pfx_renew_preserves_source_subject_dn():
@@ -320,7 +349,13 @@ async def test_download_passes_collection_id_to_client():
     assert client.calls[-1] == (
         "download",
         1,
-        {"file_format": "PEM", "include_chain": True, "chain_order": "EndEntityFirst", "collection_id": 42},
+        {
+            "file_format": "PEM",
+            "include_chain": True,
+            "chain_order": "EndEntityFirst",
+            "collection_id": 42,
+            "pfx_password": None,
+        },
     )
 
 

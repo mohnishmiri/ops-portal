@@ -3,29 +3,46 @@
  *
  * Cascade dropdowns: Subscription → Resource Group → Key Vault
  * Data is served from the existing /keyvault/vaults endpoint (DB-cached).
- * Security: certificate_password is never logged or stored.
+ *
+ * AKV only accepts a certificate that carries its private key, so the portal
+ * sources the key material itself: it exports the existing PFX from Keyfactor,
+ * or generates a new PFX certificate when the current one has no private key.
+ * Security: PFX passwords are single-use and never logged or stored.
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState } from "react";
 import {
   Certificate,
   AkvUploadRequest,
   AkvUploadResult,
   certificateErrorMessage,
   useLoadCertificateToAkv,
+  useRenewCertificate,
 } from "../../services/certificatesApi";
-import { CertificateModal, fieldInput, fieldLabel, modalButton } from "./CertificateModal";
-import { useSubscriptionScope } from "../../contexts/SubscriptionContext";
-import { useKeyVaults } from "../../services/costApi";
+import { CertificateModal, modalButton } from "./CertificateModal";
+import { AkvTarget, AkvTargetPicker, isAkvTargetComplete } from "./AkvTargetPicker";
 
 interface LoadToAkvModalProps {
   certificate: Certificate;
   /** Pre-filled base64 certificate data (e.g. from a renewal PFX). */
   certificateData?: string;
+  /** Collection context used when exporting the PFX from Keyfactor. */
+  collectionId?: number;
   onClose: () => void;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 }
+
+type CertificateSource = "existing" | "generate";
+
+const RSA_KEY_SIZES = [2048, 3072, 4096, 8192];
+
+/** Single-use password protecting the PFX only in transit to Key Vault. */
+const generatePfxPassword = (): string => {
+  const bytes = new Uint8Array(24);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+};
 
 const AkvIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -37,124 +54,88 @@ const AkvIcon = (
 export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
   certificate,
   certificateData = "",
+  collectionId,
   onClose,
   onSuccess,
   onError,
 }) => {
   const load = useLoadCertificateToAkv();
-  const { effectiveSubscriptionIds, availableSubscriptions } = useSubscriptionScope();
-  const { data: allVaults = [], isLoading: vaultsLoading } = useKeyVaults();
+  const renew = useRenewCertificate();
 
-  // Cascade selection state
-  const [selectedSubId, setSelectedSubId] = useState("");
-  const [selectedRg, setSelectedRg] = useState("");
-  const [selectedVaultName, setSelectedVaultName] = useState("");
-
-  // Form fields (auto-populated from cascade selection)
-  const [subscriptionId, setSubscriptionId] = useState("");
-  const [resourceGroup, setResourceGroup] = useState("");
-  const [vaultName, setVaultName] = useState("");
-  const [certName, setCertName] = useState(
-    (certificate.common_name || "").replace(/[^a-zA-Z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 127)
-  );
-  const [certData, setCertData] = useState(certificateData);
-  const [certPassword, setCertPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [target, setTarget] = useState<AkvTarget>({
+    subscriptionId: "",
+    resourceGroup: "",
+    vaultName: "",
+    certificateNames: [],
+  });
   const [result, setResult] = useState<AkvUploadResult | null>(null);
 
-  // Filter vaults to effective subscription scope
-  const scopedVaults = useMemo(() => {
-    if (!effectiveSubscriptionIds.length) return allVaults;
-    return allVaults.filter((v) => effectiveSubscriptionIds.includes(v.subscription_id));
-  }, [allVaults, effectiveSubscriptionIds]);
+  // Certificate (private key) source
+  const preSuppliedData = certificateData.trim();
+  // Only Keyfactor's positive "HasPrivateKey" makes a PFX export possible; unknown
+  // (never-synced) must not offer an export that Keyfactor will refuse.
+  const hasPrivateKey = certificate.has_private_key === true;
+  const [source, setSource] = useState<CertificateSource>(hasPrivateKey ? "existing" : "generate");
+  const [generated, setGenerated] = useState<{ data: string; password: string; certificateId?: number } | null>(null);
 
-  // Unique subscriptions from scoped vaults (enriched with name from SubscriptionContext)
-  const uniqueSubscriptions = useMemo(() => {
-    const seen = new Set<string>();
-    const subs: { id: string; name: string }[] = [];
-    for (const v of scopedVaults) {
-      if (v.subscription_id && !seen.has(v.subscription_id)) {
-        seen.add(v.subscription_id);
-        const found = availableSubscriptions.find((s) => s.subscription_id === v.subscription_id);
-        subs.push({ id: v.subscription_id, name: found?.subscription_name || v.subscription_id });
+  // "existing" needs no local data: the backend exports the PFX from Keyfactor.
+  const sourceReady = Boolean(preSuppliedData) || source === "existing" || generated !== null;
+  const isValid = isAkvTargetComplete(target) && sourceReady;
+
+  const handleGenerate = async () => {
+    const password = generatePfxPassword();
+    try {
+      const res = await renew.mutateAsync({
+        id: certificate.id,
+        data: {
+          mode: "pfx",
+          certificate_authority: certificate.certificate_authority || undefined,
+          template: certificate.template || undefined,
+          collection_id: collectionId,
+          password,
+          // Keyfactor reports KeyType as a numeric enum, which it rejects on enrollment.
+          key_type: "RSA",
+          key_length: RSA_KEY_SIZES.includes(certificate.key_size) ? certificate.key_size : 4096,
+        },
+      });
+      if (!res.pfx_base64) {
+        onError("The new certificate was issued without PFX data. Try the Renew flow instead.");
+        return;
       }
+      setGenerated({ data: res.pfx_base64, password, certificateId: res.certificate_id });
+      onSuccess("New certificate with private key generated.");
+    } catch (err) {
+      onError(certificateErrorMessage(err, "Failed to generate a new certificate with PFX"));
     }
-    return subs.sort((a, b) => a.name.localeCompare(b.name));
-  }, [scopedVaults, availableSubscriptions]);
-
-  // Unique RGs for selected subscription
-  const filteredRgs = useMemo(() => {
-    if (!selectedSubId) return [];
-    const seen = new Set<string>();
-    const rgs: string[] = [];
-    for (const v of scopedVaults) {
-      if (v.subscription_id === selectedSubId && v.resource_group && !seen.has(v.resource_group)) {
-        seen.add(v.resource_group);
-        rgs.push(v.resource_group);
-      }
-    }
-    return rgs.sort();
-  }, [scopedVaults, selectedSubId]);
-
-  // Vaults for selected subscription + RG
-  const filteredVaults = useMemo(() => {
-    if (!selectedSubId || !selectedRg) return [];
-    return scopedVaults
-      .filter((v) => v.subscription_id === selectedSubId && v.resource_group === selectedRg)
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [scopedVaults, selectedSubId, selectedRg]);
-
-  // Cascade handlers
-  const handleSubChange = (subId: string) => {
-    setSelectedSubId(subId);
-    setSelectedRg("");
-    setSelectedVaultName("");
-    setSubscriptionId(subId);
-    setResourceGroup("");
-    setVaultName("");
   };
-
-  const handleRgChange = (rg: string) => {
-    setSelectedRg(rg);
-    setSelectedVaultName("");
-    setResourceGroup(rg);
-    setVaultName("");
-  };
-
-  const handleVaultChange = (vName: string) => {
-    setSelectedVaultName(vName);
-    setVaultName(vName);
-  };
-
-  const certNameValid = !certName || /^[a-zA-Z0-9-]+$/.test(certName.trim());
-  const isValid =
-    subscriptionId.trim() &&
-    resourceGroup.trim() &&
-    vaultName.trim() &&
-    certName.trim() &&
-    certNameValid &&
-    certData.trim();
 
   const handleSubmit = async () => {
     if (!isValid) return;
+    const localData = preSuppliedData || generated?.data || "";
+    const localPassword = preSuppliedData ? "" : generated?.password || "";
     try {
       const uploadRequest: AkvUploadRequest = {
-        subscription_id: subscriptionId.trim(),
-        resource_group: resourceGroup.trim(),
-        vault_name: vaultName.trim(),
-        certificate_name: certName.trim(),
-        certificate_data: certData.trim(),
-        ...(certPassword ? { certificate_password: certPassword } : {}),
+        subscription_id: target.subscriptionId.trim(),
+        resource_group: target.resourceGroup.trim(),
+        vault_name: target.vaultName.trim(),
+        certificate_names: target.certificateNames.map((n) => n.trim()),
+        ...(localData ? { certificate_data: localData } : {}),
+        ...(localPassword ? { certificate_password: localPassword } : {}),
+        ...(collectionId ? { collection_id: collectionId } : {}),
       };
-      const res = await load.mutateAsync({ id: certificate.id, data: uploadRequest });
+      const res = await load.mutateAsync({ id: generated?.certificateId ?? certificate.id, data: uploadRequest });
       setResult(res);
-      onSuccess(`Certificate loaded to AKV: ${vaultName.trim()}/${certName.trim()}`);
+      onSuccess(
+        `Certificate loaded to AKV: ${target.vaultName.trim()} (${res.certificates.length} entr${
+          res.certificates.length === 1 ? "y" : "ies"
+        })`
+      );
     } catch (err) {
+      // 409 = Keyfactor holds no exportable key, so only a freshly issued PFX can work.
+      if ((err as { response?: { status?: number } })?.response?.status === 409) setSource("generate");
       onError(certificateErrorMessage(err, "Failed to load certificate into Azure Key Vault"));
     }
   };
-
-  // Success view
   if (result) {
     return (
       <CertificateModal
@@ -171,15 +152,33 @@ export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
             </div>
             <div>
               <p className="font-semibold text-green-900">Certificate Successfully Loaded</p>
-              <p className="text-sm text-green-700">The certificate was imported into Azure Key Vault.</p>
+              <p className="text-sm text-green-700">
+                Imported into {result.certificates.length} Key Vault entr
+                {result.certificates.length === 1 ? "y" : "ies"}.
+              </p>
             </div>
           </div>
-          <dl className="grid grid-cols-2 gap-3 rounded-xl border border-att-100 bg-att-50/30 p-4 text-sm">
+          <dl className="grid grid-cols-1 gap-3 rounded-xl border border-att-100 bg-att-50/30 p-4 text-sm">
             <div><dt className="text-xs font-semibold uppercase text-gray-400">Key Vault</dt><dd className="font-mono text-gray-800">{result.vault_name}</dd></div>
-            <div><dt className="text-xs font-semibold uppercase text-gray-400">Certificate Name</dt><dd className="font-mono text-gray-800">{result.certificate_name}</dd></div>
-            <div><dt className="text-xs font-semibold uppercase text-gray-400">Status</dt><dd><span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">Active</span></dd></div>
-            {result.akv_id && <div className="col-span-2"><dt className="text-xs font-semibold uppercase text-gray-400">AKV Resource ID</dt><dd className="break-all font-mono text-xs text-gray-600">{result.akv_id}</dd></div>}
+            <div>
+              <dt className="text-xs font-semibold uppercase text-gray-400">Certificates</dt>
+              <dd className="space-y-1">
+                {result.certificates.map((c) => (
+                  <p key={c.certificate_name} className="font-mono text-gray-800">{c.certificate_name}</p>
+                ))}
+              </dd>
+            </div>
           </dl>
+          {result.failed.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm">
+              <p className="font-semibold text-amber-900">Some entries were not updated</p>
+              {result.failed.map((f) => (
+                <p key={f.certificate_name} className="mt-1 text-xs text-amber-800">
+                  <span className="font-mono">{f.certificate_name}</span>: {f.error}
+                </p>
+              ))}
+            </div>
+          )}
         </div>
       </CertificateModal>
     );
@@ -215,170 +214,104 @@ export const LoadToAkvModal: React.FC<LoadToAkvModalProps> = ({
           )}
         </div>
 
-        {/* Cascade: Subscription → RG → Vault */}
-        <div className="space-y-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Target Azure Key Vault</p>
+        <AkvTargetPicker
+          commonName={certificate.common_name}
+          sans={certificate.sans}
+          thumbprint={certificate.thumbprint}
+          onChange={setTarget}
+        />
 
-          {vaultsLoading ? (
-            <p className="text-sm text-gray-400">Loading available Key Vaults…</p>
-          ) : scopedVaults.length === 0 ? (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
-              No Key Vaults found in your subscription scope. Enter the details manually below.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              {/* Subscription */}
-              <div>
-                <label className={fieldLabel} htmlFor="akv-sub-dd">Subscription</label>
-                <select
-                  id="akv-sub-dd"
-                  className={fieldInput}
-                  value={selectedSubId}
-                  onChange={(e) => handleSubChange(e.target.value)}
-                >
-                  <option value="">Select subscription…</option>
-                  {uniqueSubscriptions.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Resource Group */}
-              <div>
-                <label className={fieldLabel} htmlFor="akv-rg-dd">Resource Group</label>
-                <select
-                  id="akv-rg-dd"
-                  className={fieldInput}
-                  value={selectedRg}
-                  onChange={(e) => handleRgChange(e.target.value)}
-                  disabled={!selectedSubId}
-                >
-                  <option value="">{selectedSubId ? "Select resource group…" : "Select subscription first"}</option>
-                  {filteredRgs.map((rg) => (
-                    <option key={rg} value={rg}>{rg}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Key Vault */}
-              <div>
-                <label className={fieldLabel} htmlFor="akv-vault-dd">Key Vault</label>
-                <select
-                  id="akv-vault-dd"
-                  className={fieldInput}
-                  value={selectedVaultName}
-                  onChange={(e) => handleVaultChange(e.target.value)}
-                  disabled={!selectedRg}
-                >
-                  <option value="">{selectedRg ? "Select vault…" : "Select resource group first"}</option>
-                  {filteredVaults.map((v) => (
-                    <option key={v.name} value={v.name}>{v.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
-
-          {/* Manual override / display of selected values */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="col-span-2">
-              <label className={fieldLabel} htmlFor="akv-sub-txt">
-                Subscription ID <span className="text-red-500">*</span>
-                <span className="ml-1 text-xs font-normal text-gray-400">(auto-filled from dropdown)</span>
-              </label>
-              <input
-                id="akv-sub-txt"
-                className={fieldInput}
-                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                value={subscriptionId}
-                onChange={(e) => setSubscriptionId(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className={fieldLabel} htmlFor="akv-rg-txt">
-                Resource Group <span className="text-red-500">*</span>
-              </label>
-              <input
-                id="akv-rg-txt"
-                className={fieldInput}
-                placeholder="my-resource-group"
-                value={resourceGroup}
-                onChange={(e) => setResourceGroup(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className={fieldLabel} htmlFor="akv-vault-txt">
-                Key Vault Name <span className="text-red-500">*</span>
-              </label>
-              <input
-                id="akv-vault-txt"
-                className={fieldInput}
-                placeholder="my-key-vault"
-                value={vaultName}
-                onChange={(e) => setVaultName(e.target.value)}
-              />
-            </div>
-            <div className="col-span-2">
-              <label className={fieldLabel} htmlFor="akv-certname">
-                Certificate Name in AKV <span className="text-red-500">*</span>
-              </label>
-              <input
-                id="akv-certname"
-                className={fieldInput + (!certName || certNameValid ? "" : " border-red-400")}
-                placeholder="my-certificate"
-                value={certName}
-                onChange={(e) => setCertName(e.target.value)}
-              />
-              {certName && !certNameValid && (
-                <p className="mt-1 text-xs text-red-600">Only alphanumeric characters and hyphens allowed.</p>
-              )}
-            </div>
+        {/* Certificate material (private key) */}
+        {preSuppliedData ? (
+          <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">
+            Using the PFX from the completed renewal. No certificate data entry is needed.
           </div>
-        </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Certificate Source</p>
+            <p className="text-xs text-gray-500">
+              Azure Key Vault requires a certificate with its private key. The portal supplies the key
+              material — nothing needs to be pasted.
+            </p>
 
-        {/* Certificate Data */}
-        <div>
-          <label className={fieldLabel} htmlFor="akv-data">
-            Certificate Data (Base64) <span className="text-red-500">*</span>
-          </label>
-          <textarea
-            id="akv-data"
-            className={`${fieldInput} h-24 font-mono text-xs`}
-            placeholder="Base64-encoded PFX or PEM certificate data"
-            value={certData}
-            onChange={(e) => setCertData(e.target.value)}
-          />
-          <p className="mt-1 text-xs text-gray-500">Paste the base64-encoded certificate (PFX or PEM).</p>
-        </div>
+            {!hasPrivateKey && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+                Keyfactor has no retrievable private key for this certificate, so it cannot be
+                exported as a PFX. This is normal even just after a renewal: Keyfactor returns the
+                PFX only at the moment of issuance unless key archival is enabled on the template.
+                Generate a new certificate with PFX below.
+              </div>
+            )}
 
-        {/* Certificate Password (optional for PFX) */}
-        <div>
-          <label className={fieldLabel} htmlFor="akv-certpw">Certificate Password (if PFX)</label>
-          <div className="relative">
-            <input
-              id="akv-certpw"
-              type={showPassword ? "text" : "password"}
-              className={fieldInput + " pr-10"}
-              placeholder="Leave blank for PEM certificates"
-              value={certPassword}
-              onChange={(e) => setCertPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-            <button
-              type="button"
-              className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600"
-              onClick={() => setShowPassword((v) => !v)}
-              tabIndex={-1}
+            <label
+              className={`flex cursor-pointer gap-3 rounded-lg border p-3 ${
+                source === "existing" ? "border-att-300 bg-att-50/40" : "border-gray-200"
+              } ${hasPrivateKey ? "" : "cursor-not-allowed opacity-60"}`}
             >
-              {showPassword ? (
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
-              ) : (
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
-              )}
-            </button>
+              <input
+                type="radio"
+                name="akv-cert-source"
+                className="mt-1"
+                checked={source === "existing"}
+                disabled={!hasPrivateKey}
+                onChange={() => setSource("existing")}
+              />
+              <span>
+                <span className="block text-sm font-medium text-att-700">Use existing certificate</span>
+                <span className="block text-xs text-gray-500">
+                  {hasPrivateKey
+                    ? "Exports the PFX from Keyfactor. Works only while Keyfactor still holds an exportable key (key archival)."
+                    : "Unavailable — Keyfactor cannot export a private key for this certificate."}
+                </span>
+              </span>
+            </label>
+
+            <label
+              className={`flex cursor-pointer gap-3 rounded-lg border p-3 ${
+                source === "generate" ? "border-att-300 bg-att-50/40" : "border-gray-200"
+              }`}
+            >
+              <input
+                type="radio"
+                name="akv-cert-source"
+                className="mt-1"
+                checked={source === "generate"}
+                onChange={() => setSource("generate")}
+              />
+              <span>
+                <span className="block text-sm font-medium text-att-700">Generate new certificate with PFX</span>
+                <span className="block text-xs text-gray-500">
+                  Issues a new certificate with a private key via PFX renewal, then loads it.
+                </span>
+              </span>
+            </label>
+
+            {source === "generate" && (
+              <div className="rounded-lg border border-att-100 bg-att-50/30 p-3">
+                {generated ? (
+                  <p className="text-sm text-green-700">
+                    New certificate with private key is ready to load.
+                  </p>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className={modalButton.secondary}
+                      disabled={renew.isPending}
+                      onClick={handleGenerate}
+                    >
+                      {renew.isPending ? "Generating…" : "Generate certificate with PFX"}
+                    </button>
+                    <p className="mt-2 text-xs text-gray-500">
+                      Uses CA "{certificate.certificate_authority || "—"}" and template "
+                      {certificate.template || "—"}". The PFX password is single-use and never stored.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
           </div>
-          <p className="mt-1 text-xs text-gray-400">Never logged or stored.</p>
-        </div>
+        )}
       </div>
     </CertificateModal>
   );

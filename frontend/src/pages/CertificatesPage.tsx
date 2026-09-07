@@ -1048,12 +1048,17 @@ const CertificatesPage: React.FC = () => {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [exporting, setExporting] = useState(false);
   const [openActionMenu, setOpenActionMenu] = useState<number | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (openActionMenu === null) return;
-    const close = () => setOpenActionMenu(null);
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
+    // Only a click outside the trigger + menu dismisses it.
+    const close = (e: MouseEvent) => {
+      if (actionMenuRef.current?.contains(e.target as Node)) return;
+      setOpenActionMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
   }, [openActionMenu]);
 
   const showToast = useCallback((message: string, type: ToastType = "success") => setToast({ message, type }), []);
@@ -1288,7 +1293,10 @@ const CertificatesPage: React.FC = () => {
                     <td className={gridStyles.cell}><span className="font-mono text-xs" title={cert.thumbprint}>{cert.thumbprint || "—"}</span></td>
                     <td className={gridStyles.cell}><ExpiryBadge not_after={cert.not_after} /></td>
                     <td className={gridStyles.centerCell}>
-                      <div className="relative flex items-center justify-center">
+                      <div
+                        className="relative flex items-center justify-center"
+                        ref={openActionMenu === cert.id ? actionMenuRef : undefined}
+                      >
                         <button
                           type="button"
                           title="Certificate actions"
@@ -1298,10 +1306,7 @@ const CertificatesPage: React.FC = () => {
                           {Icons.more}
                         </button>
                         {openActionMenu === cert.id && (
-                          <div
-                            className="absolute right-0 top-8 z-30 min-w-[180px] rounded-xl border border-att-100 bg-white py-1 shadow-xl"
-                            onMouseLeave={() => setOpenActionMenu(null)}
-                          >
+                          <div className="absolute right-0 top-8 z-30 min-w-[180px] rounded-xl border border-att-100 bg-white py-1 shadow-xl">
                             <button type="button" className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-att-50" onClick={() => { setOpenActionMenu(null); openModal("view", cert); }}>
                               {Icons.eye} <span>View Certificate</span>
                             </button>
@@ -1350,7 +1355,7 @@ const CertificatesPage: React.FC = () => {
       {modal === "revoke" && selected && <RevokeCertificateModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       {modal === "delete" && selected && <DeleteCertificateModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       {modal === "download" && selected && <DownloadCertificateModal certificate={selected} collectionId={collectionId} canWrite={canWrite} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
-      {modal === "load_to_akv" && selected && <LoadToAkvModal certificate={selected} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
+      {modal === "load_to_akv" && selected && <LoadToAkvModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       </>)}
 
       {activeTab === "auto-renewal" && <AutoRenewalPanel onToast={showToast} />}

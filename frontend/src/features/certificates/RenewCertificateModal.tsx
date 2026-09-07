@@ -9,7 +9,7 @@
  * and allows AKV upload retry without re-renewing.
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState } from "react";
 import {
   Certificate,
   EnrollResult,
@@ -19,9 +19,8 @@ import {
   useLoadCertificateToAkv,
 } from "../../services/certificatesApi";
 import { CertificateModal, fieldInput, fieldLabel, modalButton } from "./CertificateModal";
+import { AkvTarget, AkvTargetPicker, isAkvTargetComplete } from "./AkvTargetPicker";
 import { formatDate } from "../../utils/dateFormat";
-import { useSubscriptionScope } from "../../contexts/SubscriptionContext";
-import { useKeyVaults } from "../../services/costApi";
 
 type RenewMode = "select" | "one_click" | "pfx" | "csr";
 type Step = "configure" | "result";
@@ -38,82 +37,50 @@ interface RenewCertificateModalProps {
 
 interface AkvFormProps {
   certificateId: number;
+  commonName: string;
+  sans: string[];
+  /** Thumbprint of the certificate being replaced — AKV still holds that one. */
+  thumbprint: string;
   renewalResult: EnrollResult;
+  /** Password the PFX was renewed with; required to import that PFX. */
+  pfxPassword?: string;
   onSuccess: () => void;
   onFailure: (msg: string) => void;
 }
 
-const AkvUploadForm: React.FC<AkvFormProps> = ({ certificateId, renewalResult, onSuccess, onFailure }) => {
+const AkvUploadForm: React.FC<AkvFormProps> = ({
+  certificateId,
+  commonName,
+  sans,
+  thumbprint,
+  renewalResult,
+  pfxPassword,
+  onSuccess,
+  onFailure,
+}) => {
   const load = useLoadCertificateToAkv();
-  const { effectiveSubscriptionIds, availableSubscriptions } = useSubscriptionScope();
-  const { data: allVaults = [] } = useKeyVaults();
-
-  // Cascade selection
-  const [selectedSubId, setSelectedSubId] = useState("");
-  const [selectedRg, setSelectedRg] = useState("");
-
-  // Form fields
-  const [subscriptionId, setSubscriptionId] = useState("");
-  const [resourceGroup, setResourceGroup] = useState("");
-  const [vaultName, setVaultName] = useState("");
-  const [certName, setCertName] = useState("");
-  const [certPassword, setCertPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [target, setTarget] = useState<AkvTarget>({
+    subscriptionId: "",
+    resourceGroup: "",
+    vaultName: "",
+    certificateNames: [],
+  });
 
   const certData = renewalResult.pfx_base64 || renewalResult.certificate || "";
-
-  // Scoped vaults
-  const scopedVaults = useMemo(
-    () => (effectiveSubscriptionIds.length ? allVaults.filter((v) => effectiveSubscriptionIds.includes(v.subscription_id)) : allVaults),
-    [allVaults, effectiveSubscriptionIds]
-  );
-
-  const uniqueSubscriptions = useMemo(() => {
-    const seen = new Set<string>();
-    const subs: { id: string; name: string }[] = [];
-    for (const v of scopedVaults) {
-      if (v.subscription_id && !seen.has(v.subscription_id)) {
-        seen.add(v.subscription_id);
-        const found = availableSubscriptions.find((s) => s.subscription_id === v.subscription_id);
-        subs.push({ id: v.subscription_id, name: found?.subscription_name || v.subscription_id });
-      }
-    }
-    return subs.sort((a, b) => a.name.localeCompare(b.name));
-  }, [scopedVaults, availableSubscriptions]);
-
-  const filteredRgs = useMemo(() => {
-    if (!selectedSubId) return [];
-    const seen = new Set<string>();
-    return scopedVaults
-      .filter((v) => v.subscription_id === selectedSubId && v.resource_group && !seen.has(v.resource_group) && seen.add(v.resource_group))
-      .map((v) => v.resource_group)
-      .sort();
-  }, [scopedVaults, selectedSubId]);
-
-  const filteredVaults = useMemo(
-    () => (selectedSubId && selectedRg ? scopedVaults.filter((v) => v.subscription_id === selectedSubId && v.resource_group === selectedRg).sort((a, b) => a.name.localeCompare(b.name)) : []),
-    [scopedVaults, selectedSubId, selectedRg]
-  );
-
-  const handleSubChange = (subId: string) => { setSelectedSubId(subId); setSelectedRg(""); setSubscriptionId(subId); setResourceGroup(""); setVaultName(""); };
-  const handleRgChange = (rg: string) => { setSelectedRg(rg); setResourceGroup(rg); setVaultName(""); };
-  const handleVaultChange = (vName: string) => setVaultName(vName);
-
-  const certNameValid = !certName || /^[a-zA-Z0-9-]+$/.test(certName.trim());
-  const isValid = subscriptionId.trim() && resourceGroup.trim() && vaultName.trim() && certName.trim() && certNameValid && certData;
+  const isValid = isAkvTargetComplete(target) && Boolean(certData);
 
   const handleUpload = async () => {
     if (!isValid) return;
     try {
       await load.mutateAsync({
-        id: certificateId,
+        id: renewalResult.certificate_id ?? certificateId,
         data: {
-          subscription_id: subscriptionId.trim(),
-          resource_group: resourceGroup.trim(),
-          vault_name: vaultName.trim(),
-          certificate_name: certName.trim(),
+          subscription_id: target.subscriptionId.trim(),
+          resource_group: target.resourceGroup.trim(),
+          vault_name: target.vaultName.trim(),
+          certificate_names: target.certificateNames.map((n) => n.trim()),
           certificate_data: certData,
-          ...(certPassword ? { certificate_password: certPassword } : {}),
+          ...(renewalResult.pfx_base64 && pfxPassword ? { certificate_password: pfxPassword } : {}),
         },
       });
       onSuccess();
@@ -132,73 +99,18 @@ const AkvUploadForm: React.FC<AkvFormProps> = ({ certificateId, renewalResult, o
 
   return (
     <div className="space-y-3 rounded-xl border border-att-100 bg-att-50/30 p-4">
-      <p className="text-xs font-semibold uppercase tracking-wide text-att-600">Azure Key Vault Target</p>
-
-      {/* Cascade selectors */}
-      {scopedVaults.length > 0 && (
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label className={fieldLabel}>Subscription</label>
-            <select className={fieldInput} value={selectedSubId} onChange={(e) => handleSubChange(e.target.value)}>
-              <option value="">Select…</option>
-              {uniqueSubscriptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className={fieldLabel}>Resource Group</label>
-            <select className={fieldInput} value={selectedRg} onChange={(e) => handleRgChange(e.target.value)} disabled={!selectedSubId}>
-              <option value="">{selectedSubId ? "Select…" : "—"}</option>
-              {filteredRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className={fieldLabel}>Key Vault</label>
-            <select className={fieldInput} value={vaultName} onChange={(e) => handleVaultChange(e.target.value)} disabled={!selectedRg}>
-              <option value="">{selectedRg ? "Select…" : "—"}</option>
-              {filteredVaults.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
-            </select>
-          </div>
-        </div>
-      )}
-
-      {/* Manual text fields */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="col-span-2">
-          <label className={fieldLabel}>Subscription ID <span className="text-red-500">*</span></label>
-          <input className={fieldInput} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={subscriptionId} onChange={(e) => setSubscriptionId(e.target.value)} />
-        </div>
-        <div>
-          <label className={fieldLabel}>Resource Group <span className="text-red-500">*</span></label>
-          <input className={fieldInput} placeholder="my-resource-group" value={resourceGroup} onChange={(e) => setResourceGroup(e.target.value)} />
-        </div>
-        <div>
-          <label className={fieldLabel}>Key Vault Name <span className="text-red-500">*</span></label>
-          <input className={fieldInput} placeholder="my-key-vault" value={vaultName} onChange={(e) => setVaultName(e.target.value)} />
-        </div>
-        <div className="col-span-2">
-          <label className={fieldLabel}>Certificate Name in AKV <span className="text-red-500">*</span></label>
-          <input className={fieldInput + (!certName || certNameValid ? "" : " border-red-400")} placeholder="my-certificate" value={certName} onChange={(e) => setCertName(e.target.value)} />
-          {certName && !certNameValid && <p className="mt-1 text-xs text-red-600">Only alphanumeric characters and hyphens allowed.</p>}
-        </div>
-        {renewalResult.pfx_base64 && (
-          <div className="col-span-2">
-            <label className={fieldLabel}>PFX Password</label>
-            <div className="relative">
-              <input type={showPassword ? "text" : "password"} className={fieldInput + " pr-10"} placeholder="Password used during renewal" value={certPassword} onChange={(e) => setCertPassword(e.target.value)} autoComplete="new-password" />
-              <button type="button" className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600" onClick={() => setShowPassword((v) => !v)} tabIndex={-1}>
-                {showPassword ? (
-                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
-                ) : (
-                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
-                )}
-              </button>
-            </div>
-            <p className="mt-1 text-xs text-gray-400">Never logged or stored.</p>
-          </div>
-        )}
-      </div>
-
-      <button type="button" className={modalButton.primary + " w-full"} disabled={load.isPending || !isValid} onClick={handleUpload}>
+      <AkvTargetPicker
+        commonName={commonName}
+        sans={sans}
+        thumbprint={thumbprint}
+        onChange={setTarget}
+      />
+      <button
+        type="button"
+        className={modalButton.primary + " w-full"}
+        disabled={load.isPending || !isValid}
+        onClick={handleUpload}
+      >
         {load.isPending ? "Loading to AKV…" : "Load to Azure Key Vault"}
       </button>
     </div>
@@ -324,7 +236,11 @@ export const RenewCertificateModal: React.FC<RenewCertificateModalProps> = ({
                 </p>
                 <AkvUploadForm
                   certificateId={certificate.id}
+                  commonName={certificate.common_name}
+                  sans={certificate.sans}
+                  thumbprint={certificate.thumbprint}
                   renewalResult={renewalResult}
+                  pfxPassword={password}
                   onSuccess={() => setAkvStatus("success")}
                   onFailure={(msg) => { setAkvStatus("failed"); setAkvError(msg); }}
                 />

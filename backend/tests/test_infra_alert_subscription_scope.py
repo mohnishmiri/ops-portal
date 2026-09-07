@@ -313,6 +313,17 @@ async def test_create_tables_backfills_expiry_environment_column(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_create_tables_backfills_certificate_private_key_column(monkeypatch):
+    fake_connection = _FakeConnection()
+    monkeypatch.setattr(database_core, "_engine", _FakeEngine(fake_connection))
+
+    await database_core.create_tables()
+
+    assert any("ALTER TABLE IF EXISTS cert_certificates" in sql for sql in fake_connection.executed_sql)
+    assert any("ADD COLUMN IF NOT EXISTS has_private_key" in sql for sql in fake_connection.executed_sql)
+
+
+@pytest.mark.anyio
 async def test_create_expiry_config_persists_environment():
     fake_db = _SeedableDbSession()
     service = InfraAlertService(fake_db)
