@@ -109,3 +109,49 @@ describe("RevokeCertificateModal confirmation guard", () => {
     expect(onSuccess).toHaveBeenCalled();
   });
 });
+
+describe("RevokeCertificateModal optional comment", () => {
+  function confirmAndRevoke() {
+    fireEvent.change(screen.getByLabelText(/Type REVOKE to confirm/i), {
+      target: { value: "REVOKE" },
+    });
+    return act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    });
+  }
+
+  it("keeps revoke enabled with the comment left empty", () => {
+    setup();
+    fireEvent.change(screen.getByLabelText(/Type REVOKE to confirm/i), {
+      target: { value: "REVOKE" },
+    });
+    expect(screen.getByLabelText(/Comment \(optional\)/i)).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeEnabled();
+  });
+
+  it("submits successfully without a comment", async () => {
+    const { mutateAsync, onSuccess, onError } = setup();
+    await confirmAndRevoke();
+    expect(mutateAsync.mock.calls[0][0].data.comment).toBe("");
+    expect(onSuccess).toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("normalizes a whitespace-only comment to empty", async () => {
+    const { mutateAsync } = setup();
+    fireEvent.change(screen.getByLabelText(/Comment \(optional\)/i), {
+      target: { value: "    " },
+    });
+    await confirmAndRevoke();
+    expect(mutateAsync.mock.calls[0][0].data.comment).toBe("");
+  });
+
+  it("passes a supplied comment through trimmed", async () => {
+    const { mutateAsync } = setup();
+    fireEvent.change(screen.getByLabelText(/Comment \(optional\)/i), {
+      target: { value: "  replaced by CR-1234  " },
+    });
+    await confirmAndRevoke();
+    expect(mutateAsync.mock.calls[0][0].data.comment).toBe("replaced by CR-1234");
+  });
+});

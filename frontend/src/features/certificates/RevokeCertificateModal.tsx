@@ -40,7 +40,12 @@ export const RevokeCertificateModal: React.FC<RevokeCertificateModalProps> = ({
   const handleSubmit = async () => {
     if (!confirmed) return;
     try {
-      await revoke.mutateAsync({ id: certificate.id, data: { reason, comment, collection_id: collectionId } });
+      // Blank stays blank: the backend fills in who revoked it and why, because
+      // Keyfactor rejects an empty revocation comment.
+      await revoke.mutateAsync({
+        id: certificate.id,
+        data: { reason, comment: comment.trim(), collection_id: collectionId },
+      });
       onSuccess(`Certificate ${certificate.id} revoked`);
       onClose();
     } catch (err) {
@@ -99,7 +104,11 @@ export const RevokeCertificateModal: React.FC<RevokeCertificateModalProps> = ({
             className={fieldInput}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
+            aria-describedby="revoke-comment-help"
           />
+          <p id="revoke-comment-help" className="mt-1 text-xs text-gray-500">
+            Leave blank and the revocation is recorded against your name and the reason above.
+          </p>
         </div>
         <div>
           <label className={fieldLabel} htmlFor="revoke-confirm">

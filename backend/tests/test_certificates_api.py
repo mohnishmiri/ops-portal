@@ -38,6 +38,7 @@ class FakeService:
         self.last_query: str | None = None
         self.last_collection_id: int | None = None
         self.last_renew_kwargs: dict | None = None
+        self.last_revoke_kwargs: dict | None = None
         self.last_download_kwargs: dict | None = None
         self.download_calls: list[dict] = []
         self.renew_result: dict | None = None
@@ -77,7 +78,18 @@ class FakeService:
 
     async def revoke_certificate(self, **kwargs):
         self._maybe_raise()
-        return {"certificate_id": kwargs["certificate_id"], "reason": kwargs["reason"], "revoked": True}
+        from app.services.keyfactor_service import default_revocation_comment
+
+        self.last_revoke_kwargs = kwargs
+        comment = (kwargs.get("comment") or "").strip() or default_revocation_comment(
+            kwargs["reason"], kwargs.get("actor")
+        )
+        return {
+            "certificate_id": kwargs["certificate_id"],
+            "reason": kwargs["reason"],
+            "revoked": True,
+            "comment": comment,
+        }
 
     async def update_metadata(self, **kwargs):
         self._maybe_raise()
@@ -498,6 +510,36 @@ async def test_load_to_akv_rejects_invalid_base64(app, admin_client, fake_keyvau
     )
     assert resp.status_code == 422
     assert fake_keyvault.imports == []
+
+
+async def test_revoke_without_a_comment_succeeds(app, admin_client):
+    # The field is labelled optional, so omitting it must not fail — Keyfactor
+    # needs a non-empty comment, which the portal supplies on the caller's behalf.
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.post("/api/v1/certificates/1/revoke", json={"reason": "superseded"})
+    assert resp.status_code == 200
+    assert resp.json()["revoked"] is True
+    assert svc.last_revoke_kwargs["comment"] == ""
+    # The actor is passed through so the substituted comment names who did it.
+    assert svc.last_revoke_kwargs["actor"] == "admin@example.com"
+    assert resp.json()["comment"] == "Revoked via OpsPortal by admin@example.com (reason: superseded)"
+
+
+async def test_revoke_audits_the_comment_keyfactor_received(app, admin_client, db_session):
+    from sqlalchemy import select
+
+    from app.models.database import AuditLog
+
+    _use_service(app, FakeService())
+    resp = await admin_client.post("/api/v1/certificates/1/revoke", json={"reason": "keyCompromise"})
+    assert resp.status_code == 200
+
+    entry = (
+        (await db_session.execute(select(AuditLog).where(AuditLog.action == "revoke_certificate"))).scalars().all()[-1]
+    )
+    assert entry.details["comment_supplied"] is False
+    assert "admin@example.com" in entry.details["comment"]
 
 
 async def test_revoke_invalid_reason_returns_422(app, admin_client):

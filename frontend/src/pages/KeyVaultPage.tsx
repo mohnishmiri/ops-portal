@@ -5,7 +5,7 @@
  * All icons are inline SVG vector icons (no emojis).
  */
 
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
@@ -851,6 +851,46 @@ const SecretValueViewer: React.FC<{
 
 // ── Create / Update Secret Dialog ─────────────────────────────────────
 
+// ── File → Base64 helpers ────────────────────────────────────────────────
+const FILE_CONTENT_TYPES: Record<string, string> = {
+  jks:  "application/x-java-keystore",
+  pfx:  "application/x-pkcs12",
+  p12:  "application/x-pkcs12",
+  pem:  "application/x-pem-file",
+  cer:  "application/x-x509-ca-cert",
+  crt:  "application/x-x509-ca-cert",
+  p7b:  "application/pkcs7-mime",
+  p7c:  "application/pkcs7-mime",
+  der:  "application/x-x509-ca-cert",
+  json: "application/json",
+  txt:  "text/plain",
+};
+
+function guessContentType(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  return FILE_CONTENT_TYPES[ext] ?? "application/octet-stream";
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // result is "data:<mime>;base64,<b64>" — we want only the b64 part
+      const result = reader.result as string;
+      resolve(result.split(",")[1] ?? "");
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 const SecretFormDialog: React.FC<{
   vaultUri: string;
   editSecret?: SecretInfo | null;
@@ -868,6 +908,13 @@ const SecretFormDialog: React.FC<{
   const [decodedPreview, setDecodedPreview] = useState<string | null>(null);
   const [keepOpen, setKeepOpen] = useState(false);
   const isEdit = !!editSecret;
+
+  // File upload state
+  const [valueSource, setValueSource] = useState<"manual" | "file">("manual");
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Date fields — default: today → today + 360 days
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -899,6 +946,48 @@ const SecretFormDialog: React.FC<{
     });
   }, [value]);
 
+  // File processing
+  const processFile = useCallback(async (file: File) => {
+    setFileError(null);
+    const MAX_MB = 5;
+    if (file.size > MAX_MB * 1024 * 1024) {
+      setFileError(`File exceeds ${MAX_MB} MB limit.`);
+      return;
+    }
+    try {
+      const b64 = await fileToBase64(file);
+      setUploadedFile(file);
+      setValue(b64);
+      // Auto-fill content type only if user hasn't already set one
+      setContentType((prev) => prev || guessContentType(file.name));
+      // File content is already Base64 — no need to re-encode
+      setEncodeBase64(false);
+    } catch {
+      setFileError("Failed to read file. Please try again.");
+    }
+  }, []);
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) processFile(file);
+    // Reset so same file can be re-selected
+    e.target.value = "";
+  }, [processFile]);
+
+  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) processFile(file);
+  }, [processFile]);
+
+  const clearFile = useCallback(() => {
+    setUploadedFile(null);
+    setValue("");
+    setFileError(null);
+    setContentType(editSecret?.content_type || "");
+  }, [editSecret]);
+
   const resetForm = useCallback(() => {
     const today = new Date().toISOString().slice(0, 10);
     const expiry = new Date(Date.now() + 360 * 86400000).toISOString().slice(0, 10);
@@ -910,6 +999,9 @@ const SecretFormDialog: React.FC<{
     setDecodedPreview(null);
     setNotBefore(today);
     setExpiresDate(expiry);
+    setValueSource("manual");
+    setUploadedFile(null);
+    setFileError(null);
     createMutation.reset();
   }, [createMutation]);
 
@@ -921,7 +1013,8 @@ const SecretFormDialog: React.FC<{
         name: name.trim(),
         value: value.trim(),
         content_type: contentType.trim() || undefined,
-        encode_base64: encodeBase64,
+        // File uploads are already Base64; manual input respects the checkbox
+        encode_base64: valueSource === "file" ? false : encodeBase64,
         not_before: notBefore || undefined,
         expires: expiresDate || undefined,
       },
@@ -957,35 +1050,134 @@ const SecretFormDialog: React.FC<{
           {!isEdit && <p className="text-xs text-gray-400 mt-1">Alphanumeric and hyphens only (1-127 chars)</p>}
         </div>
 
-        {/* Value */}
+        {/* Value — source toggle */}
         <div>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-medium text-gray-700">Secret Value</label>
-            <div className="flex gap-2">
+            {/* Manual / Upload toggle */}
+            <div className="flex rounded-md border border-gray-200 overflow-hidden text-xs">
               <button
                 type="button"
-                onClick={toggleDecodeInput}
-                className={`text-xs px-2 py-0.5 rounded border transition ${
-                  decodeInput
-                    ? "bg-blue-100 text-blue-700 border-blue-300"
-                    : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"
+                onClick={() => { setValueSource("manual"); clearFile(); }}
+                className={`px-3 py-1 transition ${
+                  valueSource === "manual"
+                    ? "bg-blue-600 text-white"
+                    : "bg-white text-gray-500 hover:bg-gray-50"
                 }`}
               >
-                {decodeInput ? "✓ Decoding Preview" : "Preview Base64 Decode"}
+                ✏️ Manual
+              </button>
+              <button
+                type="button"
+                onClick={() => setValueSource("file")}
+                className={`px-3 py-1 transition border-l border-gray-200 ${
+                  valueSource === "file"
+                    ? "bg-blue-600 text-white"
+                    : "bg-white text-gray-500 hover:bg-gray-50"
+                }`}
+              >
+                📎 Upload File
               </button>
             </div>
           </div>
-          <textarea
-            value={value}
-            onChange={(e) => handleValueChange(e.target.value)}
-            rows={4}
-            placeholder={isEdit ? "Enter new value..." : "Enter secret value..."}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-          />
+
+          {valueSource === "manual" ? (
+            <>
+              {/* Manual textarea + decode toggle */}
+              <div className="flex items-center justify-end mb-1">
+                <button
+                  type="button"
+                  onClick={toggleDecodeInput}
+                  className={`text-xs px-2 py-0.5 rounded border transition ${
+                    decodeInput
+                      ? "bg-blue-100 text-blue-700 border-blue-300"
+                      : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"
+                  }`}
+                >
+                  {decodeInput ? "✓ Decoding Preview" : "Preview Base64 Decode"}
+                </button>
+              </div>
+              <textarea
+                value={value}
+                onChange={(e) => handleValueChange(e.target.value)}
+                rows={4}
+                placeholder={isEdit ? "Enter new value..." : "Enter secret value..."}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+              />
+            </>
+          ) : (
+            /* ── File upload zone ── */
+            <div>
+              {!uploadedFile ? (
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={handleDrop}
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`flex flex-col items-center justify-center gap-2 border-2 border-dashed rounded-lg p-6 cursor-pointer transition ${
+                    isDragOver
+                      ? "border-blue-400 bg-blue-50"
+                      : "border-gray-300 bg-gray-50 hover:border-blue-300 hover:bg-blue-50"
+                  }`}
+                >
+                  <span className="text-3xl select-none">📂</span>
+                  <p className="text-sm font-medium text-gray-700">
+                    Drop a file here, or <span className="text-blue-600 underline">browse</span>
+                  </p>
+                  <p className="text-xs text-gray-400">
+                    JKS · PFX / P12 · PEM · CER / CRT · P7B · JSON · TXT · any binary (max 5 MB)
+                  </p>
+                  <p className="text-xs text-gray-400">
+                    File is read and stored as a <strong>Base64</strong> secret value
+                  </p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    onChange={handleFileInputChange}
+                    accept=".jks,.pfx,.p12,.pem,.cer,.crt,.p7b,.p7c,.der,.json,.txt,*"
+                  />
+                </div>
+              ) : (
+                /* Uploaded file badge */
+                <div className="flex items-start gap-3 border border-green-200 bg-green-50 rounded-lg p-3">
+                  <span className="text-2xl">✅</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-800 truncate">{uploadedFile.name}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {formatBytes(uploadedFile.size)} · detected type: <code className="bg-green-100 px-1 rounded">{guessContentType(uploadedFile.name)}</code>
+                    </p>
+                    <p className="text-xs text-gray-400 mt-1">
+                      Base64 value ready · {value.length.toLocaleString()} characters
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearFile}
+                    className="text-xs text-red-500 hover:text-red-700 whitespace-nowrap mt-0.5"
+                  >
+                    ✕ Remove
+                  </button>
+                </div>
+              )}
+              {fileError && (
+                <p className="text-xs text-red-500 mt-1">⚠ {fileError}</p>
+              )}
+              {/* Read-only Base64 preview when file loaded */}
+              {uploadedFile && value && (
+                <div className="mt-2">
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Base64 Preview (first 200 chars)</label>
+                  <p className="text-xs font-mono bg-gray-100 border border-gray-200 rounded px-2 py-1.5 break-all text-gray-600 select-all">
+                    {value.slice(0, 200)}{value.length > 200 ? "…" : ""}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Decoded preview */}
-        {decodeInput && decodedPreview !== null && (
+        {/* Decoded preview (manual mode only) */}
+        {valueSource === "manual" && decodeInput && decodedPreview !== null && (
           <div>
             <label className="block text-xs font-medium text-blue-600 mb-1">Base64 Decoded Preview</label>
             <textarea
@@ -996,23 +1188,30 @@ const SecretFormDialog: React.FC<{
             />
           </div>
         )}
-        {decodeInput && value && decodedPreview === null && (
+        {valueSource === "manual" && decodeInput && value && decodedPreview === null && (
           <p className="text-xs text-red-500">Not valid Base64 — cannot decode</p>
         )}
 
-        {/* Encode Base64 option */}
-        <div className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            id="encode-b64"
-            checked={encodeBase64}
-            onChange={(e) => setEncodeBase64(e.target.checked)}
-            className="accent-blue-600"
-          />
-          <label htmlFor="encode-b64" className="text-sm text-gray-700">
-            Encode value as Base64 before saving
-          </label>
-        </div>
+        {/* Encode Base64 option (manual mode only; file is always already Base64) */}
+        {valueSource === "manual" && (
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="encode-b64"
+              checked={encodeBase64}
+              onChange={(e) => setEncodeBase64(e.target.checked)}
+              className="accent-blue-600"
+            />
+            <label htmlFor="encode-b64" className="text-sm text-gray-700">
+              Encode value as Base64 before saving
+            </label>
+          </div>
+        )}
+        {valueSource === "file" && (
+          <p className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded px-3 py-1.5">
+            ℹ File content is already stored as Base64 — no additional encoding applied.
+          </p>
+        )}
 
         {/* Start & Expiry Dates */}
         <div className="grid grid-cols-2 gap-3">

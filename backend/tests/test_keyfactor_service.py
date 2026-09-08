@@ -341,6 +341,47 @@ async def test_revoke_passes_collection_id_to_client():
     assert client.calls[-1][2] == 42
 
 
+async def test_revoke_substitutes_a_comment_when_none_is_given():
+    # Keyfactor rejects a blank Comment, so an "optional" comment field in the UI
+    # only works if the service fills one in.
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    result = await svc.revoke_certificate(
+        certificate_id=1,
+        reason="keyCompromise",
+        comment="   ",
+        effective_date=None,
+        actor="admin@example.com",
+    )
+    sent = client.calls[-1][1]["Comment"]
+    assert sent
+    assert "admin@example.com" in sent
+    assert "keyCompromise" in sent
+    # The caller is told what Keyfactor actually recorded, for the audit trail.
+    assert result["comment"] == sent
+
+
+async def test_revoke_substitutes_a_comment_without_an_actor():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.revoke_certificate(certificate_id=1, reason="superseded", comment="", effective_date=None)
+    assert client.calls[-1][1]["Comment"] == "Revoked via OpsPortal (reason: superseded)"
+
+
+async def test_revoke_preserves_a_supplied_comment():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    result = await svc.revoke_certificate(
+        certificate_id=1,
+        reason="unspecified",
+        comment="replaced by CR-1234",
+        effective_date=None,
+        actor="admin@example.com",
+    )
+    assert client.calls[-1][1]["Comment"] == "replaced by CR-1234"
+    assert result["comment"] == "replaced by CR-1234"
+
+
 async def test_download_passes_collection_id_to_client():
     client = FakeClient()
     svc = CertificateService(client=client)

@@ -69,6 +69,17 @@ def _extract_sans(cert: dict[str, Any]) -> list[str]:
     return sans
 
 
+def default_revocation_comment(reason: str, actor: str | None = None) -> str:
+    """Comment recorded in Keyfactor when the caller leaves the field blank.
+
+    Keyfactor requires a non-empty comment on revocation, so "optional" in the
+    portal has to mean "we fill one in", not "we send nothing".
+    """
+    who = (actor or "").strip()
+    by = f" by {who}" if who else ""
+    return f"Revoked via OpsPortal{by} (reason: {reason})"
+
+
 def _compute_status(not_after: datetime | None, revoked: bool) -> str:
     if revoked:
         return "revoked"
@@ -360,22 +371,38 @@ class CertificateService:
         comment: str,
         effective_date: datetime | None,
         collection_id: int | None = None,
+        actor: str | None = None,
     ) -> dict[str, Any]:
+        """Revoke a certificate, substituting a comment when the caller omits one.
+
+        Keyfactor rejects a blank ``Comment`` on ``/Certificates/Revoke``, which
+        would make the portal's optional comment field impossible to leave empty.
+        Filling in who revoked it and why keeps the field genuinely optional and
+        still leaves a useful trail in Keyfactor's own revocation record.
+
+        Returns the comment actually sent so callers can audit what Keyfactor got.
+        """
         if reason not in REVOCATION_REASONS:
             raise CertificateServiceError(
                 f"Invalid revocation reason '{reason}'. Allowed: {', '.join(REVOCATION_REASONS)}.",
                 status_code=422,
             )
+        effective_comment = (comment or "").strip() or default_revocation_comment(reason, actor)
         payload: dict[str, Any] = {
             "CertificateIds": [certificate_id],
             "Reason": REVOCATION_REASONS[reason],
-            "Comment": comment,
+            "Comment": effective_comment,
             "EffectiveDate": (effective_date or datetime.now(UTC)).isoformat(),
         }
         if collection_id is not None:
             payload["CollectionId"] = collection_id
         await self._guard(self._client.revoke_certificate(payload, collection_id=collection_id))
-        return {"certificate_id": certificate_id, "reason": reason, "revoked": True}
+        return {
+            "certificate_id": certificate_id,
+            "reason": reason,
+            "revoked": True,
+            "comment": effective_comment,
+        }
 
     async def update_metadata(
         self,

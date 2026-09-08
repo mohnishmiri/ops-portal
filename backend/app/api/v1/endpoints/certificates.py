@@ -253,7 +253,14 @@ class LoadToAkvRequest(BaseModel):
 
 class RevokeRequest(BaseModel):
     reason: str = Field(..., description=f"One of: {', '.join(REVOCATION_REASONS)}")
-    comment: str = Field(default="", max_length=1000)
+    comment: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "Optional. Keyfactor requires a non-empty revocation comment, so when this "
+            "is blank the portal records who revoked the certificate and why."
+        ),
+    )
     effective_date: datetime | None = None
     collection_id: int | None = Field(default=None, description="Collection context for the operation")
 
@@ -1280,6 +1287,7 @@ async def revoke_certificate(
             comment=payload.comment,
             effective_date=payload.effective_date,
             collection_id=payload.collection_id,
+            actor=user.email or user.user_id,
         )
     except CertificateServiceError as exc:
         _raise_http(exc)
@@ -1301,7 +1309,11 @@ async def revoke_certificate(
         resource_id=str(certificate_id),
         summary=f"Revoked certificate {certificate_id} ({payload.reason})",
         outcome="success",
-        details={"reason": payload.reason, "comment": payload.comment[:200]},
+        details={
+            "reason": payload.reason,
+            "comment": str(result.get("comment") or payload.comment)[:200],
+            "comment_supplied": bool(payload.comment.strip()),
+        },
     )
     _schedule_sync(payload.collection_id, triggered_by="mutation")
     return result

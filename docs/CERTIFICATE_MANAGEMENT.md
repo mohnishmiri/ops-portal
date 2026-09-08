@@ -313,6 +313,7 @@ incident.
 | Token expiry mid-session | Normal — handled automatically | The client re-acquires the token once on a 401 and retries. |
 | `403` in the UI | Caller lacks the role | Grant the `write` (enroll/renew/update) or `admin` (revoke/delete) permission. |
 | `422` on enroll | Missing required fields | CSR enrollment needs `csr`; PFX needs `subject` and `password`. |
+| Revoke rejected for a missing comment | Keyfactor requires a non-empty revocation `Comment` | Handled: a blank comment is replaced with `Revoked via OpsPortal by <user> (reason: <reason>)`. The audit row keeps `comment_supplied` so you can tell them apart. |
 | `404` on view/renew | Certificate id not in Keyfactor | Refresh the list; the record may have been deleted. |
 | `409` "No escrowed private key" | Certificate predates escrow, or was renewed outside the portal | Renew it through the portal to escrow a key, or retry with `key_source=auto` to attempt a live export. |
 | `Key` column missing from the grid | Escrow not configured | Set `CERT_KEY_ESCROW_ENABLED` / `CERT_KEY_ESCROW_VAULT`; the flag is omitted entirely when escrow is off. |
