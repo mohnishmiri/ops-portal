@@ -8,10 +8,27 @@
  *
  * Rendered by `PortalAccessGate` when the backend reports
  * `authenticated: true, authorized: false`.
+ *
+ * Authenticating with Entra proves identity, not entitlement: Azure AD issues
+ * a token to any tenant user, while portal access comes from the Entra groups
+ * assigned to the OpsPortal app roles. An identity holding none of those roles
+ * previously sat here indefinitely, on a shell where no page worked — which
+ * reads as a broken portal rather than a denied one. So this screen states the
+ * denial plainly and then signs the session out on a short countdown, handing
+ * the user back to the login page with an explanatory banner.
  */
 
-import React from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useMsal } from "@azure/msal-react";
+import { markAccessDenied } from "../config/accessDenial";
+
+/**
+ * Seconds the denial is shown before the session is signed out.
+ *
+ * Long enough to read the reason and the signed-in address, short enough that
+ * an unentitled session is not left sitting open.
+ */
+const AUTO_SIGN_OUT_SECONDS = 8;
 
 // Matches BRAND_LOGO_PATH in App.tsx. Inlined rather than imported because
 // BrandMark is a local helper there, and this screen must render without
@@ -25,6 +42,31 @@ interface PortalAccessDeniedProps {
 
 const PortalAccessDenied: React.FC<PortalAccessDeniedProps> = ({ email }) => {
   const { instance } = useMsal();
+  const [secondsLeft, setSecondsLeft] = useState(AUTO_SIGN_OUT_SECONDS);
+
+  // At most one sign-out per mount. The countdown and the button can both
+  // reach for it, and MSAL rejects a second interaction while one is already
+  // in flight, so the guard prevents that error from surfacing to the user.
+  const signOutStarted = useRef(false);
+
+  const signOut = useCallback(() => {
+    if (signOutStarted.current) return;
+    signOutStarted.current = true;
+    // Recorded before the redirect so the login page can explain the bounce.
+    markAccessDenied(email);
+    void instance.logoutRedirect();
+  }, [instance, email]);
+
+  useEffect(() => {
+    const tick = setInterval(() => {
+      setSecondsLeft((remaining) => (remaining <= 1 ? 0 : remaining - 1));
+    }, 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  useEffect(() => {
+    if (secondsLeft === 0) signOut();
+  }, [secondsLeft, signOut]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-att-50 to-att-100 flex items-center justify-center p-4">
@@ -56,8 +98,8 @@ const PortalAccessDenied: React.FC<PortalAccessDeniedProps> = ({ email }) => {
         <h1 className="text-2xl font-bold text-gray-900 mb-3">Access Denied</h1>
 
         <p className="text-gray-600 text-sm mb-2">
-          Your account has been successfully authenticated, but you are not authorized to access
-          the AT&amp;T Ops Portal.
+          Your identity was verified, but your account is not a member of any Active Directory
+          group granted access to the AT&amp;T Ops Portal.
         </p>
 
         {email && (
@@ -66,12 +108,18 @@ const PortalAccessDenied: React.FC<PortalAccessDeniedProps> = ({ email }) => {
           </p>
         )}
 
-        <p className="text-gray-400 text-xs mb-8">
-          Please contact the Ops Portal administrator if you believe you should have access.
+        <p className="text-gray-400 text-xs mb-6">
+          Please contact the Ops Portal administrator to request access for this account.
+        </p>
+
+        <p className="text-gray-500 text-xs mb-6" aria-live="polite">
+          {secondsLeft > 0
+            ? `Signing you out in ${secondsLeft} second${secondsLeft === 1 ? "" : "s"}…`
+            : "Signing you out…"}
         </p>
 
         <button
-          onClick={() => instance.logoutRedirect()}
+          onClick={signOut}
           className="inline-flex items-center gap-2 px-5 py-2.5 bg-att-400 text-white rounded-lg text-sm font-semibold hover:bg-att-500 transition"
         >
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -81,7 +129,7 @@ const PortalAccessDenied: React.FC<PortalAccessDeniedProps> = ({ email }) => {
               d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"
             />
           </svg>
-          Sign out
+          Sign out now
         </button>
       </div>
     </div>

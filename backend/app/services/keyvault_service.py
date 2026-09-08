@@ -15,6 +15,8 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 import structlog
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from app.core.azure_auth import get_azure_credential
 from app.core.db_cache import cache_manager
@@ -521,7 +523,9 @@ class KeyVaultService:
             "kid": key_data.get("kid", ""),
             "kty": key_data.get("kty", ""),
             "key_ops": key_data.get("key_ops", []),
-            "key_size": key_data.get("key_size"),
+            # Azure's JWK carries no key_size field — derive it from the modulus
+            # (RSA) or the named curve (EC).
+            "key_size": key_data.get("key_size") or _derive_key_size(key_data),
             "crv": key_data.get("crv"),
             "enabled": attrs.get("enabled", True),
             "created": _epoch_to_iso(attrs.get("created")),
@@ -530,6 +534,13 @@ class KeyVaultService:
             "not_before": _epoch_to_iso(attrs.get("nbf")),
             "recovery_level": attrs.get("recoveryLevel", ""),
             "tags": body.get("tags", {}),
+            # Public JWK components. Private material (d, p, q, dp, dq, qi) is
+            # never returned by Azure and is deliberately not surfaced here.
+            "n": key_data.get("n"),
+            "e": key_data.get("e"),
+            "x": key_data.get("x"),
+            "y": key_data.get("y"),
+            "public_key_pem": _jwk_to_public_pem(key_data),
         }
         await self._set_cache(detail_cache_key, result, _CACHE_TTL_DETAIL)
         return result
@@ -1170,6 +1181,82 @@ def _epoch_to_iso(epoch: int | None) -> str | None:
     try:
         return datetime.utcfromtimestamp(epoch).isoformat()
     except (ValueError, OSError):
+        return None
+
+
+# ── JWK public-key helpers ────────────────────────────────────────────────
+# Azure returns keys as a JWK. It carries the *public* components (n/e for RSA,
+# x/y for EC) but no ``key_size`` field — that has to be derived. Private key
+# material is never returned by the service and cannot be reconstructed here.
+
+_EC_CURVES = {
+    "P-256": ec.SECP256R1,
+    "P-384": ec.SECP384R1,
+    "P-521": ec.SECP521R1,
+    "P-256K": ec.SECP256K1,
+}
+
+_EC_CURVE_BITS = {"P-256": 256, "P-256K": 256, "P-384": 384, "P-521": 521}
+
+
+def _b64url_decode(val: str) -> bytes:
+    """Decode a base64url JWK field, restoring stripped padding."""
+    return base64.urlsafe_b64decode(val + "=" * (-len(val) % 4))
+
+
+def _b64url_to_int(val: str) -> int:
+    """Decode a base64url JWK field into a big-endian integer."""
+    return int.from_bytes(_b64url_decode(val), "big")
+
+
+def _derive_key_size(key_data: dict) -> int | None:
+    """Derive key size in bits from JWK components.
+
+    Azure's JWK response has no ``key_size`` field, so RSA size comes from the
+    byte length of the modulus and EC size from the named curve.
+    """
+    kty = (key_data.get("kty") or "").upper()
+    if kty.startswith("RSA"):
+        n = key_data.get("n")
+        if not n:
+            return None
+        try:
+            return len(_b64url_decode(n)) * 8
+        except (ValueError, TypeError):
+            return None
+    if kty.startswith("EC"):
+        return _EC_CURVE_BITS.get((key_data.get("crv") or "").upper())
+    return None
+
+
+def _jwk_to_public_pem(key_data: dict) -> str | None:
+    """Build a SubjectPublicKeyInfo PEM from the JWK public components.
+
+    Returns ``None`` for key types with no public half to export (e.g. ``oct``)
+    or when the components are missing/malformed.
+    """
+    kty = (key_data.get("kty") or "").upper()
+    try:
+        if kty.startswith("RSA"):
+            n, e = key_data.get("n"), key_data.get("e")
+            if not n or not e:
+                return None
+            public_key = rsa.RSAPublicNumbers(e=_b64url_to_int(e), n=_b64url_to_int(n)).public_key()
+        elif kty.startswith("EC"):
+            x, y = key_data.get("x"), key_data.get("y")
+            curve = _EC_CURVES.get((key_data.get("crv") or "").upper())
+            if not x or not y or curve is None:
+                return None
+            public_key = ec.EllipticCurvePublicNumbers(
+                x=_b64url_to_int(x), y=_b64url_to_int(y), curve=curve()
+            ).public_key()
+        else:
+            return None
+        return public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode()
+    except (ValueError, TypeError):
         return None
 
 

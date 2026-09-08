@@ -1171,6 +1171,12 @@ export interface KeyDetailResponse {
   not_before: string | null;
   recovery_level: string;
   tags: Record<string, string>;
+  /** Public JWK components. Private key material is never returned by Azure. */
+  n: string | null; // RSA modulus (base64url)
+  e: string | null; // RSA public exponent (base64url)
+  x: string | null; // EC x coordinate (base64url)
+  y: string | null; // EC y coordinate (base64url)
+  public_key_pem: string | null; // SubjectPublicKeyInfo PEM, null for `oct` keys
 }
 
 export function useKeyDetail(vaultUri: string | null, name: string | null) {

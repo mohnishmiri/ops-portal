@@ -1864,6 +1864,37 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
 
 // ── Key Value Viewer (read-only detail) ───────────────────────────────
 
+/** Trigger a browser download of a PEM string. */
+function downloadPem(pem: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([pem], { type: "application/x-pem-file" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** One base64url JWK component with truncated display and copy-to-clipboard. */
+const JwkField: React.FC<{
+  label: string;
+  value: string;
+  copied: string | null;
+  onCopy: (text: string, label: string) => void;
+}> = ({ label, value, copied, onCopy }) => (
+  <div className="flex items-start gap-2">
+    <span className="text-xs text-gray-500 w-28 shrink-0 pt-1">{label}</span>
+    <code className="flex-1 min-w-0 text-xs font-mono bg-gray-50 border border-gray-200 rounded px-2 py-1 truncate">
+      {value}
+    </code>
+    <button
+      onClick={() => onCopy(value, label)}
+      className="text-xs text-blue-600 hover:text-blue-800 shrink-0 pt-1"
+    >
+      {copied === label ? "Copied!" : "Copy"}
+    </button>
+  </div>
+);
+
 const KeyValueViewer: React.FC<{
   vaultUri: string;
   keyName: string;
@@ -1914,6 +1945,55 @@ const KeyValueViewer: React.FC<{
               </div>
             </div>
           )}
+
+          {/* Public Key */}
+          {(data.public_key_pem || data.n || data.x) && (
+            <div className="border-t border-gray-100 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-gray-700">Public Key</label>
+                {data.public_key_pem && (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => copyToClipboard(data.public_key_pem!, "pem")}
+                      className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                    >
+                      {Icons.copy()} {copied === "pem" ? "Copied!" : "Copy PEM"}
+                    </button>
+                    <button
+                      onClick={() => downloadPem(data.public_key_pem!, `${keyName}.pub.pem`)}
+                      className="text-xs text-blue-600 hover:text-blue-800"
+                    >
+                      ⭳ Download .pem
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* JWK components */}
+              <div className="space-y-2 mb-3">
+                {data.e && <JwkField label="Exponent (e)" value={data.e} onCopy={copyToClipboard} copied={copied} />}
+                {data.n && <JwkField label="Modulus (n)" value={data.n} onCopy={copyToClipboard} copied={copied} />}
+                {data.x && <JwkField label="X coordinate" value={data.x} onCopy={copyToClipboard} copied={copied} />}
+                {data.y && <JwkField label="Y coordinate" value={data.y} onCopy={copyToClipboard} copied={copied} />}
+              </div>
+
+              {/* PEM block */}
+              {data.public_key_pem && (
+                <pre className="w-full border border-gray-200 rounded-lg p-3 text-xs font-mono bg-gray-50 whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
+                  {data.public_key_pem}
+                </pre>
+              )}
+            </div>
+          )}
+
+          {/* Private key notice */}
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+            <span className="text-sm leading-none mt-0.5">🔒</span>
+            <p className="text-xs text-amber-800">
+              Private key material is never returned by Azure Key Vault and cannot be displayed or
+              exported. Signing and decryption must be performed by the vault.
+            </p>
+          </div>
 
           {/* Key ID */}
           <div>

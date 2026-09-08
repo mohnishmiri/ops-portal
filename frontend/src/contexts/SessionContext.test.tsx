@@ -6,10 +6,15 @@
  * entitlement used to reach the full application shell, because MSAL
  * authentication succeeding was treated as authorization. The gate must render
  * Access Denied instead, and must not mount any data provider below it.
+ *
+ * It also guards the follow-up: an unentitled identity that was merely shown a
+ * denial screen sat there indefinitely, which reads as a broken portal. The
+ * denial must sign the session out on its own so the user cannot linger in a
+ * half-dead session, and must record why so the login page can explain it.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 
@@ -27,6 +32,7 @@ vi.mock("@azure/msal-react", () => ({
 
 import apiClient from "../services/apiClient";
 import { PortalAccessGate, useSession } from "./SessionContext";
+import { peekAccessDenial, clearAccessDenial } from "../config/accessDenial";
 
 const AUTHORIZED = {
   authenticated: true,
@@ -74,6 +80,8 @@ function renderGate() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The denial marker outlives a render, so it must not leak between tests.
+  clearAccessDenial();
 });
 
 describe("PortalAccessGate", () => {
@@ -88,8 +96,10 @@ describe("PortalAccessGate", () => {
     renderGate();
 
     expect(await screen.findByText("Access Denied")).toBeTruthy();
+    // The denial must name the actual cause — AD group membership — rather
+    // than a generic "not authorized", which sends users to the wrong fix.
     expect(
-      screen.getByText(/authenticated, but you are not authorized/i)
+      screen.getByText(/not a member of any Active Directory group/i)
     ).toBeTruthy();
     // The application shell must never mount for them.
     expect(screen.queryByText("APP SHELL")).toBeNull();
@@ -102,6 +112,58 @@ describe("PortalAccessGate", () => {
     const signOut = await screen.findByRole("button", { name: /sign out/i });
     signOut.click();
     expect(logoutRedirect).toHaveBeenCalled();
+  });
+
+  it("signs an unentitled session out on its own, without user action", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      (apiClient.get as any).mockResolvedValue({ data: DENIED });
+      renderGate();
+
+      await screen.findByText("Access Denied");
+      // The user gets a beat to read why before being bounced.
+      expect(logoutRedirect).not.toHaveBeenCalled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(9000);
+      });
+
+      expect(logoutRedirect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records the denial so the login page can explain the sign-out", async () => {
+    (apiClient.get as any).mockResolvedValue({ data: DENIED });
+    renderGate();
+
+    const signOut = await screen.findByRole("button", { name: /sign out/i });
+    signOut.click();
+
+    // Survives the round trip through Microsoft's end-session endpoint, which
+    // destroys component state and cannot carry a query parameter.
+    expect(peekAccessDenial()).toEqual({ email: "outsider@example.com" });
+  });
+
+  it("fires sign-out only once when the countdown and the button race", async () => {
+    // MSAL rejects a second interaction while one is in flight, so a
+    // double-fire would surface as an error on top of the denial.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      (apiClient.get as any).mockResolvedValue({ data: DENIED });
+      renderGate();
+
+      const signOut = await screen.findByRole("button", { name: /sign out/i });
+      signOut.click();
+      await act(async () => {
+        vi.advanceTimersByTime(9000);
+      });
+
+      expect(logoutRedirect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows the signed-in address on denial to reveal a wrong-account login", async () => {

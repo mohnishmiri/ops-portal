@@ -21,6 +21,7 @@ import { MsalProvider, AuthenticatedTemplate, UnauthenticatedTemplate, useMsal }
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { msalInstance } from "./services/apiClient";
 import { isDevMode, loginRequest } from "./config/authConfig";
+import { peekAccessDenial, clearAccessDenial } from "./config/accessDenial";
 import LeadershipDashboard from "./pages/LeadershipDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
 import PermissionsManagement from "./features/admin/PermissionsManagement";
@@ -179,6 +180,17 @@ const Navigation: React.FC = () => {
 
 const LoginPage: React.FC = () => {
   const { instance } = useMsal();
+
+  // Read once on mount. A user bounced here by PortalAccessDenied would
+  // otherwise see a bare login form and read the sign-out as a glitch.
+  const [denial] = React.useState(() => peekAccessDenial());
+
+  const startLogin = () => {
+    // Drop the notice so it does not follow the user into this attempt.
+    clearAccessDenial();
+    instance.loginRedirect(loginRequest);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-att-50 to-att-100 flex items-center justify-center">
       <div className="bg-white rounded-2xl shadow-xl p-10 max-w-md w-full text-center">
@@ -186,11 +198,37 @@ const LoginPage: React.FC = () => {
           <BrandMark sizeClassName="h-28 w-28" imageClassName="h-full w-full" />
         </div>
         <h1 className="text-2xl font-bold text-gray-900 mb-2">AT&T OpsPortal</h1>
-        <p className="text-gray-600 mb-8">
-          Sign in with your organization account to access infrastructure dashboards, cost analytics, and operational insights.
-        </p>
+
+        {denial ? (
+          <div className="mb-8 rounded-lg border border-red-100 bg-red-50 p-4 text-left">
+            <p className="text-sm font-semibold text-red-700 mb-1">Access denied</p>
+            <p className="text-xs text-red-600">
+              {denial.email ? (
+                <>
+                  <span className="font-medium">{denial.email}</span> is not a member of any
+                  Active Directory group granted access to the Ops Portal, so the session was
+                  signed out.
+                </>
+              ) : (
+                <>
+                  That account is not a member of any Active Directory group granted access to
+                  the Ops Portal, so the session was signed out.
+                </>
+              )}
+            </p>
+            <p className="text-xs text-red-500 mt-2">
+              Contact the Ops Portal administrator to request access, or sign in with a
+              different account.
+            </p>
+          </div>
+        ) : (
+          <p className="text-gray-600 mb-8">
+            Sign in with your organization account to access infrastructure dashboards, cost analytics, and operational insights.
+          </p>
+        )}
+
         <button
-          onClick={() => instance.loginRedirect(loginRequest)}
+          onClick={startLogin}
           className="w-full px-6 py-3 bg-att-400 text-white font-semibold rounded-lg hover:bg-att-500 transition"
         >
           Sign in with Microsoft
