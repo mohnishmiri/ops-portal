@@ -55,8 +55,10 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
   const pfxPasswordValid = !isPfx || pfxPassword.trim().length >= 12;
   const canDownloadPfx = isPfx ? canWrite : true;
 
-  // PFX requires WRITE role AND the certificate must have a server-side private key
-  const hasPfxAvailable = certificate.has_private_key !== false;
+  // PFX needs WRITE role and a private key the backend can reach: either one
+  // Keyfactor still holds, or the escrowed copy kept at issuance.
+  const isEscrowed = certificate.key_escrowed === true;
+  const hasPfxAvailable = isEscrowed || certificate.has_private_key !== false;
   const availableFormats = DOWNLOAD_FORMATS.filter(
     (f) => f !== "PFX" || (canWrite && hasPfxAvailable)
   );
@@ -137,7 +139,8 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
           )}
           {!hasPfxAvailable && (
             <p className="mt-1 text-xs text-gray-400">
-              PFX format is not available — this certificate was enrolled via CSR and the private key is not stored server-side.
+              PFX format is not available — no private key is retrievable for this certificate.
+              Renewing it through the portal escrows the key and enables PFX download.
             </p>
           )}
         </div>
@@ -153,6 +156,7 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
               </svg>
               <p className="text-xs text-amber-800">
                 <strong>PFX/PKCS#12</strong> contains the private key. Set a strong password and store it securely. The password is never logged.
+                {isEscrowed && " The escrowed key is re-protected with this password, so it is the one that opens the file."}
               </p>
             </div>
             <div>

@@ -256,3 +256,105 @@ async def test_purge_tolerates_unparseable_expiry(db_session, vault):
 async def test_reconcile_is_a_no_op_when_disabled(db_session, monkeypatch):
     monkeypatch.setattr(settings, "CERT_KEY_ESCROW_ENABLED", False)
     assert await CertificateEscrowService(db_session).reconcile() == {"backfilled": 0, "purged": 0}
+
+
+# ── PFX export (re-wrapping for download) ──────────────────────────────
+
+
+def _real_pfx(password: str, *, with_chain: bool = False) -> tuple[bytes, str]:
+    """Build a genuine PKCS#12 blob so re-wrapping is exercised for real."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import pkcs12
+    from cryptography.x509.oid import NameOID
+
+    def _self_signed(cn: str):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=365))
+            .sign(key, hashes.SHA256())
+        )
+        return key, cert
+
+    key, cert = _self_signed("cesdataroutergears.dev.att.com")
+    chain = [_self_signed("Test Issuing CA")[1]] if with_chain else None
+    blob = pkcs12.serialize_key_and_certificates(
+        name=b"escrowed",
+        key=key,
+        cert=cert,
+        cas=chain,
+        encryption_algorithm=serialization.BestAvailableEncryption(password.encode())
+        if password
+        else serialization.NoEncryption(),
+    )
+    return blob, cert.subject.rfc4514_string()
+
+
+async def test_export_pfx_rewraps_under_the_requested_password(db_session, vault):
+    # Keyfactor will not re-export a non-archived key, so download has to serve
+    # the escrowed copy — under a password the caller actually knows.
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    blob, subject = _real_pfx("issuance-time-pw")
+    await _escrow(db_session, pfx_base64=base64.b64encode(blob).decode(), password="issuance-time-pw")
+
+    exported = await CertificateEscrowService(db_session).export_pfx(certificate_id=4242, password="download-password")
+    assert exported is not None
+
+    key, cert, _chain = pkcs12.load_key_and_certificates(exported, b"download-password")
+    assert key is not None
+    assert cert.subject.rfc4514_string() == subject
+
+    # The issuance-time password must no longer open it.
+    with pytest.raises(ValueError):
+        pkcs12.load_key_and_certificates(exported, b"issuance-time-pw")
+
+
+async def test_export_pfx_honours_include_chain(db_session, vault):
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    blob, _ = _real_pfx("issuance-time-pw", with_chain=True)
+    await _escrow(db_session, pfx_base64=base64.b64encode(blob).decode(), password="issuance-time-pw")
+    service = CertificateEscrowService(db_session)
+
+    with_chain = await service.export_pfx(certificate_id=4242, password="download-password", include_chain=True)
+    without_chain = await service.export_pfx(certificate_id=4242, password="download-password", include_chain=False)
+    assert len(pkcs12.load_key_and_certificates(with_chain, b"download-password")[2]) == 1
+    assert pkcs12.load_key_and_certificates(without_chain, b"download-password")[2] == []
+
+
+async def test_export_pfx_handles_a_password_free_escrowed_blob(db_session, vault):
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    blob, _ = _real_pfx("")
+    await _escrow(db_session, pfx_base64=base64.b64encode(blob).decode(), password="")
+    exported = await CertificateEscrowService(db_session).export_pfx(certificate_id=4242, password="download-password")
+    assert pkcs12.load_key_and_certificates(exported, b"download-password")[0] is not None
+
+
+async def test_export_pfx_returns_none_for_unusable_material(db_session, vault):
+    # Garbage in the vault must degrade to "no escrowed key", not a 500.
+    await _escrow(db_session, pfx_base64=base64.b64encode(b"not-a-pfx").decode())
+    assert (
+        await CertificateEscrowService(db_session).export_pfx(certificate_id=4242, password="download-password") is None
+    )
+
+
+async def test_export_pfx_returns_none_without_a_pointer(db_session, vault):
+    assert (
+        await CertificateEscrowService(db_session).export_pfx(certificate_id=999, password="download-password") is None
+    )
+
+
+async def test_export_pfx_requires_a_password(db_session, vault):
+    blob, _ = _real_pfx("issuance-time-pw")
+    await _escrow(db_session, pfx_base64=base64.b64encode(blob).decode(), password="issuance-time-pw")
+    assert await CertificateEscrowService(db_session).export_pfx(certificate_id=4242, password="") is None

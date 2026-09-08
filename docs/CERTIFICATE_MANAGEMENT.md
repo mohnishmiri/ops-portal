@@ -297,7 +297,8 @@ incident.
 | Stage | Behaviour |
 | --- | --- |
 | Capture | `_escrow_issued_key` in the enroll/renew endpoints; best-effort, so an escrow failure never fails an issuance |
-| Use | `Load to AKV` → **Use escrowed key** (preselected when available). `key_source=escrow` fails rather than silently falling back to a Keyfactor export |
+| Use — AKV | `Load to AKV` → **Use escrowed key** (preselected when available). `key_source=escrow` fails rather than silently falling back to a Keyfactor export |
+| Use — download | PFX download tries Keyfactor first (so chain options are unchanged), then the escrowed key, re-wrapped under the password on the request |
 | Reconcile | After each full sync: expiry/common-name backfilled from the snapshot |
 | Purge | Secrets for expired certificates are deleted and the row marked `purged_at`. A row with unknown expiry is never purged |
 
@@ -316,6 +317,8 @@ incident.
 | Revoke rejected for a missing comment | Keyfactor requires a non-empty revocation `Comment` | Handled: a blank comment is replaced with `Revoked via OpsPortal by <user> (reason: <reason>)`. The audit row keeps `comment_supplied` so you can tell them apart. |
 | `404` on view/renew | Certificate id not in Keyfactor | Refresh the list; the record may have been deleted. |
 | `409` "No escrowed private key" | Certificate predates escrow, or was renewed outside the portal | Renew it through the portal to escrow a key, or retry with `key_source=auto` to attempt a live export. |
+| `422` on PFX download | Keyfactor 400 ("private key is not available") mapped to 422 by `_raise_http`, and no escrowed key to fall back to | Renew through the portal to escrow the key. With escrow the download is served from it and returns `200`. |
+| PFX missing from the download format list | No key reachable: `has_private_key=false` and not escrowed | Renew through the portal; PFX reappears once the key is escrowed. Note PFX still requires the WRITE role. |
 | `Key` column missing from the grid | Escrow not configured | Set `CERT_KEY_ESCROW_ENABLED` / `CERT_KEY_ESCROW_VAULT`; the flag is omitted entirely when escrow is off. |
 | Escrow silently not happening | Vault write refused | Check `cert_escrow_vault_write_failed` in the logs and the identity's `secrets/set` permission on the escrow vault. |
 

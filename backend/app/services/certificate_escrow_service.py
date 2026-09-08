@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, pkcs12
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -269,6 +270,42 @@ class CertificateEscrowService:
             return None
         return pfx_bytes, password
 
+    async def export_pfx(
+        self,
+        *,
+        password: str,
+        certificate_id: int | None = None,
+        thumbprint: str | None = None,
+        include_chain: bool = True,
+    ) -> bytes | None:
+        """Escrowed PFX re-encrypted under a caller-chosen ``password``.
+
+        The escrowed material is protected by whatever password was used at
+        issuance, which nobody remembers months later, so it is re-wrapped under
+        the password the caller is about to use to open the file. ``None`` means
+        no usable escrowed key, leaving the caller to surface its own error.
+        """
+        material = await self.get_material(certificate_id=certificate_id, thumbprint=thumbprint)
+        if material is None:
+            return None
+        pfx_bytes, stored_password = material
+        try:
+            return rewrap_pfx(
+                pfx_bytes,
+                current_password=stored_password,
+                new_password=password,
+                include_chain=include_chain,
+            )
+        except Exception as exc:
+            # Never echo the exception message: it can carry key material.
+            logger.warning(
+                "cert_escrow_pfx_rewrap_failed",
+                certificate_id=certificate_id,
+                thumbprint=thumbprint,
+                error=type(exc).__name__,
+            )
+            return None
+
     async def escrowed_thumbprints(self, thumbprints: list[str]) -> set[str]:
         """Subset of ``thumbprints`` (lowercased) that have live escrowed keys."""
         if not self.is_enabled():
@@ -386,6 +423,34 @@ class CertificateEscrowService:
                 logger.warning("cert_escrow_purge_commit_failed", error=str(exc)[:300])
                 return 0
         return purged
+
+
+def rewrap_pfx(
+    pfx_bytes: bytes,
+    *,
+    current_password: str,
+    new_password: str,
+    include_chain: bool = True,
+) -> bytes:
+    """Re-encrypt a PKCS#12 blob under a new password.
+
+    Raises on unreadable material or a PFX without a private key — callers treat
+    that as "no usable escrowed key" rather than propagating it.
+    """
+    if not new_password:
+        raise ValueError("a non-empty password is required to re-wrap a PFX")
+    key, cert, chain = pkcs12.load_key_and_certificates(
+        pfx_bytes, current_password.encode("utf-8") if current_password else None
+    )
+    if key is None or cert is None:
+        raise ValueError("escrowed material has no private key or certificate")
+    return pkcs12.serialize_key_and_certificates(
+        name=None,
+        key=key,
+        cert=cert,
+        cas=(chain or None) if include_chain else None,
+        encryption_algorithm=BestAvailableEncryption(new_password.encode("utf-8")),
+    )
 
 
 def _parse_expiry(value: str | None) -> datetime | None:

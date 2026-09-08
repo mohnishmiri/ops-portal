@@ -921,3 +921,107 @@ async def test_list_certificates_omits_escrow_flag_when_disabled(app, admin_clie
     resp = await admin_client.get("/api/v1/certificates")
     assert resp.status_code == 200
     assert "key_escrowed" not in resp.json()["items"][0]
+
+
+# ── PFX download via escrow ────────────────────────────────────────────
+
+
+def _pfx_fixture(password: str) -> bytes:
+    """A real PKCS#12 blob so the download path exercises actual re-wrapping."""
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import pkcs12
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "a.example.com")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=365))
+        .sign(key, hashes.SHA256())
+    )
+    return pkcs12.serialize_key_and_certificates(
+        name=None,
+        key=key,
+        cert=cert,
+        cas=None,
+        encryption_algorithm=serialization.BestAvailableEncryption(password.encode()),
+    )
+
+
+_NO_KEY = CertificateServiceError("Private key is not available.", status_code=400)
+
+
+async def test_pfx_download_falls_back_to_the_escrowed_key(app, admin_client, db_session, escrow_vault):
+    # Keyfactor refuses to export a key it never archived, which surfaced as a
+    # 422 on download. The escrowed copy must serve the request instead.
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    _use_service(app, FakeService(error=_NO_KEY))
+    await _seed_escrow(
+        db_session,
+        certificate_id=1,
+        thumbprint="ABC",
+        pfx=_pfx_fixture("issuance-time-pw"),
+        password="issuance-time-pw",
+    )
+
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/download",
+        json={"file_format": "PFX", "pfx_password": "download-password-1"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/x-pkcs12"
+    # The delivered file opens with the password the caller asked for.
+    key, cert, _ = pkcs12.load_key_and_certificates(resp.content, b"download-password-1")
+    assert key is not None
+    assert cert is not None
+
+
+async def test_pfx_download_prefers_keyfactor_when_it_works(app, admin_client, db_session, escrow_vault):
+    # Escrow is a fallback here, not a replacement: a working Keyfactor export
+    # keeps honouring chain options exactly as before.
+    svc = FakeService()
+    _use_service(app, svc)
+    await _seed_escrow(db_session, certificate_id=1, thumbprint="ABC", pfx=_pfx_fixture("pw"), password="pw")
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/download",
+        json={"file_format": "PFX", "pfx_password": "download-password-1"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"CERTIFICATE"
+    assert svc.last_download_kwargs["pfx_password"] == "download-password-1"
+
+
+async def test_pfx_download_without_any_key_is_actionable(app, admin_client, escrow_vault):
+    # No Keyfactor key and nothing escrowed → a 409 that says what to do, rather
+    # than the bare 422 that used to leak out of the Keyfactor error mapping.
+    _use_service(app, FakeService(error=_NO_KEY))
+    resp = await admin_client.post(
+        "/api/v1/certificates/1/download",
+        json={"file_format": "PFX", "pfx_password": "download-password-1"},
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "no escrowed key" in detail.lower()
+    assert "renew this certificate through the portal" in detail.lower()
+
+
+async def test_non_pfx_download_error_mapping_is_unchanged(app, admin_client, escrow_vault):
+    _use_service(app, FakeService(error=CertificateServiceError("Bad request.", status_code=400)))
+    resp = await admin_client.post("/api/v1/certificates/1/download", json={"file_format": "PEM"})
+    assert resp.status_code == 422
+
+
+async def test_pfx_download_still_requires_a_password(app, admin_client, escrow_vault):
+    _use_service(app, FakeService(error=_NO_KEY))
+    resp = await admin_client.post("/api/v1/certificates/1/download", json={"file_format": "PFX"})
+    assert resp.status_code == 422

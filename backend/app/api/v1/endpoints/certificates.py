@@ -1394,6 +1394,12 @@ async def download_certificate(
     """Download a certificate in the specified format.
 
     PFX/PKCS#12 (private-key-containing) downloads require at least WRITE role.
+
+    Keyfactor is tried first so chain options behave exactly as before, but it
+    refuses to export a key it never archived. For PFX the escrowed key is then
+    used instead, re-wrapped under the password supplied on this request — that
+    is the difference between a working download and a 422 for every certificate
+    without key archival.
     """
     from fastapi.responses import Response
 
@@ -1404,6 +1410,8 @@ async def download_certificate(
             detail="Downloading PFX/PKCS#12 format requires at least WRITE role.",
         )
 
+    is_pfx = payload.file_format.upper() == "PFX"
+    key_source = "keyfactor"
     try:
         content = await service.download_certificate(
             certificate_id,
@@ -1411,10 +1419,38 @@ async def download_certificate(
             include_chain=payload.include_chain,
             chain_order=payload.chain_order,
             collection_id=payload.collection_id,
-            pfx_password=payload.pfx_password if payload.file_format.upper() == "PFX" else None,
+            pfx_password=payload.pfx_password if is_pfx else None,
         )
     except CertificateServiceError as exc:
-        _raise_http(exc)
+        escrowed_pfx = None
+        if is_pfx and payload.pfx_password and db is not None:
+            try:
+                escrowed_pfx = await CertificateEscrowService(db).export_pfx(
+                    certificate_id=certificate_id,
+                    password=payload.pfx_password,
+                    include_chain=payload.include_chain,
+                )
+            except Exception as escrow_exc:  # pragma: no cover - fall through to the original error
+                logger.warning(
+                    "cert_escrow_download_failed",
+                    certificate_id=certificate_id,
+                    error=str(escrow_exc)[:200],
+                )
+        if escrowed_pfx is None:
+            if is_pfx:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Could not export this certificate's private key from Keyfactor "
+                        f"({exc.message}), and no escrowed key is available for it. Keyfactor "
+                        "returns the PFX only at the moment of issuance unless key archival is "
+                        "enabled on the template. Renew this certificate through the portal to "
+                        "escrow its key, after which PFX download works at any time."
+                    ),
+                )
+            _raise_http(exc)
+        content = escrowed_pfx
+        key_source = "escrow"
 
     await _write_audit(
         db,
@@ -1424,7 +1460,11 @@ async def download_certificate(
         resource_id=str(certificate_id),
         summary=f"Downloaded certificate {certificate_id} ({payload.file_format})",
         outcome="success",
-        details={"file_format": payload.file_format, "include_chain": payload.include_chain},
+        details={
+            "file_format": payload.file_format,
+            "include_chain": payload.include_chain,
+            "key_source": key_source,
+        },
         # Never log pfx_password
     )
 
