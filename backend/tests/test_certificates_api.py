@@ -10,6 +10,7 @@ import pytest
 from app.api.v1.endpoints.certificates import _filter_enabled_collections, _get_service
 from app.core.config import settings
 from app.services.keyfactor_service import CertificateServiceError
+from tests.jks_reader import load_jks
 
 CERT = {
     "id": 1,
@@ -1047,8 +1048,6 @@ def _jks_request(**overrides) -> dict:
 async def test_jks_download_is_built_from_a_keyfactor_pfx(app, admin_client):
     # Keyfactor has no JKS format, so it is asked for a PFX under a throwaway
     # transit password and the keystore is assembled locally.
-    import jks
-
     svc = FakeService()
     svc.download_payload = lambda kw: _pfx_fixture(kw["pfx_password"])
     _use_service(app, svc)
@@ -1064,13 +1063,11 @@ async def test_jks_download_is_built_from_a_keyfactor_pfx(app, admin_client):
     assert svc.last_download_kwargs["pfx_password"] != "keystore-password-1"
 
     # The delivered keystore opens with the password the caller asked for.
-    store = jks.KeyStore.loads(resp.content, "keystore-password-1")
+    store = load_jks(resp.content, "keystore-password-1")
     assert store.private_keys
 
 
 async def test_jks_download_falls_back_to_the_escrowed_key(app, admin_client, db_session, escrow_vault):
-    import jks
-
     _use_service(app, FakeService(error=_NO_KEY))
     await _seed_escrow(
         db_session,
@@ -1083,18 +1080,16 @@ async def test_jks_download_falls_back_to_the_escrowed_key(app, admin_client, db
     resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
     assert resp.status_code == 200
     assert resp.content[:4] == _JKS_MAGIC
-    assert jks.KeyStore.loads(resp.content, "keystore-password-1").private_keys
+    assert load_jks(resp.content, "keystore-password-1").private_keys
 
 
 async def test_jks_download_honours_an_alias_override(app, admin_client):
-    import jks
-
     svc = FakeService()
     svc.download_payload = lambda kw: _pfx_fixture(kw["pfx_password"])
     _use_service(app, svc)
     resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request(jks_alias="Tomcat-TLS"))
     assert resp.status_code == 200
-    assert list(jks.KeyStore.loads(resp.content, "keystore-password-1").private_keys) == ["tomcat-tls"]
+    assert list(load_jks(resp.content, "keystore-password-1").private_keys) == ["tomcat-tls"]
 
 
 async def test_jks_download_requires_a_password(app, admin_client):

@@ -1,14 +1,14 @@
 """Tests for PKCS#12 → JKS conversion.
 
-The output is read back with pyjks and the certificates re-parsed, so these
-assert the keystore is genuinely loadable rather than merely non-empty. Java 8
-is in service here, so the container must be legacy JKS (magic 0xFEEDFEED) and
-not a PKCS#12 file wearing a .jks name.
+The output is parsed by the local jks_reader (no C extension required) and
+the certificates re-inspected, so these assert the keystore is genuinely
+well-formed rather than merely non-empty.  Java 8 is in service here, so the
+container must be legacy JKS (magic 0xFEEDFEED) — not a PKCS#12 file renamed
+to .jks.
 """
 
 from datetime import UTC, datetime, timedelta
 
-import jks
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import NameOID
 
 from app.services.keystore_service import DEFAULT_ALIAS, pfx_to_jks, sanitize_alias
+from tests.jks_reader import JksSignatureError, load_jks
 
 JKS_MAGIC = bytes.fromhex("feedfeed")
 STORE_PASSWORD = "keystore-password"
@@ -52,7 +53,7 @@ def _pfx(password: str, *, cn: str = "cesdataroutergears.dev.att.com", with_chai
     )
 
 
-# ── Alias normalization ────────────────────────────────────────────────
+# ── Alias normalization ────────────────────────────────────────────────────────
 
 
 def test_alias_is_lowercased_to_match_java():
@@ -70,7 +71,7 @@ def test_alias_is_truncated_to_the_jks_limit():
     assert len(sanitize_alias("a" * 400)) == 255
 
 
-# ── Conversion ─────────────────────────────────────────────────────────
+# ── Conversion ─────────────────────────────────────────────────────────────────
 
 
 def test_produces_a_legacy_jks_container():
@@ -81,7 +82,7 @@ def test_produces_a_legacy_jks_container():
 
 def test_keystore_round_trips_key_and_chain():
     blob = pfx_to_jks(_pfx("src-pw"), pfx_password="src-pw", store_password=STORE_PASSWORD)
-    store = jks.KeyStore.loads(blob, STORE_PASSWORD)
+    store = load_jks(blob, STORE_PASSWORD)
 
     alias, entry = next(iter(store.private_keys.items()))
     assert alias == "cesdataroutergears.dev.att.com"
@@ -100,8 +101,8 @@ def test_keystore_round_trips_key_and_chain():
 
 def test_keystore_password_is_enforced():
     blob = pfx_to_jks(_pfx("src-pw"), pfx_password="src-pw", store_password=STORE_PASSWORD)
-    with pytest.raises(jks.util.KeystoreSignatureException):
-        jks.KeyStore.loads(blob, "wrong-password")
+    with pytest.raises(JksSignatureError):
+        load_jks(blob, "wrong-password")
 
 
 def test_alias_override_is_used():
@@ -111,7 +112,7 @@ def test_alias_override_is_used():
         store_password=STORE_PASSWORD,
         alias="Tomcat-TLS",
     )
-    store = jks.KeyStore.loads(blob, STORE_PASSWORD)
+    store = load_jks(blob, STORE_PASSWORD)
     assert list(store.private_keys) == ["tomcat-tls"]
 
 
@@ -122,7 +123,7 @@ def test_include_chain_false_keeps_only_the_leaf():
         store_password=STORE_PASSWORD,
         include_chain=False,
     )
-    store = jks.KeyStore.loads(blob, STORE_PASSWORD)
+    store = load_jks(blob, STORE_PASSWORD)
     _alias, entry = next(iter(store.private_keys.items()))
     assert len(entry.cert_chain) == 1
 
@@ -130,7 +131,7 @@ def test_include_chain_false_keeps_only_the_leaf():
 def test_accepts_a_password_free_pfx():
     # Escrowed material may carry an empty password.
     blob = pfx_to_jks(_pfx(""), pfx_password="", store_password=STORE_PASSWORD)
-    assert jks.KeyStore.loads(blob, STORE_PASSWORD).private_keys
+    assert load_jks(blob, STORE_PASSWORD).private_keys
 
 
 def test_alias_defaults_when_the_certificate_has_no_common_name():
@@ -156,10 +157,10 @@ def test_alias_defaults_when_the_certificate_has_no_common_name():
         pfx_password="",
         store_password=STORE_PASSWORD,
     )
-    assert list(jks.KeyStore.loads(blob, STORE_PASSWORD).private_keys) == [DEFAULT_ALIAS]
+    assert list(load_jks(blob, STORE_PASSWORD).private_keys) == [DEFAULT_ALIAS]
 
 
-# ── Failure modes ──────────────────────────────────────────────────────
+# ── Failure modes ──────────────────────────────────────────────────────────────
 
 
 def test_rejects_a_missing_store_password():

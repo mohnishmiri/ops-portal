@@ -31,9 +31,8 @@ dependencies = [
     "azure-storage-blob>=12.19.0",
     "httpx>=0.27.0",
     # Direct dependency: PKCS#12 re-wrapping for escrowed PFX downloads.
+    # Also used for pure-Python JKS generation (Keyfactor has no JKS export).
     "cryptography>=42.0.0",
-    # Legacy JKS keystore generation (Keyfactor has no JKS export format).
-    "pyjks>=20.0.0",
     "python-jose[cryptography]>=3.3.0",
     "python-multipart>=0.0.9",
     "jinja2>=3.1.0",
