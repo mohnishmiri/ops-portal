@@ -1,18 +1,20 @@
 /**
- * Tests for DownloadCertificateModal format availability.
+ * Tests for DownloadCertificateModal format handling.
  *
- * PFX must be offered whenever the backend can reach a private key — including
- * an escrowed one, which is the only source left for certificates Keyfactor
- * never archived.
+ * The keystore formats (PFX and JKS) must be offered whenever the backend can
+ * reach a private key — including an escrowed one, which is the only source
+ * left for certificates Keyfactor never archived — and must stay behind the
+ * WRITE role and a keystore password.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
 
 vi.mock("../../services/certificatesApi", () => ({
-  useDownloadCertificate: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
-  DOWNLOAD_FORMATS: ["PEM", "CER", "CRT", "DER", "P7B", "PFX"],
+  useDownloadCertificate: vi.fn(),
+  DOWNLOAD_FORMATS: ["PEM", "CER", "CRT", "DER", "P7B", "PFX", "JKS"],
+  KEYSTORE_FORMATS: ["PFX", "JKS"],
   certificateErrorMessage: (_err: unknown, fallback = "Download failed") => fallback,
 }));
 
@@ -26,6 +28,11 @@ const CERT = {
 } as unknown as certApi.Certificate;
 
 function setup(overrides: Partial<certApi.Certificate> = {}, canWrite = true) {
+  const mutateAsync = vi.fn().mockResolvedValue(new Blob(["keystore"]));
+  vi.mocked(certApi.useDownloadCertificate).mockReturnValue({
+    mutateAsync,
+    isPending: false,
+  } as any);
   render(
     <DownloadCertificateModal
       certificate={{ ...CERT, ...overrides }}
@@ -36,6 +43,7 @@ function setup(overrides: Partial<certApi.Certificate> = {}, canWrite = true) {
       onError={vi.fn()}
     />
   );
+  return mutateAsync;
 }
 
 const formatOptions = () =>
@@ -85,5 +93,87 @@ describe("DownloadCertificateModal PFX availability", () => {
     expect(button).toBeDisabled();
     fireEvent.change(screen.getByLabelText(/Password/i), { target: { value: "download-password" } });
     expect(button).toBeEnabled();
+  });
+});
+
+describe("DownloadCertificateModal JKS format", () => {
+  const selectJks = () =>
+    fireEvent.change(screen.getByLabelText(/File Format/i), { target: { value: "JKS" } });
+
+  it("offers JKS alongside the other formats", () => {
+    setup({ has_private_key: true });
+    expect(formatOptions()).toContain("JKS");
+  });
+
+  it("gates JKS behind the WRITE role and a reachable key", () => {
+    setup({ has_private_key: true }, false);
+    expect(formatOptions()).not.toContain("JKS");
+
+    cleanup();
+    setup({ key_escrowed: false, has_private_key: false });
+    expect(formatOptions()).not.toContain("JKS");
+  });
+
+  it("offers JKS for an escrowed certificate Keyfactor cannot export", () => {
+    setup({ key_escrowed: true, has_private_key: false });
+    expect(formatOptions()).toContain("JKS");
+  });
+
+  it("requires a keystore password before download is enabled", () => {
+    setup({ has_private_key: true });
+    selectJks();
+    const button = screen.getByRole("button", { name: "DOWNLOAD" });
+    expect(button).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/Keystore Password/i), { target: { value: "short" } });
+    expect(button).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/Keystore Password/i), {
+      target: { value: "keystore-password" },
+    });
+    expect(button).toBeEnabled();
+  });
+
+  it("submits the keystore password and keeps the chain", async () => {
+    // A JKS entry carries its issuing chain, unlike a bare PFX download.
+    const mutateAsync = setup({ has_private_key: true });
+    selectJks();
+    fireEvent.change(screen.getByLabelText(/Keystore Password/i), {
+      target: { value: "keystore-password" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "DOWNLOAD" }));
+    });
+    const sent = mutateAsync.mock.calls[0][0].data;
+    expect(sent.file_format).toBe("JKS");
+    expect(sent.pfx_password).toBe("keystore-password");
+    expect(sent.include_chain).toBe(true);
+    expect(sent.jks_alias).toBeUndefined();
+  });
+
+  it("passes an alias override through trimmed", async () => {
+    const mutateAsync = setup({ has_private_key: true });
+    selectJks();
+    fireEvent.change(screen.getByLabelText(/Keystore Password/i), {
+      target: { value: "keystore-password" },
+    });
+    fireEvent.change(screen.getByLabelText(/Entry Alias/i), {
+      target: { value: "  Tomcat-TLS  " },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "DOWNLOAD" }));
+    });
+    expect(mutateAsync.mock.calls[0][0].data.jks_alias).toBe("Tomcat-TLS");
+  });
+
+  it("hides the chain-order choice, which JKS fixes at leaf-first", () => {
+    setup({ has_private_key: true });
+    expect(screen.getByText(/Chain Order/i)).toBeInTheDocument();
+    selectJks();
+    expect(screen.queryByText(/Chain Order/i)).not.toBeInTheDocument();
+  });
+
+  it("does not offer the alias field for PFX", () => {
+    setup({ has_private_key: true });
+    fireEvent.change(screen.getByLabelText(/File Format/i), { target: { value: "PFX" } });
+    expect(screen.queryByLabelText(/Entry Alias/i)).not.toBeInTheDocument();
   });
 });

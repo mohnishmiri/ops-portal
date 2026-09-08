@@ -39,6 +39,9 @@ class FakeService:
         self.last_collection_id: int | None = None
         self.last_renew_kwargs: dict | None = None
         self.last_revoke_kwargs: dict | None = None
+        # bytes, or a callable(kwargs) -> bytes for formats that depend on the
+        # password the endpoint sends (Keyfactor encrypts the PFX with it).
+        self.download_payload: bytes | None = None
         self.last_download_kwargs: dict | None = None
         self.download_calls: list[dict] = []
         self.renew_result: dict | None = None
@@ -74,6 +77,10 @@ class FakeService:
         self._maybe_raise()
         self.last_download_kwargs = {"certificate_id": certificate_id, **kwargs}
         self.download_calls.append(self.last_download_kwargs)
+        if callable(self.download_payload):
+            return self.download_payload(self.last_download_kwargs)
+        if self.download_payload is not None:
+            return self.download_payload
         return b"CERTIFICATE"
 
     async def revoke_certificate(self, **kwargs):
@@ -1025,3 +1032,99 @@ async def test_pfx_download_still_requires_a_password(app, admin_client, escrow_
     _use_service(app, FakeService(error=_NO_KEY))
     resp = await admin_client.post("/api/v1/certificates/1/download", json={"file_format": "PFX"})
     assert resp.status_code == 422
+
+
+# ── JKS download ───────────────────────────────────────────────────────
+
+
+_JKS_MAGIC = bytes.fromhex("feedfeed")
+
+
+def _jks_request(**overrides) -> dict:
+    return {"file_format": "JKS", "pfx_password": "keystore-password-1", **overrides}
+
+
+async def test_jks_download_is_built_from_a_keyfactor_pfx(app, admin_client):
+    # Keyfactor has no JKS format, so it is asked for a PFX under a throwaway
+    # transit password and the keystore is assembled locally.
+    import jks
+
+    svc = FakeService()
+    svc.download_payload = lambda kw: _pfx_fixture(kw["pfx_password"])
+    _use_service(app, svc)
+
+    resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/x-java-keystore"
+    assert resp.content[:4] == _JKS_MAGIC
+
+    # Keyfactor was asked for PFX, never for "JKS".
+    assert svc.last_download_kwargs["file_format"] == "PFX"
+    # The transit password is internal and must not be the keystore password.
+    assert svc.last_download_kwargs["pfx_password"] != "keystore-password-1"
+
+    # The delivered keystore opens with the password the caller asked for.
+    store = jks.KeyStore.loads(resp.content, "keystore-password-1")
+    assert store.private_keys
+
+
+async def test_jks_download_falls_back_to_the_escrowed_key(app, admin_client, db_session, escrow_vault):
+    import jks
+
+    _use_service(app, FakeService(error=_NO_KEY))
+    await _seed_escrow(
+        db_session,
+        certificate_id=1,
+        thumbprint="ABC",
+        pfx=_pfx_fixture("issuance-time-pw"),
+        password="issuance-time-pw",
+    )
+
+    resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
+    assert resp.status_code == 200
+    assert resp.content[:4] == _JKS_MAGIC
+    assert jks.KeyStore.loads(resp.content, "keystore-password-1").private_keys
+
+
+async def test_jks_download_honours_an_alias_override(app, admin_client):
+    import jks
+
+    svc = FakeService()
+    svc.download_payload = lambda kw: _pfx_fixture(kw["pfx_password"])
+    _use_service(app, svc)
+    resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request(jks_alias="Tomcat-TLS"))
+    assert resp.status_code == 200
+    assert list(jks.KeyStore.loads(resp.content, "keystore-password-1").private_keys) == ["tomcat-tls"]
+
+
+async def test_jks_download_requires_a_password(app, admin_client):
+    _use_service(app, FakeService())
+    resp = await admin_client.post("/api/v1/certificates/1/download", json={"file_format": "JKS"})
+    assert resp.status_code == 422
+    assert "JKS" in str(resp.json()["detail"])
+
+
+async def test_jks_download_requires_write_role(app, reader_client):
+    _use_service(app, FakeService())
+    resp = await reader_client.post("/api/v1/certificates/1/download", json=_jks_request())
+    assert resp.status_code == 403
+    assert "JKS" in resp.json()["detail"]
+
+
+async def test_jks_download_without_any_key_is_actionable(app, admin_client, escrow_vault):
+    _use_service(app, FakeService(error=_NO_KEY))
+    resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
+    assert resp.status_code == 409
+    detail = resp.json()["detail"].lower()
+    assert "jks keystore needs the certificate's private key" in detail
+    assert "renew this certificate through the portal" in detail
+
+
+async def test_jks_download_reports_unusable_material(app, admin_client):
+    # Keyfactor returning something that is not a PFX must not surface as a 500.
+    svc = FakeService()
+    svc.download_payload = b"not-a-pfx"
+    _use_service(app, svc)
+    resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
+    assert resp.status_code == 422
+    assert "could not build a jks keystore" in resp.json()["detail"].lower()

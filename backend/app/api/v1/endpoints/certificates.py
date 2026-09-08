@@ -177,21 +177,41 @@ class RenewRequest(BaseModel):
         return self
 
 
+# Formats that carry the private key and therefore need a keystore password and
+# the WRITE role. JKS is built by the portal: Keyfactor has no JKS export.
+_KEYSTORE_FORMATS = frozenset({"PFX", "JKS"})
+
+
 class DownloadRequest(BaseModel):
-    file_format: str = Field(default="PEM", description="PEM, CER, CRT, DER, P7B, or PFX")
+    file_format: str = Field(default="PEM", description="PEM, CER, CRT, DER, P7B, PFX, or JKS")
     include_chain: bool = Field(default=True)
     chain_order: str = Field(default="EndEntityFirst", description="EndEntityFirst or RootFirst")
     include_subject_header: bool = Field(default=True)
     collection_id: int | None = Field(default=None, description="Collection context for the download")
     pfx_password: str | None = Field(
         default=None,
-        description="Password for PFX download (min 12 chars); only used when file_format='PFX'",
+        description=(
+            "Keystore password (min 12 chars) for the PFX and JKS formats. For JKS it "
+            "protects both the keystore integrity check and the private-key entry."
+        ),
+    )
+    jks_alias: str | None = Field(
+        default=None,
+        max_length=255,
+        description=(
+            "Entry alias for JKS downloads. Defaults to the certificate's common name. "
+            "Java lowercases JKS aliases, so the value is normalized."
+        ),
     )
 
     @model_validator(mode="after")
     def _validate_pfx_password(self) -> DownloadRequest:
-        if self.file_format.upper() == "PFX" and (not self.pfx_password or len(self.pfx_password.strip()) < 12):
-            raise ValueError("pfx_password must contain at least 12 non-blank characters for PFX download")
+        if self.file_format.upper() in _KEYSTORE_FORMATS and (
+            not self.pfx_password or len(self.pfx_password.strip()) < 12
+        ):
+            raise ValueError(
+                f"pfx_password must contain at least 12 non-blank characters for {self.file_format.upper()} download"
+            )
         return self
 
 
@@ -422,6 +442,86 @@ async def _escrow_issued_key(
         },
         # Never log pfx_base64 or the PFX password
     )
+
+
+async def _build_jks(
+    *,
+    service: CertificateService,
+    db: AsyncSession,
+    certificate_id: int,
+    payload: DownloadRequest,
+) -> tuple[bytes, str]:
+    """Build a JKS keystore for a certificate, returning ``(bytes, key_source)``.
+
+    Keyfactor cannot emit JKS, so PFX material is obtained first — from a live
+    export under a throwaway transit password, or from the escrowed key — and
+    converted locally. The transit password never leaves this function: the
+    keystore the caller receives is protected by the password on their request.
+    """
+    import secrets
+
+    from app.services.keystore_service import pfx_to_jks
+
+    store_password = (payload.pfx_password or "").strip()
+    upstream_error: str | None = None
+    pfx_bytes: bytes | None = None
+    pfx_password = ""
+    key_source = "keyfactor"
+
+    transit_password = secrets.token_urlsafe(24)
+    try:
+        pfx_bytes = await service.download_certificate(
+            certificate_id,
+            file_format="PFX",
+            include_chain=payload.include_chain,
+            chain_order=payload.chain_order,
+            collection_id=payload.collection_id,
+            pfx_password=transit_password,
+        )
+        pfx_password = transit_password
+    except CertificateServiceError as exc:
+        upstream_error = exc.message
+
+    if pfx_bytes is None and db is not None:
+        try:
+            material = await CertificateEscrowService(db).get_material(certificate_id=certificate_id)
+        except Exception as exc:  # pragma: no cover - fall through to the 409 below
+            logger.warning(
+                "cert_escrow_jks_lookup_failed",
+                certificate_id=certificate_id,
+                error=str(exc)[:200],
+            )
+            material = None
+        if material is not None:
+            pfx_bytes, pfx_password = material
+            key_source = "escrow"
+
+    if pfx_bytes is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "A JKS keystore needs the certificate's private key, which could not be "
+                f"exported from Keyfactor ({upstream_error or 'no key available'}) and is not "
+                "escrowed. Keyfactor returns the key only at the moment of issuance unless key "
+                "archival is enabled on the template. Renew this certificate through the portal "
+                "to escrow its key, after which JKS download works at any time."
+            ),
+        )
+
+    try:
+        content = pfx_to_jks(
+            pfx_bytes,
+            pfx_password=pfx_password,
+            store_password=store_password,
+            alias=payload.jks_alias,
+            include_chain=payload.include_chain,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not build a JKS keystore for this certificate: {exc}",
+        )
+    return content, key_source
 
 
 async def _decorate_escrow_status(db: AsyncSession, result: dict[str, Any]) -> dict[str, Any]:
@@ -1403,14 +1503,43 @@ async def download_certificate(
     """
     from fastapi.responses import Response
 
-    # PFX downloads contain private key material — require WRITE role.
-    if payload.file_format.upper() == "PFX" and not (user.is_admin or user.can_write):
+    # PFX and JKS carry private key material — require WRITE role.
+    requested_format = payload.file_format.upper()
+    if requested_format in _KEYSTORE_FORMATS and not (user.is_admin or user.can_write):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Downloading PFX/PKCS#12 format requires at least WRITE role.",
+            detail=f"Downloading {requested_format} (private key) format requires at least WRITE role.",
         )
 
-    is_pfx = payload.file_format.upper() == "PFX"
+    if requested_format == "JKS":
+        content, key_source = await _build_jks(
+            service=service,
+            db=db,
+            certificate_id=certificate_id,
+            payload=payload,
+        )
+        await _write_audit(
+            db,
+            request=request,
+            user=user,
+            action="download_certificate",
+            resource_id=str(certificate_id),
+            summary=f"Downloaded certificate {certificate_id} (JKS)",
+            outcome="success",
+            details={
+                "file_format": "JKS",
+                "include_chain": payload.include_chain,
+                "key_source": key_source,
+            },
+            # Never log the keystore password
+        )
+        return Response(
+            content=content,
+            media_type="application/x-java-keystore",
+            headers={"Content-Disposition": 'attachment; filename="certificate.jks"'},
+        )
+
+    is_pfx = requested_format == "PFX"
     key_source = "keyfactor"
     try:
         content = await service.download_certificate(

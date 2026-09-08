@@ -10,6 +10,7 @@ import React, { useState } from "react";
 import {
   Certificate,
   DOWNLOAD_FORMATS,
+  KEYSTORE_FORMATS,
   DownloadFormat,
   ChainOrder,
   certificateErrorMessage,
@@ -33,6 +34,7 @@ const FORMAT_DESCRIPTIONS: Record<DownloadFormat, string> = {
   DER: "Binary DER-encoded certificate",
   P7B: "PKCS#7 certificate chain",
   PFX: "PKCS#12 — includes private key (requires password)",
+  JKS: "Java KeyStore — includes private key (requires password)",
 };
 
 export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> = ({
@@ -50,17 +52,19 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
   const [includeSubjectHeader, setIncludeSubjectHeader] = useState(true);
   const [pfxPassword, setPfxPassword] = useState("");
   const [showPfxPassword, setShowPfxPassword] = useState(false);
+  const [jksAlias, setJksAlias] = useState("");
 
-  const isPfx = format === "PFX";
-  const pfxPasswordValid = !isPfx || pfxPassword.trim().length >= 12;
-  const canDownloadPfx = isPfx ? canWrite : true;
+  // PFX and JKS both carry the private key, so they share the password, the
+  // WRITE gate, and the requirement that a key is actually reachable.
+  const isKeystore = KEYSTORE_FORMATS.includes(format);
+  const pfxPasswordValid = !isKeystore || pfxPassword.trim().length >= 12;
+  const canDownloadPfx = isKeystore ? canWrite : true;
 
-  // PFX needs WRITE role and a private key the backend can reach: either one
-  // Keyfactor still holds, or the escrowed copy kept at issuance.
+  // The key can come from Keyfactor, or from the escrowed copy kept at issuance.
   const isEscrowed = certificate.key_escrowed === true;
   const hasPfxAvailable = isEscrowed || certificate.has_private_key !== false;
   const availableFormats = DOWNLOAD_FORMATS.filter(
-    (f) => f !== "PFX" || (canWrite && hasPfxAvailable)
+    (f) => !KEYSTORE_FORMATS.includes(f) || (canWrite && hasPfxAvailable)
   );
 
   const handleDownload = async () => {
@@ -70,11 +74,14 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
         id: certificate.id,
         data: {
           file_format: format,
-          include_chain: isPfx ? false : includeChain,
+          // A JKS entry carries its issuing chain, so keep it for JKS even
+          // though a bare PFX download intentionally drops it.
+          include_chain: format === "PFX" ? false : includeChain,
           chain_order: chainOrder,
-          include_subject_header: isPfx ? false : includeSubjectHeader,
+          include_subject_header: isKeystore ? false : includeSubjectHeader,
           collection_id: collectionId,
-          ...(isPfx ? { pfx_password: pfxPassword } : {}),
+          ...(isKeystore ? { pfx_password: pfxPassword } : {}),
+          ...(format === "JKS" && jksAlias.trim() ? { jks_alias: jksAlias.trim() } : {}),
         },
       });
       const url = URL.createObjectURL(blob);
@@ -123,7 +130,8 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
             onChange={(e) => {
               const newFmt = e.target.value as DownloadFormat;
               setFormat(newFmt);
-              if (newFmt !== "PFX") setPfxPassword("");
+              if (!KEYSTORE_FORMATS.includes(newFmt)) setPfxPassword("");
+              if (newFmt !== "JKS") setJksAlias("");
             }}
           >
             {availableFormats.map((f) => (
@@ -139,14 +147,14 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
           )}
           {!hasPfxAvailable && (
             <p className="mt-1 text-xs text-gray-400">
-              PFX format is not available — no private key is retrievable for this certificate.
-              Renewing it through the portal escrows the key and enables PFX download.
+              PFX and JKS formats are not available — no private key is retrievable for this
+              certificate. Renewing it through the portal escrows the key and enables them.
             </p>
           )}
         </div>
 
-        {/* PFX password */}
-        {isPfx && (
+        {/* Keystore password (PFX and JKS) */}
+        {isKeystore && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
             <div className="flex items-start gap-2">
               <svg className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -155,13 +163,19 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
                 <line x1="12" y1="17" x2="12.01" y2="17" />
               </svg>
               <p className="text-xs text-amber-800">
-                <strong>PFX/PKCS#12</strong> contains the private key. Set a strong password and store it securely. The password is never logged.
-                {isEscrowed && " The escrowed key is re-protected with this password, so it is the one that opens the file."}
+                <strong>{format === "JKS" ? "JKS (Java KeyStore)" : "PFX/PKCS#12"}</strong> contains
+                the private key. Set a strong password and store it securely. The password is never
+                logged.
+                {format === "JKS"
+                  ? " It protects both the keystore and the key entry inside it."
+                  : isEscrowed
+                    ? " The escrowed key is re-protected with this password, so it is the one that opens the file."
+                    : ""}
               </p>
             </div>
             <div>
               <label className={fieldLabel} htmlFor="pfx-password">
-                PFX Password <span className="text-red-500">*</span> (min 12 characters)
+                Keystore Password <span className="text-red-500">*</span> (min 12 characters)
               </label>
               <div className="relative">
                 <input
@@ -191,11 +205,29 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
                 <p className="mt-1 text-xs text-red-600">Password must be at least 12 characters.</p>
               )}
             </div>
+            {format === "JKS" && (
+              <div>
+                <label className={fieldLabel} htmlFor="jks-alias">
+                  Entry Alias (optional)
+                </label>
+                <input
+                  id="jks-alias"
+                  className={fieldInput}
+                  value={jksAlias}
+                  onChange={(e) => setJksAlias(e.target.value)}
+                  placeholder={certificate.common_name || "certificate"}
+                  aria-describedby="jks-alias-help"
+                />
+                <p id="jks-alias-help" className="mt-1 text-xs text-amber-800">
+                  Defaults to the common name. Java lowercases JKS aliases, so it is normalized.
+                </p>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Chain options — not applicable for PFX */}
-        {!isPfx && (
+        {/* Chain options — a bare PFX download intentionally has none */}
+        {format !== "PFX" && (
           <>
             <div className="border-t border-att-100 pt-4">
               <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-600">
@@ -222,7 +254,7 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
               </label>
             </div>
 
-            {includeChain && (
+            {includeChain && format !== "JKS" && (
               <div className="pl-4">
                 <span className={fieldLabel}>Chain Order</span>
                 <div className="mt-1 flex gap-4">
@@ -250,7 +282,7 @@ export const DownloadCertificateModal: React.FC<DownloadCertificateModalProps> =
               </div>
             )}
 
-            <div className="border-t border-att-100 pt-4">
+            <div className={`border-t border-att-100 pt-4 ${format === "JKS" ? "hidden" : ""}`}>
               <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-600">
                 Additional Options
               </h3>

@@ -757,10 +757,13 @@ export const certificateErrorMessage = (error: unknown, fallback = "Operation fa
 
 // ── Download ───────────────────────────────────────────────────────────────
 
-export type DownloadFormat = "PEM" | "CER" | "CRT" | "DER" | "P7B" | "PFX";
+export type DownloadFormat = "PEM" | "CER" | "CRT" | "DER" | "P7B" | "PFX" | "JKS";
+
+/** Formats that carry the private key: keystore password + WRITE role required. */
+export const KEYSTORE_FORMATS: DownloadFormat[] = ["PFX", "JKS"];
 export type ChainOrder = "EndEntityFirst" | "RootFirst";
 
-export const DOWNLOAD_FORMATS: DownloadFormat[] = ["PEM", "CER", "CRT", "DER", "P7B", "PFX"];
+export const DOWNLOAD_FORMATS: DownloadFormat[] = ["PEM", "CER", "CRT", "DER", "P7B", "PFX", "JKS"];
 
 export interface DownloadRequest {
   file_format: DownloadFormat;
@@ -768,7 +771,10 @@ export interface DownloadRequest {
   chain_order: ChainOrder;
   include_subject_header: boolean;
   collection_id?: number;
+  /** Keystore password for the PFX and JKS formats (min 12 chars). */
   pfx_password?: string;
+  /** JKS entry alias; defaults to the certificate's common name. */
+  jks_alias?: string;
 }
 
 export const downloadCertificate = async (id: number, data: DownloadRequest): Promise<Blob> => {

@@ -101,6 +101,7 @@ Base path: `/api/v1/certificates`. All endpoints require an authenticated user.
 | `POST` | `/{id}/renew` | WRITE | Renew an existing certificate. |
 | `POST` | `/{id}/revoke` | ADMIN | Revoke a certificate with an RFC 5280 reason. |
 | `PUT` | `/{id}/metadata` | WRITE | Update metadata / custom fields. |
+| `POST` | `/{id}/download` | view (WRITE for PFX/JKS) | Download as PEM, CER, CRT, DER, P7B, PFX, or JKS. |
 | `DELETE` | `/{id}` | ADMIN | Delete a certificate record. |
 
 ### List / search
@@ -234,7 +235,41 @@ All write operations are recorded in the audit log (who, what, when, target, out
 
 ---
 
-## 6. Private-Key Escrow (multi-vault loads)
+## 6. Download Formats
+
+| Format | Contains | Notes |
+| --- | --- | --- |
+| PEM / CER / CRT / DER | Certificate only | Chain and subject-header options apply |
+| P7B | Certificate chain | No private key |
+| PFX | Certificate + private key | WRITE role, keystore password (min 12 chars) |
+| JKS | Certificate + chain + private key | WRITE role, keystore password (min 12 chars) |
+
+### JKS specifics
+
+Keyfactor Command has **no JKS export**, so the portal builds the keystore
+itself in [keystore_service.py](../backend/app/services/keystore_service.py): it
+obtains PFX material (a live Keyfactor export under a throwaway transit
+password, or the escrowed key) and converts it locally.
+
+- **Legacy JKS on purpose.** The output is a real JKS container (magic
+  `0xFEEDFEED`) rather than a PKCS#12 file named `.jks`, because Java 8 cannot
+  read PKCS#12 through a strict `KeyStore.getInstance("JKS")`. On Java 9+ either
+  container works, so legacy JKS covers the whole fleet.
+- **Password.** The `pfx_password` field carries the keystore password for both
+  PFX and JKS. For JKS it protects the keystore integrity check *and* the
+  private-key entry — it is the password the recipient uses to open the file.
+  The transit password used for the intermediate Keyfactor export never leaves
+  the backend.
+- **Alias.** Defaults to the certificate's common name; override with
+  `jks_alias`. Java lowercases JKS aliases, so the value is normalized —
+  `Tomcat-TLS` becomes `tomcat-tls`.
+- **Chain.** The entry carries its issuing chain leaf-first (Java's traversal
+  order), so the chain-order choice does not apply. `include_chain=false` keeps
+  only the leaf.
+
+---
+
+## 7. Private-Key Escrow (multi-vault loads)
 
 ### The problem it solves
 
@@ -298,13 +333,13 @@ incident.
 | --- | --- |
 | Capture | `_escrow_issued_key` in the enroll/renew endpoints; best-effort, so an escrow failure never fails an issuance |
 | Use — AKV | `Load to AKV` → **Use escrowed key** (preselected when available). `key_source=escrow` fails rather than silently falling back to a Keyfactor export |
-| Use — download | PFX download tries Keyfactor first (so chain options are unchanged), then the escrowed key, re-wrapped under the password on the request |
+| Use — download | PFX download tries Keyfactor first (so chain options are unchanged), then the escrowed key, re-wrapped under the password on the request. JKS uses the same two sources, converted locally |
 | Reconcile | After each full sync: expiry/common-name backfilled from the snapshot |
 | Purge | Secrets for expired certificates are deleted and the row marked `purged_at`. A row with unknown expiry is never purged |
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Likely cause | Resolution |
 | --- | --- | --- |
@@ -319,16 +354,21 @@ incident.
 | `409` "No escrowed private key" | Certificate predates escrow, or was renewed outside the portal | Renew it through the portal to escrow a key, or retry with `key_source=auto` to attempt a live export. |
 | `422` on PFX download | Keyfactor 400 ("private key is not available") mapped to 422 by `_raise_http`, and no escrowed key to fall back to | Renew through the portal to escrow the key. With escrow the download is served from it and returns `200`. |
 | PFX missing from the download format list | No key reachable: `has_private_key=false` and not escrowed | Renew through the portal; PFX reappears once the key is escrowed. Note PFX still requires the WRITE role. |
+| PFX/JKS missing from the format list | Same cause — both need a reachable private key and the WRITE role | As above. |
+| `409` on JKS download | No Keyfactor key and nothing escrowed | Renew through the portal to escrow the key. |
+| `422` "Could not build a JKS keystore" | The PFX material was unreadable (wrong password upstream, or no private key inside) | Check the Keyfactor template returns a key; the log line `jks_keystore_built` is absent on failure. |
+| JKS loads but the app cannot find the key | Alias mismatch — Java lowercases aliases | Set `jks_alias` to the alias the application expects; it is normalized to lowercase. |
 | `Key` column missing from the grid | Escrow not configured | Set `CERT_KEY_ESCROW_ENABLED` / `CERT_KEY_ESCROW_VAULT`; the flag is omitted entirely when escrow is off. |
 | Escrow silently not happening | Vault write refused | Check `cert_escrow_vault_write_failed` in the logs and the identity's `secrets/set` permission on the escrow vault. |
 
 ---
 
-## 8. Related Files
+## 9. Related Files
 
 - Backend client: [backend/app/services/keyfactor_client.py](../backend/app/services/keyfactor_client.py)
 - Backend service: [backend/app/services/keyfactor_service.py](../backend/app/services/keyfactor_service.py)
 - Key escrow: [backend/app/services/certificate_escrow_service.py](../backend/app/services/certificate_escrow_service.py)
+- JKS keystore builder: [backend/app/services/keystore_service.py](../backend/app/services/keystore_service.py)
 - Backend router: [backend/app/api/v1/endpoints/certificates.py](../backend/app/api/v1/endpoints/certificates.py)
 - Config: [backend/app/core/config.py](../backend/app/core/config.py)
 - Frontend service: [frontend/src/services/certificatesApi.ts](../frontend/src/services/certificatesApi.ts)
@@ -336,5 +376,6 @@ incident.
 - Frontend modals: [frontend/src/features/certificates/](../frontend/src/features/certificates/)
 - Tests: `backend/tests/test_keyfactor_client.py`, `backend/tests/test_keyfactor_service.py`,
   `backend/tests/test_certificates_api.py`, `backend/tests/test_certificate_escrow_service.py`,
+  `backend/tests/test_keystore_service.py`,
   `frontend/src/pages/CertificatesPage.test.tsx`,
   `frontend/src/features/certificates/*.test.tsx`
