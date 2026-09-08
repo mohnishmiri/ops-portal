@@ -145,6 +145,28 @@ def _register_platform_jobs(scheduler: AsyncIOScheduler) -> None:
         coalesce=True,
     )
 
+    # Certificate automation ticks hourly but each config runs at most once a
+    # day (enforced in the service), so a restart cannot skip or duplicate a day.
+    scheduler.add_job(
+        run_certificate_expiry_alerts_job,
+        IntervalTrigger(hours=1),
+        id="certificate_expiry_alerts",
+        name="Certificate Expiry Alerts",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        run_certificate_auto_renewal_job,
+        IntervalTrigger(hours=1),
+        id="certificate_auto_renewal",
+        name="Certificate Auto-Renewal",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
 
 def _remove_legacy_alert_jobs(scheduler: AsyncIOScheduler) -> None:
     """Remove pre-migration hard-coded alert jobs from a running scheduler."""
@@ -803,6 +825,38 @@ async def run_checksum_schedules_job() -> None:
 
     except Exception as e:
         logger.error("checksum_schedule_job_failed", error=str(e))
+
+
+async def run_certificate_expiry_alerts_job() -> None:
+    """Send the certificate expiry report for every enabled alert rule."""
+    logger.info("certificate_expiry_alert_job_started")
+    try:
+        async for db in get_db_session():
+            from app.services.certificate_automation_service import CertificateAutomationService
+
+            result = await CertificateAutomationService(db).run_expiry_alerts(trigger="schedule")
+            logger.info(
+                "certificate_expiry_alert_job_finished",
+                configs_evaluated=result.get("configs_evaluated", 0),
+            )
+    except Exception as e:
+        logger.error("certificate_expiry_alert_job_failed", error=str(e)[:300])
+
+
+async def run_certificate_auto_renewal_job() -> None:
+    """Run every enabled auto-renewal schedule that is due."""
+    logger.info("certificate_auto_renewal_job_started")
+    try:
+        async for db in get_db_session():
+            from app.services.certificate_automation_service import CertificateAutomationService
+
+            result = await CertificateAutomationService(db).run_auto_renewals(trigger="schedule")
+            logger.info(
+                "certificate_auto_renewal_job_finished",
+                schedules_run=result.get("schedules_run", 0),
+            )
+    except Exception as e:
+        logger.error("certificate_auto_renewal_job_failed", error=str(e)[:300])
 
 
 async def _execute_schedule_checksum(

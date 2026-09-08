@@ -31,6 +31,7 @@ import {
   useAutoRenewalConfigs,
   useCreateAutoRenewalConfig,
   useDeleteAutoRenewalConfig,
+  useRunAlertConfig,
   useRunAutoRenewalConfig,
   useAlertConfigs,
   useCreateAlertConfig,
@@ -51,6 +52,7 @@ import { CertificateDetailsModal } from "../features/certificates/CertificateDet
 import { DownloadCertificateModal } from "../features/certificates/DownloadCertificateModal";
 import { LoadToAkvModal } from "../features/certificates/LoadToAkvModal";
 import { CertificateMultiSelect } from "../features/certificates/CertificateMultiSelect";
+import { AkvTargetPicker, isAkvTargetComplete, type AkvTarget } from "../features/certificates/AkvTargetPicker";
 
 const PAGE_SIZE = 25;
 
@@ -383,6 +385,8 @@ const AUTO_RENEWAL_CSV_COLUMNS: CsvColumn<AutoRenewalConfig>[] = [
   { header: "Certificate Count", value: (c) => c.certificates?.length ?? 0 },
   { header: "Certificates", value: (c) => c.certificates?.map((x) => x.common_name).join("; ") ?? "" },
   { header: "Renew Before (Days)", value: (c) => c.days_before_expiry },
+  { header: "Mode", value: (c) => (c.armed ? "Armed" : "Dry run") },
+  { header: "AKV Targets", value: (c) => (c.akv_targets ?? []).map((t) => `${t.vault_name}: ${t.certificate_names.join(" ")}`).join("; ") },
   { header: "Status", value: (c) => (c.enabled ? "Active" : "Disabled") },
   { header: "Notification Emails", value: (c) => c.notification_emails?.join("; ") ?? "" },
   { header: "Created By", value: (c) => c.created_by },
@@ -621,6 +625,7 @@ const actionBadgeColor: Record<string, string> = {
   download_certificate: "bg-purple-100 text-purple-800",
   load_certificate_to_akv: "bg-indigo-100 text-indigo-800",
   cert_key_escrow: "bg-cyan-100 text-cyan-800",
+  cert_alert_run: "bg-amber-100 text-amber-800",
   cert_auto_renewal_run: "bg-teal-100 text-teal-800",
   cert_auto_renewal_config: "bg-teal-100 text-teal-800",
 };
@@ -634,6 +639,7 @@ const actionLabel: Record<string, string> = {
   download_certificate: "Download",
   load_certificate_to_akv: "Load to AKV",
   cert_key_escrow: "Key Escrow",
+  cert_alert_run: "Expiry Alert Sent",
   cert_auto_renewal_run: "Auto-Renewal Run",
   cert_auto_renewal_config: "Auto-Renewal Config",
 };
@@ -825,6 +831,13 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
   const [formCollectionId, setFormCollectionId] = useState<number | "">("");
   const [formDays, setFormDays] = useState(60);
   const [formEmails, setFormEmails] = useState("");
+  const [formArmed, setFormArmed] = useState(false);
+  const [formAkvTarget, setFormAkvTarget] = useState<AkvTarget>({
+    subscriptionId: "",
+    resourceGroup: "",
+    vaultName: "",
+    certificateNames: [],
+  });
   const [formScope, setFormScope] = useState<"collection" | "certificates">("collection");
   const [formCerts, setFormCerts] = useState<AutoRenewalCertificateRef[]>([]);
 
@@ -836,6 +849,8 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
     setFormEmails("");
     setFormScope("collection");
     setFormCerts([]);
+    setFormArmed(false);
+    setFormAkvTarget({ subscriptionId: "", resourceGroup: "", vaultName: "", certificateNames: [] });
   };
 
   const handleEdit = (c: NonNullable<typeof configs>[number]) => {
@@ -843,6 +858,14 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
     setFormCollectionId(c.collection_id ?? "");
     setFormDays(c.days_before_expiry);
     setFormEmails(c.notification_emails?.join(", ") || "");
+    setFormArmed(Boolean(c.armed));
+    const target = c.akv_targets?.[0];
+    setFormAkvTarget({
+      subscriptionId: target?.subscription_id || "",
+      resourceGroup: target?.resource_group || "",
+      vaultName: target?.vault_name || "",
+      certificateNames: target?.certificate_names || [],
+    });
     const certs = c.certificates ?? [];
     setFormScope(certs.length > 0 ? "certificates" : "collection");
     setFormCerts(certs);
@@ -866,9 +889,20 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
       collection_id: Number(formCollectionId),
       collection_name: collectionName,
       days_before_expiry: formDays,
+      armed: formArmed,
       notify_on_renewal: true,
       notification_emails: formEmails.split(",").map((e) => e.trim()).filter(Boolean),
       certificates: formScope === "certificates" ? formCerts : [],
+      akv_targets: isAkvTargetComplete(formAkvTarget)
+        ? [
+            {
+              subscription_id: formAkvTarget.subscriptionId,
+              resource_group: formAkvTarget.resourceGroup,
+              vault_name: formAkvTarget.vaultName,
+              certificate_names: formAkvTarget.certificateNames,
+            },
+          ]
+        : [],
     });
     resetForm();
   };
@@ -878,8 +912,10 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
     setRunningId(c.id);
     run.mutate(c.id, {
       onSuccess: (r) => {
-        const dueText = r.certificates_due == null ? "" : ` — ${r.certificates_due} certificate(s) due within ${r.days_before_expiry} days`;
-        onToast(`Auto-renewal triggered for ${r.collection_name || "collection"}${dueText}. Recorded in audit log.`, "success");
+        const message = r.armed
+          ? `Renewed ${r.renewed} of ${r.certificates_due} due certificate(s)${r.failed ? `, ${r.failed} failed` : ""}. ${r.emails_sent} report email(s) sent.`
+          : `Dry run: ${r.certificates_due} certificate(s) are due and would be renewed. Nothing was issued. ${r.emails_sent} report email(s) sent.`;
+        onToast(message, r.failed ? "error" : "success");
       },
       onError: (e) => onToast(certificateErrorMessage(e, "Failed to run auto-renewal."), "error"),
       onSettled: () => setRunningId(null),
@@ -943,6 +979,40 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
             <CertificateMultiSelect collectionId={Number(formCollectionId)} selected={formCerts} onChange={setFormCerts} />
           )}
 
+          {/* Where each renewed certificate is loaded. Explicit targets keep a
+              scheduled run predictable — it updates these entries and nothing else. */}
+          <div className="rounded-lg border border-att-100 bg-white p-4">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Load renewals into Azure Key Vault (optional)
+            </p>
+            <p className="mb-3 text-xs text-gray-500">
+              Each renewed certificate is imported into the entries you select, using the key from
+              the renewal itself — no password is needed. Leave empty to renew without touching AKV.
+            </p>
+            <AkvTargetPicker onChange={setFormAkvTarget} />
+          </div>
+
+          {/* Arming is deliberate: an un-armed schedule reports what it would do
+              without issuing certificates against the CA. */}
+          <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${formArmed ? "border-amber-300 bg-amber-50" : "border-att-100 bg-white"}`}>
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={formArmed}
+              onChange={(e) => setFormArmed(e.target.checked)}
+            />
+            <span>
+              <span className="block text-sm font-medium text-gray-800">
+                Arm this schedule (issue certificates automatically)
+              </span>
+              <span className="block text-xs text-gray-600">
+                {formArmed
+                  ? "Every run will renew due certificates against the CA and load them to the targets above."
+                  : "Dry run: the schedule runs on time and emails what it would renew, but issues nothing. Recommended until the targets and recipients are confirmed."}
+              </span>
+            </span>
+          </label>
+
           <div className="flex gap-2">
             <button type="button" className="rounded-lg bg-att-600 px-4 py-2 text-sm font-medium text-white hover:bg-att-700 disabled:opacity-50" disabled={!formCollectionId || (formScope === "certificates" && formCerts.length === 0) || create.isPending} onClick={handleCreate}>{create.isPending ? "Saving…" : editingId ? "Update Schedule" : "Save Schedule"}</button>
             <button type="button" className={gridStyles.pagerButton} onClick={resetForm}>Cancel</button>
@@ -967,7 +1037,20 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
             <DetailField label="Notification Emails" className="sm:col-span-2">{viewingConfig.notification_emails?.length ? viewingConfig.notification_emails.join(", ") : "—"}</DetailField>
             <DetailField label="Created By">{viewingConfig.created_by}</DetailField>
             <DetailField label="Created At">{viewingConfig.created_at ? new Date(viewingConfig.created_at).toLocaleString() : "—"}</DetailField>
+            <DetailField label="Mode">
+              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${viewingConfig.armed ? "bg-amber-100 text-amber-800" : "bg-gray-100 text-gray-600"}`}>
+                {viewingConfig.armed ? "Armed — issues certificates" : "Dry run — issues nothing"}
+              </span>
+            </DetailField>
+            <DetailField label="AKV Targets" className="sm:col-span-2">
+              {viewingConfig.akv_targets?.length
+                ? viewingConfig.akv_targets.map((t) => `${t.vault_name}: ${t.certificate_names.join(", ")}`).join(" · ")
+                : "None — renewals are not loaded to Key Vault"}
+            </DetailField>
             <DetailField label="Last Run">{viewingConfig.last_run_at ? new Date(viewingConfig.last_run_at).toLocaleString() : "Never"}</DetailField>
+            {viewingConfig.last_run_summary && (
+              <DetailField label="Last Run Result" className="sm:col-span-2">{viewingConfig.last_run_summary}</DetailField>
+            )}
           </dl>
           {viewingConfig.certificates && viewingConfig.certificates.length > 0 && (
             <div className="mt-3 rounded-lg border border-att-100 bg-white px-3 py-2.5 shadow-sm">
@@ -992,6 +1075,8 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
             <th className={gridStyles.headerCell}>Scope</th>
             <th className={gridStyles.headerCell}>Renew Before</th>
             <th className={gridStyles.headerCell}>Status</th>
+            <th className={gridStyles.headerCell}>Mode</th>
+            <th className={gridStyles.headerCell}>AKV Targets</th>
             <th className={gridStyles.headerCell}>Notification Emails</th>
             <th className={gridStyles.headerCell}>Created By</th>
             <th className={gridStyles.headerCell}>Last Run</th>
@@ -1000,9 +1085,9 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
         </thead>
         <tbody>
           {isLoading ? (
-            <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-500">Loading…</td></tr>
+            <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500">Loading…</td></tr>
           ) : !configs?.length ? (
-            <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-500">No auto-renewal schedules configured. Click “+ Add Schedule” to get started.</td></tr>
+            <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500">No auto-renewal schedules configured. Click “+ Add Schedule” to get started.</td></tr>
           ) : configs.map((c) => (
             <tr key={c.id} className={gridStyles.row}>
               <td className={gridStyles.strongCell}>{c.collection_name || `Collection ${c.collection_id}`}</td>
@@ -1015,9 +1100,22 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
               </td>
               <td className={gridStyles.cell}><span className="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">{c.days_before_expiry} days</span></td>
               <td className={gridStyles.cell}><span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${c.enabled ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-600"}`}>{c.enabled ? "Active" : "Disabled"}</span></td>
+              <td className={gridStyles.cell}>
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${c.armed ? "bg-amber-100 text-amber-800" : "bg-gray-100 text-gray-600"}`}
+                  title={c.armed ? "Issues certificates automatically on each run" : "Reports what it would renew; issues nothing"}
+                >
+                  {c.armed ? "Armed" : "Dry run"}
+                </span>
+              </td>
+              <td className={`${gridStyles.cell} text-xs`} title={(c.akv_targets ?? []).map((t) => `${t.vault_name}/${t.certificate_names.join(", ")}`).join(" · ")}>
+                {c.akv_targets?.length
+                  ? c.akv_targets.map((t) => `${t.vault_name} (${t.certificate_names.length})`).join(", ")
+                  : "—"}
+              </td>
               <td className={`${gridStyles.cell} text-xs`}>{c.notification_emails?.join(", ") || "—"}</td>
               <td className={`${gridStyles.cell} text-xs`}>{c.created_by}</td>
-              <td className={`${gridStyles.cell} whitespace-nowrap text-xs`} title={c.last_run_at ? formatDateTime(c.last_run_at) : "Never triggered"}>{c.last_run_at ? formatDateTime(c.last_run_at) : "Never"}</td>
+              <td className={`${gridStyles.cell} whitespace-nowrap text-xs`} title={c.last_run_summary || (c.last_run_at ? formatDateTime(c.last_run_at) : "Never triggered")}>{c.last_run_at ? formatDateTime(c.last_run_at) : "Never"}</td>
               <td className={gridStyles.centerCell}>
                 <div className="flex items-center justify-center gap-0.5">
                   <ActionBtn title="Run now" tone="green" disabled={run.isPending} onClick={() => handleRun(c)}>{run.isPending && runningId === c.id ? SpinnerIcon : Icons.play}</ActionBtn>
@@ -1036,7 +1134,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
 
 // ── Alerts Panel ─────────────────────────────────────────────────────
 
-const AlertsPanel: React.FC = () => {
+const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void }> = ({ onToast }) => {
   const { data: configs, isLoading } = useAlertConfigs();
   const { data: collections } = useCollections();
   const create = useCreateAlertConfig();
@@ -1069,6 +1167,27 @@ const AlertsPanel: React.FC = () => {
     setFormChannel(c.notify_channel);
     setFormEmails(c.notification_emails?.join(", ") || "");
     setShowForm(true);
+  };
+
+  const runAlert = useRunAlertConfig();
+  const [runningId, setRunningId] = useState<number | null>(null);
+
+  const handleRunAlert = (c: AlertConfig) => {
+    if (runAlert.isPending) return;
+    setRunningId(c.id);
+    runAlert.mutate(c.id, {
+      onSuccess: (r) => {
+        const message =
+          r.status === "no_certificates_due"
+            ? "No certificates are inside the alert windows — no report sent."
+            : r.status === "no_recipients"
+              ? `${r.critical} critical, ${r.warning} warning — but this rule has no recipients.`
+              : `Report sent to ${r.emails_sent} recipient(s): ${r.critical} critical, ${r.warning} warning.`;
+        onToast(message, r.status === "no_recipients" ? "error" : "success");
+      },
+      onError: (e) => onToast(certificateErrorMessage(e, "Failed to send the expiry report."), "error"),
+      onSettled: () => setRunningId(null),
+    });
   };
 
   const handleCreate = async () => {
@@ -1188,6 +1307,7 @@ const AlertsPanel: React.FC = () => {
               <td className={`${gridStyles.cell} text-xs`}>{c.created_by}</td>
               <td className={gridStyles.centerCell}>
                 <div className="flex items-center justify-center gap-0.5">
+                  <ActionBtn title="Send report now" tone="green" disabled={runAlert.isPending} onClick={() => handleRunAlert(c)}>{runAlert.isPending && runningId === c.id ? SpinnerIcon : Icons.play}</ActionBtn>
                   <ActionBtn title="View" tone="blue" onClick={() => setViewingConfig(c)}>{Icons.eye}</ActionBtn>
                   <ActionBtn title="Edit" tone="blue" onClick={() => handleEdit(c)}>{Icons.edit}</ActionBtn>
                   <ActionBtn title="Delete" tone="red" onClick={() => remove.mutate(c.id)}>{Icons.trash}</ActionBtn>
@@ -1525,7 +1645,7 @@ const CertificatesPage: React.FC = () => {
       </>)}
 
       {activeTab === "auto-renewal" && <AutoRenewalPanel onToast={showToast} />}
-      {activeTab === "alerts" && <AlertsPanel />}
+      {activeTab === "alerts" && <AlertsPanel onToast={showToast} />}
       {activeTab === "audit" && <CertificateAuditHistoryPanel />}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}

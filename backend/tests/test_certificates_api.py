@@ -584,34 +584,136 @@ async def test_run_auto_renewal_config_not_found(app, admin_client):
     assert resp.status_code == 404
 
 
-async def test_run_auto_renewal_config_records_audit(app, admin_client):
-    # Create a schedule, trigger it manually, and confirm the run is persisted.
+@pytest.fixture
+def no_email(monkeypatch):
+    """Stop certificate automation from touching a real SMTP relay in tests."""
+
+    class _Stub:
+        def __init__(self, *a, **k):
+            pass
+
+        async def send_certificate_expiry_report(self, **kwargs):
+            return {"recipients": len(kwargs["recipient_emails"]), "success": len(kwargs["recipient_emails"])}
+
+        async def send_certificate_renewal_report(self, **kwargs):
+            return {"recipients": len(kwargs["recipient_emails"]), "success": len(kwargs["recipient_emails"])}
+
+    monkeypatch.setattr("app.services.certificate_automation_service.EmailNotificationService", _Stub)
+    return _Stub
+
+
+async def test_run_auto_renewal_config_records_audit(app, admin_client, no_email):
+    # A schedule defaults to un-armed, so triggering it reports what it would
+    # renew and issues nothing — the run is still persisted.
     create = await admin_client.post(
         "/api/v1/certificates/auto-renewal/configs",
         json={"collection_id": 42, "collection_name": "AP-KF-ATTCC-31599", "days_before_expiry": 60},
     )
     assert create.status_code == 200
+    assert create.json()["armed"] is False
     config_id = create.json()["id"]
 
     run = await admin_client.post(f"/api/v1/certificates/auto-renewal/configs/{config_id}/run")
     assert run.status_code == 200
     body = run.json()
-    assert body["status"] == "triggered"
+    assert body["status"] == "completed"
     assert body["config_id"] == config_id
-    assert body["collection_name"] == "AP-KF-ATTCC-31599"
-    assert body["triggered_at"]
+    assert body["armed"] is False
+    assert body["renewed"] == 0
 
     # The schedule now reports a last-run timestamp.
     configs = await admin_client.get("/api/v1/certificates/auto-renewal/configs")
     assert configs.status_code == 200
     match = next(c for c in configs.json() if c["id"] == config_id)
     assert match["last_run_at"]
+    assert match["armed"] is False
 
     # The trigger is captured in the certificate audit history.
     history = await admin_client.get("/api/v1/certificates/audit-history")
     assert history.status_code == 200
     actions = [e["action"] for e in history.json()["history"]]
     assert "cert_auto_renewal_run" in actions
+
+
+async def test_auto_renewal_config_stores_akv_targets_and_arm_state(app, admin_client):
+    create = await admin_client.post(
+        "/api/v1/certificates/auto-renewal/configs",
+        json={
+            "collection_id": 42,
+            "collection_name": "AP-KF-ATTCC-31599",
+            "days_before_expiry": 60,
+            "armed": True,
+            "akv_targets": [
+                {
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-1",
+                    "vault_name": "attcc-eastus2-perf-kv",
+                    "certificate_names": ["cesdataroutergearsperf-test-att-com"],
+                }
+            ],
+        },
+    )
+    assert create.status_code == 200
+    assert create.json()["armed"] is True
+
+    configs = await admin_client.get("/api/v1/certificates/auto-renewal/configs")
+    match = next(c for c in configs.json() if c["id"] == create.json()["id"])
+    assert match["armed"] is True
+    assert match["akv_targets"][0]["vault_name"] == "attcc-eastus2-perf-kv"
+    assert match["akv_targets"][0]["certificate_names"] == ["cesdataroutergearsperf-test-att-com"]
+
+
+async def test_auto_renewal_rejects_an_invalid_akv_entry_name(app, admin_client):
+    resp = await admin_client.post(
+        "/api/v1/certificates/auto-renewal/configs",
+        json={
+            "collection_id": 42,
+            "akv_targets": [{"vault_name": "v", "certificate_names": ["bad name!"]}],
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_run_alert_config_sends_the_report(app, admin_client, db_session, no_email):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+
+    await _cache_certificate(db_session, certificate_id=1, common_name="expiring.att.com")
+
+    # Give the cached certificate an expiry inside the critical window.
+    expiry = (datetime.now(UTC) + timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    await db_session.execute(
+        text("UPDATE cert_certificates SET not_after = :na, revoked = 0 WHERE certificate_id = 1"),
+        {"na": expiry},
+    )
+    await db_session.commit()
+
+    create = await admin_client.post(
+        "/api/v1/certificates/alerts/configs",
+        json={
+            "collection_id": 2573,
+            "warning_days": 60,
+            "critical_days": 30,
+            "notification_emails": ["leadership@att.com"],
+        },
+    )
+    assert create.status_code == 200
+    config_id = create.json()["id"]
+
+    run = await admin_client.post(f"/api/v1/certificates/alerts/configs/{config_id}/run")
+    assert run.status_code == 200
+    body = run.json()
+    assert body["status"] in {"sent", "no_recipients"}
+    assert body["critical"] == 1
+
+    history = await admin_client.get("/api/v1/certificates/audit-history")
+    assert "cert_alert_run" in [e["action"] for e in history.json()["history"]]
+
+
+async def test_run_alert_config_404_for_unknown_rule(app, admin_client):
+    resp = await admin_client.post("/api/v1/certificates/alerts/configs/999999/run")
+    assert resp.status_code == 404
 
 
 # ── RBAC — destructive/sensitive actions blocked without permission ────

@@ -194,6 +194,172 @@ STORAGE_ALERT_TEMPLATE = """
 """
 
 
+# ── Certificate lifecycle report templates ─────────────────────────────
+#
+# These reach leadership, so the styling is deliberately restrained: no emoji,
+# a single accent colour per severity, and the numbers readable at a glance
+# before any table is scanned.
+
+_SEV_CRITICAL = "#b42318"
+_SEV_WARNING = "#b54708"
+_SEV_INFO = "#175cd3"
+_SEV_OK = "#027a48"
+
+
+def _html_escape(value: Any) -> str:
+    """Escape text interpolated into a report table."""
+    return (
+        str(value if value is not None else "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _akv_summary_html(entries: list[dict]) -> str:
+    """One line per Key Vault entry a renewal was imported into."""
+    if not entries:
+        return '<span style="color:#6b7280;">No Key Vault target configured</span>'
+    parts = []
+    for entry in entries:
+        ok = entry.get("status") == "imported"
+        colour = _SEV_OK if ok else _SEV_CRITICAL
+        label = _html_escape(f"{entry.get('vault_name', '')}/{entry.get('certificate_name', '')}")
+        detail = "" if ok else f" &ndash; {_html_escape(entry.get('error', 'failed'))}"
+        parts.append(f'<div style="color:{colour};font-size:12px;">{label}{detail}</div>')
+    return "".join(parts)
+
+
+_CERT_REPORT_STYLE = """
+        body {{ margin:0; padding:0; background:#f3f4f6; }}
+        .wrap {{ max-width:760px; margin:0 auto; padding:24px; font-family:'Segoe UI',Arial,sans-serif; color:#1f2937; }}
+        .card {{ background:#ffffff; border:1px solid #e5e7eb; border-radius:10px; overflow:hidden; }}
+        .head {{ background:#00388f; color:#ffffff; padding:20px 24px; }}
+        .head h1 {{ margin:0; font-size:19px; font-weight:600; letter-spacing:.2px; }}
+        .head p {{ margin:6px 0 0; font-size:13px; opacity:.85; }}
+        .body {{ padding:24px; }}
+        .stats {{ width:100%; border-collapse:collapse; margin:0 0 20px; }}
+        .stats td {{ width:33%; padding:14px; text-align:center; background:#f9fafb; border:1px solid #e5e7eb; }}
+        .stats .n {{ display:block; font-size:26px; font-weight:700; line-height:1.1; }}
+        .stats .l {{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.7px; color:#6b7280; margin-top:4px; }}
+        .sec {{ margin:22px 0 0; }}
+        .sec h2 {{ font-size:13px; text-transform:uppercase; letter-spacing:.7px; margin:0 0 8px; }}
+        table.data {{ width:100%; border-collapse:collapse; font-size:13px; }}
+        table.data th {{ text-align:left; background:#f9fafb; color:#6b7280; font-size:11px;
+                        text-transform:uppercase; letter-spacing:.5px; padding:8px 10px; border-bottom:1px solid #e5e7eb; }}
+        table.data td {{ padding:9px 10px; border-bottom:1px solid #f3f4f6; vertical-align:top; }}
+        table.data td.cn {{ font-weight:600; word-break:break-all; }}
+        table.data td.num {{ white-space:nowrap; }}
+        table.data td.id {{ color:#6b7280; font-family:Consolas,monospace; font-size:12px; }}
+        .cta {{ display:inline-block; background:#00388f; color:#ffffff !important; text-decoration:none;
+               padding:11px 22px; border-radius:6px; font-size:13px; font-weight:600; margin-top:22px; }}
+        .foot {{ padding:16px 24px; background:#f9fafb; border-top:1px solid #e5e7eb; color:#6b7280; font-size:11px; }}
+        .banner {{ padding:12px 14px; border-radius:6px; font-size:13px; margin:0 0 20px; }}
+"""
+
+CERT_REPORT_SECTION = """
+        <div class="sec">
+          <h2 style="color:{accent};">{title} ({count})</h2>
+          <table class="data">
+            <tr><th>Common Name</th><th>Expires</th><th>Remaining</th><th>ID</th></tr>
+            {rows}
+          </table>
+        </div>
+"""
+
+CERT_RENEWAL_RESULT_SECTION = """
+        <div class="sec">
+          <h2 style="color:{accent};">{title} ({count})</h2>
+          <table class="data">
+            <tr><th>Common Name</th><th>New Thumbprint</th><th>Key Vault</th></tr>
+            {rows}
+          </table>
+        </div>
+"""
+
+CERT_RENEWAL_FAILURE_SECTION = """
+        <div class="sec">
+          <h2 style="color:{accent};">Failed ({count})</h2>
+          <table class="data">
+            <tr><th>Common Name</th><th>Reason</th></tr>
+            {rows}
+          </table>
+        </div>
+"""
+
+CERT_EXPIRY_REPORT_TEMPLATE = (
+    """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>"""
+    + _CERT_REPORT_STYLE
+    + """</style></head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="head">
+        <h1>Certificate Expiry Report</h1>
+        <p>{scope_label}</p>
+      </div>
+      <div class="body">
+        <table class="stats">
+          <tr>
+            <td><span class="n">{total}</span><span class="l">Expiring</span></td>
+            <td><span class="n" style="color:{critical_color};">{critical_count}</span><span class="l">Critical</span></td>
+            <td><span class="n" style="color:{warning_color};">{warning_count}</span><span class="l">Warning</span></td>
+          </tr>
+        </table>
+        {sections}
+        <a class="cta" href="{portal_url}">Open Certificate Management</a>
+      </div>
+      <div class="foot">
+        Generated {generated_at} by AT&amp;T Enterprise OpsPortal. This is an automated report.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+)
+
+CERT_RENEWAL_REPORT_TEMPLATE = (
+    """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>"""
+    + _CERT_REPORT_STYLE
+    + """</style></head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="head">
+        <h1>Certificate Auto-Renewal &mdash; {mode}</h1>
+        <p>{scope_label}</p>
+      </div>
+      <div class="body">
+        <div class="banner" style="background:{banner_color}14;border-left:3px solid {banner_color};color:{banner_color};">{banner}</div>
+        <table class="stats">
+          <tr>
+            <td><span class="n">{due_count}</span><span class="l">In Window</span></td>
+            <td><span class="n" style="color:{ok_color};">{renewed_count}</span><span class="l">Renewed</span></td>
+            <td><span class="n" style="color:{critical_color};">{failed_count}</span><span class="l">Failed</span></td>
+          </tr>
+        </table>
+        {sections}
+        <a class="cta" href="{portal_url}">Open Certificate Management</a>
+      </div>
+      <div class="foot">
+        Generated {generated_at} by AT&amp;T Enterprise OpsPortal. This is an automated report.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+)
+
+
 class EmailNotificationService:
     """
     Production-ready email notification service.
@@ -1012,6 +1178,185 @@ This is an automated report from the ATTCC Compliance Portal.
 For questions or to acknowledge findings, visit the Compliance Dashboard.
 """
         return text
+
+    # ── Certificate lifecycle reports ──────────────────────────────────
+
+    @staticmethod
+    def _cert_rows_html(rows: list[dict], *, accent: str) -> str:
+        """Table body for a certificate report, newest expiry first."""
+        cells = []
+        for row in rows:
+            days = row.get("days_until_expiry")
+            if days is None:
+                remaining = "Unknown"
+            elif days < 0:
+                remaining = f"Expired {abs(days)} d ago"
+            else:
+                remaining = f"{days} d"
+            expiry = (row.get("not_after") or "")[:10] or "—"
+            cells.append(
+                f"<tr>"
+                f'<td class="cn">{_html_escape(row.get("common_name", ""))}</td>'
+                f'<td class="num">{expiry}</td>'
+                f'<td class="num" style="color:{accent};font-weight:600;">{remaining}</td>'
+                f'<td class="id">{row.get("certificate_id", "") or "—"}</td>'
+                f"</tr>"
+            )
+        return "\n".join(cells)
+
+    async def send_certificate_expiry_report(
+        self,
+        recipient_emails: list[str],
+        scope_label: str,
+        critical: list[dict],
+        warning: list[dict],
+        warning_days: int,
+        critical_days: int,
+        config_id: int,
+    ) -> dict[str, Any]:
+        """Consolidated certificate expiry report for a single alert rule.
+
+        One report per rule rather than one email per certificate: these are
+        read by leadership, so the summary has to be scannable in seconds.
+        """
+        total = len(critical) + len(warning)
+        headline = f"{len(critical)} critical" if critical else f"{len(warning)} approaching expiry"
+        subject = f"Certificate Expiry Report - {scope_label} - {headline}"
+
+        sections = ""
+        if critical:
+            sections += CERT_REPORT_SECTION.format(
+                title=f"Critical &mdash; expiring within {critical_days} days",
+                accent=_SEV_CRITICAL,
+                count=len(critical),
+                rows=self._cert_rows_html(critical, accent=_SEV_CRITICAL),
+            )
+        if warning:
+            sections += CERT_REPORT_SECTION.format(
+                title=f"Warning &mdash; expiring within {warning_days} days",
+                accent=_SEV_WARNING,
+                count=len(warning),
+                rows=self._cert_rows_html(warning, accent=_SEV_WARNING),
+            )
+
+        html_body = CERT_EXPIRY_REPORT_TEMPLATE.format(
+            scope_label=_html_escape(scope_label),
+            total=total,
+            critical_count=len(critical),
+            warning_count=len(warning),
+            critical_color=_SEV_CRITICAL,
+            warning_color=_SEV_WARNING,
+            sections=sections,
+            generated_at=datetime.utcnow().strftime("%d %b %Y, %H:%M UTC"),
+            portal_url=f"{self.portal_base_url}/certificates",
+        )
+
+        results = await self._send_email_batch(
+            recipient_emails=recipient_emails,
+            subject=subject,
+            html_body=html_body,
+            alert_type="certificate_expiry",
+            alert_id=config_id,
+        )
+        return {
+            "recipients": len(recipient_emails),
+            "success": sum(1 for r in results if r["status"] == "sent"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+        }
+
+    async def send_certificate_renewal_report(
+        self,
+        recipient_emails: list[str],
+        scope_label: str,
+        armed: bool,
+        planned: list[dict],
+        renewed: list[dict],
+        failed: list[dict],
+        days_before_expiry: int,
+        truncated: int,
+        config_id: int,
+    ) -> dict[str, Any]:
+        """Outcome of one auto-renewal run (or what a dry run would have done)."""
+        if not armed:
+            subject = f"[Dry run] Certificate Auto-Renewal - {scope_label} - {len(planned)} due"
+            banner = (
+                "This schedule is <strong>not armed</strong>. The certificates below are inside "
+                "the renewal window and <strong>would</strong> be renewed. Nothing was issued."
+            )
+            banner_color = _SEV_INFO
+        elif failed:
+            subject = f"Certificate Auto-Renewal - {scope_label} - {len(renewed)} renewed, {len(failed)} failed"
+            banner = f"{len(failed)} certificate(s) could not be renewed and need attention."
+            banner_color = _SEV_CRITICAL
+        else:
+            subject = f"Certificate Auto-Renewal - {scope_label} - {len(renewed)} renewed"
+            banner = "All certificates in the renewal window were renewed successfully."
+            banner_color = _SEV_OK
+
+        sections = ""
+        if not armed and planned:
+            sections += CERT_REPORT_SECTION.format(
+                title=f"Due for renewal within {days_before_expiry} days",
+                accent=_SEV_INFO,
+                count=len(planned),
+                rows=self._cert_rows_html(planned, accent=_SEV_INFO),
+            )
+        if renewed:
+            sections += CERT_RENEWAL_RESULT_SECTION.format(
+                title="Renewed",
+                accent=_SEV_OK,
+                count=len(renewed),
+                rows="\n".join(
+                    f'<tr><td class="cn">{_html_escape(r.get("common_name", ""))}</td>'
+                    f'<td class="id">{_html_escape((r.get("thumbprint") or "")[:16])}</td>'
+                    f"<td>{_akv_summary_html(r.get('akv') or [])}</td></tr>"
+                    for r in renewed
+                ),
+            )
+        if failed:
+            sections += CERT_RENEWAL_FAILURE_SECTION.format(
+                accent=_SEV_CRITICAL,
+                count=len(failed),
+                rows="\n".join(
+                    f'<tr><td class="cn">{_html_escape(f.get("common_name", ""))}</td>'
+                    f"<td>{_html_escape(f.get('error', 'Unknown error'))}</td></tr>"
+                    for f in failed
+                ),
+            )
+        if truncated > 0:
+            sections += (
+                f'<p style="margin:16px 0 0;font-size:13px;color:#6b7280;">'
+                f"{truncated} further certificate(s) were due but not processed in this run; "
+                f"they will be picked up by the next one.</p>"
+            )
+
+        html_body = CERT_RENEWAL_REPORT_TEMPLATE.format(
+            scope_label=_html_escape(scope_label),
+            banner=banner,
+            banner_color=banner_color,
+            mode="Dry run" if not armed else "Automatic renewal",
+            due_count=len(planned),
+            renewed_count=len(renewed),
+            failed_count=len(failed),
+            ok_color=_SEV_OK,
+            critical_color=_SEV_CRITICAL,
+            sections=sections,
+            generated_at=datetime.utcnow().strftime("%d %b %Y, %H:%M UTC"),
+            portal_url=f"{self.portal_base_url}/certificates",
+        )
+
+        results = await self._send_email_batch(
+            recipient_emails=recipient_emails,
+            subject=subject,
+            html_body=html_body,
+            alert_type="certificate_renewal",
+            alert_id=config_id,
+        )
+        return {
+            "recipients": len(recipient_emails),
+            "success": sum(1 for r in results if r["status"] == "sent"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+        }
 
     async def get_notification_history(
         self,

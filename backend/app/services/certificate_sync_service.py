@@ -500,6 +500,41 @@ class CertificateSyncService:
         result = await self.db.execute(select(func.count(CertificateSnapshot.id)).where(*conditions))
         return result.scalar() or 0
 
+    async def list_due_certificates(
+        self,
+        *,
+        collection_id: int | None,
+        days_before_expiry: int,
+        certificate_ids: list[int] | None = None,
+        include_expired: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Cached certificates expiring within a window, soonest first.
+
+        ``collection_id=None`` spans every cached collection, which is what an
+        alert rule scoped to "all collections" needs. Already-expired
+        certificates are included by default: they are the most urgent thing a
+        report can surface, and silently dropping them would be worse than
+        noise.
+        """
+        now = datetime.now(UTC)
+        cutoff = (now + timedelta(days=days_before_expiry)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        conditions = [
+            CertificateSnapshot.not_after.isnot(None),
+            CertificateSnapshot.not_after <= cutoff,
+            CertificateSnapshot.revoked.is_(False),
+        ]
+        if collection_id is not None:
+            conditions.append(CertificateSnapshot.collection_id == collection_id)
+        if certificate_ids:
+            conditions.append(CertificateSnapshot.certificate_id.in_(certificate_ids))
+        if not include_expired:
+            conditions.append(CertificateSnapshot.not_after >= now.strftime("%Y-%m-%dT%H:%M:%S%z"))
+
+        result = await self.db.execute(
+            select(CertificateSnapshot).where(*conditions).order_by(CertificateSnapshot.not_after)
+        )
+        return [self._serialize_cert(r) for r in result.scalars().all()]
+
     async def list_certificates_from_db(
         self,
         *,

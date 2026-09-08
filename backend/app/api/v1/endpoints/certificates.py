@@ -870,6 +870,8 @@ async def get_certificate_audit_history(
         "delete_certificate",
         "download_certificate",
         "cert_auto_renewal_run",
+        "cert_alert_run",
+        "cert_key_escrow",
         "load_certificate_to_akv",
     )
     since = datetime.utcnow() - timedelta(days=days)
@@ -915,18 +917,54 @@ class AutoRenewalCertificateRef(BaseModel):
     thumbprint: str = Field(default="", description="Certificate thumbprint")
 
 
+class AutoRenewalAkvTarget(BaseModel):
+    """A Key Vault entry a renewed certificate is imported into."""
+
+    subscription_id: str = Field(default="", description="Azure Subscription ID")
+    resource_group: str = Field(default="", description="Resource group containing the Key Vault")
+    vault_name: str = Field(..., min_length=1, description="Key Vault name")
+    certificate_names: list[str] = Field(
+        ..., min_length=1, description="Key Vault certificate names to import the renewal into"
+    )
+
+    @field_validator("certificate_names")
+    @classmethod
+    def _valid_names(cls, v: list[str]) -> list[str]:
+        import re
+
+        cleaned = []
+        for name in v:
+            name = name.strip()
+            if not (1 <= len(name) <= 127) or not re.match(r"^[a-zA-Z0-9-]+$", name):
+                raise ValueError("certificate names must be 1-127 alphanumeric characters or hyphens")
+            cleaned.append(name)
+        return cleaned
+
+
 class AutoRenewalConfigRequest(BaseModel):
     """Configure auto-renewal for a whole collection or specific certificates."""
 
     collection_id: int = Field(..., description="Collection to auto-renew")
     collection_name: str = Field(default="", description="Collection display name")
     enabled: bool = Field(default=True)
+    armed: bool = Field(
+        default=False,
+        description=(
+            "Issue certificates unattended. An un-armed schedule runs on time and reports what "
+            "it would renew without contacting the CA, so targets and recipients can be "
+            "validated first."
+        ),
+    )
     days_before_expiry: int = Field(default=60, ge=7, le=365, description="Renew X days before expiry")
     notify_on_renewal: bool = Field(default=True)
     notification_emails: list[str] = Field(default=[])
     certificates: list[AutoRenewalCertificateRef] = Field(
         default=[],
         description="Specific certificates to renew; empty means the entire collection.",
+    )
+    akv_targets: list[AutoRenewalAkvTarget] = Field(
+        default=[],
+        description="Key Vault entries each renewed certificate is imported into.",
     )
 
 
@@ -961,11 +999,15 @@ async def list_auto_renewal_configs(
     )
     run_result = await db.execute(run_stmt)
     last_run_by_collection: dict[Any, str | None] = {}
+    last_summary_by_config: dict[Any, str] = {}
     for run in run_result.scalars().all():
         if isinstance(run.details, dict):
             cid = run.details.get("collection_id")
             if cid is not None and cid not in last_run_by_collection:
                 last_run_by_collection[cid] = run.timestamp.isoformat() if run.timestamp else None
+            config_id = run.details.get("config_id")
+            if config_id is not None and config_id not in last_summary_by_config:
+                last_summary_by_config[config_id] = str(run.details.get("summary") or "")
     # Store configs in audit_logs as config entries (simple approach; production would use a dedicated table)
     stmt = (
         select(AuditLog)
@@ -988,9 +1030,12 @@ async def list_auto_renewal_configs(
                     "notification_emails": entry.details.get("notification_emails", []),
                     "certificates": entry.details.get("certificates", []),
                     "certificate_count": entry.details.get("certificate_count", 0),
+                    "armed": entry.details.get("armed", False),
+                    "akv_targets": entry.details.get("akv_targets", []),
                     "created_at": entry.timestamp.isoformat() if entry.timestamp else None,
                     "created_by": entry.user_email or entry.user_id,
                     "last_run_at": last_run_by_collection.get(collection_id),
+                    "last_run_summary": last_summary_by_config.get(entry.id, ""),
                 }
             )
     return configs
@@ -1018,12 +1063,17 @@ async def create_auto_renewal_config(
             "collection_id": payload.collection_id,
             "collection_name": payload.collection_name,
             "enabled": payload.enabled,
+            "armed": payload.armed,
             "days_before_expiry": payload.days_before_expiry,
             "notify_on_renewal": payload.notify_on_renewal,
             "notification_emails": payload.notification_emails,
             "certificates": certificates,
             "certificate_count": len(certificates),
-            "summary": f"Auto-renewal config ({scope}): {payload.days_before_expiry} days before expiry",
+            "akv_targets": [t.model_dump() for t in payload.akv_targets],
+            "summary": (
+                f"Auto-renewal config ({scope}): {payload.days_before_expiry} days before expiry, "
+                f"{'armed' if payload.armed else 'dry run'}"
+            ),
         },
         ip_address=request.client.host if request.client else None,
         status="success",
@@ -1031,7 +1081,12 @@ async def create_auto_renewal_config(
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
-    return {"id": entry.id, "status": "created", "days_before_expiry": payload.days_before_expiry}
+    return {
+        "id": entry.id,
+        "status": "created",
+        "days_before_expiry": payload.days_before_expiry,
+        "armed": payload.armed,
+    }
 
 
 @router.delete("/auto-renewal/configs/{config_id}")
@@ -1055,81 +1110,58 @@ async def run_auto_renewal_config(
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Manually trigger an auto-renewal schedule and record the run in the audit log."""
-    from sqlalchemy import select
+    """Run an auto-renewal schedule now.
+
+    Honours the schedule's arm state: an un-armed schedule reports what it would
+    renew and issues nothing. Either way the run is recorded in the audit log
+    and the configured recipients get the report, which is what makes a dry run
+    useful for validating targets and email content.
+    """
+    from app.services.certificate_automation_service import CertificateAutomationService
 
     if db is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is not available.")
-    stmt = select(AuditLog).where(AuditLog.id == config_id).where(AuditLog.action == "cert_auto_renewal_config")
-    result = await db.execute(stmt)
+
+    result = await db.execute(
+        select(AuditLog).where(AuditLog.id == config_id).where(AuditLog.action == "cert_auto_renewal_config")
+    )
     config = result.scalar_one_or_none()
     if config is None or not isinstance(config.details, dict):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Auto-renewal schedule not found.")
 
-    cfg = config.details
-    collection_id = cfg.get("collection_id")
-    collection_name = cfg.get("collection_name", "")
-    days_before_expiry = cfg.get("days_before_expiry", 60)
-    certificate_ids = [
-        c.get("id") for c in (cfg.get("certificates") or []) if isinstance(c, dict) and c.get("id") is not None
-    ]
-
-    # Best-effort due-count from the cached snapshot (DB-first); never blocks the trigger.
-    certificates_due: int | None = None
-    if collection_id is not None:
-        try:
-            certificates_due = await CertificateSyncService(db).count_due_certificates(
-                collection_id=collection_id,
-                days_before_expiry=days_before_expiry,
-                certificate_ids=certificate_ids or None,
-            )
-        except Exception as exc:
-            logger.warning("cert_auto_renewal_due_count_failed", error=str(exc)[:200])
-
-    scope = f"{len(certificate_ids)} certificate(s)" if certificate_ids else "entire collection"
-    target = collection_name or f"collection {collection_id}"
-    due_text = "unknown" if certificates_due is None else str(certificates_due)
-    summary = (
-        f"Manual auto-renewal run for {target} ({scope}): "
-        f"{due_text} certificate(s) due within {days_before_expiry} days"
+    outcome = await CertificateAutomationService(db).run_renewal_config(
+        {"id": config.id, "created_by": config.user_email or config.user_id, **config.details},
+        trigger="manual",
+        actor=user.email or user.user_id,
     )
-    entry = AuditLog(
-        user_id=user.user_id,
-        user_email=user.email,
-        action="cert_auto_renewal_run",
-        resource_type="certificate_config",
-        resource_id=str(collection_id) if collection_id is not None else str(config_id),
-        details={
-            "page": "CertificatesPage",
-            "feature": "auto_renewal",
-            "trigger": "manual",
-            "triggered_by": user.email or user.user_id,
-            "config_id": config_id,
-            "collection_id": collection_id,
-            "collection_name": collection_name,
-            "days_before_expiry": days_before_expiry,
-            "scope": scope,
-            "certificates_targeted": len(certificate_ids),
-            "certificates_due": certificates_due,
-            "summary": summary,
-        },
-        ip_address=request.client.host if request.client else None,
-        status="success",
+    return {"status": "completed", "config_id": config_id, **outcome}
+
+
+@router.post("/alerts/configs/{config_id}/run")
+async def run_alert_config_now(
+    config_id: int,
+    request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Evaluate one expiry alert rule now and send its report."""
+    from app.services.certificate_automation_service import CertificateAutomationService
+
+    if db is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is not available.")
+
+    result = await db.execute(
+        select(AuditLog).where(AuditLog.id == config_id).where(AuditLog.action == "cert_alert_config")
     )
-    db.add(entry)
-    await db.commit()
-    await db.refresh(entry)
-    return {
-        "id": entry.id,
-        "status": "triggered",
-        "config_id": config_id,
-        "collection_id": collection_id,
-        "collection_name": collection_name,
-        "days_before_expiry": days_before_expiry,
-        "certificates_due": certificates_due,
-        "scope": scope,
-        "triggered_at": entry.timestamp.isoformat() if entry.timestamp else None,
-    }
+    config = result.scalar_one_or_none()
+    if config is None or not isinstance(config.details, dict):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert rule not found.")
+
+    outcome = await CertificateAutomationService(db).run_alert_config(
+        {"id": config.id, "created_by": config.user_email or config.user_id, **config.details},
+        trigger="manual",
+    )
+    return {"status": "completed", **outcome}
 
 
 @router.get("/alerts/configs")

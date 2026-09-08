@@ -275,7 +275,64 @@ password, or the escrowed key) and converts it locally.
 
 ---
 
-## 7. Private-Key Escrow (multi-vault loads)
+## 7. Scheduled Automation (expiry alerts & auto-renewal)
+
+Both features are executed by APScheduler jobs registered in
+[scheduler_service.py](../backend/app/services/scheduler_service.py); the logic
+lives in
+[certificate_automation_service.py](../backend/app/services/certificate_automation_service.py).
+
+| Job id | Cadence | What it does |
+| --- | --- | --- |
+| `certificate_expiry_alerts` | hourly tick, once per rule per day | Sends one consolidated expiry report per alert rule |
+| `certificate_auto_renewal` | hourly tick, once per schedule per day | Renews due certificates, escrows the key, loads to AKV, emails the outcome |
+
+The hourly tick with a per-config daily guard means a restart can neither skip a
+day nor double-send. Both can also be triggered on demand from the UI
+(`POST /alerts/configs/{id}/run`, `POST /auto-renewal/configs/{id}/run`).
+
+### Expiry alerts
+
+For each enabled rule the job selects cached certificates inside the window,
+splits them into **critical** (`<= critical_days`) and **warning**
+(`<= warning_days`), and emails one report — never one email per certificate.
+Already-expired certificates are included and shown as such. A rule with no
+recipients still records its run, so silence is provably not a failure.
+
+### Auto-renewal
+
+| Stage | Behaviour |
+| --- | --- |
+| Select | Cached certificates within `days_before_expiry`, optionally limited to the schedule's certificate list. Capped at 25 per run so a misconfigured schedule cannot flood the CA |
+| Renew | PFX-mode renewal under a single-use generated password |
+| Escrow | The fresh key is escrowed automatically (`source: auto_renewal`), so later AKV loads keep working |
+| Load | Imported into each configured `akv_targets` entry using the renewal's own password — no human supplies one |
+| Report | One email with what was renewed, the new thumbprints, per-entry Key Vault results and any failures |
+
+**Arming.** A schedule is created **un-armed**. It runs on time and emails
+exactly what it *would* renew, issuing nothing, until "Arm this schedule" is
+ticked. Validate targets and recipients in dry run first; the grid shows
+`Dry run` / `Armed` per schedule.
+
+**AKV targets are explicit.** A run updates the entries named on the schedule
+and nothing else. A schedule with no targets renews but does not touch AKV.
+
+Failures are isolated: one certificate failing to renew, or one Key Vault import
+being refused, is reported in the email and audit row without stopping the rest
+of the run.
+
+### Email delivery
+
+Reports go through the shared
+[email_notification_service.py](../backend/app/services/email_notification_service.py)
+(SMTP, or SendGrid when `SENDGRID_API_KEY` is set) and are recorded in
+`alert_notification_history`. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+`SMTP_PASSWORD`, `SMTP_FROM_ADDRESS` and `PORTAL_BASE_URL` (used for the links
+back into the portal).
+
+---
+
+## 8. Private-Key Escrow (multi-vault loads)
 
 ### The problem it solves
 
@@ -345,7 +402,7 @@ incident.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause | Resolution |
 | --- | --- | --- |
@@ -364,17 +421,22 @@ incident.
 | `409` on JKS download | No Keyfactor key and nothing escrowed | Renew through the portal to escrow the key. |
 | `422` "Could not build a JKS keystore" | The PFX material was unreadable (wrong password upstream, or no private key inside) | Check the Keyfactor template returns a key; the log line `jks_keystore_built` is absent on failure. |
 | JKS loads but the app cannot find the key | Alias mismatch — Java lowercases aliases | Set `jks_alias` to the alias the application expects; it is normalized to lowercase. |
+| Schedule runs but renews nothing | The schedule is un-armed (the default) | Tick "Arm this schedule". The dry-run email lists what it would have renewed. |
+| Renewal succeeds but AKV is untouched | No `akv_targets` on the schedule | Add the vault + entries in the schedule form. |
+| No report emails arrive | SMTP not configured or rejecting the sender | Check `SMTP_*` settings and the `email_send_failed` log line; delivery attempts are recorded in `alert_notification_history`. |
+| Alert rule set to Teams / both | Only email is implemented | The channel column is stored but Teams delivery does not exist; use email. |
 | `Key` column missing from the grid | Escrow not configured | Set `CERT_KEY_ESCROW_ENABLED` / `CERT_KEY_ESCROW_VAULT`; the flag is omitted entirely when escrow is off. |
 | Escrow silently not happening | Vault write refused | Check `cert_escrow_vault_write_failed` in the logs and the identity's `secrets/set` permission on the escrow vault. |
 
 ---
 
-## 9. Related Files
+## 10. Related Files
 
 - Backend client: [backend/app/services/keyfactor_client.py](../backend/app/services/keyfactor_client.py)
 - Backend service: [backend/app/services/keyfactor_service.py](../backend/app/services/keyfactor_service.py)
 - Key escrow: [backend/app/services/certificate_escrow_service.py](../backend/app/services/certificate_escrow_service.py)
 - JKS keystore builder: [backend/app/services/keystore_service.py](../backend/app/services/keystore_service.py)
+- Scheduled automation: [backend/app/services/certificate_automation_service.py](../backend/app/services/certificate_automation_service.py)
 - Backend router: [backend/app/api/v1/endpoints/certificates.py](../backend/app/api/v1/endpoints/certificates.py)
 - Config: [backend/app/core/config.py](../backend/app/core/config.py)
 - Frontend service: [frontend/src/services/certificatesApi.ts](../frontend/src/services/certificatesApi.ts)
@@ -382,6 +444,6 @@ incident.
 - Frontend modals: [frontend/src/features/certificates/](../frontend/src/features/certificates/)
 - Tests: `backend/tests/test_keyfactor_client.py`, `backend/tests/test_keyfactor_service.py`,
   `backend/tests/test_certificates_api.py`, `backend/tests/test_certificate_escrow_service.py`,
-  `backend/tests/test_keystore_service.py`,
+  `backend/tests/test_keystore_service.py`, `backend/tests/test_certificate_automation_service.py`,
   `frontend/src/pages/CertificatesPage.test.tsx`,
   `frontend/src/features/certificates/*.test.tsx`

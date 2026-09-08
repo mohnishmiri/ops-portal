@@ -534,29 +534,44 @@ export interface AutoRenewalCertificateRef {
   thumbprint: string;
 }
 
+/** A Key Vault entry a renewed certificate is imported into. */
+export interface AutoRenewalAkvTarget {
+  subscription_id: string;
+  resource_group: string;
+  vault_name: string;
+  certificate_names: string[];
+}
+
 export interface AutoRenewalConfig {
   id: number;
   collection_id: number;
   collection_name: string;
   enabled: boolean;
+  /** False = dry run: the schedule reports what it would renew but issues nothing. */
+  armed?: boolean;
   days_before_expiry: number;
   notify_on_renewal: boolean;
   notification_emails: string[];
   certificates: AutoRenewalCertificateRef[];
   certificate_count?: number;
+  akv_targets?: AutoRenewalAkvTarget[];
   created_at: string | null;
   created_by: string;
   last_run_at?: string | null;
+  last_run_summary?: string;
 }
 
 export interface AutoRenewalConfigRequest {
   collection_id: number;
   collection_name?: string;
   enabled?: boolean;
+  /** Leave false to run as a dry run until the targets have been validated. */
+  armed?: boolean;
   days_before_expiry?: number;
   notify_on_renewal?: boolean;
   notification_emails?: string[];
   certificates?: AutoRenewalCertificateRef[];
+  akv_targets?: AutoRenewalAkvTarget[];
 }
 
 export const fetchAutoRenewalConfigs = async (): Promise<AutoRenewalConfig[]> => {
@@ -597,15 +612,14 @@ export const useDeleteAutoRenewalConfig = () => {
 };
 
 export interface AutoRenewalRunResult {
-  id: number;
   status: string;
   config_id: number;
-  collection_id: number | null;
-  collection_name: string;
-  days_before_expiry: number;
-  certificates_due: number | null;
-  scope: string;
-  triggered_at: string | null;
+  /** False = dry run: nothing was issued. */
+  armed: boolean;
+  certificates_due: number;
+  renewed: number;
+  failed: number;
+  emails_sent: number;
 }
 
 export const runAutoRenewalConfig = async (id: number): Promise<AutoRenewalRunResult> => {
@@ -648,6 +662,30 @@ export interface AlertConfigRequest {
   notification_emails?: string[];
   notify_channel?: string;
 }
+
+export interface AlertRunResult {
+  status: string;
+  config_id: number;
+  critical: number;
+  warning: number;
+  emails_sent: number;
+}
+
+export const runAlertConfig = async (id: number): Promise<AlertRunResult> => {
+  const resp = await apiClient.post<AlertRunResult>(`${API_BASE}/alerts/configs/${id}/run`);
+  return resp.data;
+};
+
+export const useRunAlertConfig = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: runAlertConfig,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["certificates", "alert-configs"] });
+      qc.invalidateQueries({ queryKey: ["certificates", "audit-history"] });
+    },
+  });
+};
 
 export const fetchAlertConfigs = async (): Promise<AlertConfig[]> => {
   const resp = await apiClient.get<AlertConfig[]>(`${API_BASE}/alerts/configs`);
