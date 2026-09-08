@@ -27,6 +27,7 @@ vi.mock("../services/certificatesApi", () => ({
   useUpdateCertificateMetadata: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
   useDeleteCertificate: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
   useDownloadCertificate: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useCertificateAuditHistory: vi.fn(),
   useCollections: vi.fn(() => ({
     data: [{ id: 42, name: "Test Collection", description: "", certificate_count: 1 }],
   })),
@@ -256,5 +257,82 @@ describe("CertificatesPage key escrow state", () => {
     renderPage();
     expect(screen.getByRole("columnheader", { name: "Key" })).toBeInTheDocument();
     expect(screen.getByText("No key")).toBeInTheDocument();
+  });
+});
+
+describe("CertificatesPage audit history naming", () => {
+  const AUDIT_ENTRY = {
+    id: 1,
+    timestamp: "2026-09-08T16:32:41Z",
+    action: "download_certificate",
+    resource_type: "certificate",
+    resource_id: "31097770",
+    user_id: "dev",
+    user_email: "dev@localhost",
+    status: "success",
+    summary: "Downloaded cesdataroutergears.dev.att.com (31097770) (JKS)",
+    details: { common_name: "cesdataroutergears.dev.att.com" },
+  };
+
+  function renderAudit(entries: Record<string, unknown>[]) {
+    vi.mocked(certApi.useCertificateAuditHistory).mockReturnValue({
+      data: { history: entries, count: entries.length },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+      isFetching: false,
+    } as any);
+    setRole({ isAdmin: true, canEdit: true });
+    mockList({});
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <CertificatesPage />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Audit History/i }));
+  }
+
+  it("shows which certificate an entry refers to", () => {
+    // The numeric Keyfactor id alone does not say what was downloaded.
+    renderAudit([AUDIT_ENTRY]);
+    expect(screen.getByRole("columnheader", { name: "Common Name" })).toBeInTheDocument();
+    expect(screen.getAllByText("cesdataroutergears.dev.att.com").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Downloaded cesdataroutergears.dev.att.com \(31097770\) \(JKS\)/)).toBeInTheDocument();
+  });
+
+  it("falls back to a dash for entries written before names were recorded", () => {
+    renderAudit([{ ...AUDIT_ENTRY, summary: "Downloaded certificate 31097770 (PFX)", details: {} }]);
+    expect(screen.getByRole("columnheader", { name: "Common Name" })).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("labels actions that previously rendered as raw identifiers", () => {
+    renderAudit([
+      { ...AUDIT_ENTRY, id: 2, action: "load_certificate_to_akv" },
+      { ...AUDIT_ENTRY, id: 3, action: "cert_key_escrow" },
+    ]);
+    expect(screen.getByText("Load to AKV")).toBeInTheDocument();
+    expect(screen.getByText("Key Escrow")).toBeInTheDocument();
+    expect(screen.queryByText("load_certificate_to_akv")).not.toBeInTheDocument();
+  });
+
+  it("finds an entry by common name", () => {
+    renderAudit([
+      AUDIT_ENTRY,
+      {
+        ...AUDIT_ENTRY,
+        id: 9,
+        resource_id: "31069046",
+        summary: "Revoked attcctrino.web.att.com (31069046) (unspecified)",
+        details: { common_name: "attcctrino.web.att.com" },
+      },
+    ]);
+    fireEvent.change(screen.getByPlaceholderText(/Search history/i), {
+      target: { value: "attcctrino" },
+    });
+    expect(screen.getByText(/Revoked attcctrino.web.att.com/)).toBeInTheDocument();
+    expect(screen.queryByText(/Downloaded cesdataroutergears/)).not.toBeInTheDocument();
   });
 });

@@ -24,13 +24,14 @@ from typing import Any, Literal, NoReturn
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.config import settings
 from app.core.database import get_db, get_db_session
 from app.models.auth import UserContext, UserRole
-from app.models.database import AuditLog
+from app.models.database import AuditLog, CertificateSnapshot
 from app.services.certificate_escrow_service import CertificateEscrowService
 from app.services.certificate_sync_service import CertificateSyncService
 from app.services.keyfactor_client import REVOCATION_REASONS
@@ -382,6 +383,39 @@ async def _write_audit(
         logger.warning("certificate_audit_log_failed", action=action, error=str(exc)[:200])
 
 
+async def _cert_identity(db: AsyncSession, certificate_id: int | str) -> tuple[str, str | None]:
+    """Return ``(label, common_name)`` for audit text.
+
+    A bare Keyfactor id ("Revoked certificate 31069046") does not tell anyone
+    which certificate was touched, so the common name is resolved from the
+    cached snapshot and the label reads
+    ``cesdataroutergears.dev.att.com (31069046)``. Falls back to the bare id
+    when the certificate is not cached, so auditing never depends on the cache
+    being warm.
+    """
+    label = str(certificate_id)
+    if db is None:
+        return label, None
+    try:
+        cert_id = int(certificate_id)
+    except (TypeError, ValueError):
+        return label, None
+    try:
+        result = await db.execute(
+            select(CertificateSnapshot.common_name)
+            .where(CertificateSnapshot.certificate_id == cert_id)
+            .where(CertificateSnapshot.common_name.isnot(None))
+            .limit(1)
+        )
+        common_name = result.scalar_one_or_none()
+    except Exception as exc:  # pragma: no cover - audit text must never fail an op
+        logger.warning("cert_identity_lookup_failed", certificate_id=cert_id, error=str(exc)[:200])
+        return label, None
+    if not common_name:
+        return label, None
+    return f"{common_name} ({cert_id})", common_name
+
+
 async def _escrow_issued_key(
     db: AsyncSession,
     *,
@@ -432,9 +466,12 @@ async def _escrow_issued_key(
         user=user,
         action="cert_key_escrow",
         resource_id=str(result.get("certificate_id") or thumbprint),
-        summary=f"Escrowed private key for {common_name or thumbprint} ({source})",
+        summary=(
+            f"Escrowed private key for {common_name or thumbprint} ({result.get('certificate_id') or 'new'}, {source})"
+        ),
         outcome="success",
         details={
+            "common_name": common_name,
             "vault_name": pointer["vault_name"],
             "secret_name": pointer["secret_name"],
             "thumbprint": pointer["thumbprint"],
@@ -1284,21 +1321,30 @@ async def enroll_certificate(
             user=user,
             action="enroll_certificate",
             resource_id=str(payload.subject or "csr"),
-            summary=f"Enrollment failed ({payload.enrollment_type})",
+            summary=(
+                f"Enrollment failed for {payload.common_name or payload.subject or 'CSR request'} "
+                f"({payload.enrollment_type})"
+            ),
             outcome="failure",
-            details={"enrollment_type": payload.enrollment_type, "template": payload.template},
+            details={
+                "common_name": payload.common_name or None,
+                "enrollment_type": payload.enrollment_type,
+                "template": payload.template,
+            },
         )
         _raise_http(exc)
 
+    enrolled_name = payload.common_name or (target if target != "csr" else None)
     await _write_audit(
         db,
         request=request,
         user=user,
         action="enroll_certificate",
         resource_id=str(result.get("certificate_id") or target),
-        summary=f"Enrolled certificate ({payload.enrollment_type}) via {payload.template}",
+        summary=(f"Enrolled {enrolled_name or 'certificate'} ({payload.enrollment_type}) via {payload.template}"),
         outcome="success",
         details={
+            "common_name": enrolled_name,
             "enrollment_type": payload.enrollment_type,
             "template": payload.template,
             "certificate_authority": payload.certificate_authority,
@@ -1313,7 +1359,7 @@ async def enroll_certificate(
         result=result,
         password=payload.password,
         source="enroll",
-        common_name=payload.common_name or (target if target != "csr" else None),
+        common_name=enrolled_name,
     )
     _schedule_sync(None, triggered_by="mutation")
     return result
@@ -1345,15 +1391,16 @@ async def renew_certificate(
     except CertificateServiceError as exc:
         _raise_http(exc)
 
+    cert_label, cert_cn = await _cert_identity(db, certificate_id)
     await _write_audit(
         db,
         request=request,
         user=user,
         action="renew_certificate",
         resource_id=str(certificate_id),
-        summary=f"Renewed certificate {certificate_id}",
+        summary=f"Renewed {cert_label}",
         outcome="success",
-        details={"thumbprint": result.get("thumbprint")},
+        details={"thumbprint": result.get("thumbprint"), "common_name": cert_cn},
     )
     # A PFX-mode renewal is the only moment the new key exists in the response;
     # escrowing it here is what makes later loads into further vaults possible.
@@ -1364,7 +1411,7 @@ async def renew_certificate(
         result=result,
         password=payload.password,
         source="renew",
-        common_name=None,
+        common_name=cert_cn,
     )
     _schedule_sync(None, triggered_by="mutation")
     return result
@@ -1392,6 +1439,8 @@ async def revoke_certificate(
     except CertificateServiceError as exc:
         _raise_http(exc)
 
+    cert_label, cert_cn = await _cert_identity(db, certificate_id)
+
     # Reflect the revocation in the DB cache immediately so the grid shows the
     # new status without waiting for the eventually-consistent background sync.
     if db is not None:
@@ -1407,9 +1456,10 @@ async def revoke_certificate(
         user=user,
         action="revoke_certificate",
         resource_id=str(certificate_id),
-        summary=f"Revoked certificate {certificate_id} ({payload.reason})",
+        summary=f"Revoked {cert_label} ({payload.reason})",
         outcome="success",
         details={
+            "common_name": cert_cn,
             "reason": payload.reason,
             "comment": str(result.get("comment") or payload.comment)[:200],
             "comment_supplied": bool(payload.comment.strip()),
@@ -1434,15 +1484,16 @@ async def update_certificate_metadata(
     except CertificateServiceError as exc:
         _raise_http(exc)
 
+    cert_label, cert_cn = await _cert_identity(db, certificate_id)
     await _write_audit(
         db,
         request=request,
         user=user,
         action="update_certificate_metadata",
         resource_id=str(certificate_id),
-        summary=f"Updated metadata on certificate {certificate_id}",
+        summary=f"Updated metadata on {cert_label}",
         outcome="success",
-        details={"updated_fields": result.get("updated_fields", [])},
+        details={"common_name": cert_cn, "updated_fields": result.get("updated_fields", [])},
     )
     _schedule_sync(None, triggered_by="mutation")
     return result
@@ -1458,6 +1509,9 @@ async def delete_certificate(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Delete a certificate record (WRITE role or above)."""
+    # Resolved up front: after the delete the audit trail is the only place the
+    # certificate's name still exists.
+    cert_label, cert_cn = await _cert_identity(db, certificate_id)
     try:
         result = await service.delete_certificate(certificate_id, collection_id=collection_id)
     except CertificateServiceError as exc:
@@ -1469,9 +1523,9 @@ async def delete_certificate(
         user=user,
         action="delete_certificate",
         resource_id=str(certificate_id),
-        summary=f"Deleted certificate {certificate_id}",
+        summary=f"Deleted {cert_label}",
         outcome="success",
-        details={},
+        details={"common_name": cert_cn},
     )
     _schedule_sync(collection_id, triggered_by="mutation")
     return result
@@ -1511,6 +1565,8 @@ async def download_certificate(
             detail=f"Downloading {requested_format} (private key) format requires at least WRITE role.",
         )
 
+    cert_label, cert_cn = await _cert_identity(db, certificate_id)
+
     if requested_format == "JKS":
         content, key_source = await _build_jks(
             service=service,
@@ -1524,9 +1580,10 @@ async def download_certificate(
             user=user,
             action="download_certificate",
             resource_id=str(certificate_id),
-            summary=f"Downloaded certificate {certificate_id} (JKS)",
+            summary=f"Downloaded {cert_label} (JKS)",
             outcome="success",
             details={
+                "common_name": cert_cn,
                 "file_format": "JKS",
                 "include_chain": payload.include_chain,
                 "key_source": key_source,
@@ -1587,9 +1644,10 @@ async def download_certificate(
         user=user,
         action="download_certificate",
         resource_id=str(certificate_id),
-        summary=f"Downloaded certificate {certificate_id} ({payload.file_format})",
+        summary=f"Downloaded {cert_label} ({payload.file_format})",
         outcome="success",
         details={
+            "common_name": cert_cn,
             "file_format": payload.file_format,
             "include_chain": payload.include_chain,
             "key_source": key_source,
@@ -1705,6 +1763,7 @@ async def load_certificate_to_akv(
                     ),
                 )
 
+    cert_label, cert_cn = await _cert_identity(db, certificate_id)
     kv_service = KeyVaultService()
     vault_url = f"https://{payload.vault_name}.vault.azure.net"
 
@@ -1738,9 +1797,10 @@ async def load_certificate_to_akv(
             user=user,
             action="load_certificate_to_akv",
             resource_id=str(certificate_id),
-            summary=f"Failed to load certificate {certificate_id} to AKV {payload.vault_name}/{names_text}",
+            summary=f"Failed to load {cert_label} to AKV {payload.vault_name}/{names_text}",
             outcome="failed",
             details={
+                "common_name": cert_cn,
                 "vault_name": payload.vault_name,
                 "certificate_names": payload.certificate_names,
                 "subscription_id": payload.subscription_id,
@@ -1761,11 +1821,11 @@ async def load_certificate_to_akv(
         action="load_certificate_to_akv",
         resource_id=str(certificate_id),
         summary=(
-            f"Loaded certificate {certificate_id} to AKV {payload.vault_name}/"
-            f"{', '.join(i['certificate_name'] for i in imported)}"
+            f"Loaded {cert_label} to AKV {payload.vault_name}/{', '.join(i['certificate_name'] for i in imported)}"
         ),
         outcome="partial" if failures else "success",
         details={
+            "common_name": cert_cn,
             "vault_name": payload.vault_name,
             "certificate_names": [i["certificate_name"] for i in imported],
             "subscription_id": payload.subscription_id,

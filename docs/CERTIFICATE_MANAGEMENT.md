@@ -232,6 +232,12 @@ UI hides write and destructive actions based on the caller's effective permissio
 8. **Delete** (admin) requires typing `DELETE` to confirm.
 
 All write operations are recorded in the audit log (who, what, when, target, outcome).
+Every certificate entry names the certificate it touched — summaries read
+`Revoked cesdataroutergears.dev.att.com (31069046) (superseded)` and the common
+name is also stored in `details.common_name`, surfaced as its own **Common Name**
+column and included in the CSV export. The name is resolved from the cached
+snapshot (for deletes, *before* the record is removed) and falls back to the bare
+Keyfactor id when the certificate was never cached.
 
 ---
 

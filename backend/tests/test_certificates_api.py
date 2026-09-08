@@ -1123,3 +1123,144 @@ async def test_jks_download_reports_unusable_material(app, admin_client):
     resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
     assert resp.status_code == 422
     assert "could not build a jks keystore" in resp.json()["detail"].lower()
+
+
+# ── Audit trail names the certificate ──────────────────────────────────
+
+
+async def _cache_certificate(db_session, *, certificate_id: int, common_name: str) -> None:
+    """Seed the snapshot the audit trail resolves names from."""
+    from sqlalchemy import text
+
+    await db_session.execute(
+        text("INSERT INTO cert_certificates (collection_id, certificate_id, common_name) VALUES (:col, :cid, :cn)"),
+        {"col": 2573, "cid": certificate_id, "cn": common_name},
+    )
+    await db_session.commit()
+
+
+async def _last_audit(db_session, action: str):
+    from sqlalchemy import select
+
+    from app.models.database import AuditLog
+
+    rows = (await db_session.execute(select(AuditLog).where(AuditLog.action == action))).scalars().all()
+    assert rows, f"no audit row written for {action}"
+    return rows[-1]
+
+
+async def test_revoke_audit_names_the_certificate(app, admin_client, db_session):
+    # "Revoked certificate 31069046" does not say which certificate was revoked.
+    _use_service(app, FakeService())
+    await _cache_certificate(db_session, certificate_id=1, common_name="cesdataroutergears.dev.att.com")
+
+    resp = await admin_client.post("/api/v1/certificates/1/revoke", json={"reason": "superseded"})
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "revoke_certificate")
+    assert entry.details["summary"] == "Revoked cesdataroutergears.dev.att.com (1) (superseded)"
+    assert entry.details["common_name"] == "cesdataroutergears.dev.att.com"
+
+
+async def test_download_audit_names_the_certificate(app, admin_client, db_session):
+    _use_service(app, FakeService())
+    await _cache_certificate(db_session, certificate_id=1, common_name="attcctrino.web.att.com")
+
+    resp = await admin_client.post("/api/v1/certificates/1/download", json={"file_format": "PEM"})
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "download_certificate")
+    assert entry.details["summary"] == "Downloaded attcctrino.web.att.com (1) (PEM)"
+    assert entry.details["common_name"] == "attcctrino.web.att.com"
+
+
+async def test_jks_download_audit_names_the_certificate(app, admin_client, db_session):
+    svc = FakeService()
+    svc.download_payload = lambda kw: _pfx_fixture(kw["pfx_password"])
+    _use_service(app, svc)
+    await _cache_certificate(db_session, certificate_id=1, common_name="attccgrafana.stage.att.com")
+
+    resp = await admin_client.post("/api/v1/certificates/1/download", json=_jks_request())
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "download_certificate")
+    assert entry.details["summary"] == "Downloaded attccgrafana.stage.att.com (1) (JKS)"
+
+
+async def test_renew_audit_names_the_certificate(app, admin_client, db_session):
+    _use_service(app, FakeService())
+    await _cache_certificate(db_session, certificate_id=1, common_name="attcctrino.stage.att.com")
+
+    resp = await admin_client.post("/api/v1/certificates/1/renew", json={"mode": "one_click"})
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "renew_certificate")
+    assert entry.details["summary"] == "Renewed attcctrino.stage.att.com (1)"
+
+
+async def test_delete_audit_names_the_certificate(app, admin_client, db_session):
+    # Resolved before the delete: afterwards the audit row is the only record
+    # of which certificate this was.
+    _use_service(app, FakeService())
+    await _cache_certificate(db_session, certificate_id=1, common_name="attccworkday.stage.att.com")
+
+    resp = await admin_client.delete("/api/v1/certificates/1")
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "delete_certificate")
+    assert entry.details["summary"] == "Deleted attccworkday.stage.att.com (1)"
+    assert entry.details["common_name"] == "attccworkday.stage.att.com"
+
+
+async def test_metadata_audit_names_the_certificate(app, admin_client, db_session):
+    _use_service(app, FakeService())
+    await _cache_certificate(db_session, certificate_id=1, common_name="a.example.com")
+
+    resp = await admin_client.put("/api/v1/certificates/1/metadata", json={"metadata": {"owner": "team-a"}})
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "update_certificate_metadata")
+    assert entry.details["summary"] == "Updated metadata on a.example.com (1)"
+
+
+async def test_load_to_akv_audit_names_the_certificate(app, admin_client, db_session, fake_keyvault):
+    _use_service(app, FakeService())
+    await _cache_certificate(db_session, certificate_id=1, common_name="cesdatarouter.stage.att.com")
+
+    resp = await admin_client.post("/api/v1/certificates/1/load-to-akv", json=_AKV_TARGET)
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "load_certificate_to_akv")
+    assert entry.details["summary"].startswith("Loaded cesdatarouter.stage.att.com (1) to AKV my-vault/")
+    assert entry.details["common_name"] == "cesdatarouter.stage.att.com"
+
+
+async def test_enroll_audit_names_the_certificate(app, admin_client, db_session):
+    # A new certificate has no cached snapshot, so the name comes from the request.
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={
+            "enrollment_type": "pfx",
+            "certificate_authority": "ca",
+            "template": "WebServer",
+            "common_name": "new.example.com",
+            "password": "a-long-enough-password",
+        },
+    )
+    assert resp.status_code == 201
+
+    entry = await _last_audit(db_session, "enroll_certificate")
+    assert entry.details["summary"] == "Enrolled new.example.com (pfx) via WebServer"
+    assert entry.details["common_name"] == "new.example.com"
+
+
+async def test_audit_falls_back_to_the_id_when_the_name_is_unknown(app, admin_client, db_session):
+    # An un-cached certificate must still audit cleanly, just without a name.
+    _use_service(app, FakeService())
+    resp = await admin_client.post("/api/v1/certificates/999/revoke", json={"reason": "superseded"})
+    assert resp.status_code == 200
+
+    entry = await _last_audit(db_session, "revoke_certificate")
+    assert entry.details["summary"] == "Revoked 999 (superseded)"
+    assert entry.details["common_name"] is None

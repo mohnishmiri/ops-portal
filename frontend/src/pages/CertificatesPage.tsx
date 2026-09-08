@@ -619,7 +619,10 @@ const actionBadgeColor: Record<string, string> = {
   update_certificate_metadata: "bg-amber-100 text-amber-800",
   delete_certificate: "bg-red-100 text-red-800",
   download_certificate: "bg-purple-100 text-purple-800",
+  load_certificate_to_akv: "bg-indigo-100 text-indigo-800",
+  cert_key_escrow: "bg-cyan-100 text-cyan-800",
   cert_auto_renewal_run: "bg-teal-100 text-teal-800",
+  cert_auto_renewal_config: "bg-teal-100 text-teal-800",
 };
 
 const actionLabel: Record<string, string> = {
@@ -629,13 +632,27 @@ const actionLabel: Record<string, string> = {
   update_certificate_metadata: "Update",
   delete_certificate: "Delete",
   download_certificate: "Download",
+  load_certificate_to_akv: "Load to AKV",
+  cert_key_escrow: "Key Escrow",
   cert_auto_renewal_run: "Auto-Renewal Run",
+  cert_auto_renewal_config: "Auto-Renewal Config",
+};
+
+/**
+ * Common name recorded on the audit row. Entries written before the audit trail
+ * captured it have none, so the id in the Certificate column remains the only
+ * identifier for those.
+ */
+const auditCommonName = (entry: CertificateAuditEntry): string => {
+  const value = entry.details?.common_name;
+  return typeof value === "string" && value.trim() ? value : "";
 };
 
 const AUDIT_CSV_COLUMNS: CsvColumn<CertificateAuditEntry>[] = [
   { header: "Timestamp", value: (e) => (e.timestamp ? new Date(e.timestamp).toISOString() : "") },
   { header: "Action", value: (e) => actionLabel[e.action] ?? e.action },
   { header: "Resource Type", value: () => "Certificate" },
+  { header: "Common Name", value: (e) => auditCommonName(e) },
   { header: "Certificate", value: (e) => e.resource_id ?? "" },
   { header: "Status", value: (e) => (e.status === "success" ? "Success" : "Failed") },
   { header: "User", value: (e) => e.user_email || e.user_id },
@@ -659,6 +676,7 @@ const CertificateAuditHistoryPanel: React.FC = () => {
       const q = search.toLowerCase();
       items = items.filter((e) =>
         (e.summary || "").toLowerCase().includes(q) ||
+        auditCommonName(e).toLowerCase().includes(q) ||
         (e.resource_id || "").toLowerCase().includes(q) ||
         (e.user_email || "").toLowerCase().includes(q) ||
         (e.action || "").toLowerCase().includes(q)
@@ -736,6 +754,7 @@ const CertificateAuditHistoryPanel: React.FC = () => {
               <th className={gridStyles.headerCell}><SortableHeader label="Timestamp" active={auditSort.key === "timestamp"} direction={auditSort.direction} onClick={() => setAuditSort(nextSortState(auditSort, "timestamp"))} /></th>
               <th className={gridStyles.headerCell}><SortableHeader label="Action" active={auditSort.key === "action"} direction={auditSort.direction} onClick={() => setAuditSort(nextSortState(auditSort, "action"))} /></th>
               <th className={gridStyles.headerCell}>Resource</th>
+              <th className={gridStyles.headerCell}>Common Name</th>
               <th className={gridStyles.headerCell}><SortableHeader label="Certificate" active={auditSort.key === "resource_id"} direction={auditSort.direction} onClick={() => setAuditSort(nextSortState(auditSort, "resource_id"))} /></th>
               <th className={gridStyles.headerCell}><SortableHeader label="Status" active={auditSort.key === "status"} direction={auditSort.direction} onClick={() => setAuditSort(nextSortState(auditSort, "status"))} /></th>
               <th className={gridStyles.headerCell}><SortableHeader label="User" active={auditSort.key === "user_email"} direction={auditSort.direction} onClick={() => setAuditSort(nextSortState(auditSort, "user_email"))} /></th>
@@ -752,6 +771,12 @@ const CertificateAuditHistoryPanel: React.FC = () => {
                   </span>
                 </td>
                 <td className={gridStyles.cell}><span className="inline-flex items-center rounded-full bg-att-50 px-2 py-0.5 text-xs font-medium text-att-700">Certificate</span></td>
+                <td
+                  className={`${gridStyles.cell} max-w-[240px] truncate text-xs font-medium text-gray-800`}
+                  title={auditCommonName(entry)}
+                >
+                  {auditCommonName(entry) || "—"}
+                </td>
                 <td className={`${gridStyles.cell} text-xs max-w-[200px] truncate`} title={entry.resource_id || ""}>{entry.resource_id || "—"}</td>
                 <td className={gridStyles.cell}>
                   <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${entry.status === "success" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
@@ -763,7 +788,7 @@ const CertificateAuditHistoryPanel: React.FC = () => {
               </tr>
             ))}
             {filtered.length === 0 && (
-              <tr><td colSpan={7} className="py-8 text-center text-sm text-gray-400">No certificate audit entries found.</td></tr>
+              <tr><td colSpan={8} className="py-8 text-center text-sm text-gray-400">No certificate audit entries found.</td></tr>
             )}
           </tbody>
         </table>

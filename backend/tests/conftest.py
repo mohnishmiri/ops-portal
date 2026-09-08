@@ -49,6 +49,47 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 """
 
 
+# cert_certificates uses JSONB too.  The certificate audit trail resolves a
+# common name from this snapshot, so an equivalent TEXT-column table is created
+# to exercise that lookup instead of only its "not cached" fallback.
+_CERT_CERTIFICATES_SQLITE_DDL = """
+CREATE TABLE IF NOT EXISTS cert_certificates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id  INTEGER NOT NULL,
+    certificate_id INTEGER NOT NULL,
+    common_name    VARCHAR(500),
+    subject_dn     TEXT,
+    issuer_dn      TEXT,
+    serial_number  VARCHAR(255),
+    thumbprint     VARCHAR(100),
+    template       VARCHAR(500),
+    certificate_authority VARCHAR(500),
+    not_before     VARCHAR(50),
+    not_after      VARCHAR(50),
+    import_date    VARCHAR(50),
+    effective_date VARCHAR(50),
+    sans           TEXT,
+    san_count      INTEGER,
+    revoked        BOOLEAN,
+    revocation_reason INTEGER,
+    status         VARCHAR(30),
+    cert_metadata  TEXT,
+    key_algorithm  VARCHAR(50),
+    key_size       INTEGER,
+    key_usage      VARCHAR(500),
+    extended_key_usage VARCHAR(500),
+    signing_algorithm  VARCHAR(100),
+    requester      VARCHAR(255),
+    principal_name VARCHAR(255),
+    locations      TEXT,
+    location_count INTEGER,
+    collection     VARCHAR(500),
+    has_private_key BOOLEAN,
+    synced_at      DATETIME
+)
+"""
+
+
 # ── In-memory SQLite engine ────────────────────────────────────────────────────
 
 
@@ -68,6 +109,7 @@ async def db_engine():
         # cert_key_escrow holds no JSONB, so it compiles on SQLite as-is.
         await conn.run_sync(lambda c: CertificateKeyEscrow.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
+        await conn.execute(text(_CERT_CERTIFICATES_SQLITE_DDL))
     yield engine
     await engine.dispose()
 
