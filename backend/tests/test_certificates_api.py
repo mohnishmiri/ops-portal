@@ -1366,3 +1366,31 @@ async def test_audit_falls_back_to_the_id_when_the_name_is_unknown(app, admin_cl
     entry = await _last_audit(db_session, "revoke_certificate")
     assert entry.details["summary"] == "Revoked 999 (superseded)"
     assert entry.details["common_name"] is None
+
+
+# ── Deleted-certificate view ───────────────────────────────────────────
+
+
+async def test_deleted_only_returns_empty_rather_than_live_certificates(app, admin_client, db_session):
+    # With nothing soft-deleted the view must be empty. Falling through to the
+    # live Keyfactor path would present every *active* cert under the "Deleted
+    # Certificates" banner, which reads as a mass deletion that never happened.
+    _use_service(app, FakeService())
+    resp = await admin_client.get("/api/v1/certificates", params={"collection_id": 2573, "deleted_only": True})
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+
+
+async def test_deleted_only_surfaces_a_cache_failure_instead_of_masking_it(app, admin_client, db_session, monkeypatch):
+    # A missing deleted_at column previously raised, got swallowed by the
+    # fallback, and the live Keyfactor result was rendered as "deleted".
+    from app.services.certificate_sync_service import CertificateSyncService
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError('column "deleted_at" does not exist')
+
+    monkeypatch.setattr(CertificateSyncService, "list_certificates_from_db", _boom)
+    _use_service(app, FakeService())
+    resp = await admin_client.get("/api/v1/certificates", params={"collection_id": 2573, "deleted_only": True})
+    assert resp.status_code == 503
+    assert "deleted-certificate view is unavailable" in resp.json()["detail"]

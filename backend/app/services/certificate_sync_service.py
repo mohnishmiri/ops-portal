@@ -252,6 +252,28 @@ class CertificateSyncService:
             page += 1
 
         now = datetime.utcnow()
+
+        # An empty response is far more likely a transient Keyfactor failure
+        # than every certificate in the collection disappearing at once. Both
+        # the snapshot replacement and the orphan calculation below read
+        # "absent from the response" as "gone", so acting on an empty one would
+        # blank the active grid *and* mass soft-delete certificates that still
+        # exist. Keep the last good snapshot instead.
+        if not collected:
+            existing = await self.db.execute(
+                select(func.count(CertificateSnapshot.id))
+                .where(CertificateSnapshot.collection_id == collection_id)
+                .where(CertificateSnapshot.deleted_at.is_(None))
+            )
+            retained = existing.scalar() or 0
+            if retained:
+                logger.warning(
+                    "cert_sync_empty_response_ignored",
+                    collection_id=collection_id,
+                    retained=retained,
+                )
+                return retained
+
         # De-duplicate by Keyfactor certificate id before insert: pagination
         # overlap or missing ids (which collapse to 0) would otherwise violate the
         # (collection_id, certificate_id) unique constraint and abort the flush.
@@ -278,7 +300,23 @@ class CertificateSyncService:
             .where(CertificateSnapshot.deleted_at.is_(None))
         )
         active_ids: set[int] = {row[0] for row in active_result}
-        orphan_ids = active_ids - fresh_ids
+
+        # Only a complete snapshot can prove a certificate is gone. If the walk
+        # stopped short of Keyfactor's own total (a mid-pagination failure) or
+        # hit the local cap, the missing ids were never fetched — they are not
+        # deletions, and soft-deleting them would file live certs under
+        # "Deleted".
+        snapshot_complete = len(collected) < _MAX_CERTS_PER_COLLECTION and (
+            not keyfactor_total or len(collected) >= keyfactor_total
+        )
+        orphan_ids = (active_ids - fresh_ids) if snapshot_complete else set()
+        if not snapshot_complete and active_ids - fresh_ids:
+            logger.warning(
+                "cert_sync_partial_snapshot_orphans_skipped",
+                collection_id=collection_id,
+                fetched=len(collected),
+                keyfactor_total=keyfactor_total,
+            )
         if orphan_ids:
             await self.db.execute(
                 update(CertificateSnapshot)

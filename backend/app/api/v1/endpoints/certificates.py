@@ -619,7 +619,10 @@ async def list_certificates(
     if (not refresh or deleted_only) and collection_id is not None and db is not None:
         try:
             sync_service = CertificateSyncService(db)
-            if await sync_service.has_certificates(collection_id):
+            # ``deleted_only`` skips the has_certificates gate: an empty deleted
+            # set must return an empty list, not fall through to Keyfactor and
+            # answer "show me deleted certs" with every active one.
+            if deleted_only or await sync_service.has_certificates(collection_id):
                 cached = await sync_service.list_certificates_from_db(
                     collection_id=collection_id,
                     cn=cn,
@@ -634,6 +637,15 @@ async def list_certificates(
                 return await _decorate_escrow_status(db, cached)
         except Exception as exc:
             logger.warning("cert_list_db_fallback", error=str(exc)[:200])
+            # Falling back to Keyfactor here would return active certificates
+            # under the "Deleted" banner, which reads as mass deletion. The
+            # deleted view is DB-only, so surface the failure instead.
+            if deleted_only:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="The deleted-certificate view is unavailable because the local cache "
+                    "could not be read. Check that the cert_certificates migrations have been applied.",
+                ) from exc
 
     clauses: list[str] = []
     if cn:

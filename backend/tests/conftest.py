@@ -22,6 +22,7 @@ from app.auth import get_current_user
 from app.core.database import get_db
 from app.main import create_application
 from app.models.database import (
+    CertificateCollectionSnapshot,
     CertificateKeyEscrow,
     Permission,
     Resource,
@@ -109,6 +110,8 @@ async def db_engine():
         await conn.run_sync(lambda c: TeamMembership.__table__.create(c, checkfirst=True))
         # cert_key_escrow holds no JSONB, so it compiles on SQLite as-is.
         await conn.run_sync(lambda c: CertificateKeyEscrow.__table__.create(c, checkfirst=True))
+        # A collection sync writes the certificate count back here.
+        await conn.run_sync(lambda c: CertificateCollectionSnapshot.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
         await conn.execute(text(_CERT_CERTIFICATES_SQLITE_DDL))
     yield engine

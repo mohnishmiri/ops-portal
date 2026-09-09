@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import settings
+from app.core.migrations import run_sql_migrations
 
 logger = structlog.get_logger(__name__)
 
@@ -259,6 +260,19 @@ async def create_tables() -> None:
                     """
                 )
             )
+
+        # Apply backend/migrations/*.sql. New columns on existing tables live
+        # there rather than being hand-copied into the block above, which is how
+        # cert_certificates.deleted_at came to be declared on the model but
+        # absent from the database.
+        #
+        # Its own transaction: a failing migration must not roll back the table
+        # creation above.
+        async with _engine.begin() as conn:
+            applied = await run_sql_migrations(conn)
+        if applied:
+            logger.info("sql_migrations_applied", count=len(applied), filenames=applied)
+
         logger.info("Database tables verified/created successfully")
     except Exception as e:
         logger.error("Failed to create database tables", error=str(e))
