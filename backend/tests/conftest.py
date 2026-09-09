@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS cert_certificates (
     location_count INTEGER,
     collection     VARCHAR(500),
     has_private_key BOOLEAN,
-    synced_at      DATETIME
+    synced_at      DATETIME,
+    deleted_at     DATETIME
 )
 """
 

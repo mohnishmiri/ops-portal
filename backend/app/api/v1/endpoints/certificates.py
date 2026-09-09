@@ -24,7 +24,7 @@ from typing import Any, Literal, NoReturn
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
@@ -596,6 +596,9 @@ async def list_certificates(
     cert_status: str | None = Query(default=None, description="Keyfactor cert state, e.g. 'Active'"),
     collection_id: int | None = Query(default=None, description="Filter by collection ID"),
     expires_in_days: int | None = Query(default=None, ge=0, le=3650),
+    deleted_only: bool = Query(
+        default=False, description="Return only soft-deleted certificates (portal deletions + Keyfactor orphans)"
+    ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
     refresh: bool = Query(default=False, description="Bypass the DB cache and fetch live from Keyfactor"),
@@ -603,9 +606,17 @@ async def list_certificates(
     service: CertificateService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Paginated, filterable certificate list (served from the DB cache when available)."""
+    """Paginated, filterable certificate list (served from the DB cache when available).
+
+    By default returns only active (non-deleted) certificates. Pass
+    ``deleted_only=true`` to view soft-deleted certificates — those removed
+    from Keyfactor since the last sync, or explicitly deleted via the portal.
+    Deleted certificates are only available via the DB cache; the live
+    Keyfactor path is skipped when ``deleted_only=true``.
+    """
     # DB-first fast path: serve the cached snapshot for this collection.
-    if not refresh and collection_id is not None and db is not None:
+    # ``deleted_only`` always uses the DB cache (no Keyfactor equivalent).
+    if (not refresh or deleted_only) and collection_id is not None and db is not None:
         try:
             sync_service = CertificateSyncService(db)
             if await sync_service.has_certificates(collection_id):
@@ -616,6 +627,7 @@ async def list_certificates(
                     issuer=issuer,
                     cert_status=cert_status,
                     expires_in_days=expires_in_days,
+                    deleted_only=deleted_only,
                     page=page,
                     page_size=page_size,
                 )
@@ -1540,7 +1552,11 @@ async def delete_certificate(
     service: CertificateService = Depends(_get_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Delete a certificate record (WRITE role or above)."""
+    """Delete a certificate record (WRITE role or above).
+
+    The certificate is removed from Keyfactor and soft-deleted in the local DB
+    snapshot so it remains visible in the "Deleted Certificates" view.
+    """
     # Resolved up front: after the delete the audit trail is the only place the
     # certificate's name still exists.
     cert_label, cert_cn = await _cert_identity(db, certificate_id)
@@ -1548,6 +1564,17 @@ async def delete_certificate(
         result = await service.delete_certificate(certificate_id, collection_id=collection_id)
     except CertificateServiceError as exc:
         _raise_http(exc)
+
+    # Soft-delete the local DB snapshot immediately so the "Deleted" tile
+    # reflects the change without waiting for the next background sync.
+    if db is not None:
+        await db.execute(
+            update(CertificateSnapshot)
+            .where(CertificateSnapshot.certificate_id == certificate_id)
+            .where(CertificateSnapshot.deleted_at.is_(None))
+            .values(deleted_at=datetime.utcnow())
+        )
+        await db.commit()
 
     await _write_audit(
         db,

@@ -1339,6 +1339,9 @@ const CertificatesPage: React.FC = () => {
   const [draft, setDraft] = useState({ cn: "", thumbprint: "", issuer: "" });
   const [filters, setFilters] = useState<CertificateListParams>({ page: 1, page_size: PAGE_SIZE });
   const [expiryDays, setExpiryDays] = useState<number | undefined>(undefined);
+  // Exclusive status-filter toggles — at most one active at a time.
+  const [revokedOnly, setRevokedOnly] = useState(false);
+  const [deletedOnly, setDeletedOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "common_name", direction: "asc" });
   const [modal, setModal] = useState<ModalKind>(null);
@@ -1349,10 +1352,12 @@ const CertificatesPage: React.FC = () => {
 
   const showToast = useCallback((message: string, type: ToastType = "success") => setToast({ message, type }), []);
 
-  const params = useMemo<CertificateListParams>(
-    () => ({ ...filters, collection_id: collectionId, expires_in_days: expiryDays, page, page_size: PAGE_SIZE }),
-    [filters, collectionId, expiryDays, page]
-  );
+  const params = useMemo<CertificateListParams>(() => {
+    const base = { ...filters, collection_id: collectionId, page, page_size: PAGE_SIZE };
+    if (deletedOnly) return { ...base, deleted_only: true, expires_in_days: undefined };
+    if (revokedOnly) return { ...base, cert_status: "revoked", expires_in_days: undefined };
+    return { ...base, expires_in_days: expiryDays };
+  }, [filters, collectionId, expiryDays, revokedOnly, deletedOnly, page]);
   const { data, isLoading, isError, error, refetch, isFetching } = useCertificates(params, collectionId != null);
 
   const items = useMemo(() => sortCerts(data?.items ?? [], sort), [data?.items, sort]);
@@ -1372,11 +1377,31 @@ const CertificatesPage: React.FC = () => {
     collectionId == null ? "—" : statsLoading ? "…" : (v ?? 0).toLocaleString();
   const expiringByDays: Record<number, number | undefined> = { 30: stats?.expiring30, 60: stats?.expiring60, 90: stats?.expiring90 };
 
+  // Handlers for the exclusive status-filter tiles.
+  const handleExpiryTile = (days: number) => {
+    setPage(1);
+    setRevokedOnly(false);
+    setDeletedOnly(false);
+    setExpiryDays(expiryDays === days ? undefined : days);
+  };
+  const handleRevokedTile = () => {
+    setPage(1);
+    setExpiryDays(undefined);
+    setDeletedOnly(false);
+    setRevokedOnly((v) => !v);
+  };
+  const handleDeletedTile = () => {
+    setPage(1);
+    setExpiryDays(undefined);
+    setRevokedOnly(false);
+    setDeletedOnly((v) => !v);
+  };
+
   const applyFilters = () => {
     setPage(1);
     setFilters({ page: 1, page_size: PAGE_SIZE, cn: draft.cn.trim() || undefined, thumbprint: draft.thumbprint.trim() || undefined, issuer: draft.issuer.trim() || undefined });
   };
-  const clearFilters = () => { setDraft({ cn: "", thumbprint: "", issuer: "" }); setPage(1); setFilters({ page: 1, page_size: PAGE_SIZE }); };
+  const clearFilters = () => { setDraft({ cn: "", thumbprint: "", issuer: "" }); setPage(1); setFilters({ page: 1, page_size: PAGE_SIZE }); setExpiryDays(undefined); setRevokedOnly(false); setDeletedOnly(false); };
   const openModal = (kind: ModalKind, cert?: Certificate) => { setSelected(cert ?? null); setModal(kind); };
   const closeModal = () => { setModal(null); setSelected(null); };
 
@@ -1511,36 +1536,101 @@ const CertificatesPage: React.FC = () => {
         )}
       </div>
 
-      {/* Expiry Filter Cards */}
-      <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {[30, 60, 90].map((days) => (
+      {/* Status Filter Cards — Expiry + Revoked + Deleted */}
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {/* Expiry tiles */}
+        {([30, 60, 90] as const).map((days) => (
           <button
             key={days}
             type="button"
-            onClick={() => { setExpiryDays(expiryDays === days ? undefined : days); setPage(1); }}
+            onClick={() => handleExpiryTile(days)}
             className={`flex items-center gap-3 rounded-xl border p-4 text-left transition ${
               expiryDays === days
                 ? "border-att-500 bg-att-50 ring-2 ring-att-200"
                 : "border-att-100 bg-white hover:border-att-300 hover:bg-att-50/50"
             }`}
           >
-            <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
               days === 30 ? "bg-red-100 text-red-700" : days === 60 ? "bg-amber-100 text-amber-700" : "bg-blue-100 text-blue-700"
             }`}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
             </div>
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Expiring in {days} Days</p>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Expiring in {days}d</p>
               <p className="text-lg font-bold text-gray-900">{fmtStat(expiringByDays[days])}</p>
             </div>
             {expiryDays === days && (
-              <span className="ml-auto text-xs font-medium text-att-600 bg-att-100 px-2 py-0.5 rounded-full">Active</span>
+              <span className="ml-auto shrink-0 text-xs font-medium text-att-600 bg-att-100 px-2 py-0.5 rounded-full">Active</span>
             )}
           </button>
         ))}
+
+        {/* Revoked tile */}
+        <button
+          type="button"
+          onClick={handleRevokedTile}
+          disabled={collectionId == null}
+          className={`flex items-center gap-3 rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            revokedOnly
+              ? "border-orange-400 bg-orange-50 ring-2 ring-orange-200"
+              : "border-att-100 bg-white hover:border-orange-300 hover:bg-orange-50/50"
+          }`}
+        >
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-orange-100 text-orange-700">
+            {Icons.slash}
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Revoked</p>
+            <p className="text-lg font-bold text-gray-900">
+              {collectionId == null ? "—" : statsLoading ? "…" : stats?.revoked != null && stats.revoked >= 0 ? stats.revoked.toLocaleString() : "—"}
+            </p>
+          </div>
+          {revokedOnly && (
+            <span className="ml-auto shrink-0 text-xs font-medium text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">Active</span>
+          )}
+        </button>
+
+        {/* Deleted tile */}
+        <button
+          type="button"
+          onClick={handleDeletedTile}
+          disabled={collectionId == null}
+          className={`flex items-center gap-3 rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            deletedOnly
+              ? "border-red-400 bg-red-50 ring-2 ring-red-200"
+              : "border-att-100 bg-white hover:border-red-300 hover:bg-red-50/50"
+          }`}
+        >
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-100 text-red-700">
+            {Icons.trash}
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Deleted</p>
+            <p className="text-lg font-bold text-gray-900">{fmtStat(stats?.deleted)}</p>
+          </div>
+          {deletedOnly && (
+            <span className="ml-auto shrink-0 text-xs font-medium text-red-700 bg-red-100 px-2 py-0.5 rounded-full">Active</span>
+          )}
+        </button>
       </div>
 
       <div className={gridStyles.shell}>
+        {/* Contextual banner for special filter modes */}
+        {deletedOnly && (
+          <div className="flex items-center gap-2 border-b border-red-100 bg-red-50 px-5 py-2.5 text-sm text-red-700">
+            <span className="shrink-0">{Icons.trash}</span>
+            <span><strong>Deleted Certificates</strong> — showing certificates removed from Keyfactor or explicitly deleted via the portal. These are read-only records preserved for auditing.</span>
+            <button type="button" onClick={clearFilters} className="ml-auto shrink-0 text-xs underline hover:no-underline">Clear filter</button>
+          </div>
+        )}
+        {revokedOnly && (
+          <div className="flex items-center gap-2 border-b border-orange-100 bg-orange-50 px-5 py-2.5 text-sm text-orange-700">
+            <span className="shrink-0">{Icons.slash}</span>
+            <span><strong>Revoked Certificates</strong> — certificates that have been revoked via a CA. They remain in Keyfactor but are no longer trusted.</span>
+            <button type="button" onClick={clearFilters} className="ml-auto shrink-0 text-xs underline hover:no-underline">Clear filter</button>
+          </div>
+        )}
+
         {/* Toolbar */}
         <div className={gridStyles.panelHeader}>
           <div className="flex flex-wrap items-center gap-2">
@@ -1578,15 +1668,38 @@ const CertificatesPage: React.FC = () => {
               ) : collectionId == null ? (
                 <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">Select a collection from the tiles above to view certificates.</td></tr>
               ) : items.length === 0 ? (
-                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">No certificates found in this collection.</td></tr>
+                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">
+                  {deletedOnly ? "No deleted certificates in this collection." : revokedOnly ? "No revoked certificates in this collection." : "No certificates found in this collection."}
+                </td></tr>
               ) : (
-                items.map((cert) => (
-                  <tr key={cert.id} className={gridStyles.row}>
-                    <td className={gridStyles.strongCell}>{cert.common_name || "—"}</td>
-                    <td className={gridStyles.cell}><StatusBadge status={cert.status} /></td>
+                items.map((cert) => {
+                  const isDeleted = Boolean(cert.deleted_at);
+                  return (
+                  <tr key={cert.id} className={`${gridStyles.row} ${isDeleted ? "opacity-60" : ""}`}>
+                    <td className={gridStyles.strongCell}>
+                      <span className={isDeleted ? "line-through text-gray-400" : ""}>{cert.common_name || "—"}</span>
+                    </td>
+                    <td className={gridStyles.cell}>
+                      {isDeleted ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-700">
+                          {Icons.trash}
+                          <span>Deleted</span>
+                        </span>
+                      ) : (
+                        <StatusBadge status={cert.status} />
+                      )}
+                    </td>
                     <td className={gridStyles.cell}><EnvBadge cert={cert} /></td>
                     <td className={gridStyles.cell}><span className="font-mono text-xs" title={cert.thumbprint}>{cert.thumbprint || "—"}</span></td>
-                    <td className={gridStyles.cell}><ExpiryBadge not_after={cert.not_after} /></td>
+                    <td className={gridStyles.cell}>
+                      {isDeleted ? (
+                        <span className="text-xs text-gray-400" title={`Deleted ${new Date(cert.deleted_at!).toLocaleString()}`}>
+                          Deleted {formatDate(cert.deleted_at ?? null)}
+                        </span>
+                      ) : (
+                        <ExpiryBadge not_after={cert.not_after} />
+                      )}
+                    </td>
                     {showEscrowColumn && (
                       <td className={gridStyles.cell}><EscrowBadge escrowed={cert.key_escrowed} /></td>
                     )}
@@ -1598,10 +1711,12 @@ const CertificatesPage: React.FC = () => {
                         <button type="button" className={menuItem.neutral} onClick={() => { setOpenActionMenu(null); openModal("view", cert); }}>
                           {Icons.eye} <span>View Certificate</span>
                         </button>
-                        <button type="button" className={menuItem.neutral} onClick={() => { setOpenActionMenu(null); openModal("download", cert); }}>
-                          {Icons.download} <span>Download</span>
-                        </button>
-                        {canWrite && <>
+                        {!isDeleted && (
+                          <button type="button" className={menuItem.neutral} onClick={() => { setOpenActionMenu(null); openModal("download", cert); }}>
+                            {Icons.download} <span>Download</span>
+                          </button>
+                        )}
+                        {canWrite && !isDeleted && <>
                           <div className={menuItem.divider} />
                           <button type="button" className={menuItem.success} onClick={() => { setOpenActionMenu(null); openModal("renew", cert); }}>
                             {Icons.refresh} <span>Renew Certificate</span>
@@ -1623,7 +1738,8 @@ const CertificatesPage: React.FC = () => {
                       </RowActionMenu>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

@@ -264,8 +264,55 @@ class CertificateSyncService:
             seen_ids.add(cert_id)
             unique_certs.append(cert)
 
-        # Replace this collection's rows atomically.
-        await self.db.execute(delete(CertificateSnapshot).where(CertificateSnapshot.collection_id == collection_id))
+        # Only non-zero IDs are meaningful for soft-delete tracking;
+        # certs with id=0 (missing Keyfactor ID) are kept for insertion but
+        # excluded from the orphan / revival calculation.
+        fresh_ids = {cid for cid in seen_ids if cid != 0}
+
+        # ── Soft-delete certs no longer in Keyfactor ──────────────────
+        # Fetch the IDs of currently active (non-deleted) rows so we know
+        # which ones have disappeared since the last sync.
+        active_result = await self.db.execute(
+            select(CertificateSnapshot.certificate_id)
+            .where(CertificateSnapshot.collection_id == collection_id)
+            .where(CertificateSnapshot.deleted_at.is_(None))
+        )
+        active_ids: set[int] = {row[0] for row in active_result}
+        orphan_ids = active_ids - fresh_ids
+        if orphan_ids:
+            await self.db.execute(
+                update(CertificateSnapshot)
+                .where(CertificateSnapshot.collection_id == collection_id)
+                .where(CertificateSnapshot.certificate_id.in_(list(orphan_ids)))
+                .values(deleted_at=now)
+            )
+
+        # ── Remove stale deleted rows for certs that reappeared ────────
+        # A cert previously soft-deleted (e.g. removed temporarily) that is
+        # now back in Keyfactor needs its deleted row cleaned up so the fresh
+        # INSERT does not violate the (collection_id, certificate_id) UNIQUE
+        # constraint.
+        previously_deleted_result = await self.db.execute(
+            select(CertificateSnapshot.certificate_id)
+            .where(CertificateSnapshot.collection_id == collection_id)
+            .where(CertificateSnapshot.deleted_at.isnot(None))
+        )
+        previously_deleted_ids: set[int] = {row[0] for row in previously_deleted_result}
+        revived_ids = fresh_ids & previously_deleted_ids
+        if revived_ids:
+            await self.db.execute(
+                delete(CertificateSnapshot)
+                .where(CertificateSnapshot.collection_id == collection_id)
+                .where(CertificateSnapshot.certificate_id.in_(list(revived_ids)))
+                .where(CertificateSnapshot.deleted_at.isnot(None))
+            )
+
+        # ── Replace active snapshot ────────────────────────────────────
+        await self.db.execute(
+            delete(CertificateSnapshot)
+            .where(CertificateSnapshot.collection_id == collection_id)
+            .where(CertificateSnapshot.deleted_at.is_(None))
+        )
         for cert in unique_certs:
             self.db.add(self._to_row(cert, collection_id, collection_name, now))
         # Persist the true collection size (Keyfactor total preferred over the capped
@@ -544,20 +591,29 @@ class CertificateSyncService:
         issuer: str | None = None,
         cert_status: str | None = None,
         expires_in_days: int | None = None,
+        deleted_only: bool = False,
         page: int = 1,
         page_size: int = 25,
     ) -> dict[str, Any]:
-        """Fast, filtered, paginated certificate list served from PostgreSQL."""
+        """Fast, filtered, paginated certificate list served from PostgreSQL.
+
+        By default only active (non-deleted) certificates are returned.
+        Pass ``deleted_only=True`` to return only soft-deleted certificates.
+        """
         conditions = [CertificateSnapshot.collection_id == collection_id]
+        if deleted_only:
+            conditions.append(CertificateSnapshot.deleted_at.isnot(None))
+        else:
+            conditions.append(CertificateSnapshot.deleted_at.is_(None))
         if cn:
             conditions.append(CertificateSnapshot.common_name.ilike(f"%{cn}%"))
         if thumbprint:
             conditions.append(CertificateSnapshot.thumbprint.ilike(f"%{thumbprint}%"))
         if issuer:
             conditions.append(CertificateSnapshot.issuer_dn.ilike(f"%{issuer}%"))
-        if cert_status:
+        if cert_status and not deleted_only:
             conditions.append(CertificateSnapshot.status == cert_status.lower())
-        if expires_in_days is not None:
+        if expires_in_days is not None and not deleted_only:
             cutoff = (datetime.now(UTC) + timedelta(days=expires_in_days)).strftime("%Y-%m-%dT%H:%M:%S%z")
             conditions.append(CertificateSnapshot.not_after.isnot(None))
             conditions.append(CertificateSnapshot.not_after <= cutoff)
@@ -608,6 +664,7 @@ class CertificateSyncService:
             "location_count": r.location_count or 0,
             "collection": r.collection or "",
             "has_private_key": bool(r.has_private_key) if r.has_private_key is not None else None,
+            "deleted_at": r.deleted_at.isoformat() if r.deleted_at else None,
         }
 
     # ── Status / staleness ─────────────────────────────────────────────

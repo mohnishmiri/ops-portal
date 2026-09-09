@@ -1477,10 +1477,14 @@ class CertificateSnapshot(Base):
     collection = Column(String(500), nullable=True)
     has_private_key = Column(Boolean, nullable=True, default=False)
     synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # Soft-delete: set when a cert is removed from Keyfactor or deleted via the
+    # portal.  NULL = active; non-NULL = deleted (timestamp of deletion).
+    deleted_at = Column(DateTime, nullable=True, default=None)
 
     __table_args__ = (
         UniqueConstraint("collection_id", "certificate_id", name="uq_cert_collection_cert"),
         Index("ix_cert_certs_cn_status", "common_name", "status"),
+        Index("ix_cert_certs_deleted_at", "deleted_at"),
     )
 
 

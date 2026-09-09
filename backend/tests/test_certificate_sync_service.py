@@ -15,15 +15,20 @@ from app.services.certificate_sync_service import (
 
 
 class _FakeResult:
-    def __init__(self, *, scalar: object = None, rowcount: int = 0) -> None:
+    def __init__(self, *, scalar: object = None, rowcount: int = 0, rows: list[object] | None = None) -> None:
         self._scalar = scalar
         self.rowcount = rowcount
+        self._rows = rows or []
 
     def scalar_one_or_none(self) -> object:
         return self._scalar
 
     def scalar(self) -> object:
         return self._scalar
+
+    # Support ``for row in result`` iteration used by soft-delete helper queries.
+    def __iter__(self):  # type: ignore[override]
+        return iter(self._rows)
 
 
 class _ScalarsView:
@@ -75,7 +80,9 @@ class _CaptureSession:
         self.rollbacks = 0
 
     async def execute(self, _statement: object) -> object:
-        return _FakeResult()
+        # Return an iterable result so soft-delete select queries (active_ids,
+        # previously_deleted_ids) yield empty sets without raising TypeError.
+        return _FakeResult(rows=[])
 
     def add(self, obj: object) -> None:
         self.added.append(obj)
