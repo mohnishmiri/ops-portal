@@ -7,6 +7,10 @@ assert normalization, validation, and error mapping without any network calls.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from app.services.keyfactor_client import KeyfactorNotFoundError, KeyfactorValidationError
 from app.services.keyfactor_service import (
@@ -14,6 +18,21 @@ from app.services.keyfactor_service import (
     CertificateServiceError,
     normalize_certificate,
 )
+
+
+def _csr_with_sans(dns_names: list[str]) -> str:
+    """Real PEM CSR carrying a subjectAltName extension."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_names[0])]))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(name) for name in dns_names]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    return csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
 
 
 class FakeClient:
@@ -32,6 +51,10 @@ class FakeClient:
             "IssuedDN": "CN=a.example.com,O=AT&T Services, Inc.,L=Dallas,ST=Texas,C=US",
             "OwnerRoleId": 17,
             "OwnerRoleName": "Certificate Owners",
+            "SubjectAltNameElements": [
+                {"Type": 2, "Value": "a.example.com"},
+                {"Type": 2, "Value": "a-alt.example.com"},
+            ],
             "Metadata": {
                 "MOTS-Profile-ID": "12345",
                 "Requester-ATT-User-ID": "ab1234",
@@ -202,6 +225,7 @@ async def test_pfx_renew_targets_only_the_selected_certificate():
             },
             "Subject": "CN=a.example.com,O=AT&T Services, Inc.,L=Dallas,ST=Texas,C=US",
             "PopulateMissingValuesFromAD": False,
+            "SANs": {"dns": ["a.example.com", "a-alt.example.com"]},
         },
     )
     assert client.calls[-2] == ("get", 7, 42)
@@ -312,6 +336,122 @@ async def test_csr_renew_preserves_source_owner_and_metadata():
     assert payload["OwnerRoleId"] == 17
     assert payload["Metadata"]["MOTS-Profile-ID"] == "12345"
     assert payload["Metadata"]["PCI-Data"] == "No"
+
+
+async def test_pfx_renew_resends_source_sans():
+    # /Enrollment/PFX drops every SAN it is not given, which used to leave the
+    # renewed certificate holding only its CN.
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="pfx",
+        certificate_authority="ca",
+        template="template",
+        password="validpassword",
+    )
+    assert client.calls[-1][1]["SANs"] == {"dns": ["a.example.com", "a-alt.example.com"]}
+
+
+async def test_csr_renew_resends_source_sans_when_csr_declares_none():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="csr",
+        certificate_authority="ca",
+        template="template",
+        csr="-----BEGIN CERTIFICATE REQUEST-----",
+    )
+    assert client.calls[-1][1]["SANs"] == {"dns": ["a.example.com", "a-alt.example.com"]}
+
+
+async def test_csr_renew_defers_to_sans_declared_in_the_csr():
+    # Keyfactor merges request SANs with CSR SANs, so resending would duplicate
+    # them and override what the caller actually asked for.
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="csr",
+        certificate_authority="ca",
+        template="template",
+        csr=_csr_with_sans(["from-csr.example.com"]),
+    )
+    assert "SANs" not in client.calls[-1][1]
+
+
+async def test_renew_groups_sans_by_type():
+    class MixedSanClient(FakeClient):
+        async def get_certificate(self, certificate_id, *, collection_id=None):
+            return {
+                "Id": certificate_id,
+                "SubjectAltNameElements": [
+                    {"Type": 2, "Value": "a.example.com"},
+                    {"Type": 7, "Value": "10.0.0.1"},
+                    {"Type": 7, "Value": "2001:db8::1"},
+                    {"Type": 1, "Value": "ops@example.com"},
+                    {"Type": 6, "Value": "https://a.example.com"},
+                    {"Value": "no-type.example.com"},
+                ],
+            }
+
+    client = MixedSanClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="pfx",
+        certificate_authority="ca",
+        template="template",
+        password="validpassword",
+    )
+    assert client.calls[-1][1]["SANs"] == {
+        "dns": ["a.example.com", "no-type.example.com"],
+        "ip4": ["10.0.0.1"],
+        "ip6": ["2001:db8::1"],
+        "email": ["ops@example.com"],
+        "uri": ["https://a.example.com"],
+    }
+
+
+async def test_renew_omits_sans_when_source_has_none():
+    class NoSanClient(FakeClient):
+        async def get_certificate(self, certificate_id, *, collection_id=None):
+            return {"Id": certificate_id, "SubjectAltNameElements": []}
+
+    client = NoSanClient()
+    svc = CertificateService(client=client)
+    await svc.renew_certificate(
+        certificate_id=7,
+        mode="pfx",
+        certificate_authority="ca",
+        template="template",
+        password="validpassword",
+    )
+    assert "SANs" not in client.calls[-1][1]
+
+
+async def test_enroll_normalizes_san_type_keys():
+    # The enrollment modal offers "IP"; Keyfactor only understands ip4 / ip6.
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.enroll_pfx(
+        subject="CN=a.example.com",
+        certificate_authority="ca",
+        template="template",
+        password="validpassword",
+        key_type="RSA",
+        key_length=4096,
+        sans={"DNS": ["a.example.com"], "ip": ["10.0.0.1", "2001:db8::1"], "Email": ["ops@example.com"]},
+        metadata=None,
+        include_chain=True,
+    )
+    assert client.calls[-1][1]["SANs"] == {
+        "dns": ["a.example.com"],
+        "ip4": ["10.0.0.1"],
+        "ip6": ["2001:db8::1"],
+        "email": ["ops@example.com"],
+    }
 
 
 async def test_pfx_renew_rejects_blank_password():

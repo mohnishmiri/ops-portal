@@ -17,9 +17,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address
 from typing import Any, TypeVar
 
 import structlog
+from cryptography import x509
 
 from app.services.keyfactor_client import (
     REVOCATION_REASONS,
@@ -69,6 +71,110 @@ def _extract_sans(cert: dict[str, Any]) -> list[str]:
     return sans
 
 
+# Keyfactor reports SANs as SubjectAltNameElements tagged with a GeneralName
+# type, but its enrollment endpoints take SANs grouped under named keys, so
+# preserving SANs across a renewal means translating between the two.
+_SAN_TYPE_KEYS: dict[str, str] = {
+    "0": "other",
+    "1": "email",
+    "2": "dns",
+    "6": "uri",
+    "7": "ip4",
+    "othername": "other",
+    "other": "other",
+    "rfc822name": "email",
+    "email": "email",
+    "dnsname": "dns",
+    "dns": "dns",
+    "uniformresourceidentifier": "uri",
+    "uri": "uri",
+    "ipaddress": "ip4",
+    "ip": "ip4",
+    "ip4": "ip4",
+    "ip6": "ip6",
+    "userprincipalname": "upn",
+    "upn": "upn",
+}
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _san_key(raw_type: Any, value: str) -> str:
+    """Enrollment SAN key for one SubjectAltNameElement."""
+    key = _SAN_TYPE_KEYS.get(str(raw_type).strip().lower()) if raw_type not in (None, "") else None
+    if key is None:
+        # Some Keyfactor responses omit the type; infer it from the value shape.
+        key = "email" if "@" in value else ("ip4" if _is_ip(value) else "dns")
+    if key in ("ip4", "ip6"):
+        key = "ip6" if ":" in value else "ip4"
+    return key
+
+
+def _sans_for_enrollment(cert: dict[str, Any]) -> dict[str, list[str]]:
+    """Group a certificate's SANs into the ``{type: [value]}`` shape enrollment takes."""
+    grouped: dict[str, list[str]] = {}
+    elements = cert.get("SubjectAltNameElements") or cert.get("SANs") or []
+    if not isinstance(elements, list):
+        return grouped
+    for el in elements:
+        if isinstance(el, dict):
+            raw_value = el.get("Value") or el.get("value")
+            raw_type = el.get("Type", el.get("type"))
+        elif isinstance(el, str):
+            raw_value, raw_type = el, None
+        else:
+            continue
+        value = str(raw_value).strip() if raw_value else ""
+        if not value:
+            continue
+        bucket = grouped.setdefault(_san_key(raw_type, value), [])
+        if value not in bucket:
+            bucket.append(value)
+    return grouped
+
+
+def _normalize_san_keys(sans: dict[str, list[str]] | None) -> dict[str, list[str]] | None:
+    """Rewrite caller-supplied SAN type keys to the ones Keyfactor accepts.
+
+    The UI offers plain labels like ``DNS`` and ``IP``; Keyfactor wants ``dns``
+    and the address-family-specific ``ip4`` / ``ip6``. An unrecognized key is
+    passed through untouched rather than guessed at, so a future SAN type the UI
+    learns before this map does still reaches Keyfactor.
+    """
+    if not sans:
+        return sans
+    normalized: dict[str, list[str]] = {}
+    for raw_key, values in sans.items():
+        if not values:
+            continue
+        for raw_value in values:
+            value = str(raw_value).strip()
+            if not value:
+                continue
+            mapped = _SAN_TYPE_KEYS.get(str(raw_key).strip().lower())
+            key = _san_key(raw_key, value) if mapped else str(raw_key)
+            bucket = normalized.setdefault(key, [])
+            if value not in bucket:
+                bucket.append(value)
+    return normalized or None
+
+
+def _csr_declares_sans(csr: str) -> bool:
+    """Whether a PEM CSR already carries a subjectAltName extension."""
+    try:
+        request = x509.load_pem_x509_csr(csr.encode("utf-8"))
+        san = request.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except (ValueError, TypeError, x509.ExtensionNotFound):
+        return False
+    return bool(san.value)
+
+
 def default_revocation_comment(reason: str, actor: str | None = None) -> str:
     """Comment recorded in Keyfactor when the caller leaves the field blank.
 
@@ -105,6 +211,8 @@ def normalize_certificate(cert: dict[str, Any]) -> dict[str, Any]:
     import_date = _parse_dt(cert.get("ImportDate"))
     effective_date = _parse_dt(cert.get("EffectiveDate") or cert.get("NotBefore"))
 
+    sans = _extract_sans(cert)
+
     # Locations list
     locations = []
     raw_locations = cert.get("Locations") or []
@@ -133,8 +241,8 @@ def normalize_certificate(cert: dict[str, Any]) -> dict[str, Any]:
         "not_after": not_after.isoformat() if not_after else None,
         "import_date": import_date.isoformat() if import_date else None,
         "effective_date": effective_date.isoformat() if effective_date else None,
-        "sans": _extract_sans(cert),
-        "san_count": len(_extract_sans(cert)),
+        "sans": sans,
+        "san_count": len(sans),
         "revoked": revoked,
         "revocation_reason": revocation_reason if revoked else None,
         "status": _compute_status(not_after, revoked),
@@ -216,8 +324,9 @@ class CertificateService:
             "IncludeChain": include_chain,
             "Timestamp": datetime.now(UTC).isoformat(),
         }
-        if sans:
-            payload["SANs"] = sans
+        normalized_sans = _normalize_san_keys(sans)
+        if normalized_sans:
+            payload["SANs"] = normalized_sans
         if metadata:
             payload["Metadata"] = metadata
         result = await self._guard(self._client.enroll_csr(payload))
@@ -246,8 +355,9 @@ class CertificateService:
             "IncludeChain": include_chain,
             "Timestamp": datetime.now(UTC).isoformat(),
         }
-        if sans:
-            payload["SANs"] = sans
+        normalized_sans = _normalize_san_keys(sans)
+        if normalized_sans:
+            payload["SANs"] = normalized_sans
         if metadata:
             payload["Metadata"] = metadata
         result = await self._guard(self._client.enroll_pfx(payload))
@@ -293,6 +403,20 @@ class CertificateService:
             if isinstance(metadata, dict) and metadata:
                 payload["Metadata"] = dict(metadata)
 
+        def preserve_sans(payload: dict[str, Any], *, source_csr: str | None = None) -> None:
+            # /Enrollment/PFX and /Enrollment/CSR build a brand-new request and
+            # carry nothing over from the certificate being renewed, so every SAN
+            # beyond the CN is silently dropped unless it is resent here. A CSR
+            # that declares its own SANs is left alone: that is the caller's
+            # explicit intent, and Keyfactor would merge the two lists.
+            if source_certificate is None:
+                return
+            if source_csr and _csr_declares_sans(source_csr):
+                return
+            sans = _sans_for_enrollment(source_certificate)
+            if sans:
+                payload["SANs"] = sans
+
         def preserve_subject(payload: dict[str, Any]) -> None:
             # Reuse the existing certificate's exact Subject DN so template subject
             # policy (C/L/O/ST) validates; without it Keyfactor derives an invalid
@@ -327,6 +451,7 @@ class CertificateService:
             preserve_owner(pfx_payload)
             preserve_metadata(pfx_payload)
             preserve_subject(pfx_payload)
+            preserve_sans(pfx_payload)
             # Renewal is scoped to RenewalCertificateId alone: no directive is sent
             # that would replace this certificate across its existing locations.
             result = await self._guard(self._client.enroll_pfx(pfx_payload))
@@ -347,6 +472,7 @@ class CertificateService:
                 csr_payload["Template"] = template
             preserve_owner(csr_payload)
             preserve_metadata(csr_payload)
+            preserve_sans(csr_payload, source_csr=csr)
             result = await self._guard(self._client.enroll_csr(csr_payload))
             return self._shape_enrollment(result)
 
