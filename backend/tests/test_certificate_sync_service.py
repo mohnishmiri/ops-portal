@@ -172,13 +172,28 @@ async def test_mark_certificate_revoked_rolls_back_on_error() -> None:
     assert session.commits == 0
 
 
-async def test_list_collections_from_db_prefers_stored_total() -> None:
-    # Authoritative Keyfactor total persisted on the snapshot wins over cached rows.
+async def test_list_collections_from_db_matches_what_the_grid_will_list() -> None:
+    # The tile used to prefer the stored Keyfactor total, but that total lags a
+    # renewal by minutes: it showed "32 certs" beside a grid listing 33. Below
+    # the walk cap the cached rows are the honest number, because they are
+    # exactly what opening the collection shows.
     col = SimpleNamespace(collection_id=7, name="AP-KF-ATTCC-31599", description="", certificate_count=42, query="")
     session = _FakeSession([_RowsResult(rows=[(7, 5)]), _RowsResult(scalars=[col])])
     svc = CertificateSyncService(session)
     out = await svc.list_collections_from_db()
-    assert out[0]["certificate_count"] == 42
+    assert out[0]["certificate_count"] == 5
+
+
+async def test_list_collections_from_db_keeps_the_stored_total_when_truncated() -> None:
+    # A collection larger than the walk cap is cached as a slice, so there the
+    # stored total really is the better description of the collection's size.
+    from app.services.certificate_sync_service import _MAX_CERTS_PER_COLLECTION
+
+    col = SimpleNamespace(collection_id=7, name="Huge", description="", certificate_count=15_000, query="")
+    session = _FakeSession([_RowsResult(rows=[(7, _MAX_CERTS_PER_COLLECTION)]), _RowsResult(scalars=[col])])
+    svc = CertificateSyncService(session)
+    out = await svc.list_collections_from_db()
+    assert out[0]["certificate_count"] == 15_000
 
 
 async def test_list_collections_from_db_falls_back_to_cached_rows() -> None:

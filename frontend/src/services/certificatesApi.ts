@@ -10,6 +10,7 @@
  */
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import apiClient from "./apiClient";
 
 const API_BASE = "/certificates";
@@ -360,17 +361,45 @@ export const fetchCertificateSyncStatus = async (): Promise<CertificateSyncStatu
   return resp.data;
 };
 
-export const useCertificateSyncStatus = () =>
-  useQuery({
+/** True while the most recent sync run is still in progress. */
+export const isSyncRunning = (status?: CertificateSyncStatus): boolean =>
+  status?.recent_syncs?.[0]?.status === "running";
+
+/**
+ * Which queries to refresh once a background sync finishes.
+ *
+ * Every certificate query holds data the sync just rebuilt — except the sync
+ * status itself, which must be excluded: invalidating it from its own
+ * completion handler would refetch, re-evaluate, and loop.
+ */
+export const isRefreshableAfterSync = (queryKey: readonly unknown[]): boolean =>
+  queryKey[0] === "certificates" && queryKey[1] !== "sync-status";
+
+export const useCertificateSyncStatus = () => {
+  const qc = useQueryClient();
+  const query = useQuery({
     queryKey: ["certificates", "sync-status"],
     queryFn: fetchCertificateSyncStatus,
     staleTime: 30_000,
     // Poll live while a sync is running so the badge and progress update in real time.
-    refetchInterval: (query) => {
-      const running = query.state.data?.recent_syncs?.[0]?.status === "running";
-      return running ? 3_000 : false;
-    },
+    refetchInterval: (q) => (isSyncRunning(q.state.data) ? 3_000 : false),
   });
+
+  // Mutations (renew, enroll, revoke, delete) kick off a background sync and
+  // return immediately, so the invalidation they fire refetches data the sync
+  // has not rebuilt yet — a renewal left the collection tile on its old count
+  // until the page was reloaded. Refresh again once the sync actually finishes.
+  const running = isSyncRunning(query.data);
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !running) {
+      qc.invalidateQueries({ predicate: (q) => isRefreshableAfterSync(q.queryKey) });
+    }
+    wasRunning.current = running;
+  }, [running, qc]);
+
+  return query;
+};
 
 export const useCertificateSync = () => {
   const qc = useQueryClient();

@@ -153,3 +153,63 @@ async def test_deleted_rows_are_excluded_from_the_default_listing(db_session):
     # The view depends on this field to strike the row through; without it the
     # grid renders a deleted cert as a normal valid one.
     assert deleted["items"][0]["deleted_at"] is not None
+
+
+# ── Collection tile count ──────────────────────────────────────────────────────
+
+
+async def test_tile_count_matches_the_grid_after_a_renewal(db_session):
+    # A renewal adds a certificate, but Keyfactor's collection total lags a few
+    # minutes behind. Trusting it put "32 certs" on the tile beside a grid
+    # listing 33.
+    await _seed_active(db_session, [1, 2])
+    await db_session.execute(
+        text(
+            "INSERT INTO cert_collections (collection_id, name, certificate_count, synced_at) "
+            "VALUES (:col, 'AP-KF-ATTCC-31599', 2, CURRENT_TIMESTAMP)"
+        ),
+        {"col": COLLECTION_ID},
+    )
+    await db_session.commit()
+
+    renewed = [_kf_cert(1, "cert1.att.com"), _kf_cert(2, "cert2.att.com"), _kf_cert(3, "renewed.att.com")]
+    service = _service(db_session, [{"items": renewed, "total": 2}])  # total still says 2
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    grid = await service.list_certificates_from_db(collection_id=COLLECTION_ID, page=1, page_size=25)
+    tile = next(c for c in await service.list_collections_from_db() if c["id"] == COLLECTION_ID)
+    assert grid["total"] == 3
+    assert tile["certificate_count"] == grid["total"]
+
+
+async def test_tile_count_ignores_soft_deleted_rows(db_session):
+    await _seed_active(db_session, [1, 2, 3])
+    await db_session.execute(
+        text(
+            "INSERT INTO cert_collections (collection_id, name, certificate_count, synced_at) "
+            "VALUES (:col, 'AP-KF-ATTCC-31599', 3, CURRENT_TIMESTAMP)"
+        ),
+        {"col": COLLECTION_ID},
+    )
+    await db_session.commit()
+
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com"), _kf_cert(2, "cert2.att.com")], "total": 2}],
+    )
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    tile = next(c for c in await service.list_collections_from_db() if c["id"] == COLLECTION_ID)
+    assert tile["certificate_count"] == 2
+
+
+def test_tile_count_prefers_the_stored_total_only_when_truncated():
+    from app.services.certificate_sync_service import _MAX_CERTS_PER_COLLECTION
+
+    count = CertificateSyncService._tile_count
+    # Stale stored total loses to what is actually cached.
+    assert count(33, 32) == 33
+    # Nothing cached yet: the stored total is all there is.
+    assert count(0, 32) == 32
+    # A collection larger than the cap keeps its true size on the tile.
+    assert count(_MAX_CERTS_PER_COLLECTION, 15_000) == 15_000

@@ -353,12 +353,19 @@ class CertificateSyncService:
         )
         for cert in unique_certs:
             self.db.add(self._to_row(cert, collection_id, collection_name, now))
-        # Persist the true collection size (Keyfactor total preferred over the capped
-        # cached slice) so collection tiles never show a stale 0.
+        # The tile must agree with the grid, and the grid counts cached rows.
+        # Keyfactor's own collection total lags a renewal by some minutes, so
+        # trusting it showed "32 certs" on the tile beside a grid listing 33.
+        # It is only the better number when the walk was capped and the cache
+        # holds a slice of a larger collection.
+        truncated = len(collected) >= _MAX_CERTS_PER_COLLECTION
         await self.db.execute(
             update(CertificateCollectionSnapshot)
             .where(CertificateCollectionSnapshot.collection_id == collection_id)
-            .values(certificate_count=keyfactor_total or len(unique_certs), synced_at=now)
+            .values(
+                certificate_count=(keyfactor_total if truncated and keyfactor_total else len(unique_certs)),
+                synced_at=now,
+            )
         )
         await self.db.commit()
         return len(unique_certs)
@@ -479,14 +486,30 @@ class CertificateSyncService:
 
     # ── DB-first reads ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _tile_count(cached_rows: int, stored_total: int) -> int:
+        """Certificate count for a collection tile.
+
+        The tile should say what opening the collection will list, so the cached
+        row count wins. The stored total is only the better answer when nothing
+        is cached yet, or when the cache holds a truncated slice of a collection
+        larger than the walk cap.
+        """
+        if cached_rows == 0 or cached_rows >= _MAX_CERTS_PER_COLLECTION:
+            return stored_total or cached_rows
+        return cached_rows
+
     async def list_collections_from_db(self) -> list[dict[str, Any]]:
-        # Actual cached certificate counts per collection — used to self-heal any
-        # collection whose stored total is missing (e.g. cached before the
-        # authoritative-count sync landed) so tiles never fall back to 0.
+        # Actual cached certificate counts per collection. The tile is derived
+        # from these rather than the stored total so it always matches the grid,
+        # and so a stored total left stale by an earlier sync self-heals without
+        # waiting for the next one.
         counts_result = await self.db.execute(
-            select(CertificateSnapshot.collection_id, func.count(CertificateSnapshot.id)).group_by(
-                CertificateSnapshot.collection_id
-            )
+            select(CertificateSnapshot.collection_id, func.count(CertificateSnapshot.id))
+            # Soft-deleted rows are hidden from the grid, so counting them here
+            # would put a number on the tile the grid never reaches.
+            .where(CertificateSnapshot.deleted_at.is_(None))
+            .group_by(CertificateSnapshot.collection_id)
         )
         cached_counts = {row[0]: row[1] for row in counts_result.all()}
 
@@ -498,9 +521,7 @@ class CertificateSyncService:
                 "id": r.collection_id,
                 "name": r.name,
                 "description": r.description or "",
-                # Prefer the authoritative stored total; fall back to the count of
-                # actually-cached rows so a synced collection never shows 0.
-                "certificate_count": (r.certificate_count or 0) or cached_counts.get(r.collection_id, 0),
+                "certificate_count": self._tile_count(cached_counts.get(r.collection_id, 0), r.certificate_count or 0),
                 "query": r.query or "",
             }
             for r in result.scalars().all()
