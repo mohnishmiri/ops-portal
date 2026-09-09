@@ -213,3 +213,105 @@ def test_tile_count_prefers_the_stored_total_only_when_truncated():
     assert count(0, 32) == 32
     # A collection larger than the cap keeps its true size on the tile.
     assert count(_MAX_CERTS_PER_COLLECTION, 15_000) == 15_000
+
+
+# ── Revoked certificates ───────────────────────────────────────────────────────
+
+
+async def _seed_revoked(db_session, cert_id: int) -> None:
+    """A certificate revoked through the portal, as mark_certificate_revoked leaves it."""
+    await db_session.execute(
+        text(
+            "INSERT INTO cert_certificates "
+            "(collection_id, certificate_id, common_name, thumbprint, revoked, status, synced_at, deleted_at) "
+            "VALUES (:col, :cid, :cn, :tp, 1, 'revoked', CURRENT_TIMESTAMP, NULL)"
+        ),
+        {
+            "col": COLLECTION_ID,
+            "cid": cert_id,
+            "cn": "customeraccountanalyser.test.att.com",
+            "tp": f"TP{cert_id}",
+        },
+    )
+    await db_session.commit()
+
+
+async def test_a_revoked_certificate_is_not_filed_as_deleted(db_session):
+    # Revoking drops the cert out of the collection's saved search, so it is
+    # absent from the next sync. Reading that as a deletion put the user's
+    # revocation under "Deleted" and left the Revoked tile on 0.
+    await _seed_active(db_session, [1])
+    await _seed_revoked(db_session, 9)
+
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    _active, deleted = await _counts(db_session)
+    assert deleted == 0
+
+
+async def test_a_revoked_certificate_survives_the_snapshot_replacement(db_session):
+    # The replacement deletes active rows before re-inserting; the fresh response
+    # does not carry the revoked cert, so without an exemption it vanishes.
+    await _seed_active(db_session, [1])
+    await _seed_revoked(db_session, 9)
+
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    row = await db_session.execute(
+        text("SELECT revoked, status, deleted_at FROM cert_certificates WHERE certificate_id = 9")
+    )
+    revoked, status, deleted_at = row.one()
+    assert bool(revoked) is True
+    assert status == "revoked"
+    assert deleted_at is None
+
+
+async def test_the_revoked_filter_finds_it_after_a_sync(db_session):
+    await _seed_active(db_session, [1])
+    await _seed_revoked(db_session, 9)
+
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    revoked = await service.list_certificates_from_db(
+        collection_id=COLLECTION_ID, page=1, page_size=25, cert_status="Revoked"
+    )
+    assert revoked["total"] == 1
+    assert revoked["items"][0]["common_name"] == "customeraccountanalyser.test.att.com"
+
+
+async def test_the_tile_counts_a_preserved_revoked_certificate(db_session):
+    # It stays in the grid, so the tile must include it.
+    await _seed_active(db_session, [1])
+    await _seed_revoked(db_session, 9)
+    await db_session.execute(
+        text(
+            "INSERT INTO cert_collections (collection_id, name, certificate_count, synced_at) "
+            "VALUES (:col, 'AP-KF-ATTCC-31599', 2, CURRENT_TIMESTAMP)"
+        ),
+        {"col": COLLECTION_ID},
+    )
+    await db_session.commit()
+
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    grid = await service.list_certificates_from_db(collection_id=COLLECTION_ID, page=1, page_size=25)
+    tile = next(c for c in await service.list_collections_from_db() if c["id"] == COLLECTION_ID)
+    assert grid["total"] == 2
+    assert tile["certificate_count"] == 2
+
+
+async def test_a_genuinely_deleted_certificate_is_still_soft_deleted(db_session):
+    # The exemption is only for revoked rows; an ordinary disappearance must
+    # still reach the Deleted view.
+    await _seed_active(db_session, [1, 2])
+    await _seed_revoked(db_session, 9)
+
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    row = await db_session.execute(text("SELECT certificate_id FROM cert_certificates WHERE deleted_at IS NOT NULL"))
+    assert row.scalar() == 2

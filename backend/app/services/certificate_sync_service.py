@@ -301,6 +301,18 @@ class CertificateSyncService:
         )
         active_ids: set[int] = {row[0] for row in active_result}
 
+        # A revoked certificate still exists in Keyfactor — it has only dropped
+        # out of the collection, whose saved search usually matches active certs
+        # only. Reading that as a deletion filed the user's revocation under
+        # "Deleted" and left the Revoked tile on 0.
+        revoked_result = await self.db.execute(
+            select(CertificateSnapshot.certificate_id)
+            .where(CertificateSnapshot.collection_id == collection_id)
+            .where(CertificateSnapshot.deleted_at.is_(None))
+            .where(CertificateSnapshot.revoked.is_(True))
+        )
+        revoked_ids: set[int] = {row[0] for row in revoked_result} - fresh_ids
+
         # Only a complete snapshot can prove a certificate is gone. If the walk
         # stopped short of Keyfactor's own total (a mid-pagination failure) or
         # hit the local cap, the missing ids were never fetched — they are not
@@ -309,7 +321,7 @@ class CertificateSyncService:
         snapshot_complete = len(collected) < _MAX_CERTS_PER_COLLECTION and (
             not keyfactor_total or len(collected) >= keyfactor_total
         )
-        orphan_ids = (active_ids - fresh_ids) if snapshot_complete else set()
+        orphan_ids = (active_ids - fresh_ids - revoked_ids) if snapshot_complete else set()
         if not snapshot_complete and active_ids - fresh_ids:
             logger.warning(
                 "cert_sync_partial_snapshot_orphans_skipped",
@@ -346,11 +358,17 @@ class CertificateSyncService:
             )
 
         # ── Replace active snapshot ────────────────────────────────────
-        await self.db.execute(
+        # Revoked certificates absent from the response are kept: the fresh rows
+        # would not reinstate them, so deleting them here would lose the
+        # revocation entirely and empty the Revoked view.
+        replace = (
             delete(CertificateSnapshot)
             .where(CertificateSnapshot.collection_id == collection_id)
             .where(CertificateSnapshot.deleted_at.is_(None))
         )
+        if revoked_ids:
+            replace = replace.where(CertificateSnapshot.certificate_id.notin_(list(revoked_ids)))
+        await self.db.execute(replace)
         for cert in unique_certs:
             self.db.add(self._to_row(cert, collection_id, collection_name, now))
         # The tile must agree with the grid, and the grid counts cached rows.
@@ -359,11 +377,13 @@ class CertificateSyncService:
         # It is only the better number when the walk was capped and the cache
         # holds a slice of a larger collection.
         truncated = len(collected) >= _MAX_CERTS_PER_COLLECTION
+        # Preserved revoked rows stay in the grid, so they belong in the count.
+        cached_rows = len(unique_certs) + len(revoked_ids)
         await self.db.execute(
             update(CertificateCollectionSnapshot)
             .where(CertificateCollectionSnapshot.collection_id == collection_id)
             .values(
-                certificate_count=(keyfactor_total if truncated and keyfactor_total else len(unique_certs)),
+                certificate_count=(keyfactor_total if truncated and keyfactor_total else cached_rows),
                 synced_at=now,
             )
         )

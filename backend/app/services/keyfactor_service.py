@@ -186,6 +186,11 @@ def default_revocation_comment(reason: str, actor: str | None = None) -> str:
     return f"Revoked via OpsPortal{by} (reason: {reason})"
 
 
+# Keyfactor reports CertState either as a numeric enum or as its name.
+_REVOKED_STATES = {"revoked", "2"}
+_ACTIVE_STATES = {"active", "1"}
+
+
 def _compute_status(not_after: datetime | None, revoked: bool) -> str:
     if revoked:
         return "revoked"
@@ -202,9 +207,12 @@ def _compute_status(not_after: datetime | None, revoked: bool) -> str:
 
 def normalize_certificate(cert: dict[str, Any]) -> dict[str, Any]:
     """Map a raw Keyfactor certificate object to the portal schema."""
-    state = (cert.get("CertStateString") or cert.get("CertState") or "").__str__().lower()
+    # CertState is the numeric enum (2 = Revoked, 1 = Active); CertStateString is
+    # its name. Responses carry one or the other, so both forms are recognised —
+    # reading only the name left a revoked certificate looking active.
+    state = str(cert.get("CertStateString") or cert.get("CertState") or "").lower()
     revocation_reason = cert.get("RevocationReason")
-    revoked = state == "revoked" or (revocation_reason not in (None, "", 0) and state != "active")
+    revoked = state in _REVOKED_STATES or (revocation_reason not in (None, "", 0) and state not in _ACTIVE_STATES)
 
     not_before = _parse_dt(cert.get("NotBefore"))
     not_after = _parse_dt(cert.get("NotAfter"))

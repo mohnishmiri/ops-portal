@@ -121,6 +121,28 @@ def test_normalize_detects_revoked():
     assert cert["revoked"] is True
 
 
+def test_normalize_detects_revoked_from_the_numeric_state():
+    # Responses that carry only the numeric CertState (2 = Revoked) were read as
+    # not revoked, so the certificate came back looking valid.
+    cert = normalize_certificate({"Id": 1, "CertState": 2, "RevocationReason": 1})
+    assert cert["revoked"] is True
+    assert cert["status"] == "revoked"
+
+
+def test_normalize_detects_revoked_for_the_unspecified_reason():
+    # "Unspecified" is reason code 0, which the reason check treats as absent,
+    # so the state alone has to carry it.
+    cert = normalize_certificate({"Id": 1, "CertState": 2, "RevocationReason": 0})
+    assert cert["revoked"] is True
+
+
+def test_normalize_keeps_a_numerically_active_certificate_unrevoked():
+    future = (datetime.now(UTC) + timedelta(days=120)).isoformat()
+    cert = normalize_certificate({"Id": 1, "CertState": 1, "NotAfter": future, "RevocationReason": 0})
+    assert cert["revoked"] is False
+    assert cert["status"] == "valid"
+
+
 def test_normalize_extracts_sans():
     cert = normalize_certificate(
         {"Id": 1, "SubjectAltNameElements": [{"Value": "a.example.com"}, {"Value": "b.example.com"}]}
