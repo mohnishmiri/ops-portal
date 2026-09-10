@@ -115,7 +115,7 @@ const EscrowBadge: React.FC<{ escrowed?: boolean | null }> = ({ escrowed }) => {
   if (escrowed === undefined || escrowed === null) return null;
   return escrowed ? (
     <span
-      className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700"
+      className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700"
       title="Private key is escrowed — this certificate can be loaded into any Key Vault"
     >
       {Icons.keyvault}
@@ -123,7 +123,7 @@ const EscrowBadge: React.FC<{ escrowed?: boolean | null }> = ({ escrowed }) => {
     </span>
   ) : (
     <span
-      className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500"
+      className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500"
       title="No escrowed private key — loading this certificate into a Key Vault needs a live Keyfactor export, which only works while Keyfactor still holds an exportable key"
     >
       {Icons.keyvault}
@@ -145,7 +145,9 @@ const expiryColor = (not_after: string | null): { text: string; dot: string; lab
 const ExpiryBadge: React.FC<{ not_after: string | null }> = ({ not_after }) => {
   const { text, dot, label } = expiryColor(not_after);
   return (
-    <span className={`inline-flex items-center gap-1.5 ${text}`}>
+    // nowrap: a date broken across three lines ("03-", "18-", "2027") is the
+    // first thing to go when the thumbprint column takes more than its share.
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${text}`}>
       <span className={`h-2 w-2 rounded-full ${dot} shrink-0`} />
       <span>{formatDate(not_after)}</span>
       {label && <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[11px] font-semibold opacity-80">{label}</span>}
@@ -1581,13 +1583,16 @@ const CertificatesPage: React.FC = () => {
       <div className={gridStyles.shell}>
         {/* Toolbar */}
         <div className={gridStyles.panelHeader}>
-          <div className="flex flex-wrap items-center gap-2">
-            <input aria-label="Filter by common name" className={gridStyles.toolbarInput} placeholder="Common name…" value={draft.cn} onChange={(e) => setDraft({ ...draft, cn: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
-            <input aria-label="Filter by thumbprint" className={gridStyles.toolbarInput} placeholder="Thumbprint…" value={draft.thumbprint} onChange={(e) => setDraft({ ...draft, thumbprint: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
-            <input aria-label="Filter by issuer" className={gridStyles.toolbarInput} placeholder="Issuer…" value={draft.issuer} onChange={(e) => setDraft({ ...draft, issuer: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
+          {/* The three text filters share the available width rather than each
+              claiming a fixed 16rem, which is what pushed Search and Clear onto
+              a second row once the status filter joined them. */}
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <input aria-label="Filter by common name" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="Common name…" value={draft.cn} onChange={(e) => setDraft({ ...draft, cn: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
+            <input aria-label="Filter by thumbprint" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="Thumbprint…" value={draft.thumbprint} onChange={(e) => setDraft({ ...draft, thumbprint: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
+            <input aria-label="Filter by issuer" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="Issuer…" value={draft.issuer} onChange={(e) => setDraft({ ...draft, issuer: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
             <select
               aria-label="Filter by certificate status"
-              className={gridStyles.toolbarInput}
+              className={`${gridStyles.toolbarInput} w-36 shrink-0`}
               value={statusFilter}
               onChange={(e) => handleStatusFilter(e.target.value as CertStatusFilter)}
               disabled={collectionId == null}
@@ -1596,8 +1601,8 @@ const CertificatesPage: React.FC = () => {
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
-            <button type="button" className={gridStyles.pagerButton} onClick={applyFilters}>Search</button>
-            <button type="button" className={gridStyles.pagerButton} onClick={clearFilters}>Clear</button>
+            <button type="button" className={`${gridStyles.pagerButton} shrink-0`} onClick={applyFilters}>Search</button>
+            <button type="button" className={`${gridStyles.pagerButton} shrink-0`} onClick={clearFilters}>Clear</button>
           </div>
           <div className="flex items-center gap-2">
             <span className={gridStyles.countBadge}>{total} total{isFetching ? " · refreshing…" : ""}</span>
@@ -1614,8 +1619,8 @@ const CertificatesPage: React.FC = () => {
                 <th className={gridStyles.headerCell}><SortableHeader label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "status"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="ENV" active={sort.key === "environment"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "environment"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Thumbprint" active={sort.key === "thumbprint"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "thumbprint"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Expiry Date" active={sort.key === "not_after"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "not_after"))} /></th>
-                {showEscrowColumn && <th className={gridStyles.headerCell}>Key</th>}
+                <th className={`${gridStyles.headerCell} whitespace-nowrap`}><SortableHeader label="Expiry Date" active={sort.key === "not_after"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "not_after"))} /></th>
+                {showEscrowColumn && <th className={`${gridStyles.headerCell} whitespace-nowrap`}>Key</th>}
                 <th className={gridStyles.headerCellCenter}>Actions</th>
               </tr>
             </thead>
@@ -1638,9 +1643,9 @@ const CertificatesPage: React.FC = () => {
                     <td className={gridStyles.strongCell}>
                       <span className={isDeleted ? "line-through text-gray-400" : ""}>{cert.common_name || "—"}</span>
                     </td>
-                    <td className={gridStyles.cell}>
+                    <td className={`${gridStyles.cell} whitespace-nowrap`}>
                       {isDeleted ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-700">
+                        <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-700">
                           {Icons.trash}
                           <span>Deleted</span>
                         </span>
@@ -1648,11 +1653,19 @@ const CertificatesPage: React.FC = () => {
                         <StatusBadge status={cert.status} />
                       )}
                     </td>
-                    <td className={gridStyles.cell}><EnvBadge cert={cert} /></td>
-                    <td className={gridStyles.cell}><span className="font-mono text-xs" title={cert.thumbprint}>{cert.thumbprint || "—"}</span></td>
+                    <td className={`${gridStyles.cell} whitespace-nowrap`}><EnvBadge cert={cert} /></td>
+                    {/* The thumbprint is 40 unbroken characters and the least
+                        readable thing on the row, so it is the column that
+                        yields when space is short — the full value stays on
+                        hover and in the CSV export. */}
                     <td className={gridStyles.cell}>
+                      <span className="block max-w-[15rem] truncate font-mono text-xs xl:max-w-none" title={cert.thumbprint}>
+                        {cert.thumbprint || "—"}
+                      </span>
+                    </td>
+                    <td className={`${gridStyles.cell} whitespace-nowrap`}>
                       {isDeleted ? (
-                        <span className="text-xs text-gray-400" title={`Deleted ${new Date(cert.deleted_at!).toLocaleString()}`}>
+                        <span className="whitespace-nowrap text-xs text-gray-400" title={`Deleted ${new Date(cert.deleted_at!).toLocaleString()}`}>
                           Deleted {formatDate(cert.deleted_at ?? null)}
                         </span>
                       ) : (
@@ -1660,7 +1673,7 @@ const CertificatesPage: React.FC = () => {
                       )}
                     </td>
                     {showEscrowColumn && (
-                      <td className={gridStyles.cell}><EscrowBadge escrowed={cert.key_escrowed} /></td>
+                      <td className={`${gridStyles.cell} whitespace-nowrap`}><EscrowBadge escrowed={cert.key_escrowed} /></td>
                     )}
                     <td className={gridStyles.centerCell}>
                       <RowActionMenu
