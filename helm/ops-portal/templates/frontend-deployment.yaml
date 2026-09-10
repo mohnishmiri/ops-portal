@@ -48,6 +48,11 @@ spec:
                 secretKeyRef:
                   name: {{ .kubernetesSecretName }}
                   key: {{ default .envName .dataKey }}
+                  {{- if .optional }}
+                  # Feature-gated: absent secret falls back to the app's own
+                  # default rather than blocking pod start.
+                  optional: true
+                  {{- end }}
             {{- end }}
             {{- end }}
             {{- end }}
