@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 
 from app.services.certificate_sync_service import CertificateSyncService
+from app.services.keyfactor_service import CertificateServiceError
 
 COLLECTION_ID = 2573
 
@@ -47,15 +48,35 @@ async def _counts(db_session) -> tuple[int, int]:
     return active, deleted
 
 
-def _service(db_session, pages: list[dict]) -> CertificateSyncService:
-    """Sync service whose Keyfactor walk yields the supplied pages."""
+def _service(
+    db_session,
+    pages: list[dict],
+    *,
+    keyfactor_holds: dict[int, dict] | None = None,
+    lookup_error: Exception | None = None,
+) -> CertificateSyncService:
+    """Sync service whose Keyfactor walk yields the supplied pages.
+
+    ``keyfactor_holds`` is what a per-certificate lookup finds; anything not in
+    it answers 404, i.e. really deleted. ``get_certificate`` is always stubbed —
+    leaving it live let an earlier version of these tests call the real API.
+    """
     service = CertificateSyncService(db_session)
     queue = list(pages)
+    held = keyfactor_holds or {}
 
     async def _list_certificates(**_kwargs):
         return queue.pop(0) if queue else {"items": [], "total": 0}
 
+    async def _get_certificate(certificate_id: int, *, collection_id: int | None = None):
+        if lookup_error is not None:
+            raise lookup_error
+        if certificate_id in held:
+            return held[certificate_id]
+        raise CertificateServiceError("Certificate not found.", status_code=404)
+
     service.service.list_certificates = _list_certificates  # type: ignore[method-assign]
+    service.service.get_certificate = _get_certificate  # type: ignore[method-assign]
     return service
 
 
@@ -220,6 +241,19 @@ def test_tile_count_prefers_the_stored_total_only_when_truncated():
 # ── Revoked certificates ───────────────────────────────────────────────────────
 
 
+# Keyfactor still holds a revoked certificate; it has only left the collection.
+_REVOKED_IN_KEYFACTOR = {
+    9: {
+        "id": 9,
+        "common_name": "customeraccountanalyser.test.att.com",
+        "thumbprint": "TP9",
+        "revoked": True,
+        "status": "revoked",
+        "not_after": "2027-03-15T00:00:00Z",
+    }
+}
+
+
 async def _seed_revoked(db_session, cert_id: int) -> None:
     """A certificate revoked through the portal, as mark_certificate_revoked leaves it."""
     await db_session.execute(
@@ -245,7 +279,11 @@ async def test_a_revoked_certificate_is_not_filed_as_deleted(db_session):
     await _seed_active(db_session, [1])
     await _seed_revoked(db_session, 9)
 
-    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}],
+        keyfactor_holds=_REVOKED_IN_KEYFACTOR,
+    )
     await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
 
     _active, deleted = await _counts(db_session)
@@ -258,7 +296,11 @@ async def test_a_revoked_certificate_survives_the_snapshot_replacement(db_sessio
     await _seed_active(db_session, [1])
     await _seed_revoked(db_session, 9)
 
-    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}],
+        keyfactor_holds=_REVOKED_IN_KEYFACTOR,
+    )
     await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
 
     row = await db_session.execute(
@@ -274,7 +316,11 @@ async def test_the_revoked_filter_finds_it_after_a_sync(db_session):
     await _seed_active(db_session, [1])
     await _seed_revoked(db_session, 9)
 
-    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}],
+        keyfactor_holds=_REVOKED_IN_KEYFACTOR,
+    )
     await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
 
     revoked = await service.list_certificates_from_db(
@@ -412,3 +458,108 @@ async def test_hiding_revoked_does_not_discard_the_row(db_session):
 
     assert found["total"] == 1
     assert found["items"][0]["deleted_at"] is None
+
+
+# ── Absence is verified, never assumed ─────────────────────────────────────────
+
+
+async def test_a_certificate_keyfactor_still_holds_is_never_marked_deleted(db_session):
+    # The portal used to infer deletion from absence alone. A collection is a
+    # saved search, so leaving one proves nothing about the certificate.
+    await _seed_active(db_session, [1, 7])
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}],
+        keyfactor_holds={7: {"id": 7, "common_name": "left-the-search.att.com", "thumbprint": "TP7"}},
+    )
+
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    assert await _counts(db_session) == (2, 0)
+
+
+async def test_a_certificate_keyfactor_has_lost_is_marked_deleted(db_session):
+    # A definite 404 is the only thing that justifies the Deleted view.
+    await _seed_active(db_session, [1, 7])
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    assert await _counts(db_session) == (1, 1)
+
+
+async def test_a_failed_lookup_never_marks_a_certificate_deleted(db_session):
+    # A permission error or outage must not be read as a deletion — that is how
+    # a whole collection ends up wrongly filed.
+    await _seed_active(db_session, [1, 7])
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}],
+        lookup_error=CertificateServiceError("Forbidden.", status_code=403),
+    )
+
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    _active, deleted = await _counts(db_session)
+    assert deleted == 0
+
+
+async def test_a_mass_disappearance_is_treated_as_a_collection_change(db_session):
+    # More than the check budget vanishing at once means the saved search was
+    # edited, not that everything was deleted. Nothing is marked deleted, and
+    # no lookups are spent.
+    from app.services.certificate_sync_service import _MAX_ABSENCE_CHECKS
+
+    ids = list(range(1, _MAX_ABSENCE_CHECKS + 10))
+    await _seed_active(db_session, ids)
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    _active, deleted = await _counts(db_session)
+    assert deleted == 0
+
+
+# ── Self-repair of rows mis-filed by earlier syncs ─────────────────────────────
+
+
+async def test_a_wrongly_deleted_certificate_is_restored(db_session):
+    # The three certificates the user revoked were filed under "Deleted" by the
+    # old guess. They must come back on the next sync rather than needing a
+    # hand-written UPDATE.
+    await _seed_active(db_session, [1])
+    await _seed_revoked(db_session, 9)
+    await db_session.execute(
+        text("UPDATE cert_certificates SET deleted_at = CURRENT_TIMESTAMP WHERE certificate_id = 9")
+    )
+    await db_session.commit()
+    assert await _counts(db_session) == (1, 1)
+
+    service = _service(
+        db_session,
+        [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}],
+        keyfactor_holds=_REVOKED_IN_KEYFACTOR,
+    )
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    assert await _counts(db_session) == (2, 0)
+    revoked = await service.list_certificates_from_db(
+        collection_id=COLLECTION_ID, page=1, page_size=25, cert_status="revoked"
+    )
+    assert revoked["total"] == 1
+    assert revoked["items"][0]["common_name"] == "customeraccountanalyser.test.att.com"
+
+
+async def test_a_genuinely_deleted_certificate_stays_deleted(db_session):
+    # Restoration must not resurrect certificates Keyfactor really has lost.
+    await _seed_active(db_session, [1])
+    await _seed_revoked(db_session, 9)
+    await db_session.execute(
+        text("UPDATE cert_certificates SET deleted_at = CURRENT_TIMESTAMP WHERE certificate_id = 9")
+    )
+    await db_session.commit()
+
+    service = _service(db_session, [{"items": [_kf_cert(1, "cert1.att.com")], "total": 1}])
+    await service._sync_collection_certs(COLLECTION_ID, "AP-KF-ATTCC-31599")
+
+    assert await _counts(db_session) == (1, 1)

@@ -1579,22 +1579,6 @@ const CertificatesPage: React.FC = () => {
       </div>
 
       <div className={gridStyles.shell}>
-        {/* Contextual banner for special filter modes */}
-        {deletedOnly && (
-          <div className="flex items-center gap-2 border-b border-red-100 bg-red-50 px-5 py-2.5 text-sm text-red-700">
-            <span className="shrink-0">{Icons.trash}</span>
-            <span><strong>Deleted Certificates</strong> — showing certificates removed from Keyfactor or explicitly deleted via the portal. These are read-only records preserved for auditing.</span>
-            <button type="button" onClick={clearFilters} className="ml-auto shrink-0 text-xs underline hover:no-underline">Clear filter</button>
-          </div>
-        )}
-        {revokedOnly && (
-          <div className="flex items-center gap-2 border-b border-orange-100 bg-orange-50 px-5 py-2.5 text-sm text-orange-700">
-            <span className="shrink-0">{Icons.slash}</span>
-            <span><strong>Revoked Certificates</strong> — certificates that have been revoked via a CA. They remain in Keyfactor but are no longer trusted.</span>
-            <button type="button" onClick={clearFilters} className="ml-auto shrink-0 text-xs underline hover:no-underline">Clear filter</button>
-          </div>
-        )}
-
         {/* Toolbar */}
         <div className={gridStyles.panelHeader}>
           <div className="flex flex-wrap items-center gap-2">

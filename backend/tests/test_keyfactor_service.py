@@ -568,7 +568,7 @@ async def test_service_maps_not_found_error(monkeypatch):
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
 
     class NotFoundClient(FakeClient):
-        async def get_certificate(self, certificate_id):
+        async def get_certificate(self, certificate_id, *, collection_id=None):
             raise KeyfactorNotFoundError("missing", status_code=404)
 
     svc = CertificateService(client=NotFoundClient())
@@ -593,3 +593,32 @@ async def test_service_maps_validation_error():
             include_chain=True,
         )
     assert exc.value.status_code == 400
+
+
+def test_normalize_detects_revoked_from_the_parenthesised_state():
+    # Keyfactor sends "Revoked (2)", not "Revoked". Matching the bare name left
+    # every revoked certificate looking active, and reason 0 ("unspecified")
+    # gave the fallback nothing to work with either.
+    cert = normalize_certificate({"Id": 1, "CertStateString": "Revoked (2)", "RevocationReason": 0})
+    assert cert["revoked"] is True
+    assert cert["status"] == "revoked"
+
+
+def test_normalize_reads_the_parenthesised_active_state():
+    future = (datetime.now(UTC) + timedelta(days=120)).isoformat()
+    cert = normalize_certificate(
+        {"Id": 1, "CertStateString": "Active (1)", "CertState": 1, "NotAfter": future, "RevocationReason": 0}
+    )
+    assert cert["revoked"] is False
+    assert cert["status"] == "valid"
+
+
+def test_normalize_prefers_the_numeric_state_over_the_label():
+    # The number is unambiguous; the label is a display string.
+    cert = normalize_certificate({"Id": 1, "CertState": 2, "CertStateString": "something unexpected"})
+    assert cert["revoked"] is True
+
+
+def test_normalize_falls_back_to_the_reason_when_no_state_is_sent():
+    cert = normalize_certificate({"Id": 1, "RevocationReason": 4})
+    assert cert["revoked"] is True

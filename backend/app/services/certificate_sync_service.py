@@ -28,6 +28,10 @@ logger = structlog.get_logger(__name__)
 # Sync tuning
 _PAGE_SIZE = 200  # Keyfactor page size while walking a collection
 _MAX_CERTS_PER_COLLECTION = 10000  # Safety cap so one huge collection can't stall a sync
+# Keyfactor lookups a single collection sync will spend confirming that a
+# certificate missing from the collection really was deleted, rather than merely
+# revoked out of the saved search.
+_MAX_ABSENCE_CHECKS = 50
 _STALE_THRESHOLD_MINUTES = 60
 _RUNNING_SYNC_TIMEOUT_MINUTES = 30  # A 'running' row older than this is treated as abandoned
 
@@ -301,27 +305,14 @@ class CertificateSyncService:
         )
         active_ids: set[int] = {row[0] for row in active_result}
 
-        # A revoked certificate still exists in Keyfactor — it has only dropped
-        # out of the collection, whose saved search usually matches active certs
-        # only. Reading that as a deletion filed the user's revocation under
-        # "Deleted" and left the Revoked tile on 0.
-        revoked_result = await self.db.execute(
-            select(CertificateSnapshot.certificate_id)
-            .where(CertificateSnapshot.collection_id == collection_id)
-            .where(CertificateSnapshot.deleted_at.is_(None))
-            .where(CertificateSnapshot.revoked.is_(True))
-        )
-        revoked_ids: set[int] = {row[0] for row in revoked_result} - fresh_ids
-
-        # Only a complete snapshot can prove a certificate is gone. If the walk
-        # stopped short of Keyfactor's own total (a mid-pagination failure) or
-        # hit the local cap, the missing ids were never fetched — they are not
-        # deletions, and soft-deleting them would file live certs under
-        # "Deleted".
+        # Only a complete snapshot can say anything about what is missing. If
+        # the walk stopped short of Keyfactor's own total (a mid-pagination
+        # failure) or hit the local cap, the missing ids were simply never
+        # fetched.
         snapshot_complete = len(collected) < _MAX_CERTS_PER_COLLECTION and (
             not keyfactor_total or len(collected) >= keyfactor_total
         )
-        orphan_ids = (active_ids - fresh_ids - revoked_ids) if snapshot_complete else set()
+        missing_ids = (active_ids - fresh_ids) if snapshot_complete else set()
         if not snapshot_complete and active_ids - fresh_ids:
             logger.warning(
                 "cert_sync_partial_snapshot_orphans_skipped",
@@ -329,13 +320,28 @@ class CertificateSyncService:
                 fetched=len(collected),
                 keyfactor_total=keyfactor_total,
             )
-        if orphan_ids:
+
+        # Absence from a collection is not deletion, and this is where the
+        # portal previously guessed. A collection is a saved search; revoking a
+        # certificate drops it out of one while the certificate still exists.
+        # Guessing filed real revocations under "Deleted". Keyfactor is asked
+        # instead, so a row is only ever marked deleted on a definite 404.
+        gone_ids, still_held = await self._classify_missing(missing_ids, collection_id=collection_id)
+        if gone_ids:
             await self.db.execute(
                 update(CertificateSnapshot)
                 .where(CertificateSnapshot.collection_id == collection_id)
-                .where(CertificateSnapshot.certificate_id.in_(list(orphan_ids)))
+                .where(CertificateSnapshot.certificate_id.in_(list(gone_ids)))
                 .values(deleted_at=now)
             )
+
+        # Repair rows an earlier sync mis-filed: anything marked deleted that
+        # Keyfactor still holds comes back, so existing bad data corrects itself
+        # instead of needing a manual UPDATE.
+        restored = await self._restore_mis_deleted(
+            collection_id, budget=_MAX_ABSENCE_CHECKS - len(missing_ids), exclude=fresh_ids
+        )
+        still_held.update(restored)
 
         # ── Remove stale deleted rows for certs that reappeared ────────
         # A cert previously soft-deleted (e.g. removed temporarily) that is
@@ -358,18 +364,16 @@ class CertificateSyncService:
             )
 
         # ── Replace active snapshot ────────────────────────────────────
-        # Revoked certificates absent from the response are kept: the fresh rows
-        # would not reinstate them, so deleting them here would lose the
-        # revocation entirely and empty the Revoked view.
-        replace = (
+        # Certificates that left the collection but still exist are written back
+        # from Keyfactor's own record, so their revoked flag is authoritative
+        # rather than whatever the cache last believed.
+        snapshot_certs = unique_certs + [still_held[cid] for cid in sorted(still_held)]
+        await self.db.execute(
             delete(CertificateSnapshot)
             .where(CertificateSnapshot.collection_id == collection_id)
             .where(CertificateSnapshot.deleted_at.is_(None))
         )
-        if revoked_ids:
-            replace = replace.where(CertificateSnapshot.certificate_id.notin_(list(revoked_ids)))
-        await self.db.execute(replace)
-        for cert in unique_certs:
+        for cert in snapshot_certs:
             self.db.add(self._to_row(cert, collection_id, collection_name, now))
         # The tile must agree with the grid, and the grid counts cached rows.
         # Keyfactor's own collection total lags a renewal by some minutes, so
@@ -380,7 +384,7 @@ class CertificateSyncService:
         # The card should predict the grid, and the grid shows active
         # certificates only — so preserved revoked rows are deliberately absent
         # from this count, as are any revoked certs the response carried.
-        cached_rows = sum(1 for cert in unique_certs if not cert.get("revoked"))
+        cached_rows = sum(1 for cert in snapshot_certs if not cert.get("revoked"))
         await self.db.execute(
             update(CertificateCollectionSnapshot)
             .where(CertificateCollectionSnapshot.collection_id == collection_id)
@@ -391,6 +395,103 @@ class CertificateSyncService:
         )
         await self.db.commit()
         return len(unique_certs)
+
+    async def _classify_missing(
+        self, missing_ids: set[int], *, collection_id: int
+    ) -> tuple[set[int], dict[int, dict[str, Any]]]:
+        """Split certificates missing from a collection into gone vs still held.
+
+        A collection is a saved search, so a certificate can leave it while
+        still existing — revoking one does exactly that. Only Keyfactor can tell
+        the two apart, so every missing id is looked up: a definite 404 means
+        deleted, anything still returned merely left the collection.
+
+        An id whose lookup fails for any other reason lands in neither set and
+        is left untouched, because an outage must never read as a deletion.
+        """
+        if not missing_ids:
+            return set(), {}
+        if len(missing_ids) > _MAX_ABSENCE_CHECKS:
+            # This many disappearing at once is a collection-definition change,
+            # not a burst of deletions. Verifying is unaffordable and guessing
+            # is what caused the problem, so nothing is marked deleted.
+            logger.warning(
+                "cert_sync_absence_check_skipped",
+                collection_id=collection_id,
+                missing=len(missing_ids),
+                cap=_MAX_ABSENCE_CHECKS,
+            )
+            return set(), {}
+
+        gone: set[int] = set()
+        still_held: dict[int, dict[str, Any]] = {}
+        for cert_id in sorted(missing_ids):
+            try:
+                still_held[cert_id] = await self.service.get_certificate(cert_id, collection_id=collection_id)
+            except CertificateServiceError as exc:
+                if exc.status_code == 404:
+                    gone.add(cert_id)
+                else:
+                    logger.warning(
+                        "cert_sync_absence_check_failed",
+                        certificate_id=cert_id,
+                        error=exc.message[:200],
+                    )
+            except Exception as exc:  # noqa: BLE001 - never infer deletion from a failure
+                logger.warning("cert_sync_absence_check_error", certificate_id=cert_id, error=str(exc)[:200])
+        return gone, still_held
+
+    async def _restore_mis_deleted(
+        self, collection_id: int, *, budget: int, exclude: set[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Bring back soft-deleted rows that Keyfactor still holds.
+
+        Earlier syncs inferred deletion from absence alone, so revoked
+        certificates were filed under "Deleted". Re-checking those rows is what
+        lets already-wrong data correct itself on the next sync rather than
+        needing a hand-written UPDATE.
+
+        Newest deletions are checked first, since those are the ones a user is
+        most likely looking at right now.
+        """
+        if budget <= 0:
+            return {}
+        result = await self.db.execute(
+            select(CertificateSnapshot.certificate_id)
+            .where(CertificateSnapshot.collection_id == collection_id)
+            .where(CertificateSnapshot.deleted_at.isnot(None))
+            .order_by(CertificateSnapshot.deleted_at.desc())
+            .limit(budget)
+        )
+        candidates = [row[0] for row in result if row[0] not in exclude]
+        if not candidates:
+            return {}
+
+        restored: dict[int, dict[str, Any]] = {}
+        for cert_id in candidates:
+            try:
+                restored[cert_id] = await self.service.get_certificate(cert_id, collection_id=collection_id)
+            except CertificateServiceError as exc:
+                if exc.status_code != 404:
+                    logger.warning("cert_sync_restore_check_failed", certificate_id=cert_id, error=exc.message[:200])
+            except Exception as exc:  # noqa: BLE001 - a failed check just leaves the row deleted
+                logger.warning("cert_sync_restore_check_error", certificate_id=cert_id, error=str(exc)[:200])
+
+        if restored:
+            # Drop the deleted rows so the caller's re-insert does not collide
+            # with the (collection_id, certificate_id) unique constraint.
+            await self.db.execute(
+                delete(CertificateSnapshot)
+                .where(CertificateSnapshot.collection_id == collection_id)
+                .where(CertificateSnapshot.certificate_id.in_(list(restored)))
+                .where(CertificateSnapshot.deleted_at.isnot(None))
+            )
+            logger.info(
+                "cert_sync_restored_mis_deleted",
+                collection_id=collection_id,
+                restored=len(restored),
+            )
+        return restored
 
     async def _replace_collections(self, collections: list[dict[str, Any]]) -> None:
         now = datetime.utcnow()

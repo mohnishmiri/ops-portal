@@ -15,6 +15,7 @@ and is never persisted or logged.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
@@ -186,9 +187,36 @@ def default_revocation_comment(reason: str, actor: str | None = None) -> str:
     return f"Revoked via OpsPortal{by} (reason: {reason})"
 
 
-# Keyfactor reports CertState either as a numeric enum or as its name.
-_REVOKED_STATES = {"revoked", "2"}
-_ACTIVE_STATES = {"active", "1"}
+# Keyfactor's CertState enum. The API sends the number in ``CertState`` and a
+# display form in ``CertStateString`` — which is "Revoked (2)", not "Revoked".
+_CERT_STATE_BY_NAME = {"unknown": 0, "active": 1, "revoked": 2, "denied": 3, "failed": 4, "pending": 5}
+_CERT_STATE_REVOKED = 2
+
+
+def _cert_state_code(cert: dict[str, Any]) -> int | None:
+    """Numeric Keyfactor CertState, or None when it cannot be determined.
+
+    The numeric field is preferred because it is unambiguous. The display string
+    is only parsed as a fallback, and has to tolerate the parenthesised form:
+    matching it as a bare name left every revoked certificate looking active,
+    which in turn got them filed under "Deleted" when they dropped out of their
+    collection's saved search.
+    """
+    raw = cert.get("CertState")
+    if raw is not None and not isinstance(raw, bool):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    label = str(cert.get("CertStateString") or "").strip().lower()
+    if not label:
+        return None
+    if (match := re.search(r"\((\d+)\)", label)) is not None:
+        return int(match.group(1))
+    for name, value in _CERT_STATE_BY_NAME.items():
+        if label.startswith(name):
+            return value
+    return None
 
 
 def _compute_status(not_after: datetime | None, revoked: bool) -> str:
@@ -207,12 +235,12 @@ def _compute_status(not_after: datetime | None, revoked: bool) -> str:
 
 def normalize_certificate(cert: dict[str, Any]) -> dict[str, Any]:
     """Map a raw Keyfactor certificate object to the portal schema."""
-    # CertState is the numeric enum (2 = Revoked, 1 = Active); CertStateString is
-    # its name. Responses carry one or the other, so both forms are recognised —
-    # reading only the name left a revoked certificate looking active.
-    state = str(cert.get("CertStateString") or cert.get("CertState") or "").lower()
+    state_code = _cert_state_code(cert)
     revocation_reason = cert.get("RevocationReason")
-    revoked = state in _REVOKED_STATES or (revocation_reason not in (None, "", 0) and state not in _ACTIVE_STATES)
+    # The state is authoritative when known. Only when it is missing entirely
+    # does a revocation reason stand in for it — and reason 0 ("unspecified")
+    # is indistinguishable from no reason at all, so it cannot be relied on.
+    revoked = state_code == _CERT_STATE_REVOKED if state_code is not None else revocation_reason not in (None, "", 0)
 
     not_before = _parse_dt(cert.get("NotBefore"))
     not_after = _parse_dt(cert.get("NotAfter"))
@@ -309,8 +337,16 @@ class CertificateService:
             "page_size": page_size,
         }
 
-    async def get_certificate(self, certificate_id: int) -> dict[str, Any]:
-        cert = await self._guard(self._client.get_certificate(certificate_id))
+    async def get_certificate(self, certificate_id: int, *, collection_id: int | None = None) -> dict[str, Any]:
+        """Fetch one certificate.
+
+        ``collection_id`` scopes the permission check. Keyfactor evaluates an
+        unscoped read against every collection, which an identity granted only
+        specific collections is refused for — so callers that know the
+        collection should pass it. It scopes permission, not membership: a
+        certificate that has left the collection is still returned.
+        """
+        cert = await self._guard(self._client.get_certificate(certificate_id, collection_id=collection_id))
         return normalize_certificate(cert)
 
     # -- write ----------------------------------------------------------
