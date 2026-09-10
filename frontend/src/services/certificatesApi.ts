@@ -285,8 +285,6 @@ export const useCertificates = (params: CertificateListParams, enabled = true) =
 export interface CollectionCertStats {
   total: number;
   expired: number;
-  revoked: number;
-  deleted: number;
   expiring30: number;
   expiring60: number;
   expiring90: number;
@@ -298,21 +296,20 @@ export const fetchCollectionCertStats = async (
   const base: CertificateListParams = { collection_id: collectionId, page: 1, page_size: 1 };
   // expires_in_days=N counts certs with ExpirationDate <= now+N (includes
   // already-expired), so subtract the expired total to get "expiring within N".
-  const [all, expired, d30, d60, d90, revoked, deleted] = await Promise.all([
+  // Revoked and deleted are reached through the toolbar's status filter rather
+  // than a tile, so their counts are no longer fetched — that is two fewer
+  // round trips every time a collection is opened.
+  const [all, expired, d30, d60, d90] = await Promise.all([
     fetchCertificates(base),
     fetchCertificates({ ...base, expires_in_days: 0 }),
     fetchCertificates({ ...base, expires_in_days: 30 }),
     fetchCertificates({ ...base, expires_in_days: 60 }),
     fetchCertificates({ ...base, expires_in_days: 90 }),
-    fetchCertificates({ ...base, cert_status: "Revoked" }).catch(() => null),
-    fetchCertificates({ ...base, deleted_only: true }).catch(() => null),
   ]);
   const expiredCount = expired.total;
   return {
     total: all.total,
     expired: expiredCount,
-    revoked: revoked ? revoked.total : -1,
-    deleted: deleted ? deleted.total : 0,
     expiring30: Math.max(0, d30.total - expiredCount),
     expiring60: Math.max(0, d60.total - expiredCount),
     expiring90: Math.max(0, d90.total - expiredCount),
@@ -518,9 +515,6 @@ export const useDeleteCertificate = () => {
             ...context.stats,
             total: Math.max(0, context.stats.total - 1),
             expired: decrement(context.stats.expired, isExpired),
-            revoked: decrement(context.stats.revoked, variables.revoked && context.stats.revoked >= 0),
-            // Deleted count rises by 1 — the cert moves to the soft-deleted set.
-            deleted: (context.stats.deleted ?? 0) + 1,
             expiring30: decrement(context.stats.expiring30, expiresWithin(30)),
             expiring60: decrement(context.stats.expiring60, expiresWithin(60)),
             expiring90: decrement(context.stats.expiring90, expiresWithin(90)),

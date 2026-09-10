@@ -608,9 +608,10 @@ async def list_certificates(
 ) -> dict[str, Any]:
     """Paginated, filterable certificate list (served from the DB cache when available).
 
-    By default returns only active (non-deleted) certificates. Pass
-    ``deleted_only=true`` to view soft-deleted certificates — those removed
-    from Keyfactor since the last sync, or explicitly deleted via the portal.
+    By default returns only *active* certificates — neither revoked nor
+    soft-deleted. Pass ``cert_status=revoked`` to see revoked ones, or
+    ``deleted_only=true`` for soft-deleted certificates — those removed from
+    Keyfactor since the last sync, or explicitly deleted via the portal.
     Deleted certificates are only available via the DB cache; the live
     Keyfactor path is skipped when ``deleted_only=true``.
     """

@@ -377,8 +377,10 @@ class CertificateSyncService:
         # It is only the better number when the walk was capped and the cache
         # holds a slice of a larger collection.
         truncated = len(collected) >= _MAX_CERTS_PER_COLLECTION
-        # Preserved revoked rows stay in the grid, so they belong in the count.
-        cached_rows = len(unique_certs) + len(revoked_ids)
+        # The card should predict the grid, and the grid shows active
+        # certificates only — so preserved revoked rows are deliberately absent
+        # from this count, as are any revoked certs the response carried.
+        cached_rows = sum(1 for cert in unique_certs if not cert.get("revoked"))
         await self.db.execute(
             update(CertificateCollectionSnapshot)
             .where(CertificateCollectionSnapshot.collection_id == collection_id)
@@ -526,9 +528,10 @@ class CertificateSyncService:
         # waiting for the next one.
         counts_result = await self.db.execute(
             select(CertificateSnapshot.collection_id, func.count(CertificateSnapshot.id))
-            # Soft-deleted rows are hidden from the grid, so counting them here
-            # would put a number on the tile the grid never reaches.
+            # Revoked and soft-deleted rows are hidden from the grid, so counting
+            # them here would put a number on the card the grid never reaches.
             .where(CertificateSnapshot.deleted_at.is_(None))
+            .where(CertificateSnapshot.revoked.isnot(True))
             .group_by(CertificateSnapshot.collection_id)
         )
         cached_counts = {row[0]: row[1] for row in counts_result.all()}
@@ -676,8 +679,11 @@ class CertificateSyncService:
     ) -> dict[str, Any]:
         """Fast, filtered, paginated certificate list served from PostgreSQL.
 
-        By default only active (non-deleted) certificates are returned.
-        Pass ``deleted_only=True`` to return only soft-deleted certificates.
+        By default only *active* certificates are returned — neither revoked nor
+        soft-deleted. Both are reachable on request: pass ``cert_status="revoked"``
+        or ``deleted_only=True``. A revoked certificate is not something anyone
+        acts on from the main grid, and leaving it in inflated every expiry
+        window it happened to fall inside.
         """
         conditions = [CertificateSnapshot.collection_id == collection_id]
         if deleted_only:
@@ -692,6 +698,10 @@ class CertificateSyncService:
             conditions.append(CertificateSnapshot.issuer_dn.ilike(f"%{issuer}%"))
         if cert_status and not deleted_only:
             conditions.append(CertificateSnapshot.status == cert_status.lower())
+        elif not deleted_only:
+            # ``isnot(True)`` rather than ``is_(False)`` so rows cached before the
+            # column was populated (NULL) still count as not revoked.
+            conditions.append(CertificateSnapshot.revoked.isnot(True))
         if expires_in_days is not None and not deleted_only:
             cutoff = (datetime.now(UTC) + timedelta(days=expires_in_days)).strftime("%Y-%m-%dT%H:%M:%S%z")
             conditions.append(CertificateSnapshot.not_after.isnot(None))

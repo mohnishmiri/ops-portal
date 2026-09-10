@@ -30,8 +30,6 @@ describe("useDeleteCertificate", () => {
       {
         total: 29,
         expired: 1,
-        revoked: 2,
-        deleted: 0,
         expiring30: 3,
         expiring60: 6,
         expiring90: 9,
@@ -67,9 +65,6 @@ describe("useDeleteCertificate", () => {
     ).toEqual({
       total: 28,
       expired: 1,
-      revoked: 2,
-      // Deleting moves the certificate into the soft-deleted set.
-      deleted: 1,
       expiring30: 3,
       expiring60: 5,
       expiring90: 8,
@@ -85,8 +80,6 @@ describe("useDeleteCertificate", () => {
       {
         total: 10,
         expired: 0,
-        revoked: 0,
-        deleted: 0,
         expiring30: 2,
         expiring60: 4,
         expiring90: 6,
@@ -116,8 +109,6 @@ describe("useDeleteCertificate", () => {
     ).toEqual({
       total: 9,
       expired: 0,
-      revoked: 0,
-      deleted: 1,
       expiring30: 1,
       expiring60: 3,
       expiring90: 5,

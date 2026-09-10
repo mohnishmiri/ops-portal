@@ -56,6 +56,23 @@ import { AkvTargetPicker, isAkvTargetComplete, type AkvTarget } from "../feature
 
 const PAGE_SIZE = 25;
 
+/**
+ * Certificate status filter.
+ *
+ * The default view is active certificates only. Revoked and deleted ones are
+ * end-of-life records nobody acts on from the main grid, so they are reachable
+ * deliberately rather than mixed into everyday browsing — and every count on
+ * the page (collection card, expiry tiles, grid total) then means the same
+ * thing.
+ */
+type CertStatusFilter = "active" | "revoked" | "deleted";
+
+const CERT_STATUS_FILTERS: ReadonlyArray<{ value: CertStatusFilter; label: string }> = [
+  { value: "active", label: "Active" },
+  { value: "revoked", label: "Revoked only" },
+  { value: "deleted", label: "Deleted only" },
+];
+
 // ── Vector Icons ──────────────────────────────────────────────────────
 
 const svgProps = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -1339,9 +1356,11 @@ const CertificatesPage: React.FC = () => {
   const [draft, setDraft] = useState({ cn: "", thumbprint: "", issuer: "" });
   const [filters, setFilters] = useState<CertificateListParams>({ page: 1, page_size: PAGE_SIZE });
   const [expiryDays, setExpiryDays] = useState<number | undefined>(undefined);
-  // Exclusive status-filter toggles — at most one active at a time.
-  const [revokedOnly, setRevokedOnly] = useState(false);
-  const [deletedOnly, setDeletedOnly] = useState(false);
+  // Revoked and deleted are search filters rather than tiles: they are ways of
+  // looking something up, not numbers worth standing counters on.
+  const [statusFilter, setStatusFilter] = useState<CertStatusFilter>("active");
+  const revokedOnly = statusFilter === "revoked";
+  const deletedOnly = statusFilter === "deleted";
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "common_name", direction: "asc" });
   const [modal, setModal] = useState<ModalKind>(null);
@@ -1357,7 +1376,7 @@ const CertificatesPage: React.FC = () => {
     if (deletedOnly) return { ...base, deleted_only: true, expires_in_days: undefined };
     if (revokedOnly) return { ...base, cert_status: "revoked", expires_in_days: undefined };
     return { ...base, expires_in_days: expiryDays };
-  }, [filters, collectionId, expiryDays, revokedOnly, deletedOnly, page]);
+  }, [filters, collectionId, expiryDays, deletedOnly, revokedOnly, page]);
   const { data, isLoading, isError, error, refetch, isFetching } = useCertificates(params, collectionId != null);
 
   const items = useMemo(() => sortCerts(data?.items ?? [], sort), [data?.items, sort]);
@@ -1377,31 +1396,24 @@ const CertificatesPage: React.FC = () => {
     collectionId == null ? "—" : statsLoading ? "…" : (v ?? 0).toLocaleString();
   const expiringByDays: Record<number, number | undefined> = { 30: stats?.expiring30, 60: stats?.expiring60, 90: stats?.expiring90 };
 
-  // Handlers for the exclusive status-filter tiles.
   const handleExpiryTile = (days: number) => {
     setPage(1);
-    setRevokedOnly(false);
-    setDeletedOnly(false);
+    // An expiry window has no meaning for a deleted certificate and excludes
+    // revoked ones, so the two filters cannot both apply.
+    setStatusFilter("active");
     setExpiryDays(expiryDays === days ? undefined : days);
   };
-  const handleRevokedTile = () => {
+  const handleStatusFilter = (next: CertStatusFilter) => {
     setPage(1);
-    setExpiryDays(undefined);
-    setDeletedOnly(false);
-    setRevokedOnly((v) => !v);
-  };
-  const handleDeletedTile = () => {
-    setPage(1);
-    setExpiryDays(undefined);
-    setRevokedOnly(false);
-    setDeletedOnly((v) => !v);
+    if (next !== "active") setExpiryDays(undefined);
+    setStatusFilter(next);
   };
 
   const applyFilters = () => {
     setPage(1);
     setFilters({ page: 1, page_size: PAGE_SIZE, cn: draft.cn.trim() || undefined, thumbprint: draft.thumbprint.trim() || undefined, issuer: draft.issuer.trim() || undefined });
   };
-  const clearFilters = () => { setDraft({ cn: "", thumbprint: "", issuer: "" }); setPage(1); setFilters({ page: 1, page_size: PAGE_SIZE }); setExpiryDays(undefined); setRevokedOnly(false); setDeletedOnly(false); };
+  const clearFilters = () => { setDraft({ cn: "", thumbprint: "", issuer: "" }); setPage(1); setFilters({ page: 1, page_size: PAGE_SIZE }); setExpiryDays(undefined); setStatusFilter("active"); };
   const openModal = (kind: ModalKind, cert?: Certificate) => { setSelected(cert ?? null); setModal(kind); };
   const closeModal = () => { setModal(null); setSelected(null); };
 
@@ -1536,9 +1548,9 @@ const CertificatesPage: React.FC = () => {
         )}
       </div>
 
-      {/* Status Filter Cards — Expiry + Revoked + Deleted */}
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        {/* Expiry tiles */}
+      {/* Expiry tiles. Revoked and deleted live in the toolbar's status filter:
+          they are lookups, not counters worth standing on the dashboard. */}
+      <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
         {([30, 60, 90] as const).map((days) => (
           <button
             key={days}
@@ -1564,54 +1576,6 @@ const CertificatesPage: React.FC = () => {
             )}
           </button>
         ))}
-
-        {/* Revoked tile */}
-        <button
-          type="button"
-          onClick={handleRevokedTile}
-          disabled={collectionId == null}
-          className={`flex items-center gap-3 rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
-            revokedOnly
-              ? "border-orange-400 bg-orange-50 ring-2 ring-orange-200"
-              : "border-att-100 bg-white hover:border-orange-300 hover:bg-orange-50/50"
-          }`}
-        >
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-orange-100 text-orange-700">
-            {Icons.slash}
-          </div>
-          <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Revoked</p>
-            <p className="text-lg font-bold text-gray-900">
-              {collectionId == null ? "—" : statsLoading ? "…" : stats?.revoked != null && stats.revoked >= 0 ? stats.revoked.toLocaleString() : "—"}
-            </p>
-          </div>
-          {revokedOnly && (
-            <span className="ml-auto shrink-0 text-xs font-medium text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">Active</span>
-          )}
-        </button>
-
-        {/* Deleted tile */}
-        <button
-          type="button"
-          onClick={handleDeletedTile}
-          disabled={collectionId == null}
-          className={`flex items-center gap-3 rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
-            deletedOnly
-              ? "border-red-400 bg-red-50 ring-2 ring-red-200"
-              : "border-att-100 bg-white hover:border-red-300 hover:bg-red-50/50"
-          }`}
-        >
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-100 text-red-700">
-            {Icons.trash}
-          </div>
-          <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Deleted</p>
-            <p className="text-lg font-bold text-gray-900">{fmtStat(stats?.deleted)}</p>
-          </div>
-          {deletedOnly && (
-            <span className="ml-auto shrink-0 text-xs font-medium text-red-700 bg-red-100 px-2 py-0.5 rounded-full">Active</span>
-          )}
-        </button>
       </div>
 
       <div className={gridStyles.shell}>
@@ -1637,6 +1601,17 @@ const CertificatesPage: React.FC = () => {
             <input aria-label="Filter by common name" className={gridStyles.toolbarInput} placeholder="Common name…" value={draft.cn} onChange={(e) => setDraft({ ...draft, cn: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
             <input aria-label="Filter by thumbprint" className={gridStyles.toolbarInput} placeholder="Thumbprint…" value={draft.thumbprint} onChange={(e) => setDraft({ ...draft, thumbprint: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
             <input aria-label="Filter by issuer" className={gridStyles.toolbarInput} placeholder="Issuer…" value={draft.issuer} onChange={(e) => setDraft({ ...draft, issuer: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
+            <select
+              aria-label="Filter by certificate status"
+              className={gridStyles.toolbarInput}
+              value={statusFilter}
+              onChange={(e) => handleStatusFilter(e.target.value as CertStatusFilter)}
+              disabled={collectionId == null}
+            >
+              {CERT_STATUS_FILTERS.map(({ value, label }) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
             <button type="button" className={gridStyles.pagerButton} onClick={applyFilters}>Search</button>
             <button type="button" className={gridStyles.pagerButton} onClick={clearFilters}>Clear</button>
           </div>

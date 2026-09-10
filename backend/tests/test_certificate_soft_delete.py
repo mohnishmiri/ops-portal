@@ -7,6 +7,8 @@ is not — an empty response and a truncated one — because acting on either fi
 live certificates under "Deleted" and empties the active grid.
 """
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import text
 
 from app.services.certificate_sync_service import CertificateSyncService
@@ -282,8 +284,9 @@ async def test_the_revoked_filter_finds_it_after_a_sync(db_session):
     assert revoked["items"][0]["common_name"] == "customeraccountanalyser.test.att.com"
 
 
-async def test_the_tile_counts_a_preserved_revoked_certificate(db_session):
-    # It stays in the grid, so the tile must include it.
+async def test_the_collection_card_excludes_a_preserved_revoked_certificate(db_session):
+    # The card predicts the grid, and the grid is active-only — so a card that
+    # counted the revoked row would change number the moment it was clicked.
     await _seed_active(db_session, [1])
     await _seed_revoked(db_session, 9)
     await db_session.execute(
@@ -300,8 +303,8 @@ async def test_the_tile_counts_a_preserved_revoked_certificate(db_session):
 
     grid = await service.list_certificates_from_db(collection_id=COLLECTION_ID, page=1, page_size=25)
     tile = next(c for c in await service.list_collections_from_db() if c["id"] == COLLECTION_ID)
-    assert grid["total"] == 2
-    assert tile["certificate_count"] == 2
+    assert grid["total"] == 1
+    assert tile["certificate_count"] == grid["total"]
 
 
 async def test_a_genuinely_deleted_certificate_is_still_soft_deleted(db_session):
@@ -315,3 +318,97 @@ async def test_a_genuinely_deleted_certificate_is_still_soft_deleted(db_session)
 
     row = await db_session.execute(text("SELECT certificate_id FROM cert_certificates WHERE deleted_at IS NOT NULL"))
     assert row.scalar() == 2
+
+
+# ── Expiry windows exclude revoked and deleted ─────────────────────────────────
+
+
+async def _seed_expiring(db_session, *, cert_id: int, days_out: int, revoked: bool = False) -> None:
+    expiry = (datetime.now(UTC) + timedelta(days=days_out)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    await db_session.execute(
+        text(
+            "INSERT INTO cert_certificates "
+            "(collection_id, certificate_id, common_name, thumbprint, not_after, revoked, status, synced_at) "
+            "VALUES (:col, :cid, :cn, :tp, :na, :rev, :st, CURRENT_TIMESTAMP)"
+        ),
+        {
+            "col": COLLECTION_ID,
+            "cid": cert_id,
+            "cn": f"cert{cert_id}.att.com",
+            "tp": f"TP{cert_id}",
+            "na": expiry,
+            "rev": 1 if revoked else 0,
+            "st": "revoked" if revoked else "valid",
+        },
+    )
+    await db_session.commit()
+
+
+async def test_expiry_window_excludes_revoked_certificates(db_session):
+    # The 60d tile read 5 while two of those five were revoked. A revoked cert
+    # is never going to be renewed, so it does not belong on a renewal worklist.
+    await _seed_expiring(db_session, cert_id=1, days_out=40)
+    await _seed_expiring(db_session, cert_id=2, days_out=45)
+    await _seed_expiring(db_session, cert_id=3, days_out=50, revoked=True)
+    service = CertificateSyncService(db_session)
+
+    due = await service.list_certificates_from_db(collection_id=COLLECTION_ID, page=1, page_size=25, expires_in_days=60)
+
+    assert due["total"] == 2
+    assert all(item["revoked"] is False for item in due["items"])
+
+
+async def test_expiry_window_excludes_deleted_certificates(db_session):
+    await _seed_expiring(db_session, cert_id=1, days_out=40)
+    await _seed_expiring(db_session, cert_id=2, days_out=45)
+    await db_session.execute(
+        text("UPDATE cert_certificates SET deleted_at = CURRENT_TIMESTAMP WHERE certificate_id = 2")
+    )
+    await db_session.commit()
+    service = CertificateSyncService(db_session)
+
+    due = await service.list_certificates_from_db(collection_id=COLLECTION_ID, page=1, page_size=25, expires_in_days=60)
+
+    assert due["total"] == 1
+
+
+async def test_an_explicit_revoked_search_still_returns_them(db_session):
+    # Excluding revoked from expiry windows must not break the toolbar filter
+    # that exists specifically to find them.
+    await _seed_expiring(db_session, cert_id=1, days_out=40)
+    await _seed_expiring(db_session, cert_id=3, days_out=50, revoked=True)
+    service = CertificateSyncService(db_session)
+
+    found = await service.list_certificates_from_db(
+        collection_id=COLLECTION_ID, page=1, page_size=25, cert_status="Revoked"
+    )
+
+    assert found["total"] == 1
+    assert found["items"][0]["revoked"] is True
+
+
+async def test_the_default_grid_hides_revoked_certificates(db_session):
+    # The default view is active-only: a revoked certificate is an end-of-life
+    # record, not something anyone acts on from the main grid.
+    await _seed_expiring(db_session, cert_id=1, days_out=40)
+    await _seed_expiring(db_session, cert_id=3, days_out=50, revoked=True)
+    service = CertificateSyncService(db_session)
+
+    default_view = await service.list_certificates_from_db(collection_id=COLLECTION_ID, page=1, page_size=25)
+
+    assert default_view["total"] == 1
+    assert default_view["items"][0]["revoked"] is False
+
+
+async def test_hiding_revoked_does_not_discard_the_row(db_session):
+    # Hidden from the default grid, but still cached and still reachable — the
+    # revocation must not be lost just because it is filtered out by default.
+    await _seed_expiring(db_session, cert_id=3, days_out=50, revoked=True)
+    service = CertificateSyncService(db_session)
+
+    found = await service.list_certificates_from_db(
+        collection_id=COLLECTION_ID, page=1, page_size=25, cert_status="revoked"
+    )
+
+    assert found["total"] == 1
+    assert found["items"][0]["deleted_at"] is None
