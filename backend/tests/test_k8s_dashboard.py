@@ -10,10 +10,24 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api.v1.endpoints.aks_dashboard import _create_launch_token
 from app.auth import get_current_user
+from app.core.config import settings
 from app.main import create_application
 from app.services.k8s_dashboard_service import K8sDashboardService
 
 # ── Fixtures ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def dashboard_signing_secret(monkeypatch):
+    """Pin the launch/session signing secret for every test in this module.
+
+    ``_get_signing_secret`` falls back to ``AZURE_CLIENT_SECRET`` and only
+    tolerates a missing secret when ENVIRONMENT is a dev/test value. A developer
+    .env supplies both, so the token tests pass locally; CI has no .env, so
+    ENVIRONMENT defaults to "production" and signing raises 503. Pinning the
+    secret here keeps these tests hermetic either way.
+    """
+    monkeypatch.setattr(settings, "K8S_DASHBOARD_SESSION_SECRET", "test-dashboard-session-secret")
 
 
 @pytest.fixture
