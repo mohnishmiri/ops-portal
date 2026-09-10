@@ -26,6 +26,9 @@ const toRef = (c: Certificate): AutoRenewalCertificateRef => ({
   id: c.id,
   common_name: c.common_name,
   thumbprint: c.thumbprint,
+  // Captured at selection time, while the full certificate is in hand: the
+  // schedule form uses these to preselect the matching Key Vault entries.
+  sans: c.sans ?? [],
 });
 
 export const CertificateMultiSelect: React.FC<CertificateMultiSelectProps> = ({

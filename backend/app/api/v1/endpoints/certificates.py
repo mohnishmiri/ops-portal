@@ -1002,7 +1002,10 @@ class AlertConfigRequest(BaseModel):
     warning_days: int = Field(default=60, ge=1, le=365, description="Warn X days before expiry")
     critical_days: int = Field(default=30, ge=1, le=365, description="Critical X days before expiry")
     notification_emails: list[str] = Field(default=[])
-    notify_channel: str = Field(default="email", description="email, teams, or both")
+    # Only email delivery is implemented. The field is kept so configs stored
+    # while the UI offered "teams" and "both" still parse; those rules already
+    # sent email, which is now what the form says they do.
+    notify_channel: str = Field(default="email", description="Delivery channel; only email is implemented")
 
 
 @router.get("/auto-renewal/configs")

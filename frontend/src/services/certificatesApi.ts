@@ -567,7 +567,21 @@ export interface AutoRenewalCertificateRef {
   id: number;
   common_name: string;
   thumbprint: string;
+  /**
+   * SANs of the selected certificate, used to preselect the Key Vault entries
+   * that hold it — a multi-SAN certificate usually has one entry per name.
+   * Client-side only: stripped before saving, because a stored copy would go
+   * stale the first time the certificate is renewed with different SANs.
+   */
+  sans?: string[];
 }
+
+/** Drop client-only fields so the saved schedule holds just the reference. */
+export const toStoredCertificateRef = (ref: AutoRenewalCertificateRef): AutoRenewalCertificateRef => ({
+  id: ref.id,
+  common_name: ref.common_name,
+  thumbprint: ref.thumbprint,
+});
 
 /** A Key Vault entry a renewed certificate is imported into. */
 export interface AutoRenewalAkvTarget {

@@ -64,7 +64,6 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
   const [selectedVaultName, setSelectedVaultName] = useState("");
   const [nameMode, setNameMode] = useState<"existing" | "new">("existing");
   const [existingCertNames, setExistingCertNames] = useState<string[]>([]);
-  const [autoSelected, setAutoSelected] = useState(false);
   const [newCertName, setNewCertName] = useState(toAkvName(commonName));
 
   const scopedVaults = useMemo(() => {
@@ -127,12 +126,33 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
     });
   }, [vaultCerts, commonName, sans, thumbprint]);
 
+  // Which certificate(s) the caller is asking about. Fixed for the whole life
+  // of the "Load to AKV" modal, but it changes in the auto-renewal form as the
+  // schedule's certificates are picked — so detection is keyed on it rather
+  // than latched after the first run, which would leave the entries matching
+  // whatever happened to be selected first.
+  const identityKey = useMemo(
+    () =>
+      [
+        thumbprint.trim().toLowerCase(),
+        ...[commonName, ...sans]
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean)
+          .sort(),
+      ].join("|"),
+    [commonName, sans, thumbprint]
+  );
+
+  const autoAppliedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!autoSelected && matchingVaultCerts.length > 0) {
-      setExistingCertNames(matchingVaultCerts.map((c) => c.name));
-      setAutoSelected(true);
-    }
-  }, [matchingVaultCerts, autoSelected]);
+    const key = `${selectedVaultName}::${identityKey}`;
+    if (autoAppliedFor.current === key) return;
+    // Nothing matched yet — the vault's certificates may still be loading, so
+    // this is not recorded as applied and will be reconsidered.
+    if (matchingVaultCerts.length === 0) return;
+    setExistingCertNames(matchingVaultCerts.map((c) => c.name));
+    autoAppliedFor.current = key;
+  }, [matchingVaultCerts, identityKey, selectedVaultName]);
 
   const toggleExistingName = (name: string) =>
     setExistingCertNames((prev) =>
@@ -181,7 +201,6 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
                 setSelectedRg("");
                 setSelectedVaultName("");
                 setExistingCertNames([]);
-                setAutoSelected(false);
               }}
             >
               <option value="">Select subscription…</option>
@@ -201,7 +220,6 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
                 setSelectedRg(e.target.value);
                 setSelectedVaultName("");
                 setExistingCertNames([]);
-                setAutoSelected(false);
               }}
               disabled={!selectedSubId}
             >
@@ -221,7 +239,6 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
               onChange={(e) => {
                 setSelectedVaultName(e.target.value);
                 setExistingCertNames([]);
-                setAutoSelected(false);
               }}
               disabled={!selectedRg}
             >

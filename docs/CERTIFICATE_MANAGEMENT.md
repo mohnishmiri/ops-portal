@@ -424,7 +424,7 @@ incident.
 | Schedule runs but renews nothing | The schedule is un-armed (the default) | Tick "Arm this schedule". The dry-run email lists what it would have renewed. |
 | Renewal succeeds but AKV is untouched | No `akv_targets` on the schedule | Add the vault + entries in the schedule form. |
 | No report emails arrive | SMTP not configured or rejecting the sender | Check `SMTP_*` settings and the `email_send_failed` log line; delivery attempts are recorded in `alert_notification_history`. |
-| Alert rule set to Teams / both | Only email is implemented | The channel column is stored but Teams delivery does not exist; use email. |
+| An older alert rule shows channel `teams` / `both` | Those options were offered before any Teams delivery existed | They always sent email, and still do. The channel choice has been removed from the form; nothing needs changing on the rule. |
 | `Key` column missing from the grid | Escrow not configured | Set `CERT_KEY_ESCROW_ENABLED` / `CERT_KEY_ESCROW_VAULT`; the flag is omitted entirely when escrow is off. |
 | Escrow silently not happening | Vault write refused | Check `cert_escrow_vault_write_failed` in the logs and the identity's `secrets/set` permission on the escrow vault. |
 

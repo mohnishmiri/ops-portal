@@ -23,6 +23,7 @@ import {
   CertificateAuditEntry,
   AutoRenewalConfig,
   AutoRenewalCertificateRef,
+  toStoredCertificateRef,
   AlertConfig,
   useCertificates,
   useCollectionCertStats,
@@ -416,7 +417,6 @@ const ALERT_CSV_COLUMNS: CsvColumn<AlertConfig>[] = [
   { header: "Scope", value: (c) => c.collection_name || "All Collections" },
   { header: "Warning (Days)", value: (c) => c.warning_days },
   { header: "Critical (Days)", value: (c) => c.critical_days },
-  { header: "Channel", value: (c) => c.notify_channel },
   { header: "Status", value: (c) => (c.enabled ? "Active" : "Disabled") },
   { header: "Notification Emails", value: (c) => c.notification_emails?.join("; ") ?? "" },
   { header: "Created By", value: (c) => c.created_by },
@@ -896,6 +896,18 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
     setFormCerts([]);
   };
 
+  // Every name the selected certificates answer to — common names and SANs,
+  // de-duplicated. A vault entry is usually named after one of these, so this
+  // is what lets the picker preselect the right ones.
+  const akvMatchNames = useMemo(() => {
+    if (formScope !== "certificates") return [];
+    const names = formCerts.flatMap((c) => [c.common_name, ...(c.sans ?? [])]);
+    return Array.from(new Set(names.map((n) => (n || "").trim()).filter(Boolean)));
+  }, [formScope, formCerts]);
+
+  // Stable identity so the picker is not re-evaluating on every render.
+  const akvMatchSans = useMemo(() => akvMatchNames.slice(1), [akvMatchNames]);
+
   const handleCreate = async () => {
     if (!formCollectionId) return;
     if (formScope === "certificates" && formCerts.length === 0) return;
@@ -911,7 +923,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
       armed: formArmed,
       notify_on_renewal: true,
       notification_emails: formEmails.split(",").map((e) => e.trim()).filter(Boolean),
-      certificates: formScope === "certificates" ? formCerts : [],
+      certificates: formScope === "certificates" ? formCerts.map(toStoredCertificateRef) : [],
       akv_targets: isAkvTargetComplete(formAkvTarget)
         ? [
             {
@@ -1008,7 +1020,18 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
               Each renewed certificate is imported into the entries you select, using the key from
               the renewal itself — no password is needed. Leave empty to renew without touching AKV.
             </p>
-            <AkvTargetPicker onChange={setFormAkvTarget} />
+            {/* Fed the names of the certificates this schedule will renew, so
+                the Key Vault entries holding them are preselected — the same
+                detection the one-off "Load to AKV" flow does. With several
+                selected the names are pooled, so every entry holding any of
+                them is picked up. A thumbprint only identifies one certificate,
+                so it is only a useful signal when exactly one is selected. */}
+            <AkvTargetPicker
+              onChange={setFormAkvTarget}
+              commonName={akvMatchNames[0] ?? ""}
+              sans={akvMatchSans}
+              thumbprint={formCerts.length === 1 ? formCerts[0].thumbprint : ""}
+            />
           </div>
 
           {/* Arming is deliberate: an un-armed schedule reports what it would do
@@ -1165,7 +1188,6 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
   const [formCollectionId, setFormCollectionId] = useState<number | null | "">(null);
   const [formWarning, setFormWarning] = useState(60);
   const [formCritical, setFormCritical] = useState(30);
-  const [formChannel, setFormChannel] = useState("email");
   const [formEmails, setFormEmails] = useState("");
 
   const resetForm = () => {
@@ -1174,7 +1196,6 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
     setFormCollectionId(null);
     setFormWarning(60);
     setFormCritical(30);
-    setFormChannel("email");
     setFormEmails("");
   };
 
@@ -1183,7 +1204,6 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
     setFormCollectionId(c.collection_id ?? null);
     setFormWarning(c.warning_days);
     setFormCritical(c.critical_days);
-    setFormChannel(c.notify_channel);
     setFormEmails(c.notification_emails?.join(", ") || "");
     setShowForm(true);
   };
@@ -1220,7 +1240,9 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
       collection_name: collectionName,
       warning_days: formWarning,
       critical_days: formCritical,
-      notify_channel: formChannel,
+      // Email is the only delivery the backend implements. The field used to
+      // offer Teams and Both, which were stored and then silently ignored.
+      notify_channel: "email",
       notification_emails: formEmails.split(",").map((e) => e.trim()).filter(Boolean),
     });
     resetForm();
@@ -1262,14 +1284,6 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-gray-600 mb-1">Channel</label>
-              <select className={gridStyles.toolbarInput + " w-full"} value={formChannel} onChange={(e) => setFormChannel(e.target.value)}>
-                <option value="email">Email</option>
-                <option value="teams">Teams</option>
-                <option value="both">Both</option>
-              </select>
-            </div>
-            <div>
               <label className="block text-xs font-semibold uppercase tracking-wide text-gray-600 mb-1">Notification Emails</label>
               <input className={gridStyles.toolbarInput + " w-full"} value={formEmails} onChange={(e) => setFormEmails(e.target.value)} placeholder="ops@att.com" />
             </div>
@@ -1288,7 +1302,6 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
             <DetailField label="Scope">{viewingConfig.collection_name || "All Collections"}</DetailField>
             <DetailField label="Warning"><span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">{viewingConfig.warning_days} days</span></DetailField>
             <DetailField label="Critical"><span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800">{viewingConfig.critical_days} days</span></DetailField>
-            <DetailField label="Channel"><span className="capitalize">{viewingConfig.notify_channel}</span></DetailField>
             <DetailField label="Status"><StatusPill enabled={viewingConfig.enabled} /></DetailField>
             <DetailField label="Notification Emails" className="sm:col-span-2">{viewingConfig.notification_emails?.length ? viewingConfig.notification_emails.join(", ") : "—"}</DetailField>
             <DetailField label="Created By">{viewingConfig.created_by}</DetailField>
@@ -1303,7 +1316,6 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
             <th className={gridStyles.headerCell}>Scope</th>
             <th className={gridStyles.headerCell}>Warning</th>
             <th className={gridStyles.headerCell}>Critical</th>
-            <th className={gridStyles.headerCell}>Channel</th>
             <th className={gridStyles.headerCell}>Status</th>
             <th className={gridStyles.headerCell}>Emails</th>
             <th className={gridStyles.headerCell}>Created By</th>
@@ -1312,15 +1324,14 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
         </thead>
         <tbody>
           {isLoading ? (
-            <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-500">Loading…</td></tr>
+            <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">Loading…</td></tr>
           ) : !configs?.length ? (
-            <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-500">No alert rules configured. Click “+ Add Alert Rule” to get started.</td></tr>
+            <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">No alert rules configured. Click “+ Add Alert Rule” to get started.</td></tr>
           ) : configs.map((c) => (
             <tr key={c.id} className={gridStyles.row}>
               <td className={gridStyles.strongCell}>{c.collection_name || "All Collections"}</td>
               <td className={gridStyles.cell}><span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">{c.warning_days}d</span></td>
               <td className={gridStyles.cell}><span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800">{c.critical_days}d</span></td>
-              <td className={gridStyles.cell}><span className="capitalize text-sm">{c.notify_channel}</span></td>
               <td className={gridStyles.cell}><span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${c.enabled ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-600"}`}>{c.enabled ? "Active" : "Disabled"}</span></td>
               <td className={`${gridStyles.cell} text-xs`}>{c.notification_emails?.join(", ") || "—"}</td>
               <td className={`${gridStyles.cell} text-xs`}>{c.created_by}</td>
