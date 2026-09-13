@@ -7,8 +7,8 @@
  * - Search + pagination in results detail table (KeyVault-style)
  */
 
-import React, { useState, useEffect, useRef } from "react";
-import { gridStyles } from "../../components/gridStyles";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { gridStyles, SortableHeader, nextSortState, type SortState } from "../../components/gridStyles";
 import type { Deployment } from "../../services/aksApi";
 import type { EnvironmentScaleRequest, EnvironmentScaleResult, StepDetail } from "../../services/environmentApi";
 
@@ -56,8 +56,11 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   const [showConfirm, setShowConfirm] = useState(false);
   const [result, setResult] = useState<EnvironmentScaleResult | null>(null);
 
-  // Search in deployment picker
+  // Search + sort in deployment picker
   const [depSearch, setDepSearch] = useState("");
+  const [depSort, setDepSort] = useState<SortState<"name" | "replicas">>({ key: "name", direction: "asc" });
+  // With 184 rows and a handful ticked, finding your own selection means scrolling.
+  const [selectedFirst, setSelectedFirst] = useState(false);
   // Search in result details
   const [resultSearch, setResultSearch] = useState("");
   const [resultPage, setResultPage] = useState(1);
@@ -73,6 +76,24 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   const searchedDeployments = filteredDeployments.filter((d) =>
     d.name.toLowerCase().includes(depSearch.toLowerCase()),
   );
+
+  const sortedDeployments = useMemo(() => {
+    const dir = depSort.direction === "asc" ? 1 : -1;
+    return [...searchedDeployments].sort((a, b) => {
+      if (selectedFirst) {
+        const aSel = selectedDeployments.includes(a.name) ? 0 : 1;
+        const bSel = selectedDeployments.includes(b.name) ? 0 : 1;
+        if (aSel !== bSel) return aSel - bSel;
+      }
+      if (depSort.key === "replicas") {
+        // Desired replicas first, then readiness, so "0/0" and "1/1" group sensibly.
+        if (a.replicas !== b.replicas) return (a.replicas - b.replicas) * dir;
+        if (a.ready_replicas !== b.ready_replicas) return (a.ready_replicas - b.ready_replicas) * dir;
+        return a.name.localeCompare(b.name);
+      }
+      return a.name.localeCompare(b.name) * dir;
+    });
+  }, [searchedDeployments, depSort, selectedFirst, selectedDeployments]);
 
   useEffect(() => {
     if (isScaling && !result) {
@@ -379,20 +400,52 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                     </div>
                   </div>
                   <input type="text" placeholder="Search deployments..." value={depSearch} onChange={(e) => setDepSearch(e.target.value)} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-att-400 focus:ring-2 focus:ring-att-100" />
-                  <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-gray-200">
-                    {searchedDeployments.length === 0 ? (
+                  <div className="mt-2 overflow-hidden rounded-lg border border-gray-200">
+                    <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedFirst((v) => !v)}
+                        aria-pressed={selectedFirst}
+                        title={selectedFirst ? "Show in list order" : "Sort selected to the top"}
+                        className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${selectedFirst ? "border-att-500 bg-att-50 text-att-600" : "border-gray-300 text-gray-400 hover:text-att-600"}`}
+                      >
+                        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </button>
+                      <span className="flex-1">
+                        <SortableHeader
+                          label="Deployment"
+                          active={depSort.key === "name"}
+                          direction={depSort.direction}
+                          onClick={() => setDepSort(nextSortState(depSort, "name"))}
+                        />
+                      </span>
+                      <span className="w-20">
+                        <SortableHeader
+                          label="Replicas"
+                          active={depSort.key === "replicas"}
+                          direction={depSort.direction}
+                          onClick={() => setDepSort(nextSortState(depSort, "replicas"))}
+                          align="center"
+                        />
+                      </span>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto">
+                    {sortedDeployments.length === 0 ? (
                       <p className="p-4 text-center text-sm text-gray-400">No deployments match search</p>
                     ) : (
-                      searchedDeployments.map((dep) => (
+                      sortedDeployments.map((dep) => (
                         <label key={dep.name} className="flex items-center gap-2 border-b border-gray-100 px-3 py-2 text-sm hover:bg-gray-50 last:border-0 cursor-pointer">
                           <input type="checkbox" checked={selectedDeployments.includes(dep.name)} onChange={() => handleToggleDeployment(dep.name)} className="text-att-500 focus:ring-att-400" />
                           <span className="flex-1 font-mono text-xs">{dep.name}</span>
-                          <span className={`text-xs font-medium ${dep.ready_replicas >= dep.replicas && dep.replicas > 0 ? "text-green-600" : dep.replicas === 0 ? "text-gray-400" : "text-yellow-600"}`}>
+                          <span className={`w-20 text-center text-xs font-medium ${dep.ready_replicas >= dep.replicas && dep.replicas > 0 ? "text-green-600" : dep.replicas === 0 ? "text-gray-400" : "text-yellow-600"}`}>
                             {dep.ready_replicas}/{dep.replicas}
                           </span>
                         </label>
                       ))
                     )}
+                    </div>
                   </div>
                 </div>
               )}
