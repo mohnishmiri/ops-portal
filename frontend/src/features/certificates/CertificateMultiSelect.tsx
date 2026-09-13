@@ -12,7 +12,7 @@ import {
   Certificate,
   useCertificates,
 } from "../../services/certificatesApi";
-import { gridStyles } from "../../components/gridStyles";
+import { gridStyles, Spinner } from "../../components/gridStyles";
 import { StatusBadge } from "./StatusBadge";
 import { formatDate } from "../../utils/dateFormat";
 
@@ -115,7 +115,7 @@ export const CertificateMultiSelect: React.FC<CertificateMultiSelectProps> = ({
       {/* Results */}
       <div className="max-h-64 overflow-y-auto">
         {isLoading ? (
-          <p className="p-4 text-center text-sm text-gray-500">Loading certificates…</p>
+          <p className="flex items-center justify-center gap-2 p-4 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading certificates…</p>
         ) : items.length === 0 ? (
           <p className="p-4 text-center text-sm text-gray-500">
             {debounced ? "No certificates match your search." : "No certificates in this collection."}

@@ -49,8 +49,8 @@ export const EnrollCertificateModal: React.FC<EnrollCertificateModalProps> = ({
   onError,
 }) => {
   const enroll = useEnrollCertificate();
-  const { data: templates } = useTemplates();
-  const { data: authorities } = useAuthorities();
+  const { data: templates, isLoading: templatesLoading } = useTemplates();
+  const { data: authorities, isLoading: authoritiesLoading } = useAuthorities();
 
   const [type, setType] = useState<EnrollmentType>("pfx");
   const [template, setTemplate] = useState(defaultTemplate);
@@ -276,11 +276,11 @@ export const EnrollCertificateModal: React.FC<EnrollCertificateModalProps> = ({
         <fieldset className="space-y-3">
           <legend className="text-sm font-semibold text-gray-800 border-b border-att-100 pb-2 w-full">Certificate Authority Information</legend>
           <div className="grid grid-cols-3 gap-3">
-            <div><label className={fieldLabel}>Template *</label><select className={fieldInput} value={template} onChange={(e) => setTemplate(e.target.value)}><option value="">Select…</option>{templates?.map((t) => <option key={t.id} value={t.template_name}>{t.template_name}</option>)}{!templates?.length && <option value="Digicert-Standard-SHA2-4096Key">Digicert-Standard-SHA2-4096Key</option>}</select>{errors.template && <p className="mt-1 text-xs text-red-600">{errors.template}</p>}</div>
+            <div><label className={fieldLabel}>Template *</label><select className={fieldInput} value={template} onChange={(e) => setTemplate(e.target.value)}><option value="">{templatesLoading ? "Loading templates…" : "Select…"}</option>{templates?.map((t) => <option key={t.id} value={t.template_name}>{t.template_name}</option>)}{!templatesLoading && !templates?.length && <option value="Digicert-Standard-SHA2-4096Key">Digicert-Standard-SHA2-4096Key</option>}</select>{errors.template && <p className="mt-1 text-xs text-red-600">{errors.template}</p>}</div>
             <div><label className={fieldLabel}>Key Algorithm</label><select className={fieldInput} value={keyAlgorithm} onChange={(e) => setKeyAlgorithm(e.target.value)}>{KEY_ALGORITHMS.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
             <div><label className={fieldLabel}>Key Size</label><select className={fieldInput} value={keySize} onChange={(e) => setKeySize(Number(e.target.value))}>{KEY_SIZES.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
           </div>
-          <div><label className={fieldLabel}>Certificate Authority *</label><select className={fieldInput} value={ca} onChange={(e) => setCa(e.target.value)}><option value="">Auto-Select</option>{authorities?.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}</select>{errors.ca && <p className="mt-1 text-xs text-red-600">{errors.ca}</p>}</div>
+          <div><label className={fieldLabel}>Certificate Authority *</label><select className={fieldInput} value={ca} onChange={(e) => setCa(e.target.value)}><option value="">{authoritiesLoading ? "Loading authorities…" : "Auto-Select"}</option>{authorities?.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}</select>{errors.ca && <p className="mt-1 text-xs text-red-600">{errors.ca}</p>}</div>
         </fieldset>
 
         {type === "csr" ? (

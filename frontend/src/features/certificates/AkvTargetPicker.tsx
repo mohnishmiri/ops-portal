@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { Spinner } from "../../components/gridStyles";
 import { fieldInput, fieldLabel } from "./CertificateModal";
 import { useSubscriptionScope } from "../../contexts/SubscriptionContext";
 import { useKeyVaults, useVaultCertificates } from "../../services/costApi";
@@ -183,7 +184,7 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
       <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Target Azure Key Vault</p>
 
       {vaultsLoading ? (
-        <p className="text-sm text-gray-400">Loading available Key Vaults…</p>
+        <p className="flex items-center gap-2 text-sm text-gray-400"><Spinner className="h-4 w-4" />Loading available Key Vaults…</p>
       ) : scopedVaults.length === 0 ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
           No Key Vaults found in your subscription scope.
@@ -282,7 +283,7 @@ export const AkvTargetPicker: React.FC<AkvTargetPickerProps> = ({
             {!selectedVaultName ? (
               <p className="text-sm text-gray-400">Select a Key Vault first.</p>
             ) : vaultCertsLoading ? (
-              <p className="text-sm text-gray-400">Loading certificates…</p>
+              <p className="flex items-center gap-2 text-sm text-gray-400"><Spinner className="h-4 w-4" />Loading certificates…</p>
             ) : vaultCerts.length === 0 ? (
               <p className="text-sm text-gray-400">This vault has no certificates yet.</p>
             ) : (

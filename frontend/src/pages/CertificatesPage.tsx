@@ -14,7 +14,7 @@ import { createPortal } from "react-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import Toast, { type ToastState, type ToastType } from "../components/Toast";
-import { gridStyles, SortableHeader, nextSortState, type SortState } from "../components/gridStyles";
+import { gridStyles, SortableHeader, Spinner, nextSortState, type SortState } from "../components/gridStyles";
 import { exportToCsv, type CsvColumn } from "../utils/csvExport";
 import { formatDate, formatDateTime } from "../utils/dateFormat";
 import {
@@ -162,9 +162,7 @@ const ExportIcon = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="12" y1="18" x2="12" y2="12" /><polyline points="9 15 12 18 15 15" /></svg>
 );
 
-const SpinnerIcon = (
-  <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={3} opacity={0.25} /><path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth={3} strokeLinecap="round" /></svg>
-);
+const SpinnerIcon = <Spinner className="h-4 w-4" />;
 
 const ExportCsvButton: React.FC<{ onClick: () => void; disabled?: boolean; busy?: boolean }> = ({ onClick, disabled, busy }) => (
   <button
@@ -207,7 +205,7 @@ const timeAgo = (iso: string | null): string => {
 };
 
 const SyncControl: React.FC<{ collectionId?: number; collectionName?: string; onToast: (message: string, type?: ToastType) => void }> = ({ collectionId, collectionName, onToast }) => {
-  const { data: status } = useCertificateSyncStatus();
+  const { data: status, isLoading: statusLoading } = useCertificateSyncStatus();
   const sync = useCertificateSync();
   const [open, setOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -228,7 +226,9 @@ const SyncControl: React.FC<{ collectionId?: number; collectionName?: string; on
   const cachedCols = status?.collections_in_db ?? 0;
   const isStale = !running && Boolean(status?.is_stale) && cachedCerts > 0;
 
-  const state = running
+  const state = statusLoading
+    ? { label: "Checking…", pill: "bg-gray-50 text-gray-600 ring-gray-200", dot: "bg-gray-400 animate-pulse" }
+    : running
     ? { label: "Syncing…", pill: "bg-att-50 text-att-700 ring-att-200", dot: "bg-att-500 animate-pulse" }
     : latest?.status === "failed"
       ? { label: "Sync failed", pill: "bg-red-50 text-red-700 ring-red-200", dot: "bg-red-500" }
@@ -263,7 +263,7 @@ const SyncControl: React.FC<{ collectionId?: number; collectionName?: string; on
         <span className={`h-2 w-2 rounded-full ${state.dot}`} />
         <span className="font-semibold">{state.label}</span>
         <span className="hidden text-xs font-normal text-gray-400 md:inline">
-          {cachedCerts > 0 ? `${cachedCerts.toLocaleString()} cached · ` : ""}Updated {timeAgo(lastCompleted)}
+          {statusLoading ? "Checking sync status…" : <>{cachedCerts > 0 ? `${cachedCerts.toLocaleString()} cached · ` : ""}Updated {timeAgo(lastCompleted)}</>}
         </span>
         <span className={`text-gray-400 transition-transform ${open ? "rotate-180" : ""}`}>{ChevronDownIcon}</span>
       </button>
@@ -276,22 +276,29 @@ const SyncControl: React.FC<{ collectionId?: number; collectionName?: string; on
               {state.label}
             </span>
             <span className="text-[11px] text-gray-400" title={lastCompleted ? new Date(lastCompleted).toLocaleString() : undefined}>
-              Updated {timeAgo(lastCompleted)}
+              {statusLoading ? "Checking…" : <>Updated {timeAgo(lastCompleted)}</>}
             </span>
           </div>
 
           <dl className="mb-3 grid grid-cols-2 gap-2">
             <div className="rounded-lg border border-att-50 bg-att-50/40 px-3 py-2">
               <dt className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Certificates cached</dt>
-              <dd className="mt-0.5 text-sm font-bold text-gray-800">{cachedCerts.toLocaleString()}</dd>
+              <dd className="mt-0.5 text-sm font-bold text-gray-800">{statusLoading ? <Spinner className="h-4 w-4" /> : cachedCerts.toLocaleString()}</dd>
             </div>
             <div className="rounded-lg border border-att-50 bg-att-50/40 px-3 py-2">
               <dt className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Collections</dt>
-              <dd className="mt-0.5 text-sm font-bold text-gray-800">{cachedCols.toLocaleString()}</dd>
+              <dd className="mt-0.5 text-sm font-bold text-gray-800">{statusLoading ? <Spinner className="h-4 w-4" /> : cachedCols.toLocaleString()}</dd>
             </div>
           </dl>
 
-          {status?.recent_syncs && status.recent_syncs.length > 0 && (
+          {statusLoading && (
+            <div className="mb-3">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent activity</p>
+              <p className="flex items-center gap-2 text-xs text-gray-500"><Spinner className="h-3 w-3" />Loading sync history…</p>
+            </div>
+          )}
+
+          {!statusLoading && status?.recent_syncs && status.recent_syncs.length > 0 && (
             <div className="mb-3">
               <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent activity</p>
               <ul className="max-h-40 space-y-1.5 overflow-y-auto pr-1">
@@ -733,7 +740,7 @@ const CertificateAuditHistoryPanel: React.FC = () => {
     else if (pages[pages.length - 1] !== "...") pages.push("...");
   }
 
-  if (isLoading) return <p className="text-sm text-gray-500 py-4">Loading audit history…</p>;
+  if (isLoading) return <p className="flex items-center gap-2 py-4 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading audit history…</p>;
   if (isError) return (
     <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
       <p>Failed to load audit history: {(error as Error)?.message || "Unknown error"}</p>
@@ -838,7 +845,7 @@ const CertificateAuditHistoryPanel: React.FC = () => {
 
 const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void }> = ({ onToast }) => {
   const { data: configs, isLoading } = useAutoRenewalConfigs();
-  const { data: collections } = useCollections();
+  const { data: collections, isLoading: collectionsLoading } = useCollections();
   const create = useCreateAutoRenewalConfig();
   const remove = useDeleteAutoRenewalConfig();
   const run = useRunAutoRenewalConfig();
@@ -972,7 +979,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wide text-gray-600 mb-1">Collection *</label>
               <select className={gridStyles.toolbarInput + " w-full"} value={formCollectionId} onChange={(e) => handleCollectionChange(e.target.value ? Number(e.target.value) : "")}>
-                <option value="">Select…</option>
+                <option value="">{collectionsLoading ? "Loading collections…" : "Select…"}</option>
                 {collections?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
@@ -1127,7 +1134,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
         </thead>
         <tbody>
           {isLoading ? (
-            <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500">Loading…</td></tr>
+            <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500"><span className="inline-flex items-center gap-2"><Spinner className="h-4 w-4" />Loading auto-renewal schedules…</span></td></tr>
           ) : !configs?.length ? (
             <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500">No auto-renewal schedules configured. Click “+ Add Schedule” to get started.</td></tr>
           ) : configs.map((c) => (
@@ -1178,7 +1185,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
 
 const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void }> = ({ onToast }) => {
   const { data: configs, isLoading } = useAlertConfigs();
-  const { data: collections } = useCollections();
+  const { data: collections, isLoading: collectionsLoading } = useCollections();
   const create = useCreateAlertConfig();
   const remove = useDeleteAlertConfig();
 
@@ -1269,7 +1276,7 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wide text-gray-600 mb-1">Scope</label>
               <select className={gridStyles.toolbarInput + " w-full"} value={formCollectionId ?? ""} onChange={(e) => setFormCollectionId(e.target.value ? Number(e.target.value) : null)}>
-                <option value="">All Collections</option>
+                <option value="">{collectionsLoading ? "Loading collections…" : "All Collections"}</option>
                 {collections?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
@@ -1326,7 +1333,7 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
         </thead>
         <tbody>
           {isLoading ? (
-            <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">Loading…</td></tr>
+            <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500"><span className="inline-flex items-center gap-2"><Spinner className="h-4 w-4" />Loading alert schedules…</span></td></tr>
           ) : !configs?.length ? (
             <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">No alert rules configured. Click “+ Add Alert Rule” to get started.</td></tr>
           ) : configs.map((c) => (
@@ -1407,8 +1414,8 @@ const CertificatesPage: React.FC = () => {
 
   // Accurate, collection-wide counts for the tiles (not page-scoped).
   const { data: stats, isLoading: statsLoading } = useCollectionCertStats(collectionId);
-  const fmtStat = (v: number | undefined): string =>
-    collectionId == null ? "—" : statsLoading ? "…" : (v ?? 0).toLocaleString();
+  const fmtStat = (v: number | undefined): React.ReactNode =>
+    collectionId == null ? "—" : statsLoading ? <Spinner className="h-5 w-5" /> : (v ?? 0).toLocaleString();
   const expiringByDays: Record<number, number | undefined> = { 30: stats?.expiring30, 60: stats?.expiring60, 90: stats?.expiring90 };
 
   const handleExpiryTile = (days: number) => {
@@ -1528,7 +1535,7 @@ const CertificatesPage: React.FC = () => {
           </div>
         </div>
         {collectionsLoading ? (
-          <div className="rounded-xl border border-dashed border-att-200 bg-white p-4 text-center text-sm text-gray-500">Loading collections…</div>
+          <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-att-200 bg-white p-4 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading collections…</div>
         ) : filteredCollections.length > 0 ? (
           <div className="grid max-h-80 grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
             {filteredCollections.map((c) => (
@@ -1639,7 +1646,7 @@ const CertificatesPage: React.FC = () => {
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500">Loading certificates…</td></tr>
+                <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-gray-500"><span className="inline-flex items-center gap-2"><Spinner className="h-4 w-4" />Loading certificates…</span></td></tr>
               ) : isError ? (
                 <tr><td colSpan={columnCount} className="px-4 py-10 text-center text-sm text-red-600" role="alert">{(error as Error)?.message || "Failed to load certificates."} <button type="button" className="underline" onClick={() => refetch()}>Retry</button></td></tr>
               ) : collectionId == null ? (
