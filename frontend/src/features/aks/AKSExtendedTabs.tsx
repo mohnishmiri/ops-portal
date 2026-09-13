@@ -3,7 +3,7 @@
  */
 
 import React, { useCallback, useState } from "react";
-import { gridStyles } from "../../components/gridStyles";
+import { gridStyles, SortableHeader, nextSortState, type SortState } from "../../components/gridStyles";
 import {
   AKSCluster,
   K8sIngress,
@@ -36,6 +36,8 @@ import {
   GridPager,
   GridSearchBar,
   NamespaceSelect,
+  GridStateRow,
+  useGridSort,
   useSearchPagination,
 } from "./aksGridShared";
 import { ResourceActionButtons } from "./ResourceActionButtons";
@@ -100,6 +102,9 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
   createLabel,
   backgroundSync,
   isLoading,
+  isError,
+  sort,
+  onSort,
   items,
   searchPlaceholder,
   searchFn,
@@ -120,6 +125,10 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
   createLabel?: string;
   backgroundSync?: AksBackgroundSyncState;
   isLoading: boolean;
+  isError?: boolean;
+  /** Supplied when the tab sorts; lets the grid-owned Namespace column sort too. */
+  sort?: SortState<string>;
+  onSort?: (key: string) => void;
   items: T[];
   searchPlaceholder: string;
   searchFn: (item: T, q: string) => boolean;
@@ -128,6 +137,8 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
 }) {
   const pag = useSearchPagination(items, searchFn);
   const showNsCol = !namespace;
+  // colSpan must match the real column count (caller columns + optional Namespace).
+  const columnCount = React.Children.count(columns) + (showNsCol ? 1 : 0);
 
   return (
     <div className="space-y-4">
@@ -144,9 +155,7 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
       />
       <CacheSourceBadge source={source} lastSync={lastSync} formatDate={formatDate} />
       <BackgroundRefreshStatus sync={backgroundSync} />
-      {isLoading ? (
-        <div className="text-center py-8 text-gray-500">Loading...</div>
-      ) : (
+      {(
         <div className={gridStyles.shell}>
           <GridSearchBar
             search={pag.search}
@@ -160,16 +169,25 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
             <table className={gridStyles.table}>
               <thead className={gridStyles.head}>
                 <tr>
-                  {showNsCol && <th className={gridStyles.headerCell}>Namespace</th>}
+                  {showNsCol && (
+                    <th className={gridStyles.headerCell}>
+                      {sort && onSort ? (
+                        <SortableHeader label="Namespace" active={sort.key === "namespace"} direction={sort.direction} onClick={() => onSort("namespace")} />
+                      ) : "Namespace"}
+                    </th>
+                  )}
                   {columns}
                   <th className={gridStyles.headerCellCenter}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {pag.paged.length === 0 ? (
-                  <tr>
-                    <td colSpan={10} className="py-6 text-center text-sm text-gray-400">No resources found</td>
-                  </tr>
+                  <GridStateRow
+                    colSpan={columnCount}
+                    isLoading={isLoading}
+                    isError={isError}
+                    emptyText={pag.search ? "No resources match your search" : "No resources found"}
+                  />
                 ) : (
                   pag.paged.map((item) => renderRow(item))
                 )}
@@ -187,7 +205,7 @@ export const SecretsTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading } = useCachedSecrets(cluster.id, nsFilter);
+  const { data, isLoading, isError } = useCachedSecrets(cluster.id, nsFilter);
   const backgroundSync = useAksBackgroundSync({
     resourceType: "secrets",
     clusterId: cluster.id,
@@ -198,6 +216,15 @@ export const SecretsTab: React.FC<TabProps> = ({
   const createMut = useCreateSecret();
   const updateMut = useUpdateSecret();
   const items = data?.secrets || [];
+  const secretsAccessor = useCallback((r: K8sSecret, key: string): string | number => {
+    switch (key) {
+      case "namespace": return r.namespace.toLowerCase();
+      case "type": return (r.type || "").toLowerCase();
+      case "keys": return r.key_count ?? r.keys?.length ?? 0;
+      default: return r.name.toLowerCase();
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(items, secretsAccessor, { key: "name", direction: "asc" });
 
   const [viewTarget, setViewTarget] = useState<ResourceRef | null>(null);
   const [editTarget, setEditTarget] = useState<ResourceRef | null>(null);
@@ -224,14 +251,17 @@ export const SecretsTab: React.FC<TabProps> = ({
         onCreate={() => setShowCreate(true)}
         createLabel="Create Secret"
         isLoading={isLoading}
-        items={items}
+        isError={isError}
+        sort={sort}
+        onSort={(k) => setSort(nextSortState(sort, k))}
+        items={sorted}
         searchPlaceholder="Search secrets..."
         searchFn={searchFn}
         columns={
           <>
-            <th className={gridStyles.headerCell}>Name</th>
-            <th className={gridStyles.headerCell}>Type</th>
-            <th className={gridStyles.headerCell}>Keys</th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Type" active={sort.key === "type"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "type"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Keys" active={sort.key === "keys"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "keys"))} /></th>
           </>
         }
         renderRow={(s) => (
@@ -314,7 +344,7 @@ export const ServicesTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading } = useCachedServices(cluster.id, nsFilter);
+  const { data, isLoading, isError } = useCachedServices(cluster.id, nsFilter);
   const backgroundSync = useAksBackgroundSync({
     resourceType: "services",
     clusterId: cluster.id,
@@ -325,6 +355,16 @@ export const ServicesTab: React.FC<TabProps> = ({
   const createMut = useCreateService();
   const updateMut = useUpdateService();
   const items = data?.services || [];
+  const servicesAccessor = useCallback((r: K8sService, key: string): string | number => {
+    switch (key) {
+      case "namespace": return r.namespace.toLowerCase();
+      case "type": return (r.type || "").toLowerCase();
+      case "clusterIp": return (r.cluster_ip || "").toLowerCase();
+      case "ports": return (r.ports || []).length;
+      default: return r.name.toLowerCase();
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(items, servicesAccessor, { key: "name", direction: "asc" });
 
   const [viewTarget, setViewTarget] = useState<ResourceRef | null>(null);
   const [editTarget, setEditTarget] = useState<ResourceRef | null>(null);
@@ -351,15 +391,18 @@ export const ServicesTab: React.FC<TabProps> = ({
         onCreate={() => setShowCreate(true)}
         createLabel="Create Service"
         isLoading={isLoading}
-        items={items}
+        isError={isError}
+        sort={sort}
+        onSort={(k) => setSort(nextSortState(sort, k))}
+        items={sorted}
         searchPlaceholder="Search services..."
         searchFn={searchFn}
         columns={
           <>
-            <th className={gridStyles.headerCell}>Name</th>
-            <th className={gridStyles.headerCell}>Type</th>
-            <th className={gridStyles.headerCell}>Cluster IP</th>
-            <th className={gridStyles.headerCell}>Ports</th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Type" active={sort.key === "type"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "type"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Cluster IP" active={sort.key === "clusterIp"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "clusterIp"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Ports" active={sort.key === "ports"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "ports"))} /></th>
           </>
         }
         renderRow={(s) => (
@@ -443,7 +486,7 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading } = useCachedConfigMaps(cluster.id, nsFilter);
+  const { data, isLoading, isError } = useCachedConfigMaps(cluster.id, nsFilter);
   const backgroundSync = useAksBackgroundSync({
     resourceType: "configmaps",
     clusterId: cluster.id,
@@ -454,6 +497,15 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
   const createMut = useCreateConfigMap();
   const updateMut = useUpdateConfigMap();
   const items = data?.configmaps || [];
+  const configMapsAccessor = useCallback((r: ConfigMap, key: string): string | number => {
+    switch (key) {
+      case "namespace": return r.namespace.toLowerCase();
+      case "keys": return (r.data_keys || []).length;
+      case "created": return r.created_at || "";
+      default: return r.name.toLowerCase();
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(items, configMapsAccessor, { key: "name", direction: "asc" });
 
   const [viewTarget, setViewTarget] = useState<ResourceRef | null>(null);
   const [editTarget, setEditTarget] = useState<ResourceRef | null>(null);
@@ -480,14 +532,17 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
         onCreate={() => setShowCreate(true)}
         createLabel="Create ConfigMap"
         isLoading={isLoading}
-        items={items}
+        isError={isError}
+        sort={sort}
+        onSort={(k) => setSort(nextSortState(sort, k))}
+        items={sorted}
         searchPlaceholder="Search configmaps..."
         searchFn={searchFn}
         columns={
           <>
-            <th className={gridStyles.headerCell}>Name</th>
-            <th className={gridStyles.headerCell}>Keys</th>
-            <th className={gridStyles.headerCell}>Created</th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Keys" active={sort.key === "keys"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "keys"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Created" active={sort.key === "created"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "created"))} /></th>
           </>
         }
         renderRow={(c) => (
@@ -569,7 +624,7 @@ export const IngressTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading } = useCachedIngress(cluster.id, nsFilter);
+  const { data, isLoading, isError } = useCachedIngress(cluster.id, nsFilter);
   const backgroundSync = useAksBackgroundSync({
     resourceType: "ingress",
     clusterId: cluster.id,
@@ -579,6 +634,15 @@ export const IngressTab: React.FC<TabProps> = ({
   const deleteMut = useDeleteIngress();
   const updateMut = useUpdateIngress();
   const items = data?.ingress || [];
+  const ingressAccessor = useCallback((r: K8sIngress, key: string): string | number => {
+    switch (key) {
+      case "namespace": return r.namespace.toLowerCase();
+      case "hosts": return (r.hosts || []).join(",").toLowerCase();
+      case "address": return (r.address || "").toLowerCase();
+      default: return r.name.toLowerCase();
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(items, ingressAccessor, { key: "name", direction: "asc" });
 
   const [viewTarget, setViewTarget] = useState<ResourceRef | null>(null);
   const [editTarget, setEditTarget] = useState<ResourceRef | null>(null);
@@ -601,15 +665,18 @@ export const IngressTab: React.FC<TabProps> = ({
         syncing={backgroundSync.isRunning}
         backgroundSync={backgroundSync}
         isLoading={isLoading}
-        items={items}
+        isError={isError}
+        sort={sort}
+        onSort={(k) => setSort(nextSortState(sort, k))}
+        items={sorted}
         searchPlaceholder="Search ingress..."
         searchFn={searchFn}
         columns={
           <>
-            <th className={gridStyles.headerCell}>Name</th>
-            <th className={gridStyles.headerCell}>Hosts</th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Hosts" active={sort.key === "hosts"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "hosts"))} /></th>
             <th className={gridStyles.headerCell}>Services</th>
-            <th className={gridStyles.headerCell}>Address</th>
+            <th className={gridStyles.headerCell}><SortableHeader label="Address" active={sort.key === "address"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "address"))} /></th>
           </>
         }
         renderRow={(i) => (
@@ -678,10 +745,20 @@ export const HelmTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading } = useHelmReleases(cluster.id, nsFilter);
+  const { data, isLoading, isError, refetch, isFetching } = useHelmReleases(cluster.id, nsFilter);
   const uninstallMut = useUninstallHelmRelease();
   const items = data?.releases || [];
-  const pag = useSearchPagination(items, useCallback((r, q) => r.name.toLowerCase().includes(q), []));
+  const helmAccessor = useCallback((r: typeof items[0], key: string): string | number => {
+    switch (key) {
+      case "namespace": return r.namespace.toLowerCase();
+      case "chart": return (r.chart || "").toLowerCase();
+      case "revision": return Number(r.revision) || 0;
+      case "status": return (r.status || "").toLowerCase();
+      default: return r.name.toLowerCase();
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(items, helmAccessor, { key: "name", direction: "asc" });
+  const pag = useSearchPagination(sorted, useCallback((r, q) => r.name.toLowerCase().includes(q), []));
   const [deleteTarget, setDeleteTarget] = useState<{ namespace: string; name: string } | null>(null);
 
   return (
@@ -689,11 +766,11 @@ export const HelmTab: React.FC<TabProps> = ({
       <ExtendedTabToolbar
         title="Helm Releases"
         namespaceSelect={<NamespaceSelect namespaces={namespaces} value={namespace} onChange={onNamespaceChange} />}
+        onSync={() => refetch()}
+        syncing={isFetching}
         canWrite={canWrite}
       />
-      {isLoading ? (
-        <div className="text-center py-8 text-gray-500">Loading...</div>
-      ) : (
+      {(
         <div className={gridStyles.shell}>
           <GridSearchBar
             search={pag.search}
@@ -703,18 +780,22 @@ export const HelmTab: React.FC<TabProps> = ({
             shownItems={pag.filtered.length}
             placeholder="Search releases..."
           />
+          <div className="overflow-x-auto">
           <table className={gridStyles.table}>
             <thead className={gridStyles.head}>
               <tr>
-                <th className={gridStyles.headerCell}>Release</th>
-                <th className={gridStyles.headerCell}>Namespace</th>
-                <th className={gridStyles.headerCell}>Chart</th>
-                <th className={gridStyles.headerCell}>Revision</th>
-                <th className={gridStyles.headerCell}>Status</th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Release" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Namespace" active={sort.key === "namespace"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "namespace"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Chart" active={sort.key === "chart"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "chart"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Revision" active={sort.key === "revision"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "revision"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "status"))} /></th>
                 <th className={gridStyles.headerCellCenter}>Actions</th>
               </tr>
             </thead>
             <tbody>
+              {pag.paged.length === 0 && (
+                <GridStateRow colSpan={6} isLoading={isLoading} isError={isError} emptyText="No Helm releases found" />
+              )}
               {pag.paged.map((r) => (
                 <tr key={`${r.namespace}/${r.name}`} className={gridStyles.row}>
                   <td className={gridStyles.strongCell}>{r.name}</td>
@@ -736,6 +817,7 @@ export const HelmTab: React.FC<TabProps> = ({
               ))}
             </tbody>
           </table>
+          </div>
           <GridPager page={pag.page} totalPages={pag.totalPages} onPage={pag.setPage} />
         </div>
       )}
@@ -761,19 +843,31 @@ export const HelmTab: React.FC<TabProps> = ({
 export const AuditHistoryTab: React.FC<{ clusterId?: string; namespace?: string }> = ({
   clusterId, namespace,
 }) => {
-  const { data, isLoading } = useAksAuditHistory(clusterId, namespace);
+  const { data, isLoading, isError } = useAksAuditHistory(clusterId, namespace);
   const items = data?.history || [];
-  const pag = useSearchPagination(items, useCallback((h, q) =>
+  const auditAccessor = useCallback((h: typeof items[0], key: string): string | number => {
+    switch (key) {
+      case "user": return (h.user_email || "").toLowerCase();
+      case "action": return (h.action || "").toLowerCase();
+      case "resource": return (h.resource_name || "").toLowerCase();
+      case "status": return (h.status || "").toLowerCase();
+      case "summary": return (h.summary || "").toLowerCase();
+      default: return h.timestamp || "";
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(items, auditAccessor, { key: "time", direction: "desc" });
+  // status and summary are displayed, so they should be searchable too.
+  const pag = useSearchPagination(sorted, useCallback((h, q) =>
     h.resource_name.toLowerCase().includes(q) ||
     h.action.toLowerCase().includes(q) ||
+    (h.status || "").toLowerCase().includes(q) ||
+    (h.summary || "").toLowerCase().includes(q) ||
     h.user_email.toLowerCase().includes(q), []));
 
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-gray-800">Audit History</h2>
-      {isLoading ? (
-        <div className="text-center py-8 text-gray-500">Loading...</div>
-      ) : (
+      {(
         <div className={gridStyles.shell}>
           <GridSearchBar
             search={pag.search}
@@ -783,18 +877,22 @@ export const AuditHistoryTab: React.FC<{ clusterId?: string; namespace?: string 
             shownItems={pag.filtered.length}
             placeholder="Search audit history..."
           />
+          <div className="overflow-x-auto">
           <table className={gridStyles.table}>
             <thead className={gridStyles.head}>
               <tr>
-                <th className={gridStyles.headerCell}>Time</th>
-                <th className={gridStyles.headerCell}>User</th>
-                <th className={gridStyles.headerCell}>Action</th>
-                <th className={gridStyles.headerCell}>Resource</th>
-                <th className={gridStyles.headerCell}>Status</th>
-                <th className={gridStyles.headerCell}>Summary</th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Time" active={sort.key === "time"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "time"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="User" active={sort.key === "user"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "user"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Action" active={sort.key === "action"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "action"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Resource" active={sort.key === "resource"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "resource"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "status"))} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Summary" active={sort.key === "summary"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "summary"))} /></th>
               </tr>
             </thead>
             <tbody>
+              {pag.paged.length === 0 && (
+                <GridStateRow colSpan={6} isLoading={isLoading} isError={isError} emptyText="No audit events recorded" />
+              )}
               {pag.paged.map((h) => (
                 <tr key={h.id} className={gridStyles.row}>
                   <td className={gridStyles.cell}>{h.timestamp ? new Date(h.timestamp).toLocaleString() : "—"}</td>
@@ -807,6 +905,7 @@ export const AuditHistoryTab: React.FC<{ clusterId?: string; namespace?: string 
               ))}
             </tbody>
           </table>
+          </div>
           <GridPager page={pag.page} totalPages={pag.totalPages} onPage={pag.setPage} />
         </div>
       )}

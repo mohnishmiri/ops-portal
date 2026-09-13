@@ -65,6 +65,12 @@ import {
 } from "../services/aksApi";
 import { useAksLiveWatch } from "../hooks/useAksLiveWatch";
 import {
+  AKS_PAGE_SIZE as PAGE_SIZE,
+  GridPager,
+  GridSearchBar,
+  useSearchPagination,
+} from "../features/aks/aksGridShared";
+import {
   SecretsTab,
   ServicesTab,
   ConfigMapsTab,
@@ -222,7 +228,6 @@ const PIE_COLORS = ["#3f9bca", "#2d7aa8", "#10b981", "#f59e0b", "#ef4444", "#6b7
 
 // ── Reusable Helpers ──────────────────────────────────────────────────
 
-const PAGE_SIZE = 15;
 
 type AksBackgroundSyncState = ReturnType<typeof useAksBackgroundSync>;
 
@@ -231,69 +236,6 @@ function BackgroundRefreshStatus({ sync }: { sync: AksBackgroundSyncState }) {
     return <span className="text-sm text-amber-600">Refresh delayed, retrying...</span>;
   }
   return null;
-}
-
-function useSearchPagination<T>(items: T[], searchFn: (item: T, q: string) => boolean) {
-  const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter((item) => searchFn(item, q));
-  }, [items, search, searchFn]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safeP = Math.min(page, totalPages);
-  const paged = filtered.slice((safeP - 1) * PAGE_SIZE, safeP * PAGE_SIZE);
-
-  return { search, setSearch, page: safeP, setPage, paged, filtered, totalPages };
-}
-
-
-
-/** Search toolbar — sits at the top of the grid shell */
-function GridSearchBar({
-  search, onSearch, onPage, totalItems, shownItems, placeholder, isSyncing,
-}: {
-  search: string; onSearch: (v: string) => void;
-  onPage: (p: number) => void; totalItems: number; shownItems: number; placeholder?: string;
-  isSyncing?: boolean;
-}) {
-  return (
-    <div className={gridStyles.panelHeader}>
-      <div className="flex items-center gap-3">
-        <span className={gridStyles.countBadge}>{shownItems} of {totalItems}</span>
-        <AutoRefreshIndicator label={isSyncing ? "Syncing..." : "Auto-refresh on"} />
-      </div>
-      <input
-        type="text"
-        value={search}
-        onChange={(e) => { onSearch(e.target.value); onPage(1); }}
-        placeholder={placeholder || "Search..."}
-        className={gridStyles.toolbarInput}
-      />
-    </div>
-  );
-}
-
-/** Pagination footer — sits at the bottom of the grid shell */
-function GridPager({
-  page, totalPages, onPage,
-}: {
-  page: number; totalPages: number; onPage: (p: number) => void;
-}) {
-  if (totalPages <= 1) return null;
-  return (
-    <div className={gridStyles.pager}>
-      <span className="text-gray-600">Showing page {page} of {totalPages}</span>
-      <div className="flex items-center gap-2">
-        <button disabled={page <= 1} onClick={() => onPage(page - 1)} className={gridStyles.pagerButton}>Previous</button>
-        <span className="text-gray-600">Page {page} of {totalPages}</span>
-        <button disabled={page >= totalPages} onClick={() => onPage(page + 1)} className={gridStyles.pagerButton}>Next</button>
-      </div>
-    </div>
-  );
 }
 
 // ── Main Component ────────────────────────────────────────────────────
@@ -422,36 +364,45 @@ const AKSOperationsPage: React.FC = () => {
   const {
     data: clustersData,
     isLoading: loadingClusters,
+    isFetching: fetchingClusters,
+    isPlaceholderData: clustersArePlaceholder,
     refetch: refetchClusters,
   } = useCachedClusters(undefined, activeTab === "clusters");
-  const { data: deploymentsData, isLoading: loadingDeployments, isError: deploymentsError, error: deploymentsErr } = useCachedDeployments(
+  const clustersPending = fetchingClusters && clustersArePlaceholder;
+  const { data: deploymentsData, isFetching: fetchingDeployments, isPlaceholderData: deploymentsArePlaceholder, isError: deploymentsError, error: deploymentsErr } = useCachedDeployments(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadDeployments
   );
-  const { data: podMetricsData, isLoading: loadingPodMetrics, isError: podMetricsError, error: podMetricsErr } = usePodMetrics(
+  const { data: podMetricsData, isFetching: fetchingPods, isPlaceholderData: podsArePlaceholder, isError: podMetricsError, error: podMetricsErr } = usePodMetrics(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadPodMetrics
   );
 
-  const { data: cronJobsData, isLoading: loadingCronJobs, isError: cronJobsError, error: cronJobsErr } = useCachedCronJobs(
+  const { data: cronJobsData, isFetching: fetchingCronJobs, isPlaceholderData: cronJobsArePlaceholder, isError: cronJobsError, error: cronJobsErr } = useCachedCronJobs(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
     loadCronJobs
   );
-  const { data: scaleHistoryData } = useScaleHistory(
+  const { data: scaleHistoryData, isFetching: fetchingHistory, isError: historyError } = useScaleHistory(
     loadScaleHistory ? selectedCluster?.id : undefined,
     undefined,
     undefined,
     30,
     loadScaleHistory
   );
-  const { data: nodePoolsData, isLoading: loadingNodePools, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(
+  const { data: nodePoolsData, isFetching: fetchingNodePools, isPlaceholderData: nodePoolsArePlaceholder, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(
     selectedCluster?.id || "",
     loadNodePools
   );
-  const { data: namespacesData } = useAksNamespaces(selectedCluster?.id, !!selectedCluster);
+  const { data: namespacesData, isFetching: fetchingNamespaces, isPlaceholderData: namespacesArePlaceholder } =
+    useAksNamespaces(selectedCluster?.id, !!selectedCluster);
+  const namespacesPending = fetchingNamespaces && namespacesArePlaceholder;
+  const loadingDeployments = fetchingDeployments && deploymentsArePlaceholder;
+  const loadingPodMetrics = fetchingPods && podsArePlaceholder;
+  const loadingCronJobs = fetchingCronJobs && cronJobsArePlaceholder;
+  const loadingNodePools = fetchingNodePools && nodePoolsArePlaceholder;
 
   const namespaceOptions = useMemo(() => {
     return [...(namespacesData?.namespaces || [])].sort();
@@ -522,7 +473,7 @@ const AKSOperationsPage: React.FC = () => {
   const stopClusterMutation = useStopCluster();
 
   // Pod detail hooks — only enabled when dialog open
-  const { data: podLogsData, isLoading: loadingPodLogs, refetch: refetchPodLogs } = usePodLogs(
+  const { data: podLogsData, isLoading: loadingPodLogs, isError: podLogsError, error: podLogsErr, refetch: refetchPodLogs } = usePodLogs(
     selectedCluster?.id || "", podLogDialog?.namespace || "", podLogDialog?.pod_name || "",
     podLogContainer || undefined, podLogTailLines, podLogSinceSeconds,
     !!podLogDialog && !podLogSearchActive
@@ -532,7 +483,7 @@ const AKSOperationsPage: React.FC = () => {
     podLogSearchPattern, podLogContainer || undefined, !!podLogDialog && podLogSearchActive
   );
   const execPodMutation = useExecPodCommand();
-  const { data: podContainersData } = usePodContainers(
+  const { data: podContainersData, isError: podContainersError } = usePodContainers(
     selectedCluster?.id || "",
     (podLogDialog || podExecDialog)?.namespace || "",
     (podLogDialog || podExecDialog)?.pod_name || "",
@@ -564,26 +515,9 @@ const AKSOperationsPage: React.FC = () => {
     if (podExecDialog) { setExecContainer(""); setExecHistory([]); setExecCommand(""); }
   }, [podExecDialog]);
 
-  // Get unique namespaces from deployments
-  const namespaces = useMemo(() => {
-    if (!deploymentsData?.deployments) return [];
-    return [...new Set(deploymentsData.deployments.map((d) => d.namespace))].sort();
-  }, [deploymentsData]);
-
-  // Get unique namespaces from pods — cache when unfiltered so dropdown stays populated
-  const [cachedPodNamespaces, setCachedPodNamespaces] = useState<string[]>([]);
-  useEffect(() => {
-    if (!selectedNamespace && podMetricsData?.pods && podMetricsData.pods.length > 0) {
-      setCachedPodNamespaces(
-        [...new Set(podMetricsData.pods.map((p) => p.namespace))].sort()
-      );
-    }
-  }, [podMetricsData, selectedNamespace]);
-  const podNamespaces = useMemo(() => {
-    if (!podMetricsData?.pods) return cachedPodNamespaces;
-    const currentNs = [...new Set(podMetricsData.pods.map((p) => p.namespace))];
-    return [...new Set([...cachedPodNamespaces, ...currentNs])].sort();
-  }, [podMetricsData, cachedPodNamespaces]);
+  // Namespace dropdowns all read from namespaceOptions (GET /aks/namespaces, keyed
+  // on cluster only). Deriving them from the deployment/pod payloads instead made the
+  // list collapse to the single selected namespace, since those payloads are filtered.
 
   // Handle cluster selection
   const handleClusterSelect = (cluster: AKSCluster) => {
@@ -595,6 +529,7 @@ const AKSOperationsPage: React.FC = () => {
   const handleViewDeploymentPods = (deployment: Deployment) => {
     setSelectedNamespace(deployment.namespace);
     podsPag.setSearch(deployment.name);
+    podsPag.setPage(1);
     setActiveTab("pods");
   };
 
@@ -1077,11 +1012,11 @@ const AKSOperationsPage: React.FC = () => {
   const historyPag = useSearchPagination(allHistory, searchHistoryFn);
 
   // ── Sorting state (per grid) ────────────────────────────────────────
-  type DepSortKey = "name" | "namespace" | "image" | "replicas" | "status";
+  type DepSortKey = "name" | "namespace" | "image" | "version" | "replicas" | "status";
   type PodSortKey = "pod_name" | "namespace" | "phase" | "node" | "cpu" | "memory" | "restarts" | "started";
   type CJSortKey = "name" | "namespace" | "schedule" | "suspended" | "last_schedule_time";
-  type NPSortKey = "name" | "mode" | "vm_size" | "count" | "total_pods" | "provisioning_state";
-  type HistSortKey = "timestamp" | "cluster_name" | "deployment_name" | "action" | "user_email";
+  type NPSortKey = "name" | "mode" | "vm_size" | "count" | "total_pods" | "autoscaling" | "node_image" | "labels" | "provisioning_state";
+  type HistSortKey = "timestamp" | "cluster_name" | "deployment_name" | "action" | "change" | "user_email";
 
   const [depSort, setDepSort] = useState<SortState<DepSortKey>>({ key: "name", direction: "asc" });
   const [podSort, setPodSort] = useState<SortState<PodSortKey>>({ key: "pod_name", direction: "asc" });
@@ -1107,6 +1042,10 @@ const AKSOperationsPage: React.FC = () => {
       case "name": return d.name.toLowerCase();
       case "namespace": return d.namespace.toLowerCase();
       case "image": return (d.images[0] || "").toLowerCase();
+      case "version": {
+        const img = d.images[0] || "";
+        return img.includes(":") ? img.slice(img.lastIndexOf(":") + 1).toLowerCase() : "latest";
+      }
       case "replicas": return d.replicas;
       case "status": return d.ready_replicas === d.replicas ? 0 : 1;
       default: return "";
@@ -1146,6 +1085,9 @@ const AKSOperationsPage: React.FC = () => {
 
   const npAccessor = useCallback((p: NodePoolDetails, key: string): string | number => {
     switch (key) {
+      case "autoscaling": return p.enable_auto_scaling ? 0 : 1;
+      case "node_image": return (p.node_image_version || "").toLowerCase();
+      case "labels": return Object.keys(p.node_labels || {}).length;
       case "name": return p.name.toLowerCase();
       case "mode": return p.mode.toLowerCase();
       case "vm_size": return p.vm_size.toLowerCase();
@@ -1164,6 +1106,8 @@ const AKSOperationsPage: React.FC = () => {
       case "cluster_name": return h.cluster_name.toLowerCase();
       case "deployment_name": return h.deployment_name.toLowerCase();
       case "action": return (h.action || "scale").toLowerCase();
+      // Sort by the magnitude of the change, not the rendered "a → b" text.
+      case "change": return (h.new_replicas ?? 0) - (h.previous_replicas ?? 0);
       case "user_email": return h.user_email.toLowerCase();
       default: return "";
     }
@@ -1200,9 +1144,13 @@ const AKSOperationsPage: React.FC = () => {
   }, []);
 
   // Poll deployment status for each active scaling activity
+  const allDepsRef = useRef(allDeps);
+  allDepsRef.current = allDeps;
+  const hasActiveMutations = mutationActivities.some(
+    (a) => a.status === "pending" || a.status === "scaling"
+  );
   useEffect(() => {
-    const active = mutationActivities.filter((a) => a.status === "pending" || a.status === "scaling");
-    if (!active.length || !selectedCluster) {
+    if (!hasActiveMutations || !selectedCluster) {
       // No active mutations — disable burst mode
       if (statusPollBurst) setStatusPollBurst(false);
       return;
@@ -1214,7 +1162,7 @@ const AKSOperationsPage: React.FC = () => {
           if (activity.status !== "pending" && activity.status !== "scaling") return activity;
           if (activity.action === "delete") return activity;
 
-          const dep = allDeps.find(
+          const dep = allDepsRef.current.find(
             (d) => d.name === activity.deploymentName && d.namespace === activity.namespace
           );
           if (!dep) return { ...activity, status: "scaling" as const };
@@ -1232,7 +1180,7 @@ const AKSOperationsPage: React.FC = () => {
     }, 2000);
 
     return () => clearInterval(pollInterval);
-  }, [mutationActivities, allDeps, selectedCluster, statusPollBurst]);
+  }, [hasActiveMutations, selectedCluster, statusPollBurst]);
 
   // ── Render Tabs ─────────────────────────────────────────────────────
 
@@ -1307,28 +1255,28 @@ const AKSOperationsPage: React.FC = () => {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           title="Clusters in View"
-          value={clusterOverview.totalClusters}
+          value={clustersPending ? <Spinner className="h-6 w-6" /> : clusterOverview.totalClusters}
           subtitle={`${clusterOverview.locations} location${clusterOverview.locations === 1 ? "" : "s"} represented`}
           icon={MetricCardIcons.layers()}
           tone="att"
         />
         <MetricCard
           title="Running Clusters"
-          value={clusterOverview.runningClusters}
+          value={clustersPending ? <Spinner className="h-6 w-6" /> : clusterOverview.runningClusters}
           subtitle={`${clusterOverview.succeededClusters} successfully provisioned`}
           icon={MetricCardIcons.checkCircle()}
           tone="green"
         />
         <MetricCard
           title="Total Nodes"
-          value={clusterOverview.totalNodes}
+          value={clustersPending ? <Spinner className="h-6 w-6" /> : clusterOverview.totalNodes}
           subtitle="Combined worker footprint across filtered inventory"
           icon={MetricCardIcons.server()}
           tone="blue"
         />
         <MetricCard
           title="Primary Region"
-          value={clusterOverview.dominantLocation?.location ?? "N/A"}
+          value={clustersPending ? <Spinner className="h-6 w-6" /> : (clusterOverview.dominantLocation?.location ?? "N/A")}
           subtitle={clusterOverview.dominantLocation ? `${clusterOverview.dominantLocation.count} cluster${clusterOverview.dominantLocation.count === 1 ? "" : "s"}` : "No clusters available"}
           icon={MetricCardIcons.globe()}
           tone="indigo"
@@ -1337,11 +1285,15 @@ const AKSOperationsPage: React.FC = () => {
 
       <GridSearchBar search={cSearch} onSearch={setCSearch} onPage={setCPage} totalItems={allClusters.length} shownItems={filteredClusters.length} placeholder="Search clusters..." />
 
-      {loadingClusters && !clustersData ? (
+      {clustersPending ? (
         <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading clusters…</div>
       ) : !hasClusters ? (
         <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-6 text-sm text-amber-800">
           No AKS clusters are available in the local inventory cache yet. The page is ready; run <span className="font-semibold">Sync from Azure</span> to refresh inventory without blocking navigation.
+        </div>
+      ) : filteredClusters.length === 0 ? (
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 text-center text-sm text-gray-500">
+          No clusters match “{cSearch}”.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1500,13 +1452,20 @@ const AKSOperationsPage: React.FC = () => {
           Deployments {selectedCluster && `- ${selectedCluster.name}`}
         </h2>
         <div className="flex items-center gap-3">
+          {namespacesPending && (
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-att-600">
+              <Spinner className="h-3.5 w-3.5" />
+              Loading namespaces…
+            </span>
+          )}
           <select
             value={selectedNamespace}
             onChange={(e) => setSelectedNamespace(e.target.value)}
-            className="px-3 py-2 border rounded-lg text-sm"
+            disabled={namespacesPending}
+            className="px-3 py-2 border rounded-lg text-sm disabled:opacity-50"
           >
             <option value="">All Namespaces</option>
-            {namespaces.map((ns) => (
+            {namespaceOptions.map((ns) => (
               <option key={ns} value={ns}>
                 {ns}
               </option>
@@ -1649,13 +1608,16 @@ const AKSOperationsPage: React.FC = () => {
                 <th className={gridStyles.headerCell}><SortableHeader label="Name" active={depSort.key === "name"} direction={depSort.direction} onClick={() => setDepSort(nextSortState(depSort, "name"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Namespace" active={depSort.key === "namespace"} direction={depSort.direction} onClick={() => setDepSort(nextSortState(depSort, "namespace"))} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Image" active={depSort.key === "image"} direction={depSort.direction} onClick={() => setDepSort(nextSortState(depSort, "image"))} /></th>
-                <th className={gridStyles.headerCell}>Version</th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Version" active={depSort.key === "version"} direction={depSort.direction} onClick={() => setDepSort(nextSortState(depSort, "version"))} /></th>
                 <th className={gridStyles.headerCellCenter}><SortableHeader label="Replicas" active={depSort.key === "replicas"} direction={depSort.direction} onClick={() => setDepSort(nextSortState(depSort, "replicas"))} align="center" /></th>
                 <th className={gridStyles.headerCellCenter}><SortableHeader label="Status" active={depSort.key === "status"} direction={depSort.direction} onClick={() => setDepSort(nextSortState(depSort, "status"))} align="center" /></th>
                 <th className={gridStyles.headerCellCenter}>Actions</th>
               </tr>
             </thead>
             <tbody>
+              {pagedDeps.length === 0 && (
+                <tr><td colSpan={7} className="py-6 text-center text-sm text-gray-400">No deployments match your search</td></tr>
+              )}
               {pagedDeps.map((deployment) => (
                 <tr key={`${deployment.namespace}/${deployment.name}`} className={gridStyles.row}>
                   <td className={gridStyles.strongCell}>
@@ -1981,13 +1943,20 @@ const AKSOperationsPage: React.FC = () => {
         </h2>
         {selectedCluster && (
           <div className="flex items-center gap-2">
+            {namespacesPending && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-att-600">
+                <Spinner className="h-3.5 w-3.5" />
+                Loading namespaces…
+              </span>
+            )}
             <select
               value={selectedNamespace}
               onChange={(e) => setSelectedNamespace(e.target.value)}
-              className="px-3 py-2 border rounded-lg text-sm"
+              disabled={namespacesPending}
+              className="px-3 py-2 border rounded-lg text-sm disabled:opacity-50"
             >
               <option value="">All Namespaces</option>
-              {podNamespaces.map((ns) => (
+              {namespaceOptions.map((ns) => (
                 <option key={ns} value={ns}>
                   {ns}
                 </option>
@@ -2022,7 +1991,7 @@ const AKSOperationsPage: React.FC = () => {
           <div className="text-sm text-gray-500 max-w-md mx-auto">{(podMetricsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
         </div>
       ) : loadingPodMetrics ? (
-        <div className="text-center py-8 text-gray-500">Loading pod metrics...</div>
+        <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading pod metrics…</div>
       ) : (
         <>
           {/* Pod Table with Search */}
@@ -2044,6 +2013,9 @@ const AKSOperationsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
+                {pagedPods.length === 0 && (
+                  <tr><td colSpan={9} className="py-6 text-center text-sm text-gray-400">No pods match your search</td></tr>
+                )}
                 {pagedPods.map((pod) => {
                   const cpuPct = pod.total_cpu_limit && pod.total_cpu_limit > 0
                     ? Math.round((pod.total_cpu_millicores / pod.total_cpu_limit) * 100)
@@ -2250,7 +2222,7 @@ const AKSOperationsPage: React.FC = () => {
           <div className="text-sm text-gray-500 max-w-md mx-auto">{(cronJobsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
         </div>
       ) : loadingCronJobs ? (
-        <div className="text-center py-8 text-gray-500">Loading CronJobs...</div>
+        <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading CronJobs…</div>
       ) : (
         <>
         <div className={gridStyles.shell}>
@@ -2268,6 +2240,9 @@ const AKSOperationsPage: React.FC = () => {
               </tr>
             </thead>
             <tbody>
+              {pagedCJs.length === 0 && (
+                <tr><td colSpan={6} className="py-6 text-center text-sm text-gray-400">No CronJobs match your search</td></tr>
+              )}
               {pagedCJs.map((cronjob) => (
                 <tr key={`${cronjob.namespace}/${cronjob.name}`} className={gridStyles.row}>
                   <td className={gridStyles.strongCell}>
@@ -2361,7 +2336,9 @@ const AKSOperationsPage: React.FC = () => {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Namespace *</label>
-                  <input type="text" value={cjForm.namespace} onChange={e => setCjForm({ ...cjForm, namespace: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm" />
+                  <select value={cjForm.namespace} onChange={e => setCjForm({ ...cjForm, namespace: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm">
+                    {namespaceOptions.map((ns) => <option key={ns} value={ns}>{ns}</option>)}
+                  </select>
                 </div>
               </div>
               <div>
@@ -2588,25 +2565,25 @@ const AKSOperationsPage: React.FC = () => {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard
               title="Total Pools"
-              value={nodePoolsData?.count || 0}
+              value={poolsPag.filtered.length}
               icon={Icons.cluster("h-5 w-5")}
               tone="blue"
             />
             <MetricCard
               title="Total Nodes"
-              value={nodePoolsData?.node_pools?.reduce((s, p) => s + p.count, 0) || 0}
+              value={poolsPag.filtered.reduce((sum, p) => sum + p.count, 0)}
               icon={MetricCardIcons.server()}
               tone="green"
             />
             <MetricCard
               title="Autoscaling"
-              value={nodePoolsData?.node_pools?.filter(p => p.enable_auto_scaling).length || 0}
+              value={poolsPag.filtered.filter((p) => p.enable_auto_scaling).length}
               icon={Icons.scale("h-5 w-5")}
               tone="purple"
             />
             <MetricCard
               title="System Pools"
-              value={nodePoolsData?.node_pools?.filter(p => p.mode === "System").length || 0}
+              value={poolsPag.filtered.filter((p) => p.mode === "System").length}
               icon={MetricCardIcons.layers()}
               tone="orange"
             />
@@ -2624,9 +2601,9 @@ const AKSOperationsPage: React.FC = () => {
                   <th className={gridStyles.headerCell}><SortableHeader label="VM Size" active={npSort.key === "vm_size"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "vm_size"))} /></th>
                   <th className={gridStyles.headerCellCenter}><SortableHeader label="Nodes" active={npSort.key === "count"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "count"))} align="center" /></th>
                   <th className={gridStyles.headerCellCenter}><SortableHeader label="Pods" active={npSort.key === "total_pods"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "total_pods"))} align="center" /></th>
-                  <th className={gridStyles.headerCell}>Autoscaling</th>
-                  <th className={gridStyles.headerCell}>Node Image</th>
-                  <th className={gridStyles.headerCell}>Labels</th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Autoscaling" active={npSort.key === "autoscaling"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "autoscaling"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Node Image" active={npSort.key === "node_image"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "node_image"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Labels" active={npSort.key === "labels"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "labels"))} /></th>
                   <th className={gridStyles.headerCell}><SortableHeader label="State" active={npSort.key === "provisioning_state"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "provisioning_state"))} /></th>
                   <th className={gridStyles.headerCellCenter}>Actions</th>
                 </tr>
@@ -2953,11 +2930,24 @@ const AKSOperationsPage: React.FC = () => {
               <th className={gridStyles.headerCell}><SortableHeader label="Cluster" active={histSort.key === "cluster_name"} direction={histSort.direction} onClick={() => setHistSort(nextSortState(histSort, "cluster_name"))} /></th>
               <th className={gridStyles.headerCell}><SortableHeader label="Deployment" active={histSort.key === "deployment_name"} direction={histSort.direction} onClick={() => setHistSort(nextSortState(histSort, "deployment_name"))} /></th>
               <th className={gridStyles.headerCellCenter}><SortableHeader label="Action" active={histSort.key === "action"} direction={histSort.direction} onClick={() => setHistSort(nextSortState(histSort, "action"))} align="center" /></th>
-              <th className={gridStyles.headerCellCenter}>Change</th>
+              <th className={gridStyles.headerCellCenter}><SortableHeader label="Change" active={histSort.key === "change"} direction={histSort.direction} onClick={() => setHistSort(nextSortState(histSort, "change"))} align="center" /></th>
               <th className={gridStyles.headerCell}><SortableHeader label="User" active={histSort.key === "user_email"} direction={histSort.direction} onClick={() => setHistSort(nextSortState(histSort, "user_email"))} /></th>
             </tr>
           </thead>
           <tbody>
+            {pagedHistory.length === 0 && (
+              <tr>
+                <td colSpan={6} className="py-6 text-center text-sm">
+                  {fetchingHistory ? (
+                    <span className="inline-flex items-center gap-2 text-gray-500"><Spinner className="h-4 w-4" />Loading scale history…</span>
+                  ) : historyError ? (
+                    <span className="text-red-600">Failed to load scale history.</span>
+                  ) : (
+                    <span className="text-gray-400">No scale history recorded</span>
+                  )}
+                </td>
+              </tr>
+            )}
             {pagedHistory.map((entry) => (
               <tr key={entry.id} className={gridStyles.row}>
                 <td className={gridStyles.cell}>
@@ -3393,8 +3383,17 @@ const AKSOperationsPage: React.FC = () => {
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
                   </svg>
                   <div className="text-center">
-                    <p className="text-gray-400 text-sm">No logs available</p>
-                    <p className="text-gray-600 text-xs mt-1">Try adjusting the time range or enable streaming to watch for new logs</p>
+                    {podLogsError ? (
+                      <>
+                        <p className="text-red-400 text-sm">Failed to fetch logs</p>
+                        <p className="text-gray-600 text-xs mt-1">{(podLogsErr as Error)?.message || "The pod may be terminating or the container not yet started."}</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-gray-400 text-sm">No logs available</p>
+                        <p className="text-gray-600 text-xs mt-1">Try adjusting the time range or enable streaming to watch for new logs</p>
+                      </>
+                    )}
                   </div>
                   <button onClick={() => setPodLogAutoRefresh(true)}
                     className="flex items-center gap-1.5 text-xs px-4 py-2 rounded bg-green-600/20 text-green-400 border border-green-500/50 hover:bg-green-600/30 transition-colors mt-2">
@@ -3732,7 +3731,7 @@ function CronJobDetailDialog({ cluster_id, namespace, name, onClose }: { cluster
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
         {isLoading ? (
-          <div className="text-center py-8 text-gray-500">Loading details...</div>
+          <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading details…</div>
         ) : isError ? (
           <div className="text-center py-8">
             <div className="text-red-500 font-medium">Failed to load CronJob details.</div>
@@ -3887,7 +3886,7 @@ function DeploymentDetailDialog({ cluster_id, namespace, name, onClose }: { clus
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
         {isLoading ? (
-          <div className="text-center py-8 text-gray-500">Loading deployment YAML...</div>
+          <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading deployment YAML…</div>
         ) : isError ? (
           <div className="text-center py-8">
             <div className="text-red-500 font-medium">Failed to load deployment YAML.</div>
@@ -3916,7 +3915,7 @@ function ConfigMapContent({ cluster_id, namespace, name }: { cluster_id: string;
   const { data, isLoading, isError } = useConfigMapDetail(cluster_id, namespace, name);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
-  if (isLoading) return <div className="px-3 py-4 text-center text-xs text-gray-400">Loading ConfigMap...</div>;
+  if (isLoading) return <div className="flex items-center justify-center gap-2 px-3 py-4 text-xs text-gray-400"><Spinner className="h-3 w-3" />Loading ConfigMap…</div>;
   if (isError) return <div className="px-3 py-4 text-center text-xs text-red-400">Failed to load ConfigMap</div>;
   if (data?.detail_source === "unavailable") {
     return (

@@ -3,7 +3,7 @@
  */
 
 import React, { useMemo, useState } from "react";
-import { AutoRefreshIndicator, gridStyles } from "../../components/gridStyles";
+import { AutoRefreshIndicator, gridStyles, Spinner, type SortState } from "../../components/gridStyles";
 
 export const AKS_PAGE_SIZE = 15;
 
@@ -24,6 +24,55 @@ export function useSearchPagination<T>(items: T[], searchFn: (item: T, q: string
   return { search, setSearch, page: safePage, setPage, paged, filtered, totalPages };
 }
 
+/**
+ * Sorting for the AKS resource grids. `accessor` maps a row + column key to a
+ * comparable value; strings compare with localeCompare, numbers numerically.
+ */
+export function useGridSort<T, K extends string>(
+  items: T[],
+  accessor: (item: T, key: K) => string | number,
+  initial: SortState<K>,
+) {
+  const [sort, setSort] = useState<SortState<K>>(initial);
+  const sorted = useMemo(() => {
+    const dir = sort.direction === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      const av = accessor(a, sort.key);
+      const bv = accessor(b, sort.key);
+      if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }, [items, sort, accessor]);
+  return { sort, setSort, sorted };
+}
+
+/** Shared empty/loading/error body for a grid with `colSpan` columns. */
+export function GridStateRow({
+  colSpan, isLoading, isError, errorText, emptyText,
+}: {
+  colSpan: number;
+  isLoading?: boolean;
+  isError?: boolean;
+  errorText?: string;
+  emptyText: string;
+}) {
+  return (
+    <tr>
+      <td colSpan={colSpan} className="py-6 text-center text-sm">
+        {isLoading ? (
+          <span className="inline-flex items-center gap-2 text-gray-500">
+            <Spinner className="h-4 w-4" />Loading…
+          </span>
+        ) : isError ? (
+          <span className="text-red-600">{errorText || "Failed to load. Check cluster connectivity."}</span>
+        ) : (
+          <span className="text-gray-400">{emptyText}</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 export function GridSearchBar({
   search,
   onSearch,
@@ -31,6 +80,7 @@ export function GridSearchBar({
   totalItems,
   shownItems,
   placeholder,
+  isSyncing,
 }: {
   search: string;
   onSearch: (v: string) => void;
@@ -38,12 +88,13 @@ export function GridSearchBar({
   totalItems: number;
   shownItems: number;
   placeholder?: string;
+  isSyncing?: boolean;
 }) {
   return (
     <div className={gridStyles.panelHeader}>
       <div className="flex items-center gap-3">
         <span className={gridStyles.countBadge}>{shownItems} of {totalItems}</span>
-        <AutoRefreshIndicator />
+        <AutoRefreshIndicator label={isSyncing ? "Syncing..." : undefined} />
       </div>
       <input
         type="text"

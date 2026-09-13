@@ -8,7 +8,7 @@
 
 import React from "react";
 import { JobDetail, JobPod } from "../../services/aksApi";
-import { gridStyles } from "../../components/gridStyles";
+import { gridStyles, Spinner } from "../../components/gridStyles";
 import { ModalShell } from "./K8sResourceModals";
 
 const POD_PHASE_STYLES: Record<string, string> = {
@@ -70,7 +70,7 @@ export const JobDetailModal: React.FC<{
 }) => (
   <ModalShell title={`Job: ${jobRef.name}`} onClose={onClose} wide>
     {isLoading && !detail ? (
-      <p className="py-8 text-sm text-gray-500">Loading Job details...</p>
+      <p className="flex items-center justify-center gap-2 py-8 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading Job details…</p>
     ) : isError || !detail ? (
       <p className="py-8 text-sm text-red-600">
         Unable to load details for this Job. It may have been deleted or its TTL may have expired.

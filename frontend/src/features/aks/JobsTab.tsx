@@ -15,7 +15,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { gridStyles } from "../../components/gridStyles";
+import { gridStyles, SortableHeader, nextSortState } from "../../components/gridStyles";
 import {
   AKSCluster,
   JobPod,
@@ -29,6 +29,8 @@ import {
   GridPager,
   GridSearchBar,
   NamespaceSelect,
+  GridStateRow,
+  useGridSort,
   useSearchPagination,
 } from "./aksGridShared";
 import { DeleteConfirmModal } from "./K8sResourceModals";
@@ -172,8 +174,25 @@ export const JobsTab: React.FC<JobsTabProps> = ({
     []
   );
 
+  const jobAccessor = useCallback((job: K8sJob, key: string): string | number => {
+    switch (key) {
+      case "namespace": return job.namespace.toLowerCase();
+      case "status": return (job.status || "").toLowerCase();
+      case "completions": return job.succeeded ?? 0;
+      case "active": return job.active ?? 0;
+      case "failed": return job.failed ?? 0;
+      case "startTime": return job.start_time || "";
+      case "completed": return job.completion_time || "";
+      // Age is derived from creation time, so sort on the timestamp itself.
+      case "age": return job.created_at || "";
+      case "createdBy": return (job.created_by ?? "").toLowerCase();
+      default: return job.name.toLowerCase();
+    }
+  }, []);
+  const { sort, setSort, sorted } = useGridSort(filteredByFacets, jobAccessor, { key: "age", direction: "desc" });
+
   const { search, setSearch, page, setPage, paged, filtered, totalPages } = useSearchPagination(
-    filteredByFacets,
+    sorted,
     searchFn
   );
 
@@ -279,13 +298,7 @@ export const JobsTab: React.FC<JobsTabProps> = ({
         </div>
       )}
 
-      {isLoading ? (
-        <p className="text-sm text-gray-500 py-8">Loading Jobs...</p>
-      ) : allJobs.length === 0 ? (
-        <p className="text-sm text-gray-500 py-8">
-          No Jobs found in {namespace ? `namespace "${namespace}"` : "this cluster"}.
-        </p>
-      ) : (
+      {(
         <div className={gridStyles.shell}>
           <GridSearchBar
             search={search}
@@ -300,20 +313,31 @@ export const JobsTab: React.FC<JobsTabProps> = ({
             <table className={gridStyles.table}>
               <thead className={gridStyles.head}>
                 <tr>
-                  <th className={gridStyles.headerCell}>Job Name</th>
-                  <th className={gridStyles.headerCell}>Namespace</th>
-                  <th className={gridStyles.headerCell}>Status</th>
-                  <th className={gridStyles.headerCell}>Completions</th>
-                  <th className={gridStyles.headerCell}>Active</th>
-                  <th className={gridStyles.headerCell}>Failed</th>
-                  <th className={gridStyles.headerCell}>Start Time</th>
-                  <th className={gridStyles.headerCell}>Completed</th>
-                  <th className={gridStyles.headerCell}>Age</th>
-                  <th className={gridStyles.headerCell}>Created By</th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Job Name" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Namespace" active={sort.key === "namespace"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "namespace"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "status"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Completions" active={sort.key === "completions"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "completions"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Active" active={sort.key === "active"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "active"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Failed" active={sort.key === "failed"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "failed"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Start Time" active={sort.key === "startTime"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "startTime"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Completed" active={sort.key === "completed"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "completed"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Age" active={sort.key === "age"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "age"))} /></th>
+                  <th className={gridStyles.headerCell}><SortableHeader label="Created By" active={sort.key === "createdBy"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "createdBy"))} /></th>
                   <th className={gridStyles.headerCellCenter}>Actions</th>
                 </tr>
               </thead>
               <tbody>
+                {paged.length === 0 && (
+                  <GridStateRow
+                    colSpan={11}
+                    isLoading={isLoading}
+                    emptyText={
+                      allJobs.length === 0
+                        ? `No Jobs found in ${namespace ? `namespace "${namespace}"` : "this cluster"}.`
+                        : "No Jobs match the current filters"
+                    }
+                  />
+                )}
                 {paged.map((job) => (
                   <tr key={`${job.namespace}/${job.name}`} className={gridStyles.row}>
                     <td className={gridStyles.cell}>
@@ -328,7 +352,7 @@ export const JobsTab: React.FC<JobsTabProps> = ({
                     <td className={gridStyles.cell}>{job.namespace}</td>
                     <td className={gridStyles.cell}>
                       <span
-                        className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[job.status]}`}
+                        className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[job.status] ?? "bg-gray-100 text-gray-700"}`}
                       >
                         {job.status}
                       </span>

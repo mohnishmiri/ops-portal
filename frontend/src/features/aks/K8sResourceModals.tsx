@@ -3,6 +3,7 @@
  */
 
 import React, { useEffect, useState } from "react";
+import { Spinner } from "../../components/gridStyles";
 import {
   ConfigMapDetail,
   IngressDetail,
@@ -138,7 +139,7 @@ export function SecretViewModal({
   canWrite: boolean;
   onClose: () => void;
 }) {
-  const { data, isLoading } = useSecretDetail(clusterId, namespace, name, true, true);
+  const { data, isLoading, isError } = useSecretDetail(clusterId, namespace, name, true, true);
   const [search, setSearch] = useState("");
 
   const entries = Object.entries((data as SecretDetail)?.data || {});
@@ -149,7 +150,9 @@ export function SecretViewModal({
   return (
     <ModalShell title={`Secret: ${name}`} onClose={onClose} wide>
       {isLoading ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
+      ) : isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-4 mb-4 pb-3 border-b">
@@ -209,7 +212,7 @@ export function SecretEditModal({
   onSave: (data: Record<string, string>) => void;
   saving?: boolean;
 }) {
-  const { data, isLoading } = useSecretDetail(clusterId, namespace, name, true, true);
+  const { data, isLoading, isError } = useSecretDetail(clusterId, namespace, name, true, true);
   const [kvText, setKvText] = useState("");
 
   useEffect(() => {
@@ -219,7 +222,9 @@ export function SecretEditModal({
   return (
     <ModalShell title={`Edit Secret: ${name}`} onClose={onClose} wide>
       {isLoading ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
+      ) : isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
       ) : (
         <>
           <p className="text-sm text-gray-500 mb-2">One key=value pair per line</p>
@@ -317,13 +322,15 @@ export function ServiceViewModal({
   name: string;
   onClose: () => void;
 }) {
-  const { data, isLoading } = useServiceDetail(clusterId, namespace, name, true);
+  const { data, isLoading, isError } = useServiceDetail(clusterId, namespace, name, true);
   const svc = data as ServiceDetail | undefined;
 
   return (
     <ModalShell title={`Service: ${name}`} onClose={onClose} wide>
-      {isLoading || !svc ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+      {isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
+      ) : isLoading || !svc ? (
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
       ) : (
         <div className="space-y-3 text-sm">
           <p><span className="text-gray-500">Namespace:</span> {svc.namespace}</p>
@@ -458,7 +465,7 @@ export function ServiceEditModal({
   }) => void;
   saving?: boolean;
 }) {
-  const { data, isLoading } = useServiceDetail(clusterId, namespace, name, true);
+  const { data, isLoading, isError } = useServiceDetail(clusterId, namespace, name, true);
   const svc = data as ServiceDetail | undefined;
 
   const [port, setPort] = useState(80);
@@ -480,8 +487,10 @@ export function ServiceEditModal({
 
   return (
     <ModalShell title={`Edit Service: ${name}`} onClose={onClose} wide>
-      {isLoading || !svc ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+      {isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
+      ) : isLoading || !svc ? (
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
       ) : (
         <>
           <div className="space-y-3">
@@ -545,7 +554,7 @@ export function ConfigMapViewModal({
   name: string;
   onClose: () => void;
 }) {
-  const { data, isLoading } = useConfigMapDetail(clusterId, namespace, name);
+  const { data, isLoading, isError } = useConfigMapDetail(clusterId, namespace, name);
   const cm = data as ConfigMapDetail | undefined;
   const [search, setSearch] = useState("");
 
@@ -556,8 +565,10 @@ export function ConfigMapViewModal({
 
   return (
     <ModalShell title={`ConfigMap: ${name}`} onClose={onClose} wide>
-      {isLoading || !cm ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+      {isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
+      ) : isLoading || !cm ? (
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-4 mb-4 pb-3 border-b">
@@ -616,7 +627,7 @@ export function ConfigMapEditModal({
   onSave: (data: Record<string, string>) => void;
   saving?: boolean;
 }) {
-  const { data, isLoading } = useConfigMapDetail(clusterId, namespace, name);
+  const { data, isLoading, isError } = useConfigMapDetail(clusterId, namespace, name);
   const [entries, setEntries] = useState<Array<{ key: string; value: string }>>([]);
 
   useEffect(() => {
@@ -640,7 +651,9 @@ export function ConfigMapEditModal({
   return (
     <ModalShell title={`Edit ConfigMap: ${name}`} onClose={onClose} wide>
       {isLoading ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
+      ) : isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
       ) : (
         <>
           <div className="space-y-4 max-h-[60vh] overflow-y-auto">
@@ -742,13 +755,15 @@ export function IngressViewModal({
   name: string;
   onClose: () => void;
 }) {
-  const { data, isLoading } = useIngressDetail(clusterId, namespace, name, true);
+  const { data, isLoading, isError } = useIngressDetail(clusterId, namespace, name, true);
   const ing = data as IngressDetail | undefined;
 
   return (
     <ModalShell title={`Ingress: ${name}`} onClose={onClose} wide>
-      {isLoading || !ing ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+      {isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
+      ) : isLoading || !ing ? (
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
       ) : (
         <div className="space-y-3 text-sm">
           <p><span className="text-gray-500">Namespace:</span> {ing.namespace}</p>
@@ -789,7 +804,7 @@ export function IngressEditModal({
   }) => void;
   saving?: boolean;
 }) {
-  const { data, isLoading } = useIngressDetail(clusterId, namespace, name, true);
+  const { data, isLoading, isError } = useIngressDetail(clusterId, namespace, name, true);
   const ing = data as IngressDetail | undefined;
 
   const [rulesJson, setRulesJson] = useState("");
@@ -836,8 +851,10 @@ export function IngressEditModal({
 
   return (
     <ModalShell title={`Edit Ingress: ${name}`} onClose={onClose} wide>
-      {isLoading || !ing ? (
-        <p className="text-sm text-gray-500">Loading...</p>
+      {isError ? (
+        <p className="text-sm text-red-600">Failed to load details. The resource may have been deleted or the cluster is unreachable.</p>
+      ) : isLoading || !ing ? (
+        <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading…</p>
       ) : (
         <div className="space-y-4">
           <div>
