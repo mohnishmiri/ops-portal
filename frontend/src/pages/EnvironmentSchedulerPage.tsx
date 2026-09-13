@@ -14,7 +14,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
-import { AutoRefreshIndicator, SortableHeader, type SortState, nextSortState } from "../components/gridStyles";
+import { AutoRefreshIndicator, SortableHeader, Spinner, type SortState, nextSortState } from "../components/gridStyles";
 import {
   useCachedClusters,
   useAksNamespaces,
@@ -94,7 +94,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
   // ── Data queries ──
   const { data: clustersData } = useCachedClusters();
   const { data: namespacesData } = useAksNamespaces(selectedCluster?.id ?? "");
-  const { data: envStatus, refetch: refetchEnvStatus } = useEnvironmentStatus(selectedCluster?.id ?? "", selectedNamespace);
+  const { data: envStatus, refetch: refetchEnvStatus, isLoading: isLoadingStatus } = useEnvironmentStatus(selectedCluster?.id ?? "", selectedNamespace);
   const { data: schedules, isLoading: schedulesLoading } = useEnvironmentSchedules(selectedCluster?.id, selectedNamespace);
   const { data: sequences, isLoading: sequencesLoading } = useEnvironmentSequences(selectedCluster?.id, selectedNamespace);
   const { data: history, isLoading: historyLoading } = useExecutionHistory(selectedCluster?.id, selectedNamespace);
@@ -432,7 +432,15 @@ const EnvironmentSchedulerPage: React.FC = () => {
 
           {/* Namespace selector (depends on selected cluster) */}
           <div className="max-w-xs">
-            <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">Namespace</label>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">Namespace</label>
+              {isLoadingStatus && selectedCluster && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-att-600">
+                  <Spinner className="h-3 w-3" />
+                  Loading deployments…
+                </span>
+              )}
+            </div>
             <select
               value={selectedNamespace}
               onChange={(e) => setSelectedNamespace(e.target.value)}
@@ -447,7 +455,21 @@ const EnvironmentSchedulerPage: React.FC = () => {
         </div>
 
         {/* Metric cards */}
-        {envStatus && (
+        {isLoadingStatus && selectedCluster && (
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-5">
+            {["Total Deployments", "Running", "Stopped", "Scaling", "Failed"].map((title) => (
+              <div key={title} className="rounded-2xl border border-att-100 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">{title}</p>
+                <div className="mt-3 flex items-center gap-2">
+                  <Spinner className="h-5 w-5" />
+                  <span className="text-sm text-gray-400">Loading…</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {envStatus && !isLoadingStatus && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-5">
               {([
@@ -693,6 +715,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
           deployments={deploymentList}
           onRefresh={handleRefresh}
           isRefreshing={isRefreshing}
+          isLoadingDeployments={isLoadingStatus}
           onScale={handleScale}
           isScaling={scaleEnvironment.isPending}
         />

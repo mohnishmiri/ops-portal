@@ -14,7 +14,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import Toast, { type ToastState } from "../components/Toast";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
-import { AutoRefreshIndicator, gridStyles, SortState, nextSortState, SortableHeader } from "../components/gridStyles";
+import { AutoRefreshIndicator, gridStyles, Spinner, SortState, nextSortState, SortableHeader } from "../components/gridStyles";
 import {
   useClusters,
   useCachedClusters,
@@ -1338,7 +1338,7 @@ const AKSOperationsPage: React.FC = () => {
       <GridSearchBar search={cSearch} onSearch={setCSearch} onPage={setCPage} totalItems={allClusters.length} shownItems={filteredClusters.length} placeholder="Search clusters..." />
 
       {loadingClusters && !clustersData ? (
-        <div className="text-center py-8 text-gray-500">Loading clusters...</div>
+        <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading clusters…</div>
       ) : !hasClusters ? (
         <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-6 text-sm text-amber-800">
           No AKS clusters are available in the local inventory cache yet. The page is ready; run <span className="font-semibold">Sync from Azure</span> to refresh inventory without blocking navigation.
@@ -1577,7 +1577,7 @@ const AKSOperationsPage: React.FC = () => {
           <div className="text-sm text-gray-500 max-w-md mx-auto">{(deploymentsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
         </div>
       ) : loadingDeployments ? (
-        <div className="text-center py-8 text-gray-500">Loading deployments...</div>
+        <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading deployments…</div>
       ) : (
         <>
         {/* Mutation Activity Panel */}
@@ -2581,7 +2581,7 @@ const AKSOperationsPage: React.FC = () => {
           <div className="text-sm text-gray-500 max-w-md mx-auto">{(nodePoolsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
         </div>
       ) : loadingNodePools ? (
-        <div className="text-center py-8 text-gray-500">Loading node pools...</div>
+        <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading node pools…</div>
       ) : (
         <>
           {/* Summary Stats Row */}

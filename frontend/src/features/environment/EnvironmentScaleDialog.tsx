@@ -8,7 +8,7 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { gridStyles, SortableHeader, nextSortState, type SortState } from "../../components/gridStyles";
+import { gridStyles, SortableHeader, Spinner, nextSortState, type SortState } from "../../components/gridStyles";
 import type { Deployment } from "../../services/aksApi";
 import type { EnvironmentScaleRequest, EnvironmentScaleResult, StepDetail } from "../../services/environmentApi";
 
@@ -28,6 +28,8 @@ interface Props {
   deployments: Deployment[];
   onRefresh: () => void;
   isRefreshing: boolean;
+  /** True while the namespace switch is still fetching its deployment list. */
+  isLoadingDeployments: boolean;
   onScale: (request: EnvironmentScaleRequest) => Promise<EnvironmentScaleResult>;
   isScaling: boolean;
 }
@@ -44,6 +46,7 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   deployments,
   onRefresh,
   isRefreshing,
+  isLoadingDeployments,
   onScale,
   isScaling,
 }) => {
@@ -368,7 +371,15 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
               </div>
 
               <div>
-                <label className="text-sm font-semibold text-gray-700">Namespace</label>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm font-semibold text-gray-700">Namespace</label>
+                  {isLoadingDeployments && (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-att-600">
+                      <Spinner className="h-3 w-3" />
+                      Loading deployments…
+                    </span>
+                  )}
+                </div>
                 <select value={namespace} onChange={(e) => { onNamespaceChange(e.target.value); setSelectedDeployments([]); setDepSearch(""); }} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-att-400 focus:ring-2 focus:ring-att-100">
                   {namespaces.map((ns) => <option key={ns} value={ns}>{ns}</option>)}
                 </select>
@@ -377,7 +388,9 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
               {scope === "selected" && (
                 <div>
                   <div className="flex items-center justify-between">
-                    <label className="text-sm font-semibold text-gray-700">Select Deployments ({selectedDeployments.length} of {filteredDeployments.length} selected)</label>
+                    <label className="text-sm font-semibold text-gray-700">
+                      Select Deployments {isLoadingDeployments ? "(loading…)" : `(${selectedDeployments.length} of ${filteredDeployments.length} selected)`}
+                    </label>
                     <div className="flex items-center gap-3">
                       <button
                         type="button"
@@ -432,7 +445,12 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                       </span>
                     </div>
                     <div className="max-h-48 overflow-y-auto">
-                    {sortedDeployments.length === 0 ? (
+                    {isLoadingDeployments ? (
+                      <div className="flex items-center justify-center gap-2 p-6 text-sm text-gray-500">
+                        <Spinner className="h-4 w-4" />
+                        Loading deployments for {namespace}…
+                      </div>
+                    ) : sortedDeployments.length === 0 ? (
                       <p className="p-4 text-center text-sm text-gray-400">No deployments match search</p>
                     ) : (
                       sortedDeployments.map((dep) => (
@@ -482,7 +500,7 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                 Dry Run (preview changes without executing)
               </label>
 
-              <button onClick={handleSubmit} disabled={isScaling || (scope === "selected" && selectedDeployments.length === 0)} className="w-full rounded-lg bg-att-500 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-att-600 disabled:opacity-50">
+              <button onClick={handleSubmit} disabled={isScaling || isLoadingDeployments || (scope === "selected" && selectedDeployments.length === 0)} className="w-full rounded-lg bg-att-500 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-att-600 disabled:opacity-50">
                 {operation === "scale_down" ? "Scale Down" : "Scale Up"} ({totalTarget} deployments)
               </button>
             </>
