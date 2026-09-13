@@ -252,6 +252,8 @@ _CERT_REPORT_STYLE = """
         table.data td.cn {{ font-weight:600; word-break:break-all; }}
         table.data td.num {{ white-space:nowrap; }}
         table.data td.id {{ color:#6b7280; font-family:Consolas,monospace; font-size:12px; }}
+        table.data td.tp {{ color:#6b7280; font-family:Consolas,monospace; font-size:11px; word-break:break-all; }}
+        table.data td.col {{ color:#374151; font-size:12px; word-break:break-word; }}
         .cta {{ display:inline-block; background:#00388f; color:#ffffff !important; text-decoration:none;
                padding:11px 22px; border-radius:6px; font-size:13px; font-weight:600; margin-top:22px; }}
         .foot {{ padding:16px 24px; background:#f9fafb; border-top:1px solid #e5e7eb; color:#6b7280; font-size:11px; }}
@@ -262,7 +264,7 @@ CERT_REPORT_SECTION = """
         <div class="sec">
           <h2 style="color:{accent};">{title} ({count})</h2>
           <table class="data">
-            <tr><th>Common Name</th><th>Expires</th><th>Remaining</th><th>ID</th></tr>
+            <tr><th>Common Name</th><th>Collection</th><th>Expires</th><th>Remaining</th><th>Thumbprint</th></tr>
             {rows}
           </table>
         </div>
@@ -1194,12 +1196,17 @@ For questions or to acknowledge findings, visit the Compliance Dashboard.
             else:
                 remaining = f"{days} d"
             expiry = (row.get("not_after") or "")[:10] or "—"
+            # Recipients act on these in Keyfactor and in the portal's own
+            # thumbprint search; the internal certificate id means nothing there.
+            thumbprint = _html_escape(row.get("thumbprint") or "") or "—"
+            collection = _html_escape(row.get("collection") or "") or "—"
             cells.append(
                 f"<tr>"
                 f'<td class="cn">{_html_escape(row.get("common_name", ""))}</td>'
+                f'<td class="col">{collection}</td>'
                 f'<td class="num">{expiry}</td>'
                 f'<td class="num" style="color:{accent};font-weight:600;">{remaining}</td>'
-                f'<td class="id">{row.get("certificate_id", "") or "—"}</td>'
+                f'<td class="tp">{thumbprint}</td>'
                 f"</tr>"
             )
         return "\n".join(cells)

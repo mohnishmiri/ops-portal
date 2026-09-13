@@ -347,6 +347,8 @@ class CertificateAutomationService:
             {
                 "common_name": c.get("common_name") or f"Certificate {c.get('id')}",
                 "certificate_id": c.get("id"),
+                "thumbprint": c.get("thumbprint") or "",
+                "collection": c.get("collection") or scope,
                 "not_after": c.get("not_after"),
                 "days_until_expiry": _days_until(c.get("not_after")),
             }
