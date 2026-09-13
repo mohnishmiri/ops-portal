@@ -206,7 +206,9 @@ export function useScaleEnvironment() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["environment-status"] });
       queryClient.invalidateQueries({ queryKey: ["environment-history"] });
-      queryClient.invalidateQueries({ queryKey: ["deployments-cached"] });
+      // Key must match useCachedDeployments in aksApi.ts — "deployments-cached"
+      // matched nothing, so the deployment grid kept serving stale replica counts.
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
     },
   });
 }
@@ -274,6 +276,7 @@ export function useRunScheduleNow() {
       queryClient.invalidateQueries({ queryKey: ["environment-schedules"] });
       queryClient.invalidateQueries({ queryKey: ["environment-history"] });
       queryClient.invalidateQueries({ queryKey: ["environment-status"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
     },
   });
 }
@@ -342,6 +345,7 @@ export function useStartSequence() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["environment-status"] });
       queryClient.invalidateQueries({ queryKey: ["environment-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
     },
   });
 }
@@ -356,6 +360,7 @@ export function useStopSequence() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["environment-status"] });
       queryClient.invalidateQueries({ queryKey: ["environment-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
     },
   });
 }

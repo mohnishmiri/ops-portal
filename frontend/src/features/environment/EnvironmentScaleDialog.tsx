@@ -16,7 +16,10 @@ interface Props {
   open: boolean;
   onClose: () => void;
   clusterId: string;
+  /** Controlled by the page so the dashboard KPI cards always match this dialog. */
+  namespace: string;
   namespaces: string[];
+  onNamespaceChange: (ns: string) => void;
   onScale: (request: EnvironmentScaleRequest) => Promise<EnvironmentScaleResult>;
   isScaling: boolean;
 }
@@ -27,12 +30,13 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   open,
   onClose,
   clusterId,
+  namespace,
   namespaces,
+  onNamespaceChange,
   onScale,
   isScaling,
 }) => {
   const [scope, setScope] = useState<"namespace" | "selected">("namespace");
-  const [namespace, setNamespace] = useState(namespaces[0] || "default");
   const [operation, setOperation] = useState<"scale_up" | "scale_down">("scale_up");
   const [replicaCount, setReplicaCount] = useState(1);
   const [customReplica, setCustomReplica] = useState(false);
@@ -52,9 +56,10 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   const [liveProgress, setLiveProgress] = useState(0);
   const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Deployments are fetched for the dialog's own selected namespace so switching
-  // the namespace here always loads the matching deployment list.
-  const { data: deploymentsData } = useCachedDeployments(clusterId, namespace, open);
+  // Deployments are fetched for the page-level namespace, which this dialog drives
+  // via onNamespaceChange — so the picker and the dashboard cards never disagree.
+  const { data: deploymentsData, refetch: refetchDeployments, isFetching: isFetchingDeployments } =
+    useCachedDeployments(clusterId, namespace, open);
   const deployments = deploymentsData?.deployments ?? [];
   const filteredDeployments = deployments.filter((d) => d.namespace === namespace);
   const searchedDeployments = filteredDeployments.filter((d) =>
@@ -335,7 +340,7 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
 
               <div>
                 <label className="text-sm font-semibold text-gray-700">Namespace</label>
-                <select value={namespace} onChange={(e) => { setNamespace(e.target.value); setSelectedDeployments([]); setDepSearch(""); }} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-att-400 focus:ring-2 focus:ring-att-100">
+                <select value={namespace} onChange={(e) => { onNamespaceChange(e.target.value); setSelectedDeployments([]); setDepSearch(""); }} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-att-400 focus:ring-2 focus:ring-att-100">
                   {namespaces.map((ns) => <option key={ns} value={ns}>{ns}</option>)}
                 </select>
               </div>
@@ -344,9 +349,26 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="text-sm font-semibold text-gray-700">Select Deployments ({selectedDeployments.length} of {filteredDeployments.length} selected)</label>
-                    <button onClick={handleSelectAll} className="text-xs font-medium text-att-600 hover:text-att-700">
-                      {searchedDeployments.length > 0 && searchedDeployments.every((d) => selectedDeployments.includes(d.name)) ? "Deselect All" : "Select All Visible"}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => refetchDeployments()}
+                        disabled={isFetchingDeployments}
+                        title="Refresh deployment list"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-att-700 disabled:opacity-50"
+                      >
+                        <svg className={`h-3.5 w-3.5 ${isFetchingDeployments ? "animate-spin text-att-500" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                          <path d="M21 3v5h-5" />
+                          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                          <path d="M3 21v-5h5" />
+                        </svg>
+                        {isFetchingDeployments ? "Refreshing…" : "Refresh"}
+                      </button>
+                      <button onClick={handleSelectAll} className="text-xs font-medium text-att-600 hover:text-att-700">
+                        {searchedDeployments.length > 0 && searchedDeployments.every((d) => selectedDeployments.includes(d.name)) ? "Deselect All" : "Select All Visible"}
+                      </button>
+                    </div>
                   </div>
                   <input type="text" placeholder="Search deployments..." value={depSearch} onChange={(e) => setDepSearch(e.target.value)} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-att-400 focus:ring-2 focus:ring-att-100" />
                   <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-gray-200">

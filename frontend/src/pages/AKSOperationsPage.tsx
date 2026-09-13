@@ -1514,15 +1514,16 @@ const AKSOperationsPage: React.FC = () => {
           </select>
           {selectedCluster && (
             <div className="flex items-center gap-2">
-              {canWrite && (
+              {/* Read-only operation (backend requires auth only) — available to every user */}
               <button
                 onClick={() => deploymentsRefresh.start(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+                disabled={deploymentsRefresh.isRunning}
+                title="Refresh deployments from Kubernetes"
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50"
               >
                 {Icons.refresh(deploymentsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-                Sync from Kubernetes
+                {deploymentsRefresh.isRunning ? "Syncing…" : "Sync from Kubernetes"}
               </button>
-              )}
               {canWrite && (
               <button
                 onClick={() => setCreateDeploymentDialog(true)}

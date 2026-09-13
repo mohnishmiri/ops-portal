@@ -9,7 +9,7 @@
  * - Execution history
  */
 
-import React, { useState, useCallback, useMemo, useRef } from "react";
+import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
@@ -123,6 +123,13 @@ const EnvironmentSchedulerPage: React.FC = () => {
     if (raw && typeof raw === "object" && "namespaces" in raw) return (raw as { namespaces: string[] }).namespaces;
     return ["default"];
   }, [namespacesData]);
+  // Cluster selection resets the namespace to "default", but not every cluster has
+  // one. Without this the KPI cards would sit at 0 for a namespace that doesn't exist.
+  useEffect(() => {
+    if (!selectedCluster || nsList.length === 0) return;
+    if (!nsList.includes(selectedNamespace)) setSelectedNamespace(nsList[0]);
+  }, [selectedCluster, nsList, selectedNamespace]);
+
   const deploymentList = useMemo(() => (deployments ?? []) as Deployment[], [deployments]);
   const filteredClusters = useMemo(() => {
     const q = clusterSearch.trim().toLowerCase();
@@ -167,7 +174,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
       await Promise.all([
         refetchEnvStatus(),
         queryClient.invalidateQueries({ queryKey: ["environment-history"] }),
-        queryClient.invalidateQueries({ queryKey: ["deployments-cached"] }),
+        queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] }),
       ]);
     } finally {
       setIsRefreshing(false);
@@ -677,7 +684,9 @@ const EnvironmentSchedulerPage: React.FC = () => {
           open={showScaleDialog}
           onClose={() => setShowScaleDialog(false)}
           clusterId={selectedCluster.id}
+          namespace={selectedNamespace}
           namespaces={nsList}
+          onNamespaceChange={setSelectedNamespace}
           onScale={handleScale}
           isScaling={scaleEnvironment.isPending}
         />
