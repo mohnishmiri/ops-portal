@@ -70,11 +70,21 @@ class AKSHelmService:
                 os.unlink(kubeconfig)
 
     async def list_releases(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
-        """List Helm releases — tries CLI first, falls back to K8s API secrets."""
+        """List Helm releases — tries CLI first, falls back to K8s API secrets.
+
+        The CLI is absent from most container images, but it can also fail for
+        unrelated reasons (non-zero exit, timeout, unparseable output). Any of
+        those previously returned an empty list and the grid looked empty even
+        though releases existed, so every CLI failure now falls through to
+        reading Helm's own release secrets, which needs no extra tooling.
+        """
         try:
             return await self._list_releases_cli(cluster_id, namespace)
-        except FileNotFoundError:
-            logger.info("helm_cli_not_found_using_k8s_api_fallback")
+        except Exception as exc:
+            logger.info(
+                "helm_cli_unavailable_using_k8s_api_fallback",
+                error=str(exc)[:200],
+            )
             return await self._list_releases_from_secrets(cluster_id, namespace)
 
     async def _list_releases_cli(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
@@ -90,8 +100,10 @@ class AKSHelmService:
                 subprocess.run, cmd, capture_output=True, text=True, timeout=HELM_TIMEOUT, env=env
             )
             if proc.returncode != 0:
-                logger.warning("helm_list_failed", error=proc.stderr[:200])
-                return []
+                # Raise rather than return [] so list_releases falls back to the
+                # secrets reader; an empty list here is indistinguishable from
+                # "this cluster genuinely has no releases".
+                raise RuntimeError(f"helm list exited {proc.returncode}: {proc.stderr[:200]}")
             data = json.loads(proc.stdout or "[]")
             return data if isinstance(data, list) else []
         finally:

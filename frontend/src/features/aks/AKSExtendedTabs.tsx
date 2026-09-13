@@ -205,7 +205,8 @@ export const SecretsTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading, isError } = useCachedSecrets(cluster.id, nsFilter);
+  const { data, isFetching, isPlaceholderData, isError } = useCachedSecrets(cluster.id, nsFilter);
+  const isLoading = isFetching && isPlaceholderData;
   const backgroundSync = useAksBackgroundSync({
     resourceType: "secrets",
     clusterId: cluster.id,
@@ -344,7 +345,8 @@ export const ServicesTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading, isError } = useCachedServices(cluster.id, nsFilter);
+  const { data, isFetching, isPlaceholderData, isError } = useCachedServices(cluster.id, nsFilter);
+  const isLoading = isFetching && isPlaceholderData;
   const backgroundSync = useAksBackgroundSync({
     resourceType: "services",
     clusterId: cluster.id,
@@ -486,7 +488,8 @@ export const ConfigMapsTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading, isError } = useCachedConfigMaps(cluster.id, nsFilter);
+  const { data, isFetching, isPlaceholderData, isError } = useCachedConfigMaps(cluster.id, nsFilter);
+  const isLoading = isFetching && isPlaceholderData;
   const backgroundSync = useAksBackgroundSync({
     resourceType: "configmaps",
     clusterId: cluster.id,
@@ -624,7 +627,8 @@ export const IngressTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading, isError } = useCachedIngress(cluster.id, nsFilter);
+  const { data, isFetching, isPlaceholderData, isError } = useCachedIngress(cluster.id, nsFilter);
+  const isLoading = isFetching && isPlaceholderData;
   const backgroundSync = useAksBackgroundSync({
     resourceType: "ingress",
     clusterId: cluster.id,
@@ -745,7 +749,8 @@ export const HelmTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast,
 }) => {
   const nsFilter = useNsFilter(namespace);
-  const { data, isLoading, isError, refetch, isFetching } = useHelmReleases(cluster.id, nsFilter);
+  const { data, isError, refetch, isFetching, isPlaceholderData } = useHelmReleases(cluster.id, nsFilter);
+  const isLoading = isFetching && isPlaceholderData;
   const uninstallMut = useUninstallHelmRelease();
   const items = data?.releases || [];
   const helmAccessor = useCallback((r: typeof items[0], key: string): string | number => {
@@ -843,7 +848,8 @@ export const HelmTab: React.FC<TabProps> = ({
 export const AuditHistoryTab: React.FC<{ clusterId?: string; namespace?: string }> = ({
   clusterId, namespace,
 }) => {
-  const { data, isLoading, isError } = useAksAuditHistory(clusterId, namespace);
+  const { data, isFetching, isPlaceholderData, isError } = useAksAuditHistory(clusterId, namespace);
+  const isLoading = isFetching && isPlaceholderData;
   const items = data?.history || [];
   const auditAccessor = useCallback((h: typeof items[0], key: string): string | number => {
     switch (key) {
