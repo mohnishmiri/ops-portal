@@ -3339,7 +3339,7 @@ class AKSOperationsService(AKSResourceOperationsMixin):
         """
         Sync Deployments from K8s live API to DB (AzureResourceInventory).
 
-        Strategy: DELETE all existing 'aks_deployment' rows for this cluster,
+        Strategy: DELETE existing 'aks_deployment' rows in the synced scope,
         then INSERT fresh data.
         """
         deployments = await self._fetch_deployments_live(cluster_id, namespace)
@@ -3355,11 +3355,14 @@ class AKSOperationsService(AKSResourceOperationsMixin):
             }
 
         try:
-            # Delete existing aks_deployment rows for this cluster
+            # Delete existing aks_deployment rows for the scope being synced.
+            # A namespace-scoped sync only re-inserts that namespace, so purging
+            # the whole cluster here would wipe every other namespace's rows.
+            purge_prefix = f"{cluster_id}/deployment/{namespace}/" if namespace else f"{cluster_id}/deployment/"
             await self.db.execute(
                 delete(AzureResourceInventory).where(
                     AzureResourceInventory.resource_type == "aks_deployment",
-                    AzureResourceInventory.resource_id.like(f"{cluster_id}/deployment/%"),
+                    AzureResourceInventory.resource_id.like(f"{purge_prefix}%"),
                 )
             )
 

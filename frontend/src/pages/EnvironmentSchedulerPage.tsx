@@ -18,7 +18,6 @@ import { AutoRefreshIndicator, SortableHeader, type SortState, nextSortState } f
 import {
   useCachedClusters,
   useAksNamespaces,
-  useCachedDeployments,
   type AKSCluster,
   type Deployment,
 } from "../services/aksApi";
@@ -95,7 +94,6 @@ const EnvironmentSchedulerPage: React.FC = () => {
   // ── Data queries ──
   const { data: clustersData } = useCachedClusters();
   const { data: namespacesData } = useAksNamespaces(selectedCluster?.id ?? "");
-  const { data: deploymentsData } = useCachedDeployments(selectedCluster?.id ?? "", selectedNamespace);
   const { data: envStatus, refetch: refetchEnvStatus } = useEnvironmentStatus(selectedCluster?.id ?? "", selectedNamespace);
   const { data: schedules, isLoading: schedulesLoading } = useEnvironmentSchedules(selectedCluster?.id, selectedNamespace);
   const { data: sequences, isLoading: sequencesLoading } = useEnvironmentSequences(selectedCluster?.id, selectedNamespace);
@@ -103,7 +101,6 @@ const EnvironmentSchedulerPage: React.FC = () => {
   const { data: auditLogs } = useEnvironmentAuditLogs(100);
 
   const clusters = clustersData?.clusters ?? [];
-  const deployments = deploymentsData?.deployments ?? [];
 
   // ── Mutations ──
   const scaleEnvironment = useScaleEnvironment();
@@ -130,7 +127,13 @@ const EnvironmentSchedulerPage: React.FC = () => {
     if (!nsList.includes(selectedNamespace)) setSelectedNamespace(nsList[0]);
   }, [selectedCluster, nsList, selectedNamespace]);
 
-  const deploymentList = useMemo(() => (deployments ?? []) as Deployment[], [deployments]);
+  // /environment/status is served live from Kubernetes (bypass_cache=True), so this
+  // list and the KPI cards above share one source of truth. The DB-cached endpoint
+  // was showing pre-scale replica counts because only a background job writes it.
+  const deploymentList = useMemo(
+    () => (envStatus?.deployments ?? []) as unknown as Deployment[],
+    [envStatus],
+  );
   const filteredClusters = useMemo(() => {
     const q = clusterSearch.trim().toLowerCase();
     if (!q) return clusters;
@@ -687,6 +690,9 @@ const EnvironmentSchedulerPage: React.FC = () => {
           namespace={selectedNamespace}
           namespaces={nsList}
           onNamespaceChange={setSelectedNamespace}
+          deployments={deploymentList}
+          onRefresh={handleRefresh}
+          isRefreshing={isRefreshing}
           onScale={handleScale}
           isScaling={scaleEnvironment.isPending}
         />

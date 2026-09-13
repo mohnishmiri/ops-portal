@@ -9,7 +9,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { gridStyles } from "../../components/gridStyles";
-import { useCachedDeployments } from "../../services/aksApi";
+import type { Deployment } from "../../services/aksApi";
 import type { EnvironmentScaleRequest, EnvironmentScaleResult, StepDetail } from "../../services/environmentApi";
 
 interface Props {
@@ -20,6 +20,14 @@ interface Props {
   namespace: string;
   namespaces: string[];
   onNamespaceChange: (ns: string) => void;
+  /**
+   * Live deployments for `namespace`, supplied by the page from /environment/status.
+   * Deliberately NOT the DB-cached endpoint: that is only written by a background
+   * sync job, so it served replica counts from before the last scale.
+   */
+  deployments: Deployment[];
+  onRefresh: () => void;
+  isRefreshing: boolean;
   onScale: (request: EnvironmentScaleRequest) => Promise<EnvironmentScaleResult>;
   isScaling: boolean;
 }
@@ -33,6 +41,9 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   namespace,
   namespaces,
   onNamespaceChange,
+  deployments,
+  onRefresh,
+  isRefreshing,
   onScale,
   isScaling,
 }) => {
@@ -56,11 +67,8 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   const [liveProgress, setLiveProgress] = useState(0);
   const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Deployments are fetched for the page-level namespace, which this dialog drives
-  // via onNamespaceChange — so the picker and the dashboard cards never disagree.
-  const { data: deploymentsData, refetch: refetchDeployments, isFetching: isFetchingDeployments } =
-    useCachedDeployments(clusterId, namespace, open);
-  const deployments = deploymentsData?.deployments ?? [];
+  // Same live source as the dashboard KPI cards, scoped to the page-level namespace
+  // this dialog drives via onNamespaceChange — so the two can never disagree.
   const filteredDeployments = deployments.filter((d) => d.namespace === namespace);
   const searchedDeployments = filteredDeployments.filter((d) =>
     d.name.toLowerCase().includes(depSearch.toLowerCase()),
@@ -352,18 +360,18 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                     <div className="flex items-center gap-3">
                       <button
                         type="button"
-                        onClick={() => refetchDeployments()}
-                        disabled={isFetchingDeployments}
+                        onClick={onRefresh}
+                        disabled={isRefreshing}
                         title="Refresh deployment list"
                         className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-att-700 disabled:opacity-50"
                       >
-                        <svg className={`h-3.5 w-3.5 ${isFetchingDeployments ? "animate-spin text-att-500" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <svg className={`h-3.5 w-3.5 ${isRefreshing ? "animate-spin text-att-500" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
                           <path d="M21 3v5h-5" />
                           <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
                           <path d="M3 21v-5h5" />
                         </svg>
-                        {isFetchingDeployments ? "Refreshing…" : "Refresh"}
+                        {isRefreshing ? "Refreshing…" : "Refresh"}
                       </button>
                       <button onClick={handleSelectAll} className="text-xs font-medium text-att-600 hover:text-att-700">
                         {searchedDeployments.length > 0 && searchedDeployments.every((d) => selectedDeployments.includes(d.name)) ? "Deselect All" : "Select All Visible"}
