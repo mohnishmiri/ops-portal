@@ -1217,12 +1217,14 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
     runAlert.mutate(c.id, {
       onSuccess: (r) => {
         const message =
-          r.status === "no_certificates_due"
-            ? "No certificates are inside the alert windows — no report sent."
-            : r.status === "no_recipients"
-              ? `${r.critical} critical, ${r.warning} warning — but this rule has no recipients.`
-              : `Report sent to ${r.emails_sent} recipient(s): ${r.critical} critical, ${r.warning} warning.`;
-        onToast(message, r.status === "no_recipients" ? "error" : "success");
+          r.status === "collection_not_enabled"
+            ? "This collection is no longer enabled in the admin module — no report sent."
+            : r.status === "no_certificates_due"
+              ? "No certificates are inside the alert windows — no report sent."
+              : r.status === "no_recipients"
+                ? `${r.critical} critical, ${r.warning} warning — but this rule has no recipients.`
+                : `Report sent to ${r.emails_sent} recipient(s): ${r.critical} critical, ${r.warning} warning.`;
+        onToast(message, r.status === "no_recipients" || r.status === "collection_not_enabled" ? "error" : "success");
       },
       onError: (e) => onToast(certificateErrorMessage(e, "Failed to send the expiry report."), "error"),
       onSettled: () => setRunningId(null),

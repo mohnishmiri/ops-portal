@@ -17,6 +17,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
+    AuditLog,
     CertificateCollectionSnapshot,
     CertificateSnapshot,
     CertificateSyncStatus,
@@ -655,6 +656,28 @@ class CertificateSyncService:
         result = await self.db.execute(select(func.count(CertificateCollectionSnapshot.id)))
         return (result.scalar() or 0) > 0
 
+    async def get_enabled_collection_ids(self) -> list[int] | None:
+        """Return the collection ids the admin module has enabled.
+
+        ``None`` means no restriction has ever been configured, so the whole
+        cache is in scope. A stored list (even an empty one) is a deliberate
+        admin choice and is returned as-is; callers apply the same
+        "empty means unrestricted" rule the collections endpoint uses.
+        """
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.action == "cert_enabled_collections_config")
+            .where(AuditLog.resource_type == "certificate_config")
+            .order_by(AuditLog.timestamp.desc())
+            .limit(1)
+        )
+        result = await self.db.execute(stmt)
+        entry = result.scalar_one_or_none()
+        if entry and isinstance(entry.details, dict):
+            ids = entry.details.get("collection_ids", [])
+            return [int(i) for i in ids if isinstance(i, int | str) and str(i).lstrip("-").isdigit()]
+        return None
+
     async def count_collections(self, enabled_ids: list[int] | None = None) -> int:
         """Count cached collections, scoped to the admin-enabled set when configured.
 
@@ -736,15 +759,23 @@ class CertificateSyncService:
         collection_id: int | None,
         days_before_expiry: int,
         certificate_ids: list[int] | None = None,
+        collection_ids: list[int] | None = None,
         include_expired: bool = True,
     ) -> list[dict[str, Any]]:
         """Cached certificates expiring within a window, soonest first.
 
         ``collection_id=None`` spans every cached collection, which is what an
-        alert rule scoped to "all collections" needs. Already-expired
-        certificates are included by default: they are the most urgent thing a
-        report can surface, and silently dropping them would be worse than
-        noise.
+        alert rule scoped to "all collections" needs — but the cache also holds
+        collections the admin module has not enabled, and those are not part of
+        the portal's scope. Pass ``collection_ids`` to restrict the sweep to the
+        admin-enabled set; an empty/``None`` value means no restriction, the same
+        rule the collections endpoint applies.
+
+        Already-expired certificates are included by default: they are the most
+        urgent thing a report can surface, and silently dropping them would be
+        worse than noise. Soft-deleted certificates are not: they are gone from
+        Keyfactor and hidden from the grid, so alerting on them asks someone to
+        chase a certificate that no longer exists.
         """
         now = datetime.now(UTC)
         cutoff = (now + timedelta(days=days_before_expiry)).strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -752,9 +783,12 @@ class CertificateSyncService:
             CertificateSnapshot.not_after.isnot(None),
             CertificateSnapshot.not_after <= cutoff,
             CertificateSnapshot.revoked.is_(False),
+            CertificateSnapshot.deleted_at.is_(None),
         ]
         if collection_id is not None:
             conditions.append(CertificateSnapshot.collection_id == collection_id)
+        elif collection_ids:
+            conditions.append(CertificateSnapshot.collection_id.in_(collection_ids))
         if certificate_ids:
             conditions.append(CertificateSnapshot.certificate_id.in_(certificate_ids))
         if not include_expired:

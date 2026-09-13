@@ -754,20 +754,7 @@ async def _get_enabled_collection_ids(db: AsyncSession | None) -> list[int] | No
     """
     if db is None:
         return None
-    from sqlalchemy import select
-
-    stmt = (
-        select(AuditLog)
-        .where(AuditLog.action == "cert_enabled_collections_config")
-        .where(AuditLog.resource_type == "certificate_config")
-        .order_by(AuditLog.timestamp.desc())
-        .limit(1)
-    )
-    result = await db.execute(stmt)
-    entry = result.scalar_one_or_none()
-    if entry and isinstance(entry.details, dict):
-        return entry.details.get("collection_ids", [])
-    return None
+    return await CertificateSyncService(db).get_enabled_collection_ids()
 
 
 @router.get("/collections")

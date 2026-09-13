@@ -167,6 +167,35 @@ async def test_alert_includes_already_expired_certificates(db_session, automatio
     assert critical[0]["days_until_expiry"] < 0
 
 
+async def test_alert_excludes_soft_deleted_certificates(db_session, automation):
+    # A soft-deleted certificate is gone from Keyfactor and hidden from the
+    # grid; alerting on it sends someone chasing something that no longer exists.
+    await _cache_cert(db_session, cert_id=1, cn="live.att.com", days_out=10)
+    await _cache_cert(db_session, cert_id=2, cn="deleted.att.com", days_out=10)
+    await db_session.execute(
+        text("UPDATE cert_certificates SET deleted_at = CURRENT_TIMESTAMP WHERE certificate_id = 2")
+    )
+    await db_session.commit()
+    await _add_config(
+        db_session,
+        ALERT_CONFIG_ACTION,
+        {
+            "collection_id": 2573,
+            "enabled": True,
+            "warning_days": 60,
+            "critical_days": 30,
+            "notification_emails": ["leadership@att.com"],
+        },
+    )
+
+    result = await automation.run_expiry_alerts(trigger="manual")
+
+    report = automation.email.expiry_reports[0]
+    assert [c["common_name"] for c in report["critical"]] == ["live.att.com"]
+    assert "deleted.att.com" not in str(report)
+    assert result["results"][0]["critical"] == 1
+
+
 async def test_alert_sends_nothing_when_no_certificate_is_due(db_session, automation):
     await _cache_cert(db_session, cert_id=1, cn="safe.att.com", days_out=300)
     await _add_config(
@@ -187,6 +216,99 @@ async def test_alert_sends_nothing_when_no_certificate_is_due(db_session, automa
     assert automation.email.expiry_reports == []
     # The check itself is still recorded, so silence is provably not a failure.
     assert len(await _runs(db_session, ALERT_RUN_ACTION)) == 1
+
+
+async def _enable_collections(db_session, collection_ids: list[int]) -> None:
+    """Record the admin module's enabled-collections selection."""
+    db_session.add(
+        AuditLog(
+            user_id="admin",
+            user_email="admin@example.com",
+            action="cert_enabled_collections_config",
+            resource_type="certificate_config",
+            resource_id="certificates",
+            details={"collection_ids": collection_ids},
+            status="success",
+        )
+    )
+    await db_session.commit()
+
+
+async def test_all_collections_alert_covers_only_admin_enabled_collections(db_session, automation):
+    # The cache holds every collection Keyfactor exposes; the report must stay
+    # inside the collections the admin module actually enabled.
+    await _cache_cert(db_session, cert_id=1, cn="enabled.att.com", days_out=10, collection_id=2573)
+    await _cache_cert(db_session, cert_id=2, cn="not-enabled.att.com", days_out=10, collection_id=9999)
+    await _enable_collections(db_session, [2573])
+    await _add_config(
+        db_session,
+        ALERT_CONFIG_ACTION,
+        {
+            "collection_id": None,
+            "enabled": True,
+            "warning_days": 60,
+            "critical_days": 30,
+            "notification_emails": ["leadership@att.com"],
+        },
+    )
+
+    result = await automation.run_expiry_alerts(trigger="manual")
+
+    report = automation.email.expiry_reports[0]
+    assert [c["common_name"] for c in report["critical"]] == ["enabled.att.com"]
+    assert "not-enabled.att.com" not in str(report)
+    assert report["scope_label"] == "All enabled collections"
+    assert result["results"][0]["critical"] == 1
+
+
+async def test_all_collections_alert_spans_everything_when_admin_set_no_restriction(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="one.att.com", days_out=10, collection_id=2573)
+    await _cache_cert(db_session, cert_id=2, cn="two.att.com", days_out=10, collection_id=9999)
+    await _add_config(
+        db_session,
+        ALERT_CONFIG_ACTION,
+        {
+            "collection_id": None,
+            "enabled": True,
+            "warning_days": 60,
+            "critical_days": 30,
+            "notification_emails": ["leadership@att.com"],
+        },
+    )
+
+    await automation.run_expiry_alerts(trigger="manual")
+
+    report = automation.email.expiry_reports[0]
+    assert sorted(c["common_name"] for c in report["critical"]) == ["one.att.com", "two.att.com"]
+    assert report["scope_label"] == "All collections"
+
+
+async def test_alert_scoped_to_a_de_selected_collection_sends_nothing(db_session, automation):
+    # The rule was written before the admin narrowed the module's collections.
+    await _cache_cert(db_session, cert_id=2, cn="not-enabled.att.com", days_out=10, collection_id=9999)
+    await _enable_collections(db_session, [2573])
+    await _add_config(
+        db_session,
+        ALERT_CONFIG_ACTION,
+        {
+            "collection_id": 9999,
+            "collection_name": "AP-KF-RETIRED",
+            "enabled": True,
+            "warning_days": 60,
+            "critical_days": 30,
+            "notification_emails": ["leadership@att.com"],
+        },
+    )
+
+    result = await automation.run_expiry_alerts(trigger="manual")
+
+    assert result["results"][0]["status"] == "collection_not_enabled"
+    assert automation.email.expiry_reports == []
+    # Skipping is still recorded, so the panel can explain the silence.
+    runs = await _runs(db_session, ALERT_RUN_ACTION)
+    assert len(runs) == 1
+    assert runs[0].details["skipped"] is True
+    assert "not enabled in the admin module" in runs[0].details["summary"]
 
 
 async def test_disabled_alert_rule_is_skipped(db_session, automation):

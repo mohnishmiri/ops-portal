@@ -170,17 +170,54 @@ class CertificateAutomationService:
         return {"configs_evaluated": len(results), "results": results}
 
     async def run_alert_config(self, config: dict[str, Any], *, trigger: str = "manual") -> dict[str, Any]:
-        """Evaluate one alert rule and email its report."""
+        """Evaluate one alert rule and email its report.
+
+        The rule is always evaluated inside the admin module's enabled
+        collections. The cache holds every collection Keyfactor exposes, so an
+        "all collections" rule left unfiltered would report certificates the
+        portal does not manage — the report has to match what the Certificates
+        page shows.
+        """
         warning_days = int(config.get("warning_days") or 60)
         critical_days = int(config.get("critical_days") or 30)
         recipients = [e for e in (config.get("notification_emails") or []) if e and e.strip()]
-        scope = config.get("collection_name") or (
-            f"collection {config['collection_id']}" if config.get("collection_id") else "All collections"
-        )
+        collection_id = config.get("collection_id")
+        # Empty/None means the admin has not restricted the module (same rule as
+        # the collections endpoint), so every cached collection stays in scope.
+        enabled_ids = await self.sync.get_enabled_collection_ids()
+        restricted = bool(enabled_ids)
+
+        if collection_id is None:
+            scope = "All enabled collections" if restricted else "All collections"
+        else:
+            scope = config.get("collection_name") or f"collection {collection_id}"
+
+        if collection_id is not None and restricted and int(collection_id) not in set(enabled_ids or []):
+            # The collection was de-selected in the admin module after this rule
+            # was written; reporting on it would leak data the portal no longer
+            # manages.
+            await self._record_run(
+                action=ALERT_RUN_ACTION,
+                config=config,
+                summary=f"Expiry alert for {scope} skipped: collection is not enabled in the admin module",
+                details={"trigger": trigger, "critical": 0, "warning": 0, "emails_sent": 0, "skipped": True},
+                # The audit grid renders anything but "success" as a failure, and
+                # a deliberate skip is not one; the summary carries the reason.
+                outcome="success",
+                actor=config.get("created_by") or "scheduler",
+            )
+            return {
+                "config_id": config["id"],
+                "status": "collection_not_enabled",
+                "critical": 0,
+                "warning": 0,
+                "emails_sent": 0,
+            }
 
         due = await self.sync.list_due_certificates(
-            collection_id=config.get("collection_id"),
+            collection_id=collection_id,
             days_before_expiry=max(warning_days, critical_days),
+            collection_ids=enabled_ids,
         )
 
         rows = []
