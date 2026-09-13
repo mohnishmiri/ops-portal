@@ -11,7 +11,7 @@
 
 import React, { useState, useEffect } from "react";
 import { gridStyles, SortableHeader, type SortState, nextSortState } from "../../components/gridStyles";
-import type { ExecutionHistory } from "../../services/environmentApi";
+import type { ExecutionHistory, StepDetail } from "../../services/environmentApi";
 import apiClient from "../../services/apiClient";
 
 interface Props {
@@ -39,6 +39,10 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
   const [pageSize, setPageSize] = useState(20);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [detailSearch, setDetailSearch] = useState("");
+  const [stepSort, setStepSort] = useState<SortState<"deployment" | "change" | "status" | "duration">>({
+    key: "status",
+    direction: "asc",
+  });
   const [runningElapsed, setRunningElapsed] = useState<Record<number, number>>({});
   const [logDeployment, setLogDeployment] = useState<string | null>(null);
   const [logContent, setLogContent] = useState<string>("");
@@ -128,12 +132,28 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
   // Detail filtering for expanded row
   const getFilteredDetails = (h: ExecutionHistory) => {
     if (!h.step_details) return [];
-    if (!detailSearch) return h.step_details;
-    return h.step_details.filter(
-      (d) =>
-        d.deployment.toLowerCase().includes(detailSearch.toLowerCase()) ||
-        d.status.toLowerCase().includes(detailSearch.toLowerCase()),
-    );
+    const rows = detailSearch
+      ? h.step_details.filter(
+          (d) =>
+            d.deployment.toLowerCase().includes(detailSearch.toLowerCase()) ||
+            d.status.toLowerCase().includes(detailSearch.toLowerCase()),
+        )
+      : h.step_details;
+
+    const dir = stepSort.direction === "asc" ? 1 : -1;
+    const compare = (a: StepDetail, b: StepDetail): number => {
+      switch (stepSort.key) {
+        // Sort the change column by its magnitude, not its rendered text.
+        case "change": return (a.target_replicas - (a.current_replicas ?? 0)) - (b.target_replicas - (b.current_replicas ?? 0));
+        case "duration": return (a.duration_seconds ?? 0) - (b.duration_seconds ?? 0);
+        case "status": return a.status.localeCompare(b.status);
+        default: return a.deployment.localeCompare(b.deployment);
+      }
+    };
+    return [...rows].sort((a, b) => {
+      const c = compare(a, b);
+      return c !== 0 ? c * dir : a.deployment.localeCompare(b.deployment);
+    });
   };
 
   return (
@@ -249,10 +269,10 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                           <table className="w-full text-xs">
                             <thead className="bg-gray-50 sticky top-0">
                               <tr>
-                                <th className="px-3 py-1.5 text-left font-semibold text-gray-600">Deployment Name</th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Scale Change</th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Status</th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Duration</th>
+                                <th className="px-3 py-1.5 text-left font-semibold text-gray-600"><SortableHeader label="Deployment Name" active={stepSort.key === "deployment"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "deployment"))} /></th>
+                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600"><SortableHeader label="Scale Change" active={stepSort.key === "change"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "change"))} align="center" /></th>
+                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600"><SortableHeader label="Status" active={stepSort.key === "status"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "status"))} align="center" /></th>
+                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600"><SortableHeader label="Duration" active={stepSort.key === "duration"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "duration"))} align="center" /></th>
                                 <th className="px-3 py-1.5 text-left font-semibold text-gray-600">Error</th>
                               </tr>
                             </thead>
@@ -302,8 +322,8 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                                     )}
                                   </td>
                                   <td className="px-3 py-1.5 text-center text-xs text-gray-500">
-                                    {(d as unknown as Record<string, unknown>).duration_seconds != null
-                                      ? formatElapsed(Math.round(Number((d as unknown as Record<string, unknown>).duration_seconds)))
+                                    {d.duration_seconds != null
+                                      ? formatElapsed(Math.round(d.duration_seconds))
                                       : d.status === "running" && (d as unknown as Record<string, unknown>).started_at
                                         ? <StepElapsedTimer startedAt={String((d as unknown as Record<string, unknown>).started_at)} />
                                         : "\u2014"}

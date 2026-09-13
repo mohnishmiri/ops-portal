@@ -87,6 +87,8 @@ const EnvironmentSchedulerPage: React.FC = () => {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [cardFilter, setCardFilter] = useState<string | null>(null);
   const [cardDetailSearch, setCardDetailSearch] = useState("");
+  type CardSortKey = "name" | "replicas" | "ready" | "available" | "status";
+  const [cardSort, setCardSort] = useState<SortState<CardSortKey>>({ key: "name", direction: "asc" });
   const [clusterSearch, setClusterSearch] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,6 +161,41 @@ const EnvironmentSchedulerPage: React.FC = () => {
       return true;
     });
   }, [envStatus]);
+
+  const cardRows = useMemo(() => {
+    if (!cardFilter) return [];
+    const q = cardDetailSearch.trim().toLowerCase();
+    const rows = getFilteredDeployments(cardFilter)
+      .map((d) => {
+        const replicas = (d.replicas as number) || 0;
+        const ready = (d.ready_replicas as number) || 0;
+        const available = (d.available_replicas as number) || 0;
+        return {
+          name: (d.name as string) ?? "",
+          replicas,
+          ready,
+          available,
+          status: replicas === 0 ? "stopped" : ready >= replicas ? "running" : ready < replicas ? "scaling" : "failed",
+        };
+      })
+      .filter((r) => r.name.toLowerCase().includes(q));
+
+    const dir = cardSort.direction === "asc" ? 1 : -1;
+    const compare = (a: typeof rows[0], b: typeof rows[0]): number => {
+      switch (cardSort.key) {
+        case "replicas": return a.replicas - b.replicas;
+        case "ready": return a.ready - b.ready;
+        case "available": return a.available - b.available;
+        case "status": return a.status.localeCompare(b.status);
+        default: return a.name.localeCompare(b.name);
+      }
+    };
+    // Name is the tie-breaker so equal values keep a stable, predictable order.
+    return rows.sort((a, b) => {
+      const c = compare(a, b);
+      return c !== 0 ? c * dir : a.name.localeCompare(b.name);
+    });
+  }, [cardFilter, cardDetailSearch, getFilteredDeployments, cardSort]);
 
   // ── Refresh helper — refetches status + history, then does a delayed follow-up
   //    to capture K8s state after pods have had time to settle (~8s)
@@ -503,7 +540,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
                       {cardFilter === "total" ? "All" : cardFilter} Deployments
                     </h4>
                     <span className="inline-flex items-center rounded-full bg-att-50 px-2.5 py-0.5 text-xs font-medium text-att-700">
-                      {getFilteredDeployments(cardFilter).length}
+                      {cardRows.length}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -521,22 +558,16 @@ const EnvironmentSchedulerPage: React.FC = () => {
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 sticky top-0">
                       <tr>
-                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Deployment Name</th>
-                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600">Replicas</th>
-                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600">Ready</th>
-                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600">Available</th>
-                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600">Status</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600"><SortableHeader label="Deployment Name" active={cardSort.key === "name"} direction={cardSort.direction} onClick={() => setCardSort(nextSortState(cardSort, "name"))} /></th>
+                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600"><SortableHeader label="Replicas" active={cardSort.key === "replicas"} direction={cardSort.direction} onClick={() => setCardSort(nextSortState(cardSort, "replicas"))} align="center" /></th>
+                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600"><SortableHeader label="Ready" active={cardSort.key === "ready"} direction={cardSort.direction} onClick={() => setCardSort(nextSortState(cardSort, "ready"))} align="center" /></th>
+                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600"><SortableHeader label="Available" active={cardSort.key === "available"} direction={cardSort.direction} onClick={() => setCardSort(nextSortState(cardSort, "available"))} align="center" /></th>
+                        <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600"><SortableHeader label="Status" active={cardSort.key === "status"} direction={cardSort.direction} onClick={() => setCardSort(nextSortState(cardSort, "status"))} align="center" /></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {getFilteredDeployments(cardFilter)
-                        .filter((d) => (d.name as string).toLowerCase().includes(cardDetailSearch.toLowerCase()))
-                        .map((dep, idx) => {
-                          const name = dep.name as string;
-                          const replicas = (dep.replicas as number) || 0;
-                          const ready = (dep.ready_replicas as number) || 0;
-                          const available = (dep.available_replicas as number) || 0;
-                          const status = replicas === 0 ? "stopped" : ready >= replicas ? "running" : ready < replicas ? "scaling" : "failed";
+                      {cardRows
+                        .map(({ name, replicas, ready, available, status }, idx) => {
                           return (
                             <tr key={idx} className="border-t border-gray-100 hover:bg-gray-50">
                               <td className="px-4 py-2 font-mono text-xs">{name}</td>
@@ -558,7 +589,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
                             </tr>
                           );
                         })}
-                      {getFilteredDeployments(cardFilter).filter((d) => (d.name as string).toLowerCase().includes(cardDetailSearch.toLowerCase())).length === 0 && (
+                      {cardRows.length === 0 && (
                         <tr><td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-400">No deployments match</td></tr>
                       )}
                     </tbody>

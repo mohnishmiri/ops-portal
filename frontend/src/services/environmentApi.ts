@@ -41,6 +41,9 @@ export interface StepDetail {
   status: string;
   error?: string;
   order?: number;
+  // Set by the sequence executor per step (environment_scaling_service.py).
+  started_at?: string;
+  duration_seconds?: number;
 }
 
 export interface EnvironmentSchedule {

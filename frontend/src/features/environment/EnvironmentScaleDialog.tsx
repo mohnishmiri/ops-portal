@@ -66,6 +66,10 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   const [selectedFirst, setSelectedFirst] = useState(false);
   // Search in result details
   const [resultSearch, setResultSearch] = useState("");
+  const [resultSort, setResultSort] = useState<SortState<"deployment" | "current" | "target" | "status">>({
+    key: "status",
+    direction: "asc",
+  });
   const [resultPage, setResultPage] = useState(1);
   const [resultPageSize, setResultPageSize] = useState(20);
 
@@ -162,10 +166,25 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   };
 
   // Result pagination
-  const resultDetails = (result?.details ?? []).filter((d) =>
-    d.deployment.toLowerCase().includes(resultSearch.toLowerCase()) ||
-    d.status.toLowerCase().includes(resultSearch.toLowerCase()),
-  );
+  const resultDetails = useMemo(() => {
+    const rows = (result?.details ?? []).filter((d) =>
+      d.deployment.toLowerCase().includes(resultSearch.toLowerCase()) ||
+      d.status.toLowerCase().includes(resultSearch.toLowerCase()),
+    );
+    const dir = resultSort.direction === "asc" ? 1 : -1;
+    const compare = (a: StepDetail, b: StepDetail): number => {
+      switch (resultSort.key) {
+        case "current": return (a.current_replicas ?? 0) - (b.current_replicas ?? 0);
+        case "target": return a.target_replicas - b.target_replicas;
+        case "status": return a.status.localeCompare(b.status);
+        default: return a.deployment.localeCompare(b.deployment);
+      }
+    };
+    return [...rows].sort((a, b) => {
+      const c = compare(a, b);
+      return c !== 0 ? c * dir : a.deployment.localeCompare(b.deployment);
+    });
+  }, [result, resultSearch, resultSort]);
   const resultTotalPages = Math.max(1, Math.ceil(resultDetails.length / resultPageSize));
   const resultSafePage = Math.min(resultPage, resultTotalPages);
   const resultStart = resultDetails.length === 0 ? 0 : (resultSafePage - 1) * resultPageSize + 1;
@@ -313,10 +332,10 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                 <table className={gridStyles.table}>
                   <thead className={gridStyles.head}>
                     <tr>
-                      <th className={gridStyles.headerCell}>Deployment Name</th>
-                      <th className={gridStyles.headerCellCenter}>Current Replicas</th>
-                      <th className={gridStyles.headerCellCenter}>Target Replicas</th>
-                      <th className={gridStyles.headerCellCenter}>Status</th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Deployment Name" active={resultSort.key === "deployment"} direction={resultSort.direction} onClick={() => setResultSort(nextSortState(resultSort, "deployment"))} /></th>
+                      <th className={gridStyles.headerCellCenter}><SortableHeader label="Current Replicas" active={resultSort.key === "current"} direction={resultSort.direction} onClick={() => setResultSort(nextSortState(resultSort, "current"))} align="center" /></th>
+                      <th className={gridStyles.headerCellCenter}><SortableHeader label="Target Replicas" active={resultSort.key === "target"} direction={resultSort.direction} onClick={() => setResultSort(nextSortState(resultSort, "target"))} align="center" /></th>
+                      <th className={gridStyles.headerCellCenter}><SortableHeader label="Status" active={resultSort.key === "status"} direction={resultSort.direction} onClick={() => setResultSort(nextSortState(resultSort, "status"))} align="center" /></th>
                     </tr>
                   </thead>
                   <tbody>
