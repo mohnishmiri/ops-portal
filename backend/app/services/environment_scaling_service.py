@@ -885,17 +885,30 @@ class EnvironmentScalingService:
         )
 
     async def _send_schedule_notification(self, schedule, result: dict) -> None:
-        """Send professional email notification after a scheduled job execution."""
-        if not schedule.failure_notification:
+        """Send professional email notification after a scheduled job execution.
+
+        Recipients are always determined by:
+        1. The schedule creator's email (created_by_email) — always included.
+        2. Any additional addresses in failure_notification (comma-separated) — merged in.
+        """
+        # Collect recipients: creator first, then any extra notification addresses
+        recipient_set: set[str] = set()
+        if schedule.created_by_email:
+            recipient_set.add(schedule.created_by_email.strip())
+        if schedule.failure_notification:
+            for addr in schedule.failure_notification.split(","):
+                addr = addr.strip()
+                if addr:
+                    recipient_set.add(addr)
+
+        if not recipient_set:
             return
 
         try:
             from app.services.email_notification_service import EmailNotificationService
 
             email_service = EmailNotificationService(self.db)
-            recipients = [e.strip() for e in schedule.failure_notification.split(",") if e.strip()]
-            if not recipients:
-                return
+            recipients = sorted(recipient_set)
 
             status = result.get("status", "unknown")
             job_name = schedule.job_name

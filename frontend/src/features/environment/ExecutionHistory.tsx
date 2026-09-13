@@ -250,7 +250,7 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                             <thead className="bg-gray-50 sticky top-0">
                               <tr>
                                 <th className="px-3 py-1.5 text-left font-semibold text-gray-600">Deployment Name</th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Target Replicas</th>
+                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Scale Change</th>
                                 <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Status</th>
                                 <th className="px-3 py-1.5 text-center font-semibold text-gray-600">Duration</th>
                                 <th className="px-3 py-1.5 text-left font-semibold text-gray-600">Error</th>
@@ -272,7 +272,17 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                                       <span className="text-xs">{d.deployment}</span>
                                     )}
                                   </td>
-                                  <td className="px-3 py-1.5 text-center">{d.target_replicas}</td>
+                                  <td className="px-3 py-1.5 text-center font-mono text-xs">
+                                    {d.current_replicas != null ? (
+                                      <span className="inline-flex items-center gap-1">
+                                        <span className="text-gray-500">{d.current_replicas}</span>
+                                        <svg className="h-3 w-3 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                                        <span className={d.target_replicas > (d.current_replicas ?? 0) ? "text-green-700 font-semibold" : d.target_replicas < (d.current_replicas ?? 0) ? "text-red-700 font-semibold" : "text-gray-600"}>{d.target_replicas}</span>
+                                      </span>
+                                    ) : (
+                                      <span>{d.target_replicas}</span>
+                                    )}
+                                  </td>
                                   <td className="px-3 py-1.5 text-center">
                                     {d.status === "running" ? (
                                       <span className="inline-flex items-center gap-1 text-xs font-medium text-att-600">

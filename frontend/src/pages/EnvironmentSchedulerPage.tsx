@@ -9,7 +9,8 @@
  * - Execution history
  */
 
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
@@ -77,6 +78,7 @@ type Tab = "dashboard" | "schedules" | "sequences" | "history" | "audit";
 
 const EnvironmentSchedulerPage: React.FC = () => {
   const { canWrite } = useAuth();
+  const queryClient = useQueryClient();
 
   // ── Cluster/namespace selection ──
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
@@ -87,12 +89,14 @@ const EnvironmentSchedulerPage: React.FC = () => {
   const [cardFilter, setCardFilter] = useState<string | null>(null);
   const [cardDetailSearch, setCardDetailSearch] = useState("");
   const [clusterSearch, setClusterSearch] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Data queries ──
   const { data: clustersData } = useCachedClusters();
   const { data: namespacesData } = useAksNamespaces(selectedCluster?.id ?? "");
   const { data: deploymentsData } = useCachedDeployments(selectedCluster?.id ?? "", selectedNamespace);
-  const { data: envStatus } = useEnvironmentStatus(selectedCluster?.id ?? "", selectedNamespace);
+  const { data: envStatus, refetch: refetchEnvStatus } = useEnvironmentStatus(selectedCluster?.id ?? "", selectedNamespace);
   const { data: schedules, isLoading: schedulesLoading } = useEnvironmentSchedules(selectedCluster?.id, selectedNamespace);
   const { data: sequences, isLoading: sequencesLoading } = useEnvironmentSequences(selectedCluster?.id, selectedNamespace);
   const { data: history, isLoading: historyLoading } = useExecutionHistory(selectedCluster?.id, selectedNamespace);
@@ -146,6 +150,30 @@ const EnvironmentSchedulerPage: React.FC = () => {
     });
   }, [envStatus]);
 
+  // ── Refresh helper — refetches status + history, then does a delayed follow-up
+  //    to capture K8s state after pods have had time to settle (~8s)
+  const scheduleDelayedRefetch = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ["environment-status"] });
+      queryClient.invalidateQueries({ queryKey: ["environment-history"] });
+    }, 8_000);
+  }, [queryClient]);
+
+  const handleRefresh = useCallback(async () => {
+    if (!selectedCluster) return;
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        refetchEnvStatus(),
+        queryClient.invalidateQueries({ queryKey: ["environment-history"] }),
+        queryClient.invalidateQueries({ queryKey: ["deployments-cached"] }),
+      ]);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [selectedCluster, refetchEnvStatus, queryClient]);
+
   // ── Handlers ──
   const handleScale = useCallback(
     async (request: Parameters<typeof scaleEnvironment.mutateAsync>[0]) => {
@@ -155,9 +183,11 @@ const EnvironmentSchedulerPage: React.FC = () => {
           ? `Dry run complete: ${result.total_deployments} deployments previewed`
           : `Scaled ${result.completed}/${result.total_deployments} deployments`;
       setToast({ message: msg, type: result.failed > 0 ? "warning" : "success" });
+      // K8s takes a few seconds — schedule a follow-up refetch so counts settle
+      scheduleDelayedRefetch();
       return result;
     },
-    [scaleEnvironment],
+    [scaleEnvironment, scheduleDelayedRefetch],
   );
 
   const handleCreateSchedule = useCallback(
@@ -191,9 +221,11 @@ const EnvironmentSchedulerPage: React.FC = () => {
         message: `Schedule executed: ${result.completed}/${result.total_deployments} completed`,
         type: result.failed > 0 ? "warning" : "success",
       });
+      // Follow-up refetch so KPI cards reflect post-scale K8s state
+      scheduleDelayedRefetch();
       return result;
     },
-    [runScheduleNow],
+    [runScheduleNow, scheduleDelayedRefetch],
   );
 
   const handleCreateSequence = useCallback(
@@ -275,6 +307,20 @@ const EnvironmentSchedulerPage: React.FC = () => {
           </div>
           <div className="flex items-center gap-3">
             <AutoRefreshIndicator />
+            <button
+              onClick={handleRefresh}
+              disabled={!selectedCluster || isRefreshing}
+              title="Refresh deployment status"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-40"
+            >
+              <svg className={`h-4 w-4 ${isRefreshing ? "animate-spin text-att-500" : "text-gray-500"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                <path d="M21 3v5h-5"/>
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                <path d="M3 21v-5h5"/>
+              </svg>
+              {isRefreshing ? "Refreshing…" : "Refresh"}
+            </button>
             {canWrite && (
               <button
                 onClick={() => setShowScaleDialog(true)}
