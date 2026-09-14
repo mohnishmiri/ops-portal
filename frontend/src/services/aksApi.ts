@@ -2153,6 +2153,51 @@ export interface HelmRelease {
   updated?: string;
 }
 
+export interface HelmRepo {
+  name: string;
+  url: string;
+}
+
+/** A row from `helm search repo -o json`. */
+export interface HelmChartSearchResult {
+  name: string;
+  version: string;
+  app_version?: string;
+  description?: string;
+}
+
+/** A revision from `helm history -o json`. */
+export interface HelmRevision {
+  revision: number;
+  updated?: string;
+  status: string;
+  chart?: string;
+  app_version?: string;
+  description?: string;
+}
+
+/** The `helm status -o json` payload (shape varies by chart). */
+export interface HelmStatusResult {
+  name?: string;
+  info?: {
+    status?: string;
+    first_deployed?: string;
+    last_deployed?: string;
+    description?: string;
+    notes?: string;
+  };
+  version?: number;
+  namespace?: string;
+}
+
+/** Shared result envelope from the backend Helm command wrapper. */
+export interface HelmCommandResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+  data?: unknown;
+}
+
 export interface AksAuditEntry {
   id: number;
   timestamp: string | null;
@@ -2414,6 +2459,106 @@ export async function fetchHelmReleases(clusterId: string, namespace?: string) {
 export async function uninstallHelmRelease(clusterId: string, releaseName: string, namespace: string) {
   const { data } = await apiClient.delete(`${API_PREFIX}/helm/uninstall`, { params: { cluster_id: clusterId, release_name: releaseName, namespace } });
   return data;
+}
+
+export async function fetchHelmRepos() {
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/repos`, { timeout: 15000 });
+  return data as { repos: HelmRepo[]; count: number };
+}
+
+export async function addHelmRepo(payload: {
+  name: string;
+  url: string;
+  username?: string;
+  password?: string;
+}) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/repo/add`, payload, { timeout: 60000 });
+  return data as HelmCommandResult;
+}
+
+export async function updateHelmRepos(name?: string) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/repo/update`, { name: name ?? null }, { timeout: 120000 });
+  return data as HelmCommandResult;
+}
+
+export async function removeHelmRepo(name: string) {
+  const { data } = await apiClient.delete(`${API_PREFIX}/helm/repo/remove`, { params: { name }, timeout: 30000 });
+  return data as HelmCommandResult;
+}
+
+export async function searchHelmCharts(keyword?: string, versions = false) {
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/search`, {
+    params: { keyword: keyword || undefined, versions },
+    timeout: 30000,
+  });
+  return data as { charts: HelmChartSearchResult[]; count: number };
+}
+
+export async function fetchHelmStatus(clusterId: string, releaseName: string, namespace: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/status`, {
+    params: { cluster_id: clusterId, release_name: releaseName, namespace },
+    timeout: 30000,
+  });
+  return data as HelmCommandResult & { data?: HelmStatusResult };
+}
+
+export async function fetchHelmHistory(clusterId: string, releaseName: string, namespace: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/history`, {
+    params: { cluster_id: clusterId, release_name: releaseName, namespace },
+    timeout: 30000,
+  });
+  return data as { revisions: HelmRevision[]; count: number };
+}
+
+export async function installHelmRelease(payload: {
+  cluster_id: string;
+  release_name: string;
+  chart: string;
+  namespace: string;
+  version?: string;
+  values_yaml?: string;
+  create_namespace?: boolean;
+}) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/install`, payload, { timeout: 180000 });
+  return data as HelmCommandResult;
+}
+
+export async function upgradeHelmRelease(payload: {
+  cluster_id: string;
+  release_name: string;
+  chart: string;
+  namespace: string;
+  version?: string;
+  values_yaml?: string;
+}) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/upgrade`, payload, { timeout: 180000 });
+  return data as HelmCommandResult;
+}
+
+export async function rollbackHelmRelease(payload: {
+  cluster_id: string;
+  release_name: string;
+  namespace: string;
+  revision: number;
+}) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/rollback`, payload, { timeout: 180000 });
+  return data as HelmCommandResult;
+}
+
+export async function templateHelmChart(payload: {
+  chart: string;
+  release_name?: string;
+  namespace?: string;
+  version?: string;
+  values_yaml?: string;
+}) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/template`, payload, { timeout: 60000 });
+  return data as HelmCommandResult;
+}
+
+export async function lintHelmChart(payload: { chart: string; values_yaml?: string }) {
+  const { data } = await apiClient.post(`${API_PREFIX}/helm/lint`, payload, { timeout: 60000 });
+  return data as HelmCommandResult;
 }
 
 export async function fetchAksNamespaces(clusterId: string) {
@@ -2727,6 +2872,130 @@ export function useUninstallHelmRelease() {
       qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
+}
+
+/**
+ * Helm repositories live in the Helm client's home directory on whichever replica
+ * serves the request, so these are not cluster-scoped and are not polled.
+ */
+export function useHelmRepos(enabled = true) {
+  return useQuery({
+    queryKey: ["aks-helm-repos"],
+    queryFn: fetchHelmRepos,
+    enabled,
+    staleTime: 30_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useAddHelmRepo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: addHelmRepo,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["aks-helm-repos"] });
+      qc.invalidateQueries({ queryKey: ["aks-helm-search"] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useUpdateHelmRepos() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name?: string) => updateHelmRepos(name),
+    onSuccess: () => {
+      // Indexes changed, so cached search results are stale.
+      qc.invalidateQueries({ queryKey: ["aks-helm-search"] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useRemoveHelmRepo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: removeHelmRepo,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["aks-helm-repos"] });
+      qc.invalidateQueries({ queryKey: ["aks-helm-search"] });
+      qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useHelmChartSearch(keyword: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-helm-search", keyword],
+    queryFn: () => searchHelmCharts(keyword),
+    enabled,
+    staleTime: 30_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useHelmStatus(clusterId: string, releaseName?: string, namespace?: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-helm-status", clusterId, releaseName, namespace],
+    queryFn: () => fetchHelmStatus(clusterId, releaseName!, namespace!),
+    enabled: enabled && !!clusterId && !!releaseName && !!namespace,
+    staleTime: 10_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useHelmHistory(clusterId: string, releaseName?: string, namespace?: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-helm-history", clusterId, releaseName, namespace],
+    queryFn: () => fetchHelmHistory(clusterId, releaseName!, namespace!),
+    enabled: enabled && !!clusterId && !!releaseName && !!namespace,
+    staleTime: 10_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** Releases, status, and history all change after a write — invalidate together. */
+function invalidateHelmRelease(qc: ReturnType<typeof useQueryClient>, clusterId: string) {
+  qc.invalidateQueries({ queryKey: ["aks-helm-releases", clusterId] });
+  qc.invalidateQueries({ queryKey: ["aks-helm-status", clusterId] });
+  qc.invalidateQueries({ queryKey: ["aks-helm-history", clusterId] });
+  qc.invalidateQueries({ queryKey: ["aks-audit-history"] });
+}
+
+export function useInstallHelmRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: installHelmRelease,
+    onSuccess: (_, v) => invalidateHelmRelease(qc, v.cluster_id),
+  });
+}
+
+export function useUpgradeHelmRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: upgradeHelmRelease,
+    onSuccess: (_, v) => invalidateHelmRelease(qc, v.cluster_id),
+  });
+}
+
+export function useRollbackHelmRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: rollbackHelmRelease,
+    onSuccess: (_, v) => invalidateHelmRelease(qc, v.cluster_id),
+  });
+}
+
+export function useTemplateHelmChart() {
+  return useMutation({ mutationFn: templateHelmChart });
+}
+
+export function useLintHelmChart() {
+  return useMutation({ mutationFn: lintHelmChart });
 }
 
 export function useAksNamespaces(clusterId: string | undefined, enabled = true) {

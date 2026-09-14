@@ -14,7 +14,6 @@ import {
   useCachedServices,
   useCachedConfigMaps,
   useCachedIngress,
-  useHelmReleases,
   useAksAuditHistory,
   useAksBackgroundSync,
   useDeleteSecret,
@@ -22,7 +21,6 @@ import {
   useDeleteConfigMap,
   useDeleteIngress,
   useUpdateIngress,
-  useUninstallHelmRelease,
   useCreateSecret,
   useUpdateSecret,
   useCreateService,
@@ -41,6 +39,7 @@ import {
   useSearchPagination,
 } from "./aksGridShared";
 import { ResourceActionButtons } from "./ResourceActionButtons";
+import HelmManagement from "./HelmManagement";
 import {
   ConfigMapCreateModal,
   ConfigMapEditModal,
@@ -745,105 +744,22 @@ export const IngressTab: React.FC<TabProps> = ({
   );
 };
 
+/**
+ * Helm now has its own surface (repos, search, install/upgrade/rollback, status,
+ * history, template, lint), so this is a thin adapter onto that component.
+ */
 export const HelmTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast,
-}) => {
-  const nsFilter = useNsFilter(namespace);
-  const { data, isError, refetch, isFetching, isPlaceholderData } = useHelmReleases(cluster.id, nsFilter);
-  const isLoading = isFetching && isPlaceholderData;
-  const uninstallMut = useUninstallHelmRelease();
-  const items = data?.releases || [];
-  const helmAccessor = useCallback((r: typeof items[0], key: string): string | number => {
-    switch (key) {
-      case "namespace": return r.namespace.toLowerCase();
-      case "chart": return (r.chart || "").toLowerCase();
-      case "revision": return Number(r.revision) || 0;
-      case "status": return (r.status || "").toLowerCase();
-      default: return r.name.toLowerCase();
-    }
-  }, []);
-  const { sort, setSort, sorted } = useGridSort(items, helmAccessor, { key: "name", direction: "asc" });
-  const pag = useSearchPagination(sorted, useCallback((r, q) => r.name.toLowerCase().includes(q), []));
-  const [deleteTarget, setDeleteTarget] = useState<{ namespace: string; name: string } | null>(null);
-
-  return (
-    <div className="space-y-4">
-      <ExtendedTabToolbar
-        title="Helm Releases"
-        namespaceSelect={<NamespaceSelect namespaces={namespaces} value={namespace} onChange={onNamespaceChange} />}
-        onSync={() => refetch()}
-        syncing={isFetching}
-        canWrite={canWrite}
-      />
-      {(
-        <div className={gridStyles.shell}>
-          <GridSearchBar
-            search={pag.search}
-            onSearch={pag.setSearch}
-            onPage={pag.setPage}
-            totalItems={items.length}
-            shownItems={pag.filtered.length}
-            placeholder="Search releases..."
-          />
-          <div className="overflow-x-auto">
-          <table className={gridStyles.table}>
-            <thead className={gridStyles.head}>
-              <tr>
-                <th className={gridStyles.headerCell}><SortableHeader label="Release" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Namespace" active={sort.key === "namespace"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "namespace"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Chart" active={sort.key === "chart"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "chart"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Revision" active={sort.key === "revision"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "revision"))} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "status"))} /></th>
-                <th className={gridStyles.headerCellCenter}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pag.paged.length === 0 && (
-                <GridStateRow colSpan={6} isLoading={isLoading} isError={isError} emptyText="No Helm releases found" />
-              )}
-              {pag.paged.map((r) => (
-                <tr key={`${r.namespace}/${r.name}`} className={gridStyles.row}>
-                  <td className={gridStyles.strongCell}>{r.name}</td>
-                  <td className={gridStyles.cell}>{r.namespace}</td>
-                  <td className={gridStyles.cell}>{r.chart}</td>
-                  <td className={gridStyles.cell}>{r.revision}</td>
-                  <td className={gridStyles.cell}>{r.status}</td>
-                  <td className={gridStyles.centerCell}>
-                    {canWrite && (
-                      <ResourceActionButtons
-                        canWrite={canWrite}
-                        showEdit={false}
-                        showView={false}
-                        onDelete={() => setDeleteTarget({ namespace: r.namespace, name: r.name })}
-                      />
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
-          <GridPager page={pag.page} totalPages={pag.totalPages} onPage={pag.setPage} />
-        </div>
-      )}
-      {deleteTarget && (
-        <DeleteConfirmModal
-          title="Uninstall Helm Release"
-          message={`Uninstall release "${deleteTarget.name}" in namespace "${deleteTarget.namespace}"?`}
-          confirming={uninstallMut.isPending}
-          onClose={() => setDeleteTarget(null)}
-          onConfirm={() => uninstallMut.mutate(
-            { clusterId: cluster.id, releaseName: deleteTarget.name, namespace: deleteTarget.namespace },
-            {
-              onSuccess: () => { showToast(`Uninstalled ${deleteTarget.name}`); setDeleteTarget(null); },
-              onError: () => showToast("Uninstall failed", "error"),
-            }
-          )}
-        />
-      )}
-    </div>
-  );
-};
+}) => (
+  <HelmManagement
+    cluster={cluster}
+    namespace={namespace}
+    namespaces={namespaces}
+    onNamespaceChange={onNamespaceChange}
+    canWrite={canWrite}
+    showToast={showToast}
+  />
+);
 
 export const AuditHistoryTab: React.FC<{ clusterId?: string; namespace?: string }> = ({
   clusterId, namespace,

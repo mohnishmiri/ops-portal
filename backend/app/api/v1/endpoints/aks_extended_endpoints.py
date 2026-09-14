@@ -101,6 +101,30 @@ class HelmRollbackRequest(BaseModel):
     revision: int = Field(ge=1)
 
 
+class HelmRepoAddRequest(BaseModel):
+    name: str
+    url: str
+    username: str | None = None
+    password: str | None = None
+
+
+class HelmRepoUpdateRequest(BaseModel):
+    name: str | None = None
+
+
+class HelmTemplateRequest(BaseModel):
+    chart: str
+    release_name: str = "release-name"
+    namespace: str | None = None
+    version: str | None = None
+    values_yaml: str | None = None
+
+
+class HelmLintRequest(BaseModel):
+    chart: str
+    values_yaml: str | None = None
+
+
 def register_extended_routes(router, *, get_service, write_audit, serialize_audit):
     """Register extended routes on the AKS router."""
 
@@ -749,6 +773,200 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         helm = AKSHelmService(service)
         releases = await helm.list_releases(cluster_id, namespace)
         return {"releases": releases, "count": len(releases)}
+
+    # -- Helm: repositories, search, inspection, chart tooling ---------
+    #
+    # Reads (repos, search, status, history, template, lint) need auth only.
+    # Anything that mutates cluster or client state requires WRITE and is audited.
+
+    @router.get("/helm/repos", summary="List configured Helm chart repositories")
+    async def helm_repo_list(
+        user: UserContext = Depends(get_current_user),
+        service=Depends(get_service),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService
+
+        repos = await AKSHelmService(service).repo_list()
+        return {"repos": repos, "count": len(repos)}
+
+    @router.post("/helm/repo/add", summary="Add a Helm chart repository")
+    async def helm_repo_add(
+        request: HelmRepoAddRequest,
+        http_request: Request,
+        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        service=Depends(get_service),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            result = await AKSHelmService(service).repo_add(
+                request.name,
+                request.url,
+                username=request.username,
+                password=request.password,
+            )
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        await write_audit(
+            db,
+            request=http_request,
+            user=user,
+            action="helm_repo_add",
+            resource_type="helm_repo",
+            resource_name=request.name,
+            status="success" if result.get("success") else "failed",
+            # Credentials are never written to the audit trail.
+            details={"url": request.url, "error": result.get("error")},
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=502, detail=result.get("error", "helm repo add failed"))
+        return result
+
+    @router.post("/helm/repo/update", summary="Refresh cached Helm chart indexes")
+    async def helm_repo_update(
+        request: HelmRepoUpdateRequest,
+        http_request: Request,
+        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        service=Depends(get_service),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            result = await AKSHelmService(service).repo_update(request.name)
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        await write_audit(
+            db,
+            request=http_request,
+            user=user,
+            action="helm_repo_update",
+            resource_type="helm_repo",
+            resource_name=request.name or "all",
+            status="success" if result.get("success") else "failed",
+            details={"error": result.get("error")},
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=502, detail=result.get("error", "helm repo update failed"))
+        return result
+
+    @router.delete("/helm/repo/remove", summary="Remove a Helm chart repository")
+    async def helm_repo_remove(
+        http_request: Request,
+        name: str = Query(...),
+        user: UserContext = Depends(require_role(UserRole.WRITE)),
+        service=Depends(get_service),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            result = await AKSHelmService(service).repo_remove(name)
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        await write_audit(
+            db,
+            request=http_request,
+            user=user,
+            action="helm_repo_remove",
+            resource_type="helm_repo",
+            resource_name=name,
+            status="success" if result.get("success") else "failed",
+            details={"error": result.get("error")},
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=502, detail=result.get("error", "helm repo remove failed"))
+        return result
+
+    @router.get("/helm/search", summary="Search configured repositories for charts")
+    async def helm_search_repo(
+        keyword: str | None = Query(default=None),
+        versions: bool = Query(default=False),
+        user: UserContext = Depends(get_current_user),
+        service=Depends(get_service),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            charts = await AKSHelmService(service).search_repo(keyword, versions=versions)
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"charts": charts, "count": len(charts)}
+
+    @router.get("/helm/status", summary="Current status of a Helm release")
+    async def helm_release_status(
+        cluster_id: str = Query(...),
+        release_name: str = Query(...),
+        namespace: str = Query(...),
+        user: UserContext = Depends(get_current_user),
+        service=Depends(get_service),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            result = await AKSHelmService(service).release_status(cluster_id, release_name, namespace)
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not result.get("success"):
+            raise HTTPException(status_code=502, detail=result.get("error", "helm status failed"))
+        return result
+
+    @router.get("/helm/history", summary="Revision history of a Helm release")
+    async def helm_release_history(
+        cluster_id: str = Query(...),
+        release_name: str = Query(...),
+        namespace: str = Query(...),
+        user: UserContext = Depends(get_current_user),
+        service=Depends(get_service),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            revisions = await AKSHelmService(service).release_history(cluster_id, release_name, namespace)
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"revisions": revisions, "count": len(revisions)}
+
+    @router.post("/helm/template", summary="Render chart manifests without installing")
+    async def helm_template(
+        request: HelmTemplateRequest,
+        user: UserContext = Depends(get_current_user),
+        service=Depends(get_service),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            result = await AKSHelmService(service).template_chart(
+                request.chart,
+                release_name=request.release_name,
+                namespace=request.namespace,
+                version=request.version,
+                values_yaml=request.values_yaml,
+            )
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not result.get("success"):
+            raise HTTPException(status_code=422, detail=result.get("error", "helm template failed"))
+        return result
+
+    @router.post("/helm/lint", summary="Lint a chart without installing it")
+    async def helm_lint(
+        request: HelmLintRequest,
+        user: UserContext = Depends(get_current_user),
+        service=Depends(get_service),
+    ) -> dict:
+        from app.services.aks_helm_service import AKSHelmService, HelmValidationError
+
+        try:
+            result = await AKSHelmService(service).lint_chart(request.chart, values_yaml=request.values_yaml)
+        except HelmValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # A failing lint is a valid answer, not a server error - return the output.
+        return result
 
     @router.post("/helm/install")
     async def helm_install(
