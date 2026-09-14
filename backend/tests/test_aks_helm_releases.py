@@ -82,3 +82,66 @@ async def test_unparseable_cli_output_falls_back(tmp_path, monkeypatch):
 
     assert await svc.list_releases("cluster-1") == []
     svc._list_releases_from_secrets.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_reports_warning_instead_of_raising(tmp_path, monkeypatch):
+    """A cluster-client failure must not 500 the endpoint.
+
+    _get_k8s_clients performs auth and can raise. It used to sit outside the
+    fallback's try block, so the exception escaped list_releases entirely.
+    """
+    svc = AKSHelmService(SimpleNamespace())
+    svc._kubeconfig_path = AsyncMock(side_effect=RuntimeError("kubeconfig unavailable"))
+    svc._aks = SimpleNamespace(_get_k8s_clients=AsyncMock(side_effect=RuntimeError("AADSTS700016: app not found")))
+
+    result = await svc.list_releases_detailed("cluster-1")
+
+    assert result["releases"] == []
+    assert result["source"] == "unavailable"
+    assert "AADSTS700016" in result["warning"]
+    assert "all namespaces" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_warning_names_the_namespace_scope(tmp_path):
+    """The message should say which scope failed, so the user knows what to retry."""
+    svc = AKSHelmService(SimpleNamespace())
+    svc._kubeconfig_path = AsyncMock(side_effect=RuntimeError("no cli"))
+    svc._aks = SimpleNamespace(_get_k8s_clients=AsyncMock(side_effect=RuntimeError("forbidden")))
+
+    result = await svc.list_releases_detailed("cluster-1", "com-att-attcc-prod")
+
+    assert "namespace 'com-att-attcc-prod'" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_secrets_fallback_reports_source(tmp_path, monkeypatch):
+    """A successful fallback is not a degraded answer — no warning."""
+    svc = _service_with_kubeconfig(tmp_path)
+
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("helm")
+
+    monkeypatch.setattr("subprocess.run", _raise)
+    svc._list_releases_from_secrets = AsyncMock(return_value=[{"name": "akvtoaks"}])
+
+    result = await svc.list_releases_detailed("cluster-1")
+
+    assert result["source"] == "k8s-secrets"
+    assert result["warning"] is None
+    assert result["releases"] == [{"name": "akvtoaks"}]
+
+
+@pytest.mark.asyncio
+async def test_cli_success_reports_source(tmp_path, monkeypatch):
+    svc = _service_with_kubeconfig(tmp_path)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout='[{"name": "ingress"}]', stderr=""),
+    )
+
+    result = await svc.list_releases_detailed("cluster-1")
+
+    assert result["source"] == "helm-cli"
+    assert result["warning"] is None

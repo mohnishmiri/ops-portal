@@ -2452,8 +2452,19 @@ export async function fetchIngressDetail(clusterId: string, namespace: string, n
 }
 
 export async function fetchHelmReleases(clusterId: string, namespace?: string) {
-  const { data } = await apiClient.get(`${API_PREFIX}/helm/releases`, { params: { cluster_id: clusterId, namespace }, timeout: 8000 });
-  return data as { releases: HelmRelease[]; count: number };
+  const { data } = await apiClient.get(`${API_PREFIX}/helm/releases`, {
+    params: { cluster_id: clusterId, namespace },
+    // Listing across all namespaces walks every namespace on the cluster; 8s was
+    // not enough on large clusters and showed up as a spurious load failure.
+    timeout: 45000,
+  });
+  return data as {
+    releases: HelmRelease[];
+    count: number;
+    source?: string;
+    /** Set when the lookup degraded — releases may be incomplete. */
+    warning?: string | null;
+  };
 }
 
 export async function uninstallHelmRelease(clusterId: string, releaseName: string, namespace: string) {

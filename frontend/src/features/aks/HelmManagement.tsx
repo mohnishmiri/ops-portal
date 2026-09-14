@@ -47,6 +47,7 @@ import {
   useSearchPagination,
 } from "./aksGridShared";
 import { ModalShell } from "./K8sResourceModals";
+import { IconActionButton } from "./ResourceActionButtons";
 
 type ToastFn = (message: string, type?: "success" | "error" | "info" | "warning") => void;
 
@@ -202,25 +203,22 @@ function RepoManagerModal({ onClose, canWrite, showToast }: { onClose: () => voi
                 <td className={gridStyles.monoCell}>{r.url}</td>
                 {canWrite && (
                   <td className={gridStyles.centerCell}>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await removeMut.mutateAsync(r.name);
-                          showToast(`Repository "${r.name}" removed`);
-                        } catch (e) {
-                          showToast(errText(e, "helm repo remove failed"), "error");
-                        }
-                      }}
-                      disabled={removeMut.isPending}
-                      className="rounded-lg p-2 text-red-600 hover:bg-red-50 disabled:opacity-50"
-                      title="helm repo remove"
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6" />
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      </svg>
-                    </button>
+                    <div className="flex justify-center">
+                      <IconActionButton
+                        icon="delete"
+                        tone="red"
+                        title="Remove repository (helm repo remove)"
+                        disabled={removeMut.isPending}
+                        onClick={async () => {
+                          try {
+                            await removeMut.mutateAsync(r.name);
+                            showToast(`Repository "${r.name}" removed`);
+                          } catch (e) {
+                            showToast(errText(e, "helm repo remove failed"), "error");
+                          }
+                        }}
+                      />
+                    </div>
                   </td>
                 )}
               </tr>
@@ -315,13 +313,14 @@ function ChartSearchModal({
                   </td>
                   {canWrite && (
                     <td className={gridStyles.centerCell}>
-                      <button
-                        type="button"
-                        onClick={() => onInstall(c.name, c.version)}
-                        className="rounded-lg border border-green-200 px-2.5 py-1 text-xs font-medium text-green-700 hover:bg-green-50"
-                      >
-                        Install
-                      </button>
+                      <div className="flex justify-center">
+                        <IconActionButton
+                          icon="install"
+                          tone="teal"
+                          title={`Install ${c.name} (helm install)`}
+                          onClick={() => onInstall(c.name, c.version)}
+                        />
+                      </div>
                     </td>
                   )}
                 </tr>
@@ -671,15 +670,15 @@ function HistoryModal({
                     </td>
                     {canWrite && (
                       <td className={gridStyles.centerCell}>
-                        <button
-                          type="button"
-                          onClick={() => setConfirm(r)}
-                          disabled={isCurrent}
-                          title={isCurrent ? "Already the current revision" : `Roll back to revision ${r.revision}`}
-                          className="rounded-lg border border-amber-200 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-40"
-                        >
-                          Rollback
-                        </button>
+                        <div className="flex justify-center">
+                          <IconActionButton
+                            icon="rollback"
+                            tone="amber"
+                            disabled={isCurrent}
+                            title={isCurrent ? "Already the current revision" : `Roll back to revision ${r.revision} (helm rollback)`}
+                            onClick={() => setConfirm(r)}
+                          />
+                        </div>
                       </td>
                     )}
                   </tr>
@@ -772,8 +771,11 @@ type SortKey = "name" | "namespace" | "chart" | "revision" | "status";
 
 const HelmManagement: React.FC<Props> = ({ cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast }) => {
   const nsFilter = namespace || undefined;
-  const { data, isError, refetch, isFetching, isPlaceholderData } = useHelmReleases(cluster.id, nsFilter);
+  const { data, isError, error, refetch, isFetching, isPlaceholderData } = useHelmReleases(cluster.id, nsFilter);
   const isLoading = isFetching && isPlaceholderData;
+  // The endpoint returns 200 with a warning when it could not read releases, so
+  // the rest of the tab (repos, search, template) stays usable.
+  const warning = data?.warning ?? null;
   const uninstallMut = useUninstallHelmRelease();
 
   const items = data?.releases ?? [];
@@ -836,6 +838,13 @@ const HelmManagement: React.FC<Props> = ({ cluster, namespace, namespaces, onNam
         )}
       </div>
 
+      {warning && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-semibold">Helm releases could not be listed</p>
+          <p className="mt-1 break-words text-xs">{warning}</p>
+        </div>
+      )}
+
       <div className={gridStyles.shell}>
         <GridSearchBar
           search={pag.search}
@@ -864,7 +873,18 @@ const HelmManagement: React.FC<Props> = ({ cluster, namespace, namespaces, onNam
                   colSpan={6}
                   isLoading={isLoading}
                   isError={isError}
-                  emptyText={pag.search ? "No releases match your search" : "No Helm releases found"}
+                  errorText={
+                    (error as Error | null)?.message?.toLowerCase().includes("timeout")
+                      ? "Timed out listing releases. Select a single namespace — scanning every namespace is much slower."
+                      : `Failed to load releases: ${(error as Error | null)?.message ?? "unknown error"}`
+                  }
+                  emptyText={
+                    warning
+                      ? "Releases unavailable — see the message above."
+                      : pag.search
+                        ? "No releases match your search"
+                        : "No Helm releases found"
+                  }
                 />
               )}
               {pag.paged.map((r) => (
@@ -884,20 +904,12 @@ const HelmManagement: React.FC<Props> = ({ cluster, namespace, namespaces, onNam
                   </td>
                   <td className={gridStyles.centerCell}>
                     <div className="flex justify-center gap-1">
-                      <button type="button" onClick={() => setStatusTarget(r)} title="helm status" className="rounded-lg px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">
-                        Status
-                      </button>
-                      <button type="button" onClick={() => setHistoryTarget(r)} title="helm history" className="rounded-lg px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50">
-                        History
-                      </button>
+                      <IconActionButton icon="status" tone="teal" title="View status (helm status)" onClick={() => setStatusTarget(r)} />
+                      <IconActionButton icon="history" tone="blue" title="Revision history (helm history)" onClick={() => setHistoryTarget(r)} />
                       {canWrite && (
                         <>
-                          <button type="button" onClick={() => setUpgradeTarget(r)} title="helm upgrade" className="rounded-lg px-2 py-1 text-xs font-medium text-att-600 hover:bg-att-50">
-                            Upgrade
-                          </button>
-                          <button type="button" onClick={() => setDeleteTarget(r)} title="helm uninstall" className="rounded-lg px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50">
-                            Uninstall
-                          </button>
+                          <IconActionButton icon="upgrade" tone="purple" title="Upgrade release (helm upgrade)" onClick={() => setUpgradeTarget(r)} />
+                          <IconActionButton icon="delete" tone="red" title="Uninstall release (helm uninstall)" onClick={() => setDeleteTarget(r)} />
                         </>
                       )}
                     </div>

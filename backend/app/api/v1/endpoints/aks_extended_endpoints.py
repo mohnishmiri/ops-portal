@@ -771,8 +771,16 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
         from app.services.aks_helm_service import AKSHelmService
 
         helm = AKSHelmService(service)
-        releases = await helm.list_releases(cluster_id, namespace)
-        return {"releases": releases, "count": len(releases)}
+        result = await helm.list_releases_detailed(cluster_id, namespace)
+        releases = result["releases"]
+        # A degraded lookup returns 200 with a warning: the tab stays usable for
+        # repo/search/template work even when releases cannot be read.
+        return {
+            "releases": releases,
+            "count": len(releases),
+            "source": result["source"],
+            "warning": result["warning"],
+        }
 
     # -- Helm: repositories, search, inspection, chart tooling ---------
     #

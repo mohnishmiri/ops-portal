@@ -246,23 +246,50 @@ class AKSHelmService:
                 with contextlib.suppress(OSError):
                     os.unlink(values_path)
 
-    async def list_releases(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
-        """List Helm releases — tries CLI first, falls back to K8s API secrets.
+    async def list_releases_detailed(self, cluster_id: str, namespace: str | None = None) -> dict[str, Any]:
+        """List Helm releases, reporting which source answered and why.
 
-        The CLI is absent from most container images, but it can also fail for
-        unrelated reasons (non-zero exit, timeout, unparseable output). Any of
-        those previously returned an empty list and the grid looked empty even
-        though releases existed, so every CLI failure now falls through to
-        reading Helm's own release secrets, which needs no extra tooling.
+        The CLI is absent from most container images and can also fail for
+        unrelated reasons (non-zero exit, timeout, unparseable output), so any
+        CLI failure falls through to reading Helm's own release secrets, which
+        needs no extra tooling.
+
+        Neither source raises to the caller. "No releases" and "could not
+        determine" are different answers, so the second is returned as a
+        ``warning`` rather than an empty list that looks like success.
         """
         try:
-            return await self._list_releases_cli(cluster_id, namespace)
+            releases = await self._list_releases_cli(cluster_id, namespace)
+            return {"releases": releases, "source": "helm-cli", "warning": None}
         except Exception as exc:
-            logger.info(
-                "helm_cli_unavailable_using_k8s_api_fallback",
-                error=str(exc)[:200],
+            cli_error = str(exc)[:300]
+            logger.info("helm_cli_unavailable_using_k8s_api_fallback", error=cli_error)
+
+        try:
+            releases = await self._list_releases_from_secrets(cluster_id, namespace)
+            return {"releases": releases, "source": "k8s-secrets", "warning": None}
+        except Exception as exc:
+            detail = str(exc)[:300]
+            logger.warning(
+                "helm_list_unavailable",
+                cluster_id=cluster_id,
+                namespace=namespace or "all",
+                error=detail,
             )
-            return await self._list_releases_from_secrets(cluster_id, namespace)
+            scope = f"namespace '{namespace}'" if namespace else "all namespaces"
+            return {
+                "releases": [],
+                "source": "unavailable",
+                "warning": (
+                    f"Could not list Helm releases for {scope}. The Helm CLI is unavailable and "
+                    f"reading Helm's release secrets failed: {detail}"
+                ),
+            }
+
+    async def list_releases(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
+        """Releases only. Prefer list_releases_detailed when the reason matters."""
+        result = await self.list_releases_detailed(cluster_id, namespace)
+        return result["releases"]
 
     async def _list_releases_cli(self, cluster_id: str, namespace: str | None = None) -> list[dict[str, Any]]:
         kubeconfig = await self._kubeconfig_path(cluster_id)
@@ -292,8 +319,10 @@ class AKSHelmService:
         import base64
         import gzip
 
-        _, core_v1, _ = await self._aks._get_k8s_clients(cluster_id)
+        # _get_k8s_clients must be inside the try: it performs auth and can raise,
+        # and an escape here would 500 the endpoint instead of degrading.
         try:
+            _, core_v1, _ = await self._aks._get_k8s_clients(cluster_id)
             if namespace:
                 secrets = await asyncio.to_thread(
                     core_v1.list_namespaced_secret,
@@ -355,8 +384,10 @@ class AKSHelmService:
                 result.append(r)
             return sorted(result, key=lambda x: x.get("name", ""))
         except Exception as e:
-            logger.warning("helm_list_from_secrets_failed", error=str(e))
-            return []
+            # Raise so list_releases_detailed can explain the failure. Returning []
+            # here made a permissions error look like a cluster with no releases.
+            logger.warning("helm_list_from_secrets_failed", error=str(e)[:300])
+            raise
 
     async def install_release(
         self,
