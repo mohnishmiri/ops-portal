@@ -368,6 +368,9 @@ incident.
    deployed into, with soft-delete and purge protection enabled.
 2. Grant the portal's identity `secrets: get/set/delete` on that vault **only**.
 3. Set `CERT_KEY_ESCROW_ENABLED=true` and `CERT_KEY_ESCROW_VAULT=<vault-name>`.
+   On Kubernetes these are plain (non-secret) values under `backend.env` in the
+   Helm chart — see [helm/ops-portal/values.yaml](../helm/ops-portal/values.yaml)
+   and the per-environment `values-dev.yaml` / `values-prod.yaml` overrides.
 4. Apply [migrations/add_cert_key_escrow.sql](../backend/migrations/add_cert_key_escrow.sql)
    if your deployment manages schema out of band (otherwise it is created at startup).
 

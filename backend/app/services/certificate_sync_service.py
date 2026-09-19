@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Text, cast, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
@@ -806,6 +806,7 @@ class CertificateSyncService:
         cn: str | None = None,
         thumbprint: str | None = None,
         issuer: str | None = None,
+        san: str | None = None,
         cert_status: str | None = None,
         expires_in_days: int | None = None,
         deleted_only: bool = False,
@@ -831,6 +832,11 @@ class CertificateSyncService:
             conditions.append(CertificateSnapshot.thumbprint.ilike(f"%{thumbprint}%"))
         if issuer:
             conditions.append(CertificateSnapshot.issuer_dn.ilike(f"%{issuer}%"))
+        if san:
+            # ``sans`` is a JSON array of strings; matching against its text form
+            # searches every entry in one clause without a lateral unnest, and
+            # keeps the filter portable across the JSONB and TEXT column shapes.
+            conditions.append(cast(CertificateSnapshot.sans, Text).ilike(f"%{san}%"))
         if cert_status and not deleted_only:
             conditions.append(CertificateSnapshot.status == cert_status.lower())
         elif not deleted_only:

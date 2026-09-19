@@ -173,6 +173,16 @@ async def test_list_certificates_with_filters(app, admin_client):
     assert resp.status_code == 200
 
 
+async def test_list_san_filter_reaches_keyfactor_as_a_san_clause(app, admin_client):
+    # The live path has no DB to filter, so the SAN term has to be expressed in
+    # Keyfactor's query language or the filter silently returns everything.
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.get("/api/v1/certificates", params={"san": "portal.dev.att.com"})
+    assert resp.status_code == 200
+    assert svc.last_query == 'SAN -contains "portal.dev.att.com"'
+
+
 async def test_list_cert_status_maps_to_numeric_certstate(app, admin_client):
     # Keyfactor's CertState field is numeric; "Revoked" must become CertState -eq "2"
     # (a name would make Keyfactor return "Invalid CertState value: Revoked.").

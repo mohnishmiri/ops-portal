@@ -12,7 +12,11 @@ backend:
     enabled: false
   autoscaling:
     enabled: false
-  env: {}
+  env:
+    # Private-key escrow for Keyfactor-issued certificates. Stage escrow vault;
+    # the backend identity needs secrets get/set/delete on it.
+    CERT_KEY_ESCROW_ENABLED: "true"
+    CERT_KEY_ESCROW_VAULT: "attcc-eastus2-stge-kv"
   resources:
     requests:
       cpu: 2

@@ -154,6 +154,30 @@ describe("CertificatesPage rendering states", () => {
   });
 });
 
+describe("CertificatesPage SAN search", () => {
+  it("sends the SAN term to the list query and clears it with the other filters", () => {
+    setRole({ isAdmin: true, canEdit: true });
+    mockList({});
+    renderPage();
+
+    fireEvent.change(screen.getByLabelText(/Filter by subject alternative name/i), {
+      target: { value: "  portal.dev.att.com  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Search$/i }));
+
+    // A multi-SAN certificate is looked up by a name that is not its CN, so the
+    // term has to reach the backend rather than filter the current page.
+    expect(vi.mocked(certApi.useCertificates).mock.calls.at(-1)?.[0]).toMatchObject({
+      san: "portal.dev.att.com",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Clear$/i }));
+
+    expect(vi.mocked(certApi.useCertificates).mock.calls.at(-1)?.[0].san).toBeUndefined();
+    expect(screen.getByLabelText(/Filter by subject alternative name/i)).toHaveValue("");
+  });
+});
+
 describe("CertificatesPage role gating", () => {
   it("admin sees enroll, revoke, and delete actions", () => {
     setRole({ isAdmin: true, canEdit: true });

@@ -1375,7 +1375,7 @@ const CertificatesPage: React.FC = () => {
   const [collectionId, setCollectionId] = useState<number | undefined>(undefined);
   const [collectionSearch, setCollectionSearch] = useState("");
 
-  const [draft, setDraft] = useState({ cn: "", thumbprint: "", issuer: "" });
+  const [draft, setDraft] = useState({ cn: "", thumbprint: "", issuer: "", san: "" });
   const [filters, setFilters] = useState<CertificateListParams>({ page: 1, page_size: PAGE_SIZE });
   const [expiryDays, setExpiryDays] = useState<number | undefined>(undefined);
   // Revoked and deleted are search filters rather than tiles: they are ways of
@@ -1433,9 +1433,9 @@ const CertificatesPage: React.FC = () => {
 
   const applyFilters = () => {
     setPage(1);
-    setFilters({ page: 1, page_size: PAGE_SIZE, cn: draft.cn.trim() || undefined, thumbprint: draft.thumbprint.trim() || undefined, issuer: draft.issuer.trim() || undefined });
+    setFilters({ page: 1, page_size: PAGE_SIZE, cn: draft.cn.trim() || undefined, thumbprint: draft.thumbprint.trim() || undefined, issuer: draft.issuer.trim() || undefined, san: draft.san.trim() || undefined });
   };
-  const clearFilters = () => { setDraft({ cn: "", thumbprint: "", issuer: "" }); setPage(1); setFilters({ page: 1, page_size: PAGE_SIZE }); setExpiryDays(undefined); setStatusFilter("active"); };
+  const clearFilters = () => { setDraft({ cn: "", thumbprint: "", issuer: "", san: "" }); setPage(1); setFilters({ page: 1, page_size: PAGE_SIZE }); setExpiryDays(undefined); setStatusFilter("active"); };
   const openModal = (kind: ModalKind, cert?: Certificate) => { setSelected(cert ?? null); setModal(kind); };
   const closeModal = () => { setModal(null); setSelected(null); };
 
@@ -1603,13 +1603,14 @@ const CertificatesPage: React.FC = () => {
       <div className={gridStyles.shell}>
         {/* Toolbar */}
         <div className={gridStyles.panelHeader}>
-          {/* The three text filters share the available width rather than each
+          {/* The text filters share the available width rather than each
               claiming a fixed 16rem, which is what pushed Search and Clear onto
               a second row once the status filter joined them. */}
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
             <input aria-label="Filter by common name" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="Common name…" value={draft.cn} onChange={(e) => setDraft({ ...draft, cn: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
             <input aria-label="Filter by thumbprint" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="Thumbprint…" value={draft.thumbprint} onChange={(e) => setDraft({ ...draft, thumbprint: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
             <input aria-label="Filter by issuer" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="Issuer…" value={draft.issuer} onChange={(e) => setDraft({ ...draft, issuer: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
+            <input aria-label="Filter by subject alternative name" className={`${gridStyles.toolbarInput} w-auto min-w-[7rem] flex-1`} placeholder="SAN…" value={draft.san} onChange={(e) => setDraft({ ...draft, san: e.target.value })} onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
             <select
               aria-label="Filter by certificate status"
               className={`${gridStyles.toolbarInput} w-36 shrink-0`}

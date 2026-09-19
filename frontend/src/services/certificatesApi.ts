@@ -99,6 +99,8 @@ export interface CertificateListParams {
   cn?: string;
   thumbprint?: string;
   issuer?: string;
+  /** Subject alternative name (contains match across every SAN on the certificate). */
+  san?: string;
   cert_status?: string;
   collection_id?: number;
   expires_in_days?: number;

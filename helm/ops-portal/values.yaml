@@ -38,7 +38,17 @@ backend:
     maxReplicas: 5
     targetCPUUtilizationPercentage: 70
 
-  env: {}
+  # Plain (non-secret) backend config. Rendered after the Key Vault-backed env
+  # below, so a key set here wins over a synced secret of the same name.
+  env:
+    # ── Certificate private-key escrow ──
+    # Keyfactor releases a PFX only at issuance, so without escrow a certificate
+    # can be loaded into exactly one Key Vault and never again. Point this at a
+    # dedicated escrow vault (not a vault certificates are deployed into); the
+    # backend's workload identity needs secrets get/set/delete on it. Escrow
+    # stays off unless both values are set — see docs/CERTIFICATE_MANAGEMENT.md.
+    CERT_KEY_ESCROW_ENABLED: "false"
+    CERT_KEY_ESCROW_VAULT: ""
 
   azureKeyVaultSecrets:
     enabled: false

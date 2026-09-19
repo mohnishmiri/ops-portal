@@ -650,6 +650,7 @@ async def list_certificates(
     cn: str | None = Query(default=None, description="Filter by common name (contains)"),
     thumbprint: str | None = Query(default=None, description="Filter by thumbprint"),
     issuer: str | None = Query(default=None, description="Filter by issuer (contains)"),
+    san: str | None = Query(default=None, description="Filter by subject alternative name (contains)"),
     cert_status: str | None = Query(default=None, description="Keyfactor cert state, e.g. 'Active'"),
     collection_id: int | None = Query(default=None, description="Filter by collection ID"),
     expires_in_days: int | None = Query(default=None, ge=0, le=3650),
@@ -686,6 +687,7 @@ async def list_certificates(
                     cn=cn,
                     thumbprint=thumbprint,
                     issuer=issuer,
+                    san=san,
                     cert_status=cert_status,
                     expires_in_days=expires_in_days,
                     deleted_only=deleted_only,
@@ -712,6 +714,8 @@ async def list_certificates(
         clauses.append(f'Thumbprint -eq "{_sanitize(thumbprint)}"')
     if issuer:
         clauses.append(f'IssuerDN -contains "{_sanitize(issuer)}"')
+    if san:
+        clauses.append(f'SAN -contains "{_sanitize(san)}"')
     if cert_status:
         state_clause = _cert_state_clause(cert_status)
         if state_clause:

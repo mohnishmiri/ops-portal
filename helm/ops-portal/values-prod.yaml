@@ -13,7 +13,12 @@ backend:
     minReplicas: 3
     maxReplicas: 8
     targetCPUUtilizationPercentage: 65
-  env: {}
+  env:
+    # Private-key escrow stays off until PKI/security sign-off and a dedicated
+    # escrow vault exist (docs/CERTIFICATE_MANAGEMENT.md §8). To enable:
+    #   CERT_KEY_ESCROW_ENABLED: "true"
+    #   CERT_KEY_ESCROW_VAULT: "<escrow-vault-name>"
+    CERT_KEY_ESCROW_ENABLED: "false"
   resources:
     requests:
       cpu: 500m
