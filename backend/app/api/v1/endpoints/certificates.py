@@ -416,6 +416,57 @@ async def _cert_identity(db: AsyncSession, certificate_id: int | str) -> tuple[s
     return f"{common_name} ({cert_id})", common_name
 
 
+def _no_private_key_detail(file_format: str, reason: str, escrowed_advice: str) -> str:
+    """Explain a private-key download that has no key to work from.
+
+    The advice has to match the deployment. "Renew this certificate through
+    the portal to escrow its key" is a dead end when escrow is switched off:
+    nothing would be captured, and the next download would fail identically.
+    """
+    if CertificateEscrowService.is_enabled():
+        return escrowed_advice
+    return (
+        f"A {file_format} download needs the certificate's private key, which Keyfactor could "
+        f"not export ({reason}) — it only hands over a key it archived at issuance. Private-key "
+        "escrow is switched off in this deployment, so the portal holds no copy either, and "
+        "renewing through the portal will not change that until escrow is configured. Set "
+        "CERT_KEY_ESCROW_ENABLED and CERT_KEY_ESCROW_VAULT and renew the certificate, or ask the "
+        f"Keyfactor team to enable key archival on its template. Until then {file_format} is "
+        "unavailable and only DER, CER, CRT, PEM and P7B can be downloaded."
+    )
+
+
+async def _cert_thumbprint(db: AsyncSession, certificate_id: int | str) -> str | None:
+    """Thumbprint for ``certificate_id`` from the cached snapshot, lowercased.
+
+    Escrow is keyed by thumbprint — that is the identifier a renewal produces
+    at issuance, long before the new certificate has a row anyone has synced.
+    The download endpoints only receive a Keyfactor id, so the thumbprint is
+    resolved here and handed to the escrow lookup alongside it; without it a
+    renewed certificate's escrowed key is unreachable and every PFX/JKS
+    download for it fails with a 409, even while the grid's Key column
+    (thumbprint-based) reports the key as escrowed.
+    """
+    if db is None:
+        return None
+    try:
+        cert_id = int(certificate_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        result = await db.execute(
+            select(CertificateSnapshot.thumbprint)
+            .where(CertificateSnapshot.certificate_id == cert_id)
+            .where(CertificateSnapshot.thumbprint.isnot(None))
+            .limit(1)
+        )
+        thumbprint = result.scalar_one_or_none()
+    except Exception as exc:  # pragma: no cover - lookup is an optimisation
+        logger.warning("cert_thumbprint_lookup_failed", certificate_id=cert_id, error=str(exc)[:200])
+        return None
+    return (thumbprint or "").strip().lower() or None
+
+
 async def _escrow_issued_key(
     db: AsyncSession,
     *,
@@ -521,7 +572,10 @@ async def _build_jks(
 
     if pfx_bytes is None and db is not None:
         try:
-            material = await CertificateEscrowService(db).get_material(certificate_id=certificate_id)
+            material = await CertificateEscrowService(db).get_material(
+                certificate_id=certificate_id,
+                thumbprint=await _cert_thumbprint(db, certificate_id),
+            )
         except Exception as exc:  # pragma: no cover - fall through to the 409 below
             logger.warning(
                 "cert_escrow_jks_lookup_failed",
@@ -534,14 +588,17 @@ async def _build_jks(
             key_source = "escrow"
 
     if pfx_bytes is None:
+        reason = upstream_error or "no key available"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
+            detail=_no_private_key_detail(
+                "JKS",
+                reason,
                 "A JKS keystore needs the certificate's private key, which could not be "
-                f"exported from Keyfactor ({upstream_error or 'no key available'}) and is not "
-                "escrowed. Keyfactor returns the key only at the moment of issuance unless key "
-                "archival is enabled on the template. Renew this certificate through the portal "
-                "to escrow its key, after which JKS download works at any time."
+                f"exported from Keyfactor ({reason}) and is not escrowed. Keyfactor returns the "
+                "key only at the moment of issuance unless key archival is enabled on the "
+                "template. Renew this certificate through the portal to escrow its key, after "
+                "which JKS download works at any time.",
             ),
         )
 
@@ -1675,6 +1732,7 @@ async def download_certificate(
             try:
                 escrowed_pfx = await CertificateEscrowService(db).export_pfx(
                     certificate_id=certificate_id,
+                    thumbprint=await _cert_thumbprint(db, certificate_id),
                     password=payload.pfx_password,
                     include_chain=payload.include_chain,
                 )
@@ -1688,12 +1746,14 @@ async def download_certificate(
             if is_pfx:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
+                    detail=_no_private_key_detail(
+                        "PFX",
+                        exc.message,
                         "Could not export this certificate's private key from Keyfactor "
                         f"({exc.message}), and no escrowed key is available for it. Keyfactor "
                         "returns the PFX only at the moment of issuance unless key archival is "
                         "enabled on the template. Renew this certificate through the portal to "
-                        "escrow its key, after which PFX download works at any time."
+                        "escrow its key, after which PFX download works at any time.",
                     ),
                 )
             _raise_http(exc)
@@ -1778,7 +1838,10 @@ async def load_certificate_to_akv(
         escrowed: tuple[bytes, str] | None = None
         if payload.key_source in ("auto", "escrow") and db is not None:
             try:
-                escrowed = await CertificateEscrowService(db).get_material(certificate_id=certificate_id)
+                escrowed = await CertificateEscrowService(db).get_material(
+                    certificate_id=certificate_id,
+                    thumbprint=await _cert_thumbprint(db, certificate_id),
+                )
             except Exception as exc:  # pragma: no cover - fall back to Keyfactor
                 logger.warning(
                     "cert_escrow_lookup_failed",

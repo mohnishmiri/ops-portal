@@ -206,6 +206,56 @@ async def test_get_material_ignores_purged_pointers(db_session, vault):
     assert await CertificateEscrowService(db_session).get_material(certificate_id=4242) is None
 
 
+async def test_pointer_is_found_by_thumbprint_when_the_id_was_never_captured(db_session, vault):
+    # Regression: Keyfactor names the field ``KeyfactorID``, so an enrollment
+    # whose id could not be read escrows the row with the 0 placeholder. The
+    # key must still be reachable, or every PFX/JKS download of a renewed
+    # certificate 409s while the grid reports the key as escrowed.
+    await _escrow(db_session, certificate_id=None)
+    row = (await db_session.execute(select(CertificateKeyEscrow))).scalar_one()
+    assert row.certificate_id == 0
+    service = CertificateEscrowService(db_session)
+
+    assert await service.get_material(certificate_id=4242, thumbprint=THUMB) == (PFX_BYTES, "single-use-pw")
+
+
+async def test_pointer_falls_back_to_the_id_when_the_thumbprint_is_unknown(db_session, vault):
+    # A just-issued certificate is not in the snapshot yet, so the caller has
+    # no thumbprint to offer — the Keyfactor id has to carry the lookup.
+    await _escrow(db_session)
+    service = CertificateEscrowService(db_session)
+
+    assert await service.get_material(certificate_id=4242, thumbprint=None) == (PFX_BYTES, "single-use-pw")
+
+
+async def test_pointer_lookup_never_matches_the_zero_placeholder(db_session, vault):
+    # 0 means "id unknown", not a certificate — matching it would hand a
+    # caller someone else's private key.
+    await _escrow(db_session, certificate_id=None)
+    assert await CertificateEscrowService(db_session).find_pointer(certificate_id=0) is None
+
+
+async def test_backfill_repairs_a_pointer_left_without_its_certificate_id(db_session, vault):
+    from app.models.database import CertificateSnapshot
+
+    await _escrow(db_session, certificate_id=None)
+    db_session.add(
+        CertificateSnapshot(
+            collection_id=7,
+            certificate_id=4242,
+            common_name="cesdataroutergears.dev.att.com",
+            thumbprint=THUMB,
+            not_after=(datetime.now(UTC) + timedelta(days=90)).isoformat(),
+        )
+    )
+    await db_session.commit()
+
+    assert await CertificateEscrowService(db_session)._backfill_from_snapshot() == 1
+    row = (await db_session.execute(select(CertificateKeyEscrow))).scalar_one()
+    assert row.certificate_id == 4242
+    assert row.not_after is not None
+
+
 async def test_escrowed_thumbprints_filters_to_live_pointers(db_session, vault):
     await _escrow(db_session)
     service = CertificateEscrowService(db_session)

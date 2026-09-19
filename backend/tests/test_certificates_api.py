@@ -791,7 +791,7 @@ def escrow_vault(monkeypatch):
     return fake
 
 
-async def _seed_escrow(db_session, *, certificate_id: int, thumbprint: str, pfx: bytes, password: str):
+async def _seed_escrow(db_session, *, certificate_id: int | None, thumbprint: str, pfx: bytes, password: str):
     import base64
 
     from app.services.certificate_escrow_service import CertificateEscrowService
@@ -1217,6 +1217,66 @@ async def test_jks_download_without_any_key_is_actionable(app, admin_client, esc
     assert "renew this certificate through the portal" in detail
 
 
+async def test_renewed_certificate_downloads_pfx_via_its_thumbprint(app, admin_client, db_session, escrow_vault):
+    # Regression for a renewed certificate that could not be downloaded as PFX.
+    # Renewal escrows the key the instant it is issued, before the new
+    # certificate's Keyfactor id is known, so the pointer carries the 0
+    # placeholder. The download only knows the id, so the thumbprint has to be
+    # resolved from the snapshot or the escrowed key stays unreachable.
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    _use_service(app, FakeService(error=_NO_KEY))
+    await _seed_escrow(
+        db_session,
+        certificate_id=None,
+        thumbprint="ABC",
+        pfx=_pfx_fixture("issuance-time-pw"),
+        password="issuance-time-pw",
+    )
+    await _cache_certificate(db_session, certificate_id=31069046, common_name="a.example.com", thumbprint="ABC")
+
+    resp = await admin_client.post(
+        "/api/v1/certificates/31069046/download",
+        json={"file_format": "PFX", "pfx_password": "download-password-1"},
+    )
+    assert resp.status_code == 200
+    assert pkcs12.load_key_and_certificates(resp.content, b"download-password-1")[0] is not None
+
+
+async def test_renewed_certificate_downloads_jks_via_its_thumbprint(app, admin_client, db_session, escrow_vault):
+    _use_service(app, FakeService(error=_NO_KEY))
+    await _seed_escrow(
+        db_session,
+        certificate_id=None,
+        thumbprint="ABC",
+        pfx=_pfx_fixture("issuance-time-pw"),
+        password="issuance-time-pw",
+    )
+    await _cache_certificate(db_session, certificate_id=31069046, common_name="a.example.com", thumbprint="ABC")
+
+    resp = await admin_client.post("/api/v1/certificates/31069046/download", json=_jks_request())
+    assert resp.status_code == 200
+    assert resp.content[:4] == _JKS_MAGIC
+    assert load_jks(resp.content, "keystore-password-1").private_keys
+
+
+async def test_download_without_escrow_configured_does_not_advise_renewing(app, admin_client, monkeypatch):
+    # With escrow switched off, "renew through the portal to escrow its key"
+    # sends the user round a loop that cannot succeed.
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "CERT_KEY_ESCROW_ENABLED", False)
+    _use_service(app, FakeService(error=_NO_KEY))
+
+    for payload in ({"file_format": "PFX", "pfx_password": "download-password-1"}, _jks_request()):
+        resp = await admin_client.post("/api/v1/certificates/1/download", json=payload)
+        assert resp.status_code == 409
+        detail = resp.json()["detail"].lower()
+        assert "escrow is switched off" in detail
+        assert "cert_key_escrow_enabled" in detail
+        assert "renew this certificate through the portal to escrow" not in detail
+
+
 async def test_jks_download_reports_unusable_material(app, admin_client):
     # Keyfactor returning something that is not a PFX must not surface as a 500.
     svc = FakeService()
@@ -1230,13 +1290,18 @@ async def test_jks_download_reports_unusable_material(app, admin_client):
 # ── Audit trail names the certificate ──────────────────────────────────
 
 
-async def _cache_certificate(db_session, *, certificate_id: int, common_name: str) -> None:
-    """Seed the snapshot the audit trail resolves names from."""
+async def _cache_certificate(
+    db_session, *, certificate_id: int, common_name: str, thumbprint: str | None = None
+) -> None:
+    """Seed the snapshot the audit trail and escrow lookups resolve from."""
     from sqlalchemy import text
 
     await db_session.execute(
-        text("INSERT INTO cert_certificates (collection_id, certificate_id, common_name) VALUES (:col, :cid, :cn)"),
-        {"col": 2573, "cid": certificate_id, "cn": common_name},
+        text(
+            "INSERT INTO cert_certificates (collection_id, certificate_id, common_name, thumbprint) "
+            "VALUES (:col, :cid, :cn, :tp)"
+        ),
+        {"col": 2573, "cid": certificate_id, "cn": common_name, "tp": thumbprint},
     )
     await db_session.commit()
 

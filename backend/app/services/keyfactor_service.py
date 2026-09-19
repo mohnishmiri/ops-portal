@@ -47,6 +47,28 @@ class CertificateServiceError(Exception):
         self.status_code = status_code
 
 
+def _first_present(source: dict[str, Any], *keys: str) -> Any:
+    """First non-null value among ``keys``, matched case-insensitively.
+
+    Keyfactor is inconsistent about the casing of its identifier fields —
+    ``CertificateInformation`` carries ``KeyfactorID`` (capital ID) on
+    ``/Enrollment/PFX`` and ``/Enrollment/CSR``, while other payloads use
+    ``Id``. A plain ``.get("KeyfactorId")`` silently misses it, which drops the
+    new certificate's id from every enrollment and renewal response and, in
+    turn, from the key-escrow pointer written for it.
+    """
+    for key in keys:
+        value = source.get(key)
+        if value is not None:
+            return value
+    lowered = {k.lower(): v for k, v in source.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value is not None:
+            return value
+    return None
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if not value or not isinstance(value, str):
         return None
@@ -686,8 +708,8 @@ class CertificateService:
         shaped: dict[str, Any] = {
             "serial_number": inner.get("SerialNumber"),
             "thumbprint": inner.get("Thumbprint"),
-            "certificate_id": inner.get("KeyfactorId") or inner.get("Id"),
-            "certificate_ids": inner.get("KeyfactorIDs"),
+            "certificate_id": _first_present(inner, "KeyfactorID", "KeyfactorId", "CertificateId", "Id"),
+            "certificate_ids": _first_present(inner, "KeyfactorIDs", "KeyfactorIds"),
             "issuer_dn": inner.get("IssuerDN"),
         }
         # Enrollment returns the signed certificate(s) / chain — pass through.

@@ -344,6 +344,43 @@ async def test_pfx_renew_explicit_owner_role_overrides_source_owner():
     assert "OwnerRoleId" not in client.calls[-1][1]
 
 
+async def test_pfx_renew_returns_the_new_certificate_id_keyfactor_actually_sends():
+    # Regression: Keyfactor spells the field ``KeyfactorID`` (capital ID) in
+    # CertificateInformation. Reading ``KeyfactorId`` returned None for every
+    # enrollment and renewal, which escrowed the new key under certificate id
+    # 0 and made its PFX/JKS download unreachable afterwards.
+    class IdClient(FakeClient):
+        async def enroll_pfx(self, payload):
+            self.calls.append(("enroll_pfx", payload))
+            return {
+                "CertificateInformation": {
+                    "Thumbprint": "DEF",
+                    "KeyfactorID": 31069046,
+                    "Pkcs12Blob": "BLOB",
+                }
+            }
+
+    result = await CertificateService(client=IdClient()).renew_certificate(
+        certificate_id=7,
+        mode="pfx",
+        certificate_authority="ca",
+        template="template",
+        password="validpassword",
+    )
+    assert result["certificate_id"] == 31069046
+    assert result["thumbprint"] == "DEF"
+    assert result["pfx_base64"] == "BLOB"
+
+
+async def test_enrollment_id_is_read_whatever_casing_keyfactor_uses():
+    shape = CertificateService._shape_enrollment
+    assert shape({"CertificateInformation": {"KeyfactorID": 11}})["certificate_id"] == 11
+    assert shape({"CertificateInformation": {"KeyfactorId": 12}})["certificate_id"] == 12
+    assert shape({"CertificateInformation": {"Id": 13}})["certificate_id"] == 13
+    assert shape({"CertificateInformation": {"keyfactorid": 14}})["certificate_id"] == 14
+    assert shape({"CertificateInformation": {"Thumbprint": "X"}})["certificate_id"] is None
+
+
 async def test_csr_renew_preserves_source_owner_and_metadata():
     client = FakeClient()
     svc = CertificateService(client=client)

@@ -211,20 +211,43 @@ class CertificateEscrowService:
         certificate_id: int | None = None,
         thumbprint: str | None = None,
     ) -> CertificateKeyEscrow | None:
-        """Locate a live (non-purged) escrow pointer by cert id or thumbprint."""
+        """Locate a live (non-purged) escrow pointer by cert id or thumbprint.
+
+        Both keys are tried, thumbprint first: it is the unique key of this
+        table and the only identifier that survives a renewal, since a renewed
+        certificate is escrowed under the *new* thumbprint the moment it is
+        issued, before any sync has taught the portal its Keyfactor id. Falling
+        back to the id keeps the lookup working in the opposite window — a
+        just-issued certificate that is not in the snapshot yet, so no
+        thumbprint can be resolved for it.
+        """
         if not self.is_enabled():
             return None
-        conditions = []
+        for condition in self._pointer_conditions(certificate_id=certificate_id, thumbprint=thumbprint):
+            result = await self.db.execute(
+                select(CertificateKeyEscrow).where(condition).where(CertificateKeyEscrow.purged_at.is_(None)).limit(1)
+            )
+            pointer = result.scalar_one_or_none()
+            if pointer is not None:
+                return pointer
+        return None
+
+    @staticmethod
+    def _pointer_conditions(*, certificate_id: int | None, thumbprint: str | None) -> list[Any]:
+        """Pointer lookup predicates in preference order (thumbprint, then id)."""
+        conditions: list[Any] = []
         if thumbprint and thumbprint.strip():
             conditions.append(CertificateKeyEscrow.thumbprint == thumbprint.strip().lower())
-        elif certificate_id is not None:
-            conditions.append(CertificateKeyEscrow.certificate_id == int(certificate_id))
-        else:
-            return None
-        result = await self.db.execute(
-            select(CertificateKeyEscrow).where(*conditions).where(CertificateKeyEscrow.purged_at.is_(None)).limit(1)
-        )
-        return result.scalar_one_or_none()
+        if certificate_id is not None:
+            try:
+                cert_id = int(certificate_id)
+            except (TypeError, ValueError):
+                return conditions
+            # 0 is the "id unknown at escrow time" placeholder, never a real
+            # Keyfactor id — matching on it would hand back someone else's key.
+            if cert_id > 0:
+                conditions.append(CertificateKeyEscrow.certificate_id == cert_id)
+        return conditions
 
     async def get_material(
         self,
@@ -338,11 +361,21 @@ class CertificateEscrowService:
         return {"backfilled": backfilled, "purged": purged}
 
     async def _backfill_from_snapshot(self) -> int:
-        """Copy expiry and common name from the synced snapshot onto pointers."""
+        """Copy id, expiry and common name from the synced snapshot onto pointers.
+
+        The Keyfactor id is backfilled as well, not just for completeness: a
+        pointer written before the id could be read from the enrollment
+        response carries the ``0`` placeholder, and only the snapshot can say
+        which certificate that thumbprint became.
+        """
         try:
             rows = await self.db.execute(
                 select(CertificateKeyEscrow.id, CertificateKeyEscrow.thumbprint)
-                .where(CertificateKeyEscrow.not_after.is_(None) | CertificateKeyEscrow.common_name.is_(None))
+                .where(
+                    CertificateKeyEscrow.not_after.is_(None)
+                    | CertificateKeyEscrow.common_name.is_(None)
+                    | (CertificateKeyEscrow.certificate_id <= 0)
+                )
                 .where(CertificateKeyEscrow.purged_at.is_(None))
             )
             pending = rows.all()
@@ -354,21 +387,26 @@ class CertificateEscrowService:
                     CertificateSnapshot.thumbprint,
                     CertificateSnapshot.not_after,
                     CertificateSnapshot.common_name,
+                    CertificateSnapshot.certificate_id,
                 ).where(CertificateSnapshot.thumbprint.isnot(None))
             )
-            by_thumb = {(t or "").strip().lower(): (na, cn) for t, na, cn in snapshot.all() if (t or "").strip()}
+            by_thumb = {
+                (t or "").strip().lower(): (na, cn, cid) for t, na, cn, cid in snapshot.all() if (t or "").strip()
+            }
 
             updated = 0
             for row_id, thumb in pending:
                 found = by_thumb.get(thumb)
                 if found is None:
                     continue
-                not_after, common_name = found
+                not_after, common_name, snapshot_cert_id = found
                 values: dict[str, Any] = {}
                 if not_after:
                     values["not_after"] = not_after
                 if common_name:
                     values["common_name"] = common_name
+                if snapshot_cert_id:
+                    values["certificate_id"] = int(snapshot_cert_id)
                 if not values:
                     continue
                 await self.db.execute(
