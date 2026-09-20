@@ -1136,6 +1136,58 @@ export async function refreshVaultSecrets(vaultUri: string) {
   return data;
 }
 
+/** Which fields a secret search matches against. */
+export type SecretSearchScope = "name" | "name_and_value";
+
+export interface SecretSearchMatch extends SecretInfo {
+  /** Where the term matched — "name", "value", or both. */
+  matched_in: string[];
+}
+
+export interface SecretSearchResult {
+  scope: SecretSearchScope;
+  results: SecretSearchMatch[];
+  total_secrets: number;
+  /** Secrets whose value was read (0 for a name-only search). */
+  scanned: number;
+  /** Secrets whose value could not be read — per-secret policy, soft-deleted, etc. */
+  unreadable: number;
+  skipped_disabled: number;
+  truncated: boolean;
+}
+
+/** Shortest term the backend will scan a vault's values for. */
+export const SECRET_VALUE_SEARCH_MIN_CHARS = 3;
+
+/** Milliseconds of idle typing before a value search fires. */
+export const SECRET_VALUE_SEARCH_DEBOUNCE_MS = 500;
+
+/**
+ * Search secret values. Key Vault has no server-side value search, so the
+ * backend reads every enabled secret in the vault — hence the long timeout,
+ * the debounce the caller applies, and no polling.
+ */
+export function useSecretValueSearch(vaultUri: string | null, query: string, enabled: boolean) {
+  const term = query.trim();
+  return useQuery<SecretSearchResult>({
+    queryKey: ["keyvault", "secret-search", vaultUri, term],
+    queryFn: async () => {
+      const { data } = await apiClient.get("/keyvault/secrets/search", {
+        params: { vault_uri: vaultUri, q: term, scope: "name_and_value" },
+        timeout: 120_000,
+      });
+      return data;
+    },
+    enabled: enabled && !!vaultUri && term.length >= SECRET_VALUE_SEARCH_MIN_CHARS,
+    // A scan takes seconds — keep the previous matches on screen instead of
+    // emptying the grid every time the term changes.
+    placeholderData: (prev) => prev,
+    staleTime: 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useVaultKeys(vaultUri: string | null) {
   return useQuery<KeyInfo[]>({
     queryKey: ["keyvault", "keys", vaultUri],

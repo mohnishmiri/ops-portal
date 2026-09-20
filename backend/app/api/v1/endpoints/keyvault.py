@@ -9,8 +9,9 @@ Data is kept in sync via periodic background jobs and immediate
 post-mutation updates.
 """
 
+import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
@@ -28,7 +29,11 @@ from app.services.keyvault_bulk_service import (
     parse_bulk_secrets_file,
     validate_bulk_secrets,
 )
-from app.services.keyvault_service import KeyVaultService, _normalize_vault_uri
+from app.services.keyvault_service import (
+    VALUE_SEARCH_MIN_QUERY,
+    KeyVaultService,
+    _normalize_vault_uri,
+)
 from app.services.keyvault_sync_service import KeyVaultSyncService
 
 logger = structlog.get_logger(__name__)
@@ -63,6 +68,7 @@ def _audit_summary(action: str, resource_type: str, resource_name: str) -> str:
         "update_certificate": "Updated",
         "delete_certificate": "Deleted",
         "bulk_create_secrets": "Bulk uploaded",
+        "search_secret_values": "Searched",
     }.get(action, "Changed")
     if action == "bulk_create_secrets":
         return f"{verb} secrets ({resource_name})"
@@ -360,6 +366,78 @@ async def list_secrets(
             status_code=502,
             detail=f"Cannot access vault data plane: {_friendly_error(e)}",
         )
+
+
+@router.get(
+    "/secrets/search",
+    summary="Search secrets by name or value",
+)
+async def search_secrets(
+    http_request: Request,
+    vault_uri: str = Query(description="Key Vault URI"),
+    q: str = Query(min_length=1, max_length=512, description="Search term"),
+    scope: Literal["name", "name_and_value"] = Query(
+        default="name",
+        description="Match names only, or names and secret values (Admin/Write)",
+    ),
+    refresh: bool = Query(default=False, description="Bypass the cached secret list"),
+    user: UserContext = Depends(get_current_user),
+    service: KeyVaultService = Depends(_get_kv_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Search a vault's secrets. Returns metadata only — never secret values.
+
+    ``scope=name_and_value`` reads every enabled secret in the vault to match
+    against, so it requires the same Admin/Write role as viewing a single
+    secret and is written to the audit trail.
+    """
+    include_values = scope == "name_and_value"
+    if include_values:
+        await require_role(UserRole.ADMIN, UserRole.WRITE)(user)
+        if len(q.strip()) < VALUE_SEARCH_MIN_QUERY:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Value search needs at least {VALUE_SEARCH_MIN_QUERY} characters.",
+            )
+
+    try:
+        result = await service.search_secrets(
+            vault_uri,
+            q,
+            include_values=include_values,
+            refresh=refresh,
+        )
+    except Exception as e:
+        logger.warning("search_secrets_error", vault_uri=vault_uri, scope=scope, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot search secrets: {_friendly_error(e)}")
+
+    if include_values:
+        vault_name = _vault_name_from_uri(vault_uri)
+        matched = len(result["results"])
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="search_secret_values",
+            resource_type="secret",
+            resource_name=vault_name,
+            vault_uri=vault_uri,
+            status="success",
+            details={
+                "summary": (
+                    f"Searched secret values in {vault_name} — {matched} match(es) across {result['scanned']} secrets"
+                ),
+                # The term itself may be secret material, so only its shape is
+                # recorded — enough to correlate repeat searches, not to replay one.
+                "query_length": len(q.strip()),
+                "query_fingerprint": hashlib.sha256(q.strip().encode()).hexdigest()[:16],
+                "matched_count": matched,
+                "scanned_count": result["scanned"],
+                "unreadable_count": result["unreadable"],
+            },
+        )
+
+    return result
 
 
 @router.get(

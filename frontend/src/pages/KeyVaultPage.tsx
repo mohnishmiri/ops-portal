@@ -5,7 +5,7 @@
  * All icons are inline SVG vector icons (no emojis).
  */
 
-import React, { useState, useCallback, useMemo, useRef } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
@@ -15,6 +15,7 @@ import {
   useKeyVaultDashboard,
   useKeyVaults,
   useVaultSecrets,
+  useSecretValueSearch,
   useVaultKeys,
   useVaultCertificates,
   useSecretValue,
@@ -44,6 +45,10 @@ import {
   refreshKeyVaultDashboard,
   KeyVaultInfo,
   SecretInfo,
+  SecretSearchResult,
+  SecretSearchScope,
+  SECRET_VALUE_SEARCH_MIN_CHARS,
+  SECRET_VALUE_SEARCH_DEBOUNCE_MS,
   KeyInfo,
   CertificateInfo,
   ExpiringItem,
@@ -213,6 +218,8 @@ const GridToolbar: React.FC<{
   refreshing?: boolean;
   primaryAction?: React.ReactNode;
   secondaryAction?: React.ReactNode;
+  /** Extra filter controls rendered immediately left of the search box. */
+  filters?: React.ReactNode;
 }> = ({
   search,
   onSearch,
@@ -224,6 +231,7 @@ const GridToolbar: React.FC<{
   refreshing = false,
   primaryAction,
   secondaryAction,
+  filters,
 }) => (
   <div className={gridStyles.panelHeader}>
     <div className="flex flex-wrap items-center gap-3">
@@ -231,6 +239,7 @@ const GridToolbar: React.FC<{
       <AutoRefreshIndicator />
     </div>
     <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
+      {filters}
       <input
         type="text"
         placeholder={placeholder}
@@ -1616,6 +1625,55 @@ const BulkSecretUploadDialog: React.FC<{
 
 // ── Secrets Tab ───────────────────────────────────────────────────────
 
+/** Progress / caveats strip shown while the secrets grid is in value-search mode. */
+const ValueSearchStatus: React.FC<{
+  term: string;
+  pending: boolean;
+  result?: SecretSearchResult;
+  error: unknown;
+}> = ({ term, pending, result, error }) => {
+  const base = "flex items-center gap-2 border-b px-4 py-2 text-xs";
+
+  if (term.length < SECRET_VALUE_SEARCH_MIN_CHARS) {
+    return (
+      <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
+        Type at least {SECRET_VALUE_SEARCH_MIN_CHARS} characters to search inside secret values.
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={`${base} border-red-200 bg-red-50 text-red-700`}>
+        {formatAxiosError(error, "Could not search secret values.")}
+      </div>
+    );
+  }
+
+  if (pending) {
+    return (
+      <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
+        <span className="animate-spin">{Icons.refresh()}</span>
+        Reading secret values across the vault — this can take a few seconds.
+      </div>
+    );
+  }
+
+  if (!result) return null;
+
+  const caveats: string[] = [];
+  if (result.unreadable > 0) caveats.push(`${result.unreadable} could not be read`);
+  if (result.skipped_disabled > 0) caveats.push(`${result.skipped_disabled} disabled and skipped`);
+  if (result.truncated) caveats.push("vault too large — results are partial");
+
+  return (
+    <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
+      Searched {result.scanned} secret value{result.scanned === 1 ? "" : "s"}
+      {caveats.length > 0 && <span className="text-amber-700">({caveats.join("; ")})</span>}
+    </div>
+  );
+};
+
 const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const { timezone } = usePortalTimezone();
   const { canWrite } = useAuth();
@@ -1624,6 +1682,8 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const queryClient = useQueryClient();
   const deleteMutation = useDeleteSecret();
   const [search, setSearch] = useState("");
+  const [searchScope, setSearchScope] = useState<SecretSearchScope>("name");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [viewingSecret, setViewingSecret] = useState<string | null>(null);
   const [editingSecret, setEditingSecret] = useState<SecretInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -1635,8 +1695,37 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const [sort, setSort] = useState<SortState<"name" | "content_type" | "enabled" | "updated" | "not_before" | "expires">>({ key: "name", direction: "asc" });
   const [toast, setToast] = useState<ToastState | null>(null);
   const showToast = useCallback((message: string, type: ToastState["type"] = "success") => setToast({ message, type }), []);
-  const filtered = (secrets || []).filter(
-    (s: SecretInfo) => !search || s.name.toLowerCase().includes(search.toLowerCase())
+
+  // Value search hits every secret in the vault, so it waits for typing to settle.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), SECRET_VALUE_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const term = search.trim();
+  // Reading values needs the same role as viewing a single secret.
+  const valueSearch = useSecretValueSearch(vaultUri, debouncedSearch, searchScope === "name_and_value" && canWrite);
+  const valueSearchActive =
+    searchScope === "name_and_value" && canWrite && term.length >= SECRET_VALUE_SEARCH_MIN_CHARS;
+  const valueSearchPending = valueSearchActive && (valueSearch.isFetching || debouncedSearch.trim() !== term);
+
+  const filtered = useMemo<SecretInfo[]>(() => {
+    const all = secrets || [];
+    if (!term) return all;
+    // While a newer term is in flight the previous result stays on screen;
+    // a failed scan shows nothing rather than stale matches under an error.
+    if (valueSearchActive) return valueSearch.isError ? [] : valueSearch.data?.results ?? [];
+    return all.filter((s: SecretInfo) => s.name.toLowerCase().includes(term.toLowerCase()));
+  }, [secrets, term, valueSearchActive, valueSearch.data, valueSearch.isError]);
+
+  const valueMatches = useMemo(
+    () =>
+      new Set(
+        (valueSearch.data?.results ?? [])
+          .filter((r) => r.matched_in.includes("value"))
+          .map((r) => r.name)
+      ),
+    [valueSearch.data]
   );
   const sorted = useMemo(() => sortCollection(filtered, sort.direction, (secret) => {
     switch (sort.key) {
@@ -1725,8 +1814,24 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
       <GridToolbar
         search={search}
         onSearch={(value) => { setSearch(value); setPage(1); }}
-        placeholder="Search secrets..."
-        countLabel={`${filtered.length} secrets`}
+        placeholder={searchScope === "name_and_value" ? "Search names and values..." : "Search secrets..."}
+        countLabel={
+          valueSearchActive && valueSearch.data
+            ? `${filtered.length} of ${valueSearch.data.total_secrets} secrets`
+            : `${filtered.length} secrets`
+        }
+        filters={canWrite ? (
+          <select
+            value={searchScope}
+            onChange={(e) => { setSearchScope(e.target.value as SecretSearchScope); setPage(1); }}
+            className={gridSelectStyles}
+            title="Choose which fields the search term is matched against"
+            aria-label="Secret search scope"
+          >
+            <option value="name">Search: Name</option>
+            <option value="name_and_value">Search: Name + Value</option>
+          </select>
+        ) : undefined}
         pageSize={pageSize}
         onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
         onRefresh={handleRefresh}
@@ -1749,6 +1854,15 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
         ) : undefined}
       />
 
+      {searchScope === "name_and_value" && canWrite && search.trim() !== "" && (
+        <ValueSearchStatus
+          term={term}
+          pending={valueSearchPending}
+          result={valueSearch.data}
+          error={valueSearch.error}
+        />
+      )}
+
       <div className="overflow-auto max-h-[500px]">
         <table className={gridStyles.table}>
           <thead className={gridStyles.head}>
@@ -1765,7 +1879,16 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
           <tbody>
             {paginated.map((s: SecretInfo) => (
               <tr key={s.name} className={gridStyles.row}>
-                <td className={`${gridStyles.strongCell} font-mono text-xs`}>{s.name}</td>
+                <td className={`${gridStyles.strongCell} font-mono text-xs`}>
+                  <span className="inline-flex items-center gap-2">
+                    {s.name}
+                    {valueSearchActive && valueMatches.has(s.name) && (
+                      <span title="The search term appears in this secret's value">
+                        <Badge label="value match" color="purple" />
+                      </span>
+                    )}
+                  </span>
+                </td>
                 <td className={`${gridStyles.cell} text-xs`}>{s.content_type || "—"}</td>
                 <td className={gridStyles.cell}>
                   <Badge label={s.enabled ? "Enabled" : "Disabled"} color={s.enabled ? "green" : "red"} />
