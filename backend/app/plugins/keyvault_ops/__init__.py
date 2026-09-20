@@ -105,9 +105,14 @@ async def list_secrets(
 async def get_secret(
     name: str,
     decode_base64: bool = Query(default=False),
-    user: UserContext = Depends(require_role(UserRole.READ)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> SecretValue:
-    """Get a secret value (Read role required). Optionally decode Base64."""
+    """Get a secret value (Write role required). Optionally decode Base64.
+
+    Write, not read, so this mirrors the core ``GET /keyvault/secrets/{name}``.
+    Revealing a secret value is the same disclosure whichever router serves
+    it, and a lower bar here made the plugin a way around the core policy.
+    """
     from azure.keyvault.secrets import SecretClient
 
     from app.core.azure_auth import get_azure_credential
@@ -143,7 +148,9 @@ async def get_secret(
 @router.post("/secrets", response_model=SecretInfo, summary="Create/update a secret")
 async def create_secret(
     request: CreateSecretRequest,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    # Write matches core ``POST /keyvault/secrets`` — a write user can already
+    # create secrets there, so admin-only here only made the two paths disagree.
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> SecretInfo:
     """Create or update a secret in Key Vault (Admin only)."""
     from azure.keyvault.secrets import SecretClient

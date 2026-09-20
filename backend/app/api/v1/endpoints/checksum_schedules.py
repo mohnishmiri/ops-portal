@@ -11,9 +11,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_role
 from app.core.database import get_db_session
-from app.models.auth import UserContext
+from app.models.auth import UserContext, UserRole
 from app.schemas.checksum_schedules import (
     ChecksumScheduleCreateRequest,
     ChecksumScheduleDetail,
@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["checksum-schedules"])
 
+# Reads are open to any portal role; creating, editing, deleting, toggling, or
+# firing a schedule requires write.  These routes previously took only
+# ``get_current_user``, which let a read-only identity schedule and delete
+# recurring compliance jobs.
+
 
 @router.post(
     "/",
@@ -38,7 +43,7 @@ router = APIRouter(tags=["checksum-schedules"])
 )
 async def create_checksum_schedule(
     request: ChecksumScheduleCreateRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """
@@ -176,7 +181,7 @@ async def get_checksum_schedule(
 async def update_checksum_schedule(
     schedule_id: int,
     request: ChecksumScheduleCreateRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """
@@ -235,7 +240,7 @@ async def update_checksum_schedule(
 )
 async def delete_checksum_schedule(
     schedule_id: str,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """
@@ -280,7 +285,7 @@ async def delete_checksum_schedule(
 )
 async def toggle_checksum_schedule(
     schedule_id: int,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Toggle a schedule between enabled and disabled."""
@@ -309,7 +314,7 @@ async def toggle_checksum_schedule(
 )
 async def test_checksum_schedule(
     schedule_id: str,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """

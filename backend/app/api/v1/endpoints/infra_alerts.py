@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
+from app.core.authz import require_capability
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.services.infra_alert_service import InfraAlertService
@@ -240,7 +241,10 @@ async def get_alert_summary(
     description="Returns DB-backed infra alert schedule configurations used for scheduler planning",
 )
 async def list_alert_schedule_configs(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    # Write, not admin: POST/PUT on this same collection are write-gated, so
+    # an admin-only list left write users able to create and edit schedule
+    # configurations they could never read back.
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> list[dict]:
     """List persisted infra alert schedule configurations."""
@@ -1696,7 +1700,7 @@ class VMActionRequest(BaseModel):
 )
 async def start_vm_endpoint(
     request: VMActionRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_capability("infra_vm_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Start a VM."""
@@ -1723,7 +1727,7 @@ async def start_vm_endpoint(
 )
 async def stop_vm_endpoint(
     request: VMActionRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_capability("infra_vm_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Stop (deallocate) a VM."""
@@ -1750,7 +1754,7 @@ async def stop_vm_endpoint(
 )
 async def restart_vm_endpoint(
     request: VMActionRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_capability("infra_vm_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Restart a VM."""
@@ -1790,7 +1794,7 @@ class PGServerActionRequest(BaseModel):
 )
 async def start_pg_server_endpoint(
     request: PGServerActionRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_capability("infra_pg_server_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Start a PG Flexible Server."""
@@ -1820,7 +1824,7 @@ async def start_pg_server_endpoint(
 )
 async def stop_pg_server_endpoint(
     request: PGServerActionRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_capability("infra_pg_server_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Stop a PG Flexible Server."""
@@ -1850,7 +1854,7 @@ async def stop_pg_server_endpoint(
 )
 async def restart_pg_server_endpoint(
     request: PGServerActionRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_capability("infra_pg_server_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Restart a PG Flexible Server."""

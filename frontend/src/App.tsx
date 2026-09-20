@@ -39,6 +39,7 @@ import { SubscriptionProvider } from "./contexts/SubscriptionContext";
 import { PortalAccessGate } from "./contexts/SessionContext";
 import SubscriptionScopePicker from "./components/SubscriptionScopePicker";
 import ProtectedRoute from "./components/ProtectedRoute";
+import AccessDenied from "./components/AccessDenied";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -297,14 +298,18 @@ const Footer: React.FC = () => (
 
 // ── Admin route guards ─────────────────────────────────────────────────���───────
 
+// Admin pages are role-gated, not permission-record gated, so they cannot go
+// through ProtectedRoute. They still say why access was refused: bouncing a
+// non-admin silently to the dashboard reads as a broken link rather than a
+// denial, and leaves the user retrying a route that will never open.
 const AdminRoute: React.FC = () => {
   const { isAdmin } = useAuth();
-  return isAdmin ? <AdminDashboard /> : <Navigate to="/" replace />;
+  return isAdmin ? <AdminDashboard /> : <AccessDenied resourceName="Admin Dashboard" />;
 };
 
 const AdminPermissionsRoute: React.FC = () => {
   const { isAdmin } = useAuth();
-  return isAdmin ? <PermissionsManagement /> : <Navigate to="/" replace />;
+  return isAdmin ? <PermissionsManagement /> : <AccessDenied resourceName="Access Control" />;
 };
 
 // ── Main app content ───────────────────────────────────────────────────────────

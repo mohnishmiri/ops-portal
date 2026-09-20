@@ -20,8 +20,9 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
-from app.auth import get_authenticated_identity, get_current_user
+from app.auth import effective_roles, get_authenticated_identity, get_current_user, require_role
 from app.core.authz import assert_capability, enforce_portal_access, granted_capabilities
 from app.core.database import get_db
 from app.models.database import Permission, Resource
@@ -415,3 +416,136 @@ async def test_session_requires_authentication(app):
         assert resp.status_code == 401
     finally:
         settings.DEV_AUTH_BYPASS = original
+
+
+# ── Role ladder ────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def strict_auth():
+    """Pin the dev bypass off for the duration of a test.
+
+    ``require_role`` returns early when the bypass is enabled, and the local
+    .env turns it on, so without this every role assertion would pass
+    vacuously and prove nothing about enforcement.
+    """
+    from app.core.config import settings
+
+    original_env, original_bypass = settings.ENVIRONMENT, settings.DEV_AUTH_BYPASS
+    settings.ENVIRONMENT, settings.DEV_AUTH_BYPASS = "production", False
+    try:
+        yield
+    finally:
+        settings.ENVIRONMENT, settings.DEV_AUTH_BYPASS = original_env, original_bypass
+
+
+async def test_write_satisfies_a_read_requirement(strict_auth):
+    """WRITE implies READ.
+
+    Entra assigns one app role per user, so a write user's token carries
+    "write" and nothing else.  Before the ladder existed, a route declared as
+    ``require_role(UserRole.READ)`` 403'd that user for a plain read.
+    """
+    checker = require_role(UserRole.READ)
+    user = make_user(UserRole.WRITE)
+    assert await checker(user=user) is user
+
+
+async def test_admin_satisfies_a_write_requirement(strict_auth):
+    checker = require_role(UserRole.WRITE)
+    user = make_user(UserRole.ADMIN)
+    assert await checker(user=user) is user
+
+
+async def test_read_does_not_satisfy_a_write_requirement(strict_auth):
+    """The ladder only runs one way — read must never imply write."""
+    checker = require_role(UserRole.WRITE)
+    with pytest.raises(HTTPException) as exc:
+        await checker(user=make_user(UserRole.READ))
+    assert exc.value.status_code == 403
+
+
+async def test_effective_roles_expands_the_ladder():
+    assert effective_roles(make_user(UserRole.ADMIN)) == {UserRole.ADMIN, UserRole.WRITE, UserRole.READ}
+    assert effective_roles(make_user(UserRole.WRITE)) == {UserRole.WRITE, UserRole.READ}
+    assert effective_roles(make_user(UserRole.READ)) == {UserRole.READ}
+    assert effective_roles(make_user()) == frozenset()
+
+
+async def test_capability_role_fallback_honours_the_ladder(db_session):
+    """An unseeded capability with a READ fallback must admit a WRITE user."""
+    await assert_capability(
+        db_session,
+        user=make_user(UserRole.WRITE),
+        capability="not_in_db",
+        permission_type="view",
+        fallback_role=UserRole.READ,
+    )
+
+
+# ── VM / PG power capabilities ─────────────────────────────────────────────────
+
+
+async def test_vm_power_capability_granted_to_write_by_default(db_session):
+    """A write user must be able to stop a VM.
+
+    The Infrastructure Alerts grid renders the power buttons for anyone who
+    can write, so an admin-only backend left those users clicking a button
+    that always 403'd.
+    """
+    from app.core.resource_registry import seed_permissions, seed_resources
+
+    await seed_resources(db_session)
+    await seed_permissions(db_session)
+
+    await assert_capability(db_session, user=make_user(UserRole.WRITE), capability="infra_vm_power")
+    await assert_capability(db_session, user=make_user(UserRole.WRITE), capability="infra_pg_server_power")
+
+
+async def test_vm_power_capability_denied_to_read(db_session):
+    from app.core.resource_registry import seed_permissions, seed_resources
+
+    await seed_resources(db_session)
+    await seed_permissions(db_session)
+
+    with pytest.raises(HTTPException) as exc:
+        await assert_capability(db_session, user=make_user(UserRole.READ), capability="infra_vm_power")
+    assert exc.value.status_code == 403
+
+
+async def test_vm_power_capability_is_revocable_per_subject(db_session):
+    """Removing the write-role grant must deny write users without touching
+    any other operation — the reason power control is a capability rather
+    than a plain role check."""
+    from sqlalchemy import delete
+
+    from app.core.resource_registry import seed_permissions, seed_resources
+
+    await seed_resources(db_session)
+    await seed_permissions(db_session)
+
+    resource_id = (
+        await db_session.execute(select(Resource.id).where(Resource.resource_name == "infra_vm_power"))
+    ).scalar_one()
+    await db_session.execute(
+        delete(Permission).where(Permission.resource_id == resource_id, Permission.subject_id == "write")
+    )
+    await db_session.commit()
+
+    with pytest.raises(HTTPException):
+        await assert_capability(db_session, user=make_user(UserRole.WRITE), capability="infra_vm_power")
+
+    # Unrelated capability still held.
+    await assert_capability(db_session, user=make_user(UserRole.WRITE), capability="aks_pod_delete")
+
+
+# ── Plugin routers inherit the module gate ─────────────────────────────────────
+
+
+async def test_plugin_paths_are_mapped_to_their_module():
+    """Plugin routers mount outside api_router, so they must be listed
+    explicitly or they become an ungated second door into a module."""
+    from app.core.authz import _module_for_path
+
+    assert _module_for_path("/api/v1/plugins/keyvault_ops/secrets") == "keyvault"
+    assert _module_for_path("/api/v1/plugins/aks_insights/clusters") == "aks_operations"

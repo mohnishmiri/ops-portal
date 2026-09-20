@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
+
+from app.core.authz import enforce_module_access
+from app.core.subscription_scope import bind_subscription_scope
 
 logger = structlog.get_logger(__name__)
 
@@ -79,12 +82,21 @@ class PluginRegistry:
 
                     self.plugins[metadata.name] = plugin
 
-                    # Register plugin routes
+                    # Register plugin routes behind the same authorization
+                    # gates as core APIs.  Plugin routers are mounted on the
+                    # app rather than on api_router, so without these
+                    # dependencies they inherited none of its gates and a
+                    # plugin path became a second door into a module the
+                    # caller had no grant for.
                     router = plugin.get_router()
                     app.include_router(
                         router,
                         prefix=f"/api/v1/plugins/{module_name}",
                         tags=[f"plugin:{metadata.name}"],
+                        dependencies=[
+                            Depends(enforce_module_access),
+                            Depends(bind_subscription_scope),
+                        ],
                     )
 
                     await plugin.on_startup()

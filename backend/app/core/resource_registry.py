@@ -304,25 +304,48 @@ async def seed_resources(db: AsyncSession) -> None:
 # parallel RBAC system.  ``permission_type`` is "edit" for state-changing
 # operations and "view" for read capabilities.
 #
-# Format: (capability_name, description, permission_type, default_roles)
+# Format: (capability_name, description, permission_type, default_roles, parent_module)
 #
 # The default_roles column reproduces the coarse role checks that guarded
 # these operations before the capability layer existed, so seeding introduces
 # no behaviour change for existing users.  Admins can then tighten or widen
 # individual capabilities through the UI — for example revoking
 # aks_pod_delete from the write role without affecting any other operation.
-CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...]]] = [
-    ("aks_view", "View AKS clusters and workloads", "view", ("read", "write")),
-    ("aks_pod_view", "View pods and pod metrics", "view", ("read", "write")),
-    ("aks_pod_delete", "Delete pods", "edit", ("write",)),
-    ("aks_pod_exec", "Execute commands inside a running pod", "edit", ("write",)),
-    ("aks_job_view", "View Kubernetes Jobs", "view", ("read", "write")),
-    ("aks_job_delete", "Delete Kubernetes Jobs", "edit", ("write",)),
-    ("aks_cronjob_view", "View CronJobs", "view", ("read", "write")),
-    ("aks_cronjob_trigger", "Manually trigger a CronJob", "edit", ("write",)),
-    ("aks_deployment_scale", "Scale, restart, and delete deployments", "edit", ("write",)),
-    ("aks_secret_view", "Reveal Kubernetes secret values", "view", ("write",)),
-    ("aks_secret_update", "Create, update, or delete Kubernetes secrets", "edit", ("write",)),
+#
+# parent_module files the capability under the module whose page exposes it,
+# so the admin Permissions matrix lists it next to the feature it guards.
+CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
+    ("aks_view", "View AKS clusters and workloads", "view", ("read", "write"), "aks_operations"),
+    ("aks_pod_view", "View pods and pod metrics", "view", ("read", "write"), "aks_operations"),
+    ("aks_pod_delete", "Delete pods", "edit", ("write",), "aks_operations"),
+    ("aks_pod_exec", "Execute commands inside a running pod", "edit", ("write",), "aks_operations"),
+    ("aks_job_view", "View Kubernetes Jobs", "view", ("read", "write"), "aks_operations"),
+    ("aks_job_delete", "Delete Kubernetes Jobs", "edit", ("write",), "aks_operations"),
+    ("aks_cronjob_view", "View CronJobs", "view", ("read", "write"), "aks_operations"),
+    ("aks_cronjob_trigger", "Manually trigger a CronJob", "edit", ("write",), "aks_operations"),
+    ("aks_deployment_scale", "Scale, restart, and delete deployments", "edit", ("write",), "aks_operations"),
+    ("aks_secret_view", "Reveal Kubernetes secret values", "view", ("write",), "aks_operations"),
+    ("aks_secret_update", "Create, update, or delete Kubernetes secrets", "edit", ("write",), "aks_operations"),
+    # Azure resource power control.  Previously admin-only, which contradicted
+    # both the Infrastructure Alerts UI (it renders the power buttons for any
+    # user who can write) and the equivalent AKS cluster start/stop routes
+    # (write).  Granting these to write restores that intent; an operator who
+    # wants power control held back can revoke the capability from the write
+    # role in the Permissions UI without touching any other operation.
+    (
+        "infra_vm_power",
+        "Start, stop (deallocate), and restart virtual machines",
+        "edit",
+        ("write",),
+        "infra_alerts",
+    ),
+    (
+        "infra_pg_server_power",
+        "Start, stop, and restart PostgreSQL Flexible Servers",
+        "edit",
+        ("write",),
+        "infra_alerts",
+    ),
 ]
 
 # Expand the capability catalogue into resource + permission seed entries.
@@ -332,21 +355,23 @@ RESOURCE_SEEDS.extend(
         "resource_name": capability,
         "description": description,
         "route_path": None,
-        "parent_name": "aks_operations",
+        "parent_name": parent_module,
         "is_system": True,
     }
-    for capability, description, _perm_type, _roles in CAPABILITY_SEEDS
+    for capability, description, _perm_type, _roles, parent_module in CAPABILITY_SEEDS
 )
 
 _CAPABILITY_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
-    (role, capability, perm_type) for capability, _description, perm_type, roles in CAPABILITY_SEEDS for role in roles
+    (role, capability, perm_type)
+    for capability, _description, perm_type, roles, _parent in CAPABILITY_SEEDS
+    for role in roles
 ]
 
 # capability name → the permission_type that grants it.  Consulted by
 # app.core.authz so a capability is reported as held only when the permission
 # row actually matches what the enforcement check requires.
 CAPABILITY_PERMISSION_TYPES: dict[str, str] = {
-    capability: perm_type for capability, _description, perm_type, _roles in CAPABILITY_SEEDS
+    capability: perm_type for capability, _description, perm_type, _roles, _parent in CAPABILITY_SEEDS
 }
 
 

@@ -273,9 +273,34 @@ async def get_current_user(
     return identity
 
 
+# Portal roles are a ladder, not a set of unrelated labels: ADMIN can do
+# everything WRITE can, and WRITE can do everything READ can.  Entra assigns a
+# user the single app role that matches their job, so a WRITE user's token
+# carries "write" and nothing else.  Without this table a route declared as
+# ``require_role(UserRole.READ)`` would 403 that user for a read they are
+# plainly entitled to perform.
+_ROLE_IMPLIES: dict[UserRole, frozenset[UserRole]] = {
+    UserRole.ADMIN: frozenset({UserRole.ADMIN, UserRole.WRITE, UserRole.READ}),
+    UserRole.WRITE: frozenset({UserRole.WRITE, UserRole.READ}),
+    UserRole.READ: frozenset({UserRole.READ}),
+}
+
+
+def effective_roles(user: UserContext) -> frozenset[UserRole]:
+    """Every role ``user`` satisfies, including the ones their roles imply."""
+    granted: set[UserRole] = set()
+    for role in user.roles:
+        granted |= _ROLE_IMPLIES.get(role, frozenset({role}))
+    return frozenset(granted)
+
+
 def require_role(*roles: UserRole):  # noqa: ANN201
     """
     FastAPI dependency factory: Require specific roles.
+
+    A role requirement is satisfied by that role or any role above it on the
+    ladder (see :data:`_ROLE_IMPLIES`), so ``require_role(UserRole.READ)``
+    admits READ, WRITE, and ADMIN.
 
     Usage:
         @router.post("/endpoint")
@@ -292,7 +317,7 @@ def require_role(*roles: UserRole):  # noqa: ANN201
         # ADMIN implicitly satisfies any role requirement
         if user.is_admin:
             return user
-        if not any(user.has_role(r) for r in roles):
+        if not (effective_roles(user) & set(roles)):
             logger.warning(
                 "access_denied",
                 user_id=user.user_id,

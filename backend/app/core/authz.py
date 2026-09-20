@@ -37,7 +37,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import effective_roles, get_current_user
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.models.database import Permission, Resource
@@ -118,6 +118,11 @@ _API_MODULE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("/api/v1/dashboards", "cost_management"),
     ("/api/v1/optimize", "cost_management"),
     ("/api/v1/reports", "cost_management"),
+    # Plugin routers expose the same Azure resources as their core module, so
+    # they are gated by that module.  Without these entries the plugin path
+    # was an ungated alternative route to data the core path protects.
+    ("/api/v1/plugins/keyvault_ops", "keyvault"),
+    ("/api/v1/plugins/aks_insights", "aks_operations"),
 )
 
 
@@ -298,7 +303,9 @@ async def assert_capability(
             fallback_role=fallback_role.value,
             user_id=user.user_id,
         )
-        if not user.has_role(fallback_role):
+        # Role ladder, not exact match — a WRITE user satisfies a READ
+        # fallback, exactly as require_role would have judged it.
+        if fallback_role not in effective_roles(user):
             raise _forbidden()
         return
 
