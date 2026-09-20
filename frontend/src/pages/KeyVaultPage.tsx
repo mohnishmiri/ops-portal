@@ -1630,26 +1630,17 @@ const vaultNameFromUri = (uri: string | null) =>
   (uri || "").replace(/^https?:\/\//, "").split(".")[0] || "this vault";
 
 /**
- * Progress / caveats strip shown while the secrets grid is in value-search mode.
- * Every message names the vault — the search only ever covers the selected one.
+ * Warning strip for value search. Deliberately silent on the happy path and
+ * while scanning — the count badge and grid already carry that. It appears
+ * only when something changes what the results *mean*: a failed search, a
+ * vault the app cannot read, or a scan that did not finish.
  */
 const ValueSearchStatus: React.FC<{
-  term: string;
-  pending: boolean;
   vaultName: string;
-  totalSecrets: number;
   result?: SecretSearchResult;
   error: unknown;
-}> = ({ term, pending, vaultName, totalSecrets, result, error }) => {
+}> = ({ vaultName, result, error }) => {
   const base = "flex items-center gap-2 border-b px-4 py-2 text-xs";
-
-  if (term.length < SECRET_VALUE_SEARCH_MIN_CHARS) {
-    return (
-      <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
-        Type at least {SECRET_VALUE_SEARCH_MIN_CHARS} characters to search inside secret values.
-      </div>
-    );
-  }
 
   if (error) {
     // Without a FastAPI `detail` the generic text hides the real cause
@@ -1664,17 +1655,7 @@ const ValueSearchStatus: React.FC<{
     );
   }
 
-  if (pending) {
-    return (
-      <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
-        <span className="animate-spin">{Icons.refresh()}</span>
-        Reading {totalSecrets > 0 ? `all ${totalSecrets} ` : ""}secret values in{" "}
-        <span className="font-semibold">{vaultName}</span> — this can take a few seconds.
-      </div>
-    );
-  }
-
-  if (!result) return null;
+  if (!result || result.scope !== "name_and_value") return null;
 
   // Nothing readable is a permission problem, not an empty search result.
   if (result.scanned > 0 && result.unreadable === result.scanned) {
@@ -1691,34 +1672,18 @@ const ValueSearchStatus: React.FC<{
     );
   }
 
-  const caveats: string[] = [];
-  if (result.unreadable > 0) caveats.push(`${result.unreadable} could not be read`);
-  if (result.skipped_disabled > 0) caveats.push(`${result.skipped_disabled} disabled and skipped`);
-  if (result.truncated) caveats.push("vault too large — results are partial");
-
   // A partial scan must not look like a complete "no matches" answer.
   if (result.timed_out) {
     return (
       <div className={`${base} border-amber-200 bg-amber-50 text-amber-800`}>
-        Read {result.scanned} of {result.total_secrets} secret values in{" "}
-        <span className="font-semibold">{vaultName}</span> before the scan hit its time
-        limit — these results are partial. Narrow the search or try again.
+        Partial — read {result.scanned} of {result.total_secrets} values before the time
+        limit{result.unreadable > 0 ? `, ${result.unreadable} of them unreadable` : ""}. Narrow
+        the search or try again.
       </div>
     );
   }
 
-  return (
-    <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
-      Searched {result.scanned} secret value{result.scanned === 1 ? "" : "s"} in{" "}
-      <span className="font-semibold">{vaultName}</span>
-      {result.base64_matches > 0 && (
-        <span className="text-att-700">
-          — {result.base64_matches} matched inside Base64-encoded values
-        </span>
-      )}
-      {caveats.length > 0 && <span className="text-amber-700">({caveats.join("; ")})</span>}
-    </div>
-  );
+  return null;
 };
 
 const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
@@ -1905,12 +1870,9 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
         ) : undefined}
       />
 
-      {searchScope === "name_and_value" && canWrite && search.trim() !== "" && (
+      {valueSearchActive && !valueSearchPending && (
         <ValueSearchStatus
-          term={term}
-          pending={valueSearchPending}
           vaultName={vaultNameFromUri(vaultUri)}
-          totalSecrets={secrets?.length ?? 0}
           result={valueSearch.data}
           error={valueSearch.error}
         />

@@ -36,11 +36,15 @@ _CACHE_TTL_DETAIL = 600  # 10 min — individual cert/key detail
 
 # Value search reads every secret in the vault one GET at a time, so it is
 # bounded on all three axes and its results are never cached.
-_VALUE_SEARCH_CONCURRENCY = 32  # parallel secret reads
+_VALUE_SEARCH_CONCURRENCY = 64  # parallel secret reads
 _VALUE_SEARCH_MAX_SCAN = 2000  # secrets read per search
 # Budget kept well under the client timeout so a slow vault returns partial
 # results with an explanation rather than the browser giving up on us.
-_VALUE_SEARCH_TIMEOUT = 45  # seconds for the whole scan
+_VALUE_SEARCH_TIMEOUT = 75  # seconds for the whole scan
+# A read that stalls holds a worker for its whole timeout, so a scan gives up
+# on one much sooner than a normal call would: 64 workers x 75s / 8s covers a
+# 600-secret vault even when every single read is hanging.
+_VALUE_SEARCH_READ_TIMEOUT = 8  # seconds per secret read
 
 # The reads are blocking urllib calls. They get their own pool so a big scan
 # neither starves the default executor (token fetches, sync jobs, other
@@ -183,6 +187,7 @@ class KeyVaultService:
         *,
         token: str | None = None,
         executor: ThreadPoolExecutor | None = None,
+        timeout: int = 15,
     ) -> dict:
         """Make Key Vault REST API GET request.
 
@@ -193,7 +198,8 @@ class KeyVaultService:
 
         ``token`` lets a caller issuing many requests in a row acquire the
         vault token once instead of per request. ``executor`` keeps a burst
-        of such calls off the shared default thread pool.
+        of such calls off the shared default thread pool, and ``timeout``
+        lets such a burst give up on a stalled read sooner.
         """
         token = token or await self._get_vault_token()
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -203,7 +209,7 @@ class KeyVaultService:
             no_proxy_handler = urllib.request.ProxyHandler({})
             opener = urllib.request.build_opener(no_proxy_handler)
             try:
-                with opener.open(req, timeout=15) as resp:
+                with opener.open(req, timeout=timeout) as resp:
                     return _json.loads(resp.read())
             except urllib.error.HTTPError as he:
                 # Read the response body for Azure's detailed error
@@ -429,8 +435,12 @@ class KeyVaultService:
                 f"{vault_uri}secrets/{name}?api-version=7.4",
                 token=token,
                 executor=_value_search_pool,
+                timeout=_VALUE_SEARCH_READ_TIMEOUT,
             )
-        except Exception as e:
+        except (RuntimeError, urllib.error.URLError, TimeoutError, OSError) as e:
+            # Deliberately narrow: these are the per-secret conditions a scan
+            # should absorb. A TypeError or the like is a bug, and must fail
+            # the search loudly instead of masquerading as an unreadable vault.
             logger.debug("secret_value_unreadable", vault_uri=vault_uri, name=name, error=str(e))
             return None, str(e)
         return body.get("value") or "", None

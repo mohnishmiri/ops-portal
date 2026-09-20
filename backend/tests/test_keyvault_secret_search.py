@@ -54,7 +54,7 @@ def _service_with(values: dict, *, listed: list | None = None) -> KeyVaultServic
     async def _get_vault_token():
         return "token"
 
-    async def _vault_get(url, *, token=None, executor=None):
+    async def _vault_get(url, *, token=None, executor=None, timeout=None):
         name = url.split("/secrets/")[1].split("?")[0]
         service.value_reads.append(name)
         value = values.get(name)
@@ -161,7 +161,7 @@ async def test_search_is_scoped_to_the_selected_vault():
         listed_for.append(vault_uri)
         return [_secret("api-key")]
 
-    async def _vault_get(url, *, token=None, executor=None):
+    async def _vault_get(url, *, token=None, executor=None, timeout=None):
         read_urls.append(url)
         return {"value": "needle"}
 
@@ -261,7 +261,7 @@ async def test_slow_vault_returns_partial_results_instead_of_failing(monkeypatch
     service = _service_with({"fast": "needle", "slow": "needle"})
     original = service._vault_get
 
-    async def _slow_for_one(url, *, token=None, executor=None):
+    async def _slow_for_one(url, *, token=None, executor=None, timeout=None):
         if "/secrets/slow" in url:
             await asyncio.sleep(5)
         return await original(url, token=token)
