@@ -5,6 +5,8 @@ three things that make that safe: values never leave the service, the scan
 is role-gated, and the audit trail records the search without the term.
 """
 
+import base64
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
@@ -13,7 +15,7 @@ from app.api.v1.endpoints.keyvault import _get_kv_service
 from app.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
-from app.services.keyvault_service import KeyVaultService, _value_contains
+from app.services.keyvault_service import KeyVaultService, _match_kind
 
 from .conftest import make_read_user
 
@@ -67,18 +69,52 @@ def _service_with(values: dict, *, listed: list | None = None) -> KeyVaultServic
 # ── Value matching ─────────────────────────────────────────────────────
 
 
-def test_value_contains_matches_raw_value_case_insensitively():
-    assert _value_contains("SuperSecret123", "secret") is True
-    assert _value_contains("SuperSecret123", "absent") is False
+PLAIN = "hunter2-password"
+B64 = base64.b64encode(PLAIN.encode()).decode()
 
 
-def test_value_contains_matches_base64_encoded_values():
-    # "hunter2-password" stored via the portal's encode-as-Base64 option.
-    assert _value_contains("aHVudGVyMi1wYXNzd29yZA==", "hunter2") is True
+def test_match_kind_matches_raw_value_case_insensitively():
+    assert _match_kind("SuperSecret123", "secret") == "value"
+    assert _match_kind("SuperSecret123", "absent") is None
 
 
-def test_value_contains_ignores_empty_values():
-    assert _value_contains("", "anything") is False
+def test_match_kind_ignores_empty_values():
+    assert _match_kind("", "anything") is None
+
+
+# Vaults hold Base64 in whatever shape produced it — a shell pipeline, an SDK,
+# a Windows tool, the portal's own encode option. Every one of these has to
+# find the plaintext the user actually searches for.
+@pytest.mark.parametrize(
+    ("label", "stored"),
+    [
+        ("clean and padded", B64),
+        ("trailing newline", B64 + "\n"),
+        ("surrounding whitespace", f"  {B64}  "),
+        ("line wrapped", "\n".join(B64[i : i + 8] for i in range(0, len(B64), 8))),
+        ("unpadded", B64.rstrip("=")),
+        ("url-safe alphabet", base64.urlsafe_b64encode(f"??>{PLAIN}".encode()).decode()),
+        ("utf-16 payload", base64.b64encode(PLAIN.encode("utf-16")).decode()),
+        ("utf-16-le without bom", base64.b64encode(PLAIN.encode("utf-16-le")).decode()),
+        ("encoded twice", base64.b64encode(B64.encode()).decode()),
+        ("wraps a properties file", base64.b64encode(f"db.pass={PLAIN}\n".encode()).decode()),
+    ],
+)
+def test_match_kind_decodes_every_base64_shape(label, stored):
+    assert _match_kind(stored, "hunter2") == "value_base64", label
+
+
+@pytest.mark.parametrize(
+    ("label", "stored"),
+    [
+        ("unrelated plaintext", "totally-different-value"),
+        ("unrelated base64", base64.b64encode(b"nothing to see here at all").decode()),
+        ("binary blob", base64.b64encode(bytes(range(256)) * 2).decode()),
+        ("too short to be base64", "ab"),
+    ],
+)
+def test_match_kind_does_not_invent_matches(label, stored):
+    assert _match_kind(stored, "hunter2") is None, label
 
 
 # ── Service: name scope ────────────────────────────────────────────────
@@ -110,6 +146,17 @@ async def test_value_scope_matches_on_value_case_insensitively():
     assert [r["name"] for r in result["results"]] == ["api-key"]
     assert result["results"][0]["matched_in"] == ["value"]
     assert result["scanned"] == 2
+
+
+@pytest.mark.asyncio
+async def test_value_scope_finds_secrets_stored_base64_encoded():
+    service = _service_with({"db-password": B64 + "\n", "unrelated": "nothing"})
+
+    result = await service.search_secrets(VAULT, "hunter2", include_values=True)
+
+    assert [r["name"] for r in result["results"]] == ["db-password"]
+    assert result["results"][0]["matched_in"] == ["value_base64"]
+    assert result["base64_matches"] == 1
 
 
 @pytest.mark.asyncio
@@ -165,6 +212,40 @@ async def test_blank_query_returns_no_matches_and_reads_nothing():
 
     assert result["results"] == []
     assert service.value_reads == []
+
+
+# ── Value viewer stays consistent with search ──────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "stored"),
+    [
+        ("clean and padded", B64),
+        ("unpadded", B64.rstrip("=")),
+        ("url-safe alphabet", base64.urlsafe_b64encode(f"??>{PLAIN}".encode()).decode()),
+        ("utf-16 payload", base64.b64encode(PLAIN.encode("utf-16")).decode()),
+    ],
+)
+async def test_viewer_decodes_what_search_flags_as_base64(label, stored):
+    """A "base64 match" in the grid must show its plaintext when opened."""
+    service = _service_with({"api-key": stored})
+
+    assert _match_kind(stored, "hunter2") == "value_base64", label
+    detail = await service.get_secret_value(VAULT, "api-key")
+
+    assert detail["is_base64"] is True, label
+    assert "hunter2" in detail["decoded_value"], label
+
+
+@pytest.mark.asyncio
+async def test_viewer_does_not_claim_plaintext_is_base64():
+    service = _service_with({"api-key": "just-a-plain-password"})
+
+    detail = await service.get_secret_value(VAULT, "api-key")
+
+    assert detail["is_base64"] is False
+    assert detail["decoded_value"] is None
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────

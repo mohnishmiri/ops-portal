@@ -1669,6 +1669,11 @@ const ValueSearchStatus: React.FC<{
   return (
     <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
       Searched {result.scanned} secret value{result.scanned === 1 ? "" : "s"}
+      {result.base64_matches > 0 && (
+        <span className="text-att-700">
+          — {result.base64_matches} matched inside Base64-encoded values
+        </span>
+      )}
       {caveats.length > 0 && <span className="text-amber-700">({caveats.join("; ")})</span>}
     </div>
   );
@@ -1718,12 +1723,13 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
     return all.filter((s: SecretInfo) => s.name.toLowerCase().includes(term.toLowerCase()));
   }, [secrets, term, valueSearchActive, valueSearch.data, valueSearch.isError]);
 
+  // name -> how the value matched, so the grid can flag Base64-stored hits.
   const valueMatches = useMemo(
     () =>
-      new Set(
+      new Map(
         (valueSearch.data?.results ?? [])
-          .filter((r) => r.matched_in.includes("value"))
-          .map((r) => r.name)
+          .map((r) => [r.name, r.matched_in.find((m) => m.startsWith("value"))] as const)
+          .filter(([, kind]) => kind !== undefined)
       ),
     [valueSearch.data]
   );
@@ -1883,9 +1889,15 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
                   <span className="inline-flex items-center gap-2">
                     {s.name}
                     {valueSearchActive && valueMatches.has(s.name) && (
-                      <span title="The search term appears in this secret's value">
-                        <Badge label="value match" color="purple" />
-                      </span>
+                      valueMatches.get(s.name) === "value_base64" ? (
+                        <span title="The search term appears in this secret's value once it is Base64-decoded">
+                          <Badge label="base64 match" color="blue" />
+                        </span>
+                      ) : (
+                        <span title="The search term appears in this secret's value">
+                          <Badge label="value match" color="purple" />
+                        </span>
+                      )
                     )}
                   </span>
                 </td>

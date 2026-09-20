@@ -37,12 +37,13 @@ const result: SecretSearchResult = {
       not_before: null,
       tags: {},
       managed: false,
-      matched_in: ["value"],
+      matched_in: ["value_base64"],
     },
   ],
   total_secrets: 605,
   scanned: 605,
   unreadable: 0,
+  base64_matches: 1,
   skipped_disabled: 0,
   truncated: false,
 };
@@ -72,7 +73,8 @@ describe("useSecretValueSearch", () => {
         params: { vault_uri: VAULT, q: "prod-token", scope: "name_and_value" },
       })
     );
-    expect(hook.current.data?.results[0].matched_in).toEqual(["value"]);
+    expect(hook.current.data?.results[0].matched_in).toEqual(["value_base64"]);
+    expect(hook.current.data?.base64_matches).toBe(1);
   });
 
   it("does not scan the vault for terms below the minimum length", async () => {

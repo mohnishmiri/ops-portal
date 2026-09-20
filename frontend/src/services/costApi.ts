@@ -1140,7 +1140,10 @@ export async function refreshVaultSecrets(vaultUri: string) {
 export type SecretSearchScope = "name" | "name_and_value";
 
 export interface SecretSearchMatch extends SecretInfo {
-  /** Where the term matched — "name", "value", or both. */
+  /**
+   * Where the term matched: "name", "value" (literal), and/or "value_base64"
+   * (only visible once the stored value is Base64-decoded).
+   */
   matched_in: string[];
 }
 
@@ -1152,6 +1155,8 @@ export interface SecretSearchResult {
   scanned: number;
   /** Secrets whose value could not be read — per-secret policy, soft-deleted, etc. */
   unreadable: number;
+  /** Matches that only appeared after Base64-decoding the stored value. */
+  base64_matches: number;
   skipped_disabled: number;
   truncated: boolean;
 }

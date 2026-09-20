@@ -9,6 +9,7 @@ import asyncio
 import base64
 import hashlib
 import json as _json
+import re
 import urllib.error
 import urllib.request
 from contextlib import suppress
@@ -38,6 +39,11 @@ _VALUE_SEARCH_CONCURRENCY = 12  # parallel secret reads
 _VALUE_SEARCH_MAX_SCAN = 2000  # secrets read per search
 _VALUE_SEARCH_TIMEOUT = 90  # seconds for the whole scan
 VALUE_SEARCH_MIN_QUERY = 3  # shortest term worth scanning a vault for
+_MAX_BASE64_ROUNDS = 2  # a value encoded twice still decodes
+_MIN_PRINTABLE_RATIO = 0.9  # below this, decoded bytes are a binary blob
+
+_B64_STANDARD = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_B64_URLSAFE = re.compile(r"[A-Za-z0-9_-]+={0,2}")
 
 
 def _normalize_vault_uri(vault_uri: str) -> str:
@@ -66,22 +72,72 @@ def _parse_vault_http_error(he: urllib.error.HTTPError) -> tuple[str, str]:
     return msg, detail
 
 
-def _value_contains(value: str, needle: str) -> bool:
-    """True when ``needle`` appears in a secret value or its Base64-decoded form.
+def _looks_like_text(text: str) -> bool:
+    """True when decoded bytes read as text rather than a binary blob."""
+    if not text:
+        return False
+    printable = sum(1 for ch in text if ch.isprintable() or ch.isspace())
+    return printable / len(text) >= _MIN_PRINTABLE_RATIO
 
-    Base64 is checked too because the portal's own "encode as Base64" option
-    stores values that way — the user searches for what they typed, not for
-    the encoding.
+
+def _bytes_to_text(raw: bytes) -> str | None:
+    """Decode bytes using the encodings secrets actually show up in."""
+    for encoding in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        # UTF-16 text also "decodes" as UTF-8 or latin-1, into NUL-separated
+        # characters that no search term will ever match — keep looking.
+        if chr(0) in text:
+            continue
+        if _looks_like_text(text):
+            return text
+    return None
+
+
+def _decode_base64_text(value: str) -> str | None:
+    """Best-effort decode of a Base64 secret value into searchable text.
+
+    Vaults hold Base64 in every shape a shell pipeline produces: wrapped
+    across lines, padded or not, standard or URL-safe alphabet, wrapping
+    UTF-8 or UTF-16 text. All of those decode here; binary blobs do not.
+    """
+    compact = "".join(value.split())  # drop line wrapping and stray whitespace
+    if len(compact) < 4:
+        return None
+    if _B64_URLSAFE.fullmatch(compact):
+        compact = compact.replace("-", "+").replace("_", "/")
+    elif not _B64_STANDARD.fullmatch(compact):
+        return None
+    padded = compact + "=" * (-len(compact) % 4)
+    try:
+        raw = base64.b64decode(padded, validate=True)
+    except Exception:
+        return None
+    return _bytes_to_text(raw)
+
+
+def _match_kind(value: str, needle: str) -> str | None:
+    """How ``needle`` matches a secret value, or None when it does not.
+
+    ``"value"`` is a literal hit. ``"value_base64"`` means the term only
+    appears once the stored value is Base64-decoded — the user searches for
+    what they stored, not for its encoding.
     """
     if not value:
-        return False
+        return None
     if needle in value.lower():
-        return True
-    try:
-        decoded = base64.b64decode(value, validate=True).decode("utf-8")
-    except Exception:
-        return False
-    return needle in decoded.lower()
+        return "value"
+    decoded = value
+    for _ in range(_MAX_BASE64_ROUNDS):
+        nxt = _decode_base64_text(decoded)
+        if nxt is None:
+            return None
+        if needle in nxt.lower():
+            return "value_base64"
+        decoded = nxt
+    return None
 
 
 class KeyVaultService:
@@ -322,14 +378,10 @@ class KeyVaultService:
         value = body.get("value", "")
         attrs = body.get("attributes", {})
 
-        # Try Base64 decode
-        decoded = None
-        is_b64 = False
-        try:
-            decoded = base64.b64decode(value).decode("utf-8")
-            is_b64 = True
-        except Exception:
-            pass
+        # Same tolerant decode the value search uses, so a secret the grid
+        # flags as a Base64 match always shows its plaintext here too.
+        decoded = _decode_base64_text(value)
+        is_b64 = decoded is not None
 
         return {
             "name": name,
@@ -378,12 +430,12 @@ class KeyVaultService:
 
         name_matches = {s["name"] for s in secrets if needle and needle in s["name"].lower()}
 
-        def _build(matched_names: set[str], value_matches: set[str]) -> list[dict]:
+        def _build(matched_names: set[str], value_kinds: dict) -> list[dict]:
             return [
                 {
                     **s,
                     "matched_in": (["name"] if s["name"] in name_matches else [])
-                    + (["value"] if s["name"] in value_matches else []),
+                    + ([value_kinds[s["name"]]] if s["name"] in value_kinds else []),
                 }
                 for s in secrets
                 if s["name"] in matched_names
@@ -392,10 +444,11 @@ class KeyVaultService:
         if not include_values or not needle:
             return {
                 "scope": "name",
-                "results": _build(name_matches, set()),
+                "results": _build(name_matches, {}),
                 "total_secrets": len(secrets),
                 "scanned": 0,
                 "unreadable": 0,
+                "base64_matches": 0,
                 "skipped_disabled": 0,
                 "truncated": False,
             }
@@ -410,12 +463,13 @@ class KeyVaultService:
         token = await self._get_vault_token()
         semaphore = asyncio.Semaphore(_VALUE_SEARCH_CONCURRENCY)
 
-        async def _scan(secret: dict) -> tuple[str, bool | None]:
+        async def _scan(secret: dict) -> tuple[str, str | None]:
+            """Return (name, "unreadable" | "value" | "value_base64" | None)."""
             async with semaphore:
                 value = await self._read_secret_value(normalized, secret["name"], token)
             if value is None:
-                return secret["name"], None
-            return secret["name"], _value_contains(value, needle)
+                return secret["name"], "unreadable"
+            return secret["name"], _match_kind(value, needle)
 
         try:
             outcomes = await asyncio.wait_for(
@@ -428,23 +482,26 @@ class KeyVaultService:
                 f"Value search timed out after {_VALUE_SEARCH_TIMEOUT}s while reading {len(candidates)} secrets."
             ) from None
 
-        value_matches = {name for name, matched in outcomes if matched}
-        unreadable = sum(1 for _, matched in outcomes if matched is None)
+        value_kinds = {name: kind for name, kind in outcomes if kind in ("value", "value_base64")}
+        unreadable = sum(1 for _, kind in outcomes if kind == "unreadable")
+        base64_matches = sum(1 for kind in value_kinds.values() if kind == "value_base64")
 
         logger.info(
             "search_secrets_values",
             vault_uri=normalized,
             scanned=len(candidates),
-            matched=len(name_matches | value_matches),
+            matched=len(name_matches | set(value_kinds)),
+            base64_matches=base64_matches,
             unreadable=unreadable,
         )
 
         return {
             "scope": "name_and_value",
-            "results": _build(name_matches | value_matches, value_matches),
+            "results": _build(name_matches | set(value_kinds), value_kinds),
             "total_secrets": len(secrets),
             "scanned": len(candidates),
             "unreadable": unreadable,
+            "base64_matches": base64_matches,
             "skipped_disabled": skipped_disabled,
             "truncated": truncated,
         }
