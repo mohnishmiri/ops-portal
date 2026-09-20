@@ -46,6 +46,8 @@ const result: SecretSearchResult = {
   base64_matches: 1,
   skipped_disabled: 0,
   truncated: false,
+  timed_out: false,
+  read_error: null,
 };
 
 function wrapper({ children }: { children: React.ReactNode }) {

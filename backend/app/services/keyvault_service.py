@@ -12,6 +12,7 @@ import json as _json
 import re
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
@@ -35,9 +36,19 @@ _CACHE_TTL_DETAIL = 600  # 10 min — individual cert/key detail
 
 # Value search reads every secret in the vault one GET at a time, so it is
 # bounded on all three axes and its results are never cached.
-_VALUE_SEARCH_CONCURRENCY = 12  # parallel secret reads
+_VALUE_SEARCH_CONCURRENCY = 32  # parallel secret reads
 _VALUE_SEARCH_MAX_SCAN = 2000  # secrets read per search
-_VALUE_SEARCH_TIMEOUT = 90  # seconds for the whole scan
+# Budget kept well under the client timeout so a slow vault returns partial
+# results with an explanation rather than the browser giving up on us.
+_VALUE_SEARCH_TIMEOUT = 45  # seconds for the whole scan
+
+# The reads are blocking urllib calls. They get their own pool so a big scan
+# neither starves the default executor (token fetches, sync jobs, other
+# requests) nor is throttled by whatever else is already using it.
+_value_search_pool = ThreadPoolExecutor(
+    max_workers=_VALUE_SEARCH_CONCURRENCY,
+    thread_name_prefix="kv-value-search",
+)
 VALUE_SEARCH_MIN_QUERY = 3  # shortest term worth scanning a vault for
 _MAX_BASE64_ROUNDS = 2  # a value encoded twice still decodes
 _MIN_PRINTABLE_RATIO = 0.9  # below this, decoded bytes are a binary blob
@@ -166,7 +177,13 @@ class KeyVaultService:
 
         return await asyncio.to_thread(_fetch)
 
-    async def _vault_get(self, url: str, *, token: str | None = None) -> dict:
+    async def _vault_get(
+        self,
+        url: str,
+        *,
+        token: str | None = None,
+        executor: ThreadPoolExecutor | None = None,
+    ) -> dict:
         """Make Key Vault REST API GET request.
 
         Bypasses corporate proxy for vault.azure.net calls (vaults are
@@ -175,7 +192,8 @@ class KeyVaultService:
         error message (network rules, permissions, etc.) is logged.
 
         ``token`` lets a caller issuing many requests in a row acquire the
-        vault token once instead of per request.
+        vault token once instead of per request. ``executor`` keeps a burst
+        of such calls off the shared default thread pool.
         """
         token = token or await self._get_vault_token()
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -205,6 +223,8 @@ class KeyVaultService:
                 logger.error("vault_api_error", url=url, status=he.code, detail=detail[:300])
                 raise RuntimeError(msg) from he
 
+        if executor is not None:
+            return await asyncio.get_running_loop().run_in_executor(executor, _fetch)
         return await asyncio.to_thread(_fetch)
 
     async def _vault_request(
@@ -396,18 +416,24 @@ class KeyVaultService:
             "expires": _epoch_to_iso(attrs.get("exp")),
         }
 
-    async def _read_secret_value(self, vault_uri: str, name: str, token: str) -> str | None:
-        """Return a secret's raw value, or None when it cannot be read.
+    async def _read_secret_value(self, vault_uri: str, name: str, token: str) -> tuple[str | None, str | None]:
+        """Return (value, error) for one secret; value is None when unreadable.
 
         Individual failures (disabled, soft-deleted, per-secret policy) are
-        expected during a scan and must not abort the whole search.
+        expected during a scan and must not abort the whole search — but the
+        reason is kept, because "every read failed" means a misconfiguration
+        the operator needs to see rather than an empty result.
         """
         try:
-            body = await self._vault_get(f"{vault_uri}secrets/{name}?api-version=7.4", token=token)
+            body = await self._vault_get(
+                f"{vault_uri}secrets/{name}?api-version=7.4",
+                token=token,
+                executor=_value_search_pool,
+            )
         except Exception as e:
             logger.debug("secret_value_unreadable", vault_uri=vault_uri, name=name, error=str(e))
-            return None
-        return body.get("value") or ""
+            return None, str(e)
+        return body.get("value") or "", None
 
     async def search_secrets(
         self,
@@ -416,6 +442,7 @@ class KeyVaultService:
         *,
         include_values: bool = False,
         refresh: bool = False,
+        secrets: list[dict] | None = None,
     ) -> dict:
         """Search a vault's secrets by name, and optionally by value.
 
@@ -423,10 +450,16 @@ class KeyVaultService:
         reads every enabled secret in the vault and matches in memory.
         Values are only ever compared — never returned, cached, or logged.
         The caller is responsible for enforcing the role needed to read them.
+
+        ``secrets`` accepts an already-known metadata list (the synced DB
+        snapshot) so a scan skips re-paginating the vault 25 names at a time.
+        A scan that outruns its budget returns what it found with
+        ``timed_out`` set, rather than failing outright.
         """
         normalized = _normalize_vault_uri(vault_uri)
         needle = (query or "").strip().lower()
-        secrets = await self.list_secrets(normalized, None, refresh=refresh)
+        if secrets is None:
+            secrets = await self.list_secrets(normalized, None, refresh=refresh)
 
         name_matches = {s["name"] for s in secrets if needle and needle in s["name"].lower()}
 
@@ -451,6 +484,8 @@ class KeyVaultService:
                 "base64_matches": 0,
                 "skipped_disabled": 0,
                 "truncated": False,
+                "timed_out": False,
+                "read_error": None,
             }
 
         # Disabled secrets cannot be read back, so they are reported as skipped
@@ -463,24 +498,36 @@ class KeyVaultService:
         token = await self._get_vault_token()
         semaphore = asyncio.Semaphore(_VALUE_SEARCH_CONCURRENCY)
 
+        read_errors: list[str] = []
+
         async def _scan(secret: dict) -> tuple[str, str | None]:
             """Return (name, "unreadable" | "value" | "value_base64" | None)."""
             async with semaphore:
-                value = await self._read_secret_value(normalized, secret["name"], token)
+                value, error = await self._read_secret_value(normalized, secret["name"], token)
             if value is None:
+                if error:
+                    read_errors.append(error)
                 return secret["name"], "unreadable"
             return secret["name"], _match_kind(value, needle)
 
-        try:
-            outcomes = await asyncio.wait_for(
-                asyncio.gather(*(_scan(s) for s in candidates)),
+        # Partial results beat an error page: whatever finished inside the
+        # budget is reported, and the rest is abandoned with timed_out set.
+        tasks = [asyncio.create_task(_scan(s)) for s in candidates]
+        done, pending = await asyncio.wait(tasks, timeout=_VALUE_SEARCH_TIMEOUT)
+        timed_out = bool(pending)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.warning(
+                "search_secrets_timeout",
+                vault_uri=normalized,
+                completed=len(done),
+                abandoned=len(pending),
                 timeout=_VALUE_SEARCH_TIMEOUT,
             )
-        except TimeoutError:
-            logger.warning("search_secrets_timeout", vault_uri=normalized, candidates=len(candidates))
-            raise RuntimeError(
-                f"Value search timed out after {_VALUE_SEARCH_TIMEOUT}s while reading {len(candidates)} secrets."
-            ) from None
+
+        outcomes = [task.result() for task in done if not task.cancelled() and task.exception() is None]
 
         value_kinds = {name: kind for name, kind in outcomes if kind in ("value", "value_base64")}
         unreadable = sum(1 for _, kind in outcomes if kind == "unreadable")
@@ -489,21 +536,28 @@ class KeyVaultService:
         logger.info(
             "search_secrets_values",
             vault_uri=normalized,
-            scanned=len(candidates),
+            scanned=len(outcomes),
+            candidates=len(candidates),
             matched=len(name_matches | set(value_kinds)),
             base64_matches=base64_matches,
             unreadable=unreadable,
+            timed_out=timed_out,
         )
 
         return {
             "scope": "name_and_value",
             "results": _build(name_matches | set(value_kinds), value_kinds),
             "total_secrets": len(secrets),
-            "scanned": len(candidates),
+            # What was actually read, which is short of `candidates` on timeout.
+            "scanned": len(outcomes),
             "unreadable": unreadable,
             "base64_matches": base64_matches,
             "skipped_disabled": skipped_disabled,
             "truncated": truncated,
+            "timed_out": timed_out,
+            # Surfaced so a vault the app can list but not read explains itself
+            # instead of looking like a search with no matches.
+            "read_error": read_errors[0] if read_errors else None,
         }
 
     async def create_or_update_secret(

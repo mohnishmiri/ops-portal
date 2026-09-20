@@ -1625,13 +1625,22 @@ const BulkSecretUploadDialog: React.FC<{
 
 // ── Secrets Tab ───────────────────────────────────────────────────────
 
-/** Progress / caveats strip shown while the secrets grid is in value-search mode. */
+/** "https://my-kv.vault.azure.net/" -> "my-kv" */
+const vaultNameFromUri = (uri: string | null) =>
+  (uri || "").replace(/^https?:\/\//, "").split(".")[0] || "this vault";
+
+/**
+ * Progress / caveats strip shown while the secrets grid is in value-search mode.
+ * Every message names the vault — the search only ever covers the selected one.
+ */
 const ValueSearchStatus: React.FC<{
   term: string;
   pending: boolean;
+  vaultName: string;
+  totalSecrets: number;
   result?: SecretSearchResult;
   error: unknown;
-}> = ({ term, pending, result, error }) => {
+}> = ({ term, pending, vaultName, totalSecrets, result, error }) => {
   const base = "flex items-center gap-2 border-b px-4 py-2 text-xs";
 
   if (term.length < SECRET_VALUE_SEARCH_MIN_CHARS) {
@@ -1643,9 +1652,14 @@ const ValueSearchStatus: React.FC<{
   }
 
   if (error) {
+    // Without a FastAPI `detail` the generic text hides the real cause
+    // (timeout, network, proxy), so fall back to the axios message.
+    const detail = formatAxiosError(error, "");
+    const reason = detail || (error as { message?: string })?.message || "unknown error";
     return (
       <div className={`${base} border-red-200 bg-red-50 text-red-700`}>
-        {formatAxiosError(error, "Could not search secret values.")}
+        Could not search secret values in{" "}
+        <span className="font-semibold">{vaultName}</span> — {reason}
       </div>
     );
   }
@@ -1654,21 +1668,49 @@ const ValueSearchStatus: React.FC<{
     return (
       <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
         <span className="animate-spin">{Icons.refresh()}</span>
-        Reading secret values across the vault — this can take a few seconds.
+        Reading {totalSecrets > 0 ? `all ${totalSecrets} ` : ""}secret values in{" "}
+        <span className="font-semibold">{vaultName}</span> — this can take a few seconds.
       </div>
     );
   }
 
   if (!result) return null;
 
+  // Nothing readable is a permission problem, not an empty search result.
+  if (result.scanned > 0 && result.unreadable === result.scanned) {
+    return (
+      <div className={`${base} border-red-200 bg-red-50 text-red-700`}>
+        <span>
+          None of the {result.scanned} secret values in{" "}
+          <span className="font-semibold">{vaultName}</span> could be read, so values were
+          not searched. The app can list this vault but not open its secrets — it needs{" "}
+          <strong>Get</strong> on secrets (Key Vault Secrets User), not just List.
+          {result.read_error ? ` Azure said: ${result.read_error}` : ""}
+        </span>
+      </div>
+    );
+  }
+
   const caveats: string[] = [];
   if (result.unreadable > 0) caveats.push(`${result.unreadable} could not be read`);
   if (result.skipped_disabled > 0) caveats.push(`${result.skipped_disabled} disabled and skipped`);
   if (result.truncated) caveats.push("vault too large — results are partial");
 
+  // A partial scan must not look like a complete "no matches" answer.
+  if (result.timed_out) {
+    return (
+      <div className={`${base} border-amber-200 bg-amber-50 text-amber-800`}>
+        Read {result.scanned} of {result.total_secrets} secret values in{" "}
+        <span className="font-semibold">{vaultName}</span> before the scan hit its time
+        limit — these results are partial. Narrow the search or try again.
+      </div>
+    );
+  }
+
   return (
     <div className={`${base} border-att-100 bg-att-50/40 text-gray-600`}>
-      Searched {result.scanned} secret value{result.scanned === 1 ? "" : "s"}
+      Searched {result.scanned} secret value{result.scanned === 1 ? "" : "s"} in{" "}
+      <span className="font-semibold">{vaultName}</span>
       {result.base64_matches > 0 && (
         <span className="text-att-700">
           — {result.base64_matches} matched inside Base64-encoded values
@@ -1822,9 +1864,12 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
         onSearch={(value) => { setSearch(value); setPage(1); }}
         placeholder={searchScope === "name_and_value" ? "Search names and values..." : "Search secrets..."}
         countLabel={
-          valueSearchActive && valueSearch.data
-            ? `${filtered.length} of ${valueSearch.data.total_secrets} secrets`
-            : `${filtered.length} secrets`
+          // A scan in progress has no count yet — "0 secrets" would read as a result.
+          valueSearchPending && !valueSearch.data
+            ? "Searching…"
+            : valueSearchActive && valueSearch.data
+              ? `${filtered.length} of ${valueSearch.data.total_secrets} secrets`
+              : `${filtered.length} secrets`
         }
         filters={canWrite ? (
           <select
@@ -1864,6 +1909,8 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
         <ValueSearchStatus
           term={term}
           pending={valueSearchPending}
+          vaultName={vaultNameFromUri(vaultUri)}
+          totalSecrets={secrets?.length ?? 0}
           result={valueSearch.data}
           error={valueSearch.error}
         />
@@ -1918,7 +1965,11 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
               </tr>
             ))}
             {filtered.length === 0 && (
-              <tr><td colSpan={7} className="py-6 text-center text-sm text-slate-400">No secrets found</td></tr>
+              <tr>
+                <td colSpan={7} className="py-6 text-center text-sm text-slate-400">
+                  {valueSearchPending ? "Searching secret values…" : "No secrets found"}
+                </td>
+              </tr>
             )}
           </tbody>
         </table>

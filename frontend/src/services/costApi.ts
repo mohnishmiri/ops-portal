@@ -1159,6 +1159,10 @@ export interface SecretSearchResult {
   base64_matches: number;
   skipped_disabled: number;
   truncated: boolean;
+  /** The scan hit its time budget; `results` covers only `scanned` secrets. */
+  timed_out: boolean;
+  /** Why reads failed, when any did — usually a missing Get permission. */
+  read_error: string | null;
 }
 
 /** Shortest term the backend will scan a vault's values for. */

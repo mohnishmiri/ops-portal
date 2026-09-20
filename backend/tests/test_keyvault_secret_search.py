@@ -5,6 +5,7 @@ three things that make that safe: values never leave the service, the scan
 is role-gated, and the audit trail records the search without the term.
 """
 
+import asyncio
 import base64
 
 import pytest
@@ -15,6 +16,7 @@ from app.api.v1.endpoints.keyvault import _get_kv_service
 from app.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
+from app.services import keyvault_service
 from app.services.keyvault_service import KeyVaultService, _match_kind
 
 from .conftest import make_read_user
@@ -52,7 +54,7 @@ def _service_with(values: dict, *, listed: list | None = None) -> KeyVaultServic
     async def _get_vault_token():
         return "token"
 
-    async def _vault_get(url, *, token=None):
+    async def _vault_get(url, *, token=None, executor=None):
         name = url.split("/secrets/")[1].split("?")[0]
         service.value_reads.append(name)
         value = values.get(name)
@@ -149,6 +151,31 @@ async def test_value_scope_matches_on_value_case_insensitively():
 
 
 @pytest.mark.asyncio
+async def test_search_is_scoped_to_the_selected_vault():
+    """The scan covers the chosen vault only — never other vaults in the tenant."""
+    service = _service_with({"api-key": "needle"})
+    listed_for: list[str] = []
+    read_urls: list[str] = []
+
+    async def _list_secrets(vault_uri, search=None, *, refresh=False):
+        listed_for.append(vault_uri)
+        return [_secret("api-key")]
+
+    async def _vault_get(url, *, token=None, executor=None):
+        read_urls.append(url)
+        return {"value": "needle"}
+
+    service.list_secrets = _list_secrets
+    service._vault_get = _vault_get
+
+    # Passed without the trailing slash to prove normalization, not re-scoping.
+    await service.search_secrets("https://demo-kv.vault.azure.net", "needle", include_values=True)
+
+    assert listed_for == [VAULT]
+    assert all(url.startswith(VAULT) for url in read_urls), read_urls
+
+
+@pytest.mark.asyncio
 async def test_value_scope_finds_secrets_stored_base64_encoded():
     service = _service_with({"db-password": B64 + "\n", "unrelated": "nothing"})
 
@@ -205,6 +232,18 @@ async def test_value_scope_counts_unreadable_secrets_without_failing():
 
 
 @pytest.mark.asyncio
+async def test_a_vault_it_can_list_but_not_read_reports_why():
+    """List-but-no-Get must explain itself, not look like a search with no hits."""
+    service = _service_with({"one": None, "two": None})
+
+    result = await service.search_secrets(VAULT, "needle", include_values=True)
+
+    assert result["results"] == []
+    assert result["unreadable"] == result["scanned"] == 2
+    assert "403" in result["read_error"]
+
+
+@pytest.mark.asyncio
 async def test_blank_query_returns_no_matches_and_reads_nothing():
     service = _service_with({"api-key": "abc"})
 
@@ -212,6 +251,53 @@ async def test_blank_query_returns_no_matches_and_reads_nothing():
 
     assert result["results"] == []
     assert service.value_reads == []
+
+
+@pytest.mark.asyncio
+async def test_slow_vault_returns_partial_results_instead_of_failing(monkeypatch):
+    """A scan that outruns its budget still answers — an error banner helps nobody."""
+    monkeypatch.setattr(keyvault_service, "_VALUE_SEARCH_TIMEOUT", 0.2)
+
+    service = _service_with({"fast": "needle", "slow": "needle"})
+    original = service._vault_get
+
+    async def _slow_for_one(url, *, token=None, executor=None):
+        if "/secrets/slow" in url:
+            await asyncio.sleep(5)
+        return await original(url, token=token)
+
+    service._vault_get = _slow_for_one
+
+    result = await service.search_secrets(VAULT, "needle", include_values=True)
+
+    assert result["timed_out"] is True
+    assert result["scanned"] == 1, "only the read that finished counts as scanned"
+    assert [r["name"] for r in result["results"]] == ["fast"]
+
+
+@pytest.mark.asyncio
+async def test_completed_scan_is_not_marked_partial():
+    service = _service_with({"api-key": "needle"})
+
+    result = await service.search_secrets(VAULT, "needle", include_values=True)
+
+    assert result["timed_out"] is False
+    assert result["scanned"] == 1
+
+
+@pytest.mark.asyncio
+async def test_search_accepts_a_prefetched_secret_list():
+    """The endpoint passes the synced snapshot so a scan skips re-listing the vault."""
+    service = _service_with({"api-key": "needle"})
+
+    async def _fail(*args, **kwargs):
+        raise AssertionError("list_secrets must not be called when secrets are supplied")
+
+    service.list_secrets = _fail
+
+    result = await service.search_secrets(VAULT, "needle", include_values=True, secrets=[_secret("api-key")])
+
+    assert [r["name"] for r in result["results"]] == ["api-key"]
 
 
 # ── Value viewer stays consistent with search ──────────────────────────

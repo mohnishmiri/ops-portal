@@ -383,6 +383,7 @@ async def search_secrets(
     refresh: bool = Query(default=False, description="Bypass the cached secret list"),
     user: UserContext = Depends(get_current_user),
     service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Search a vault's secrets. Returns metadata only — never secret values.
@@ -400,12 +401,22 @@ async def search_secrets(
                 detail=f"Value search needs at least {VALUE_SEARCH_MIN_QUERY} characters.",
             )
 
+    # Start from the synced snapshot when there is one — re-listing a large
+    # vault costs a round trip per 25 names before the scan even begins.
+    known_secrets = None
+    if not refresh:
+        try:
+            known_secrets = await sync_service.get_secrets_from_db(vault_uri) or None
+        except Exception as e:
+            logger.warning("search_secrets_db_fallback", vault_uri=vault_uri, error=str(e))
+
     try:
         result = await service.search_secrets(
             vault_uri,
             q,
             include_values=include_values,
             refresh=refresh,
+            secrets=known_secrets,
         )
     except Exception as e:
         logger.warning("search_secrets_error", vault_uri=vault_uri, scope=scope, error=str(e))
@@ -434,6 +445,7 @@ async def search_secrets(
                 "matched_count": matched,
                 "scanned_count": result["scanned"],
                 "unreadable_count": result["unreadable"],
+                "timed_out": result["timed_out"],
             },
         )
 
