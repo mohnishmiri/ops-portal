@@ -167,13 +167,13 @@ describe("CertificatesPage SAN search", () => {
 
     // A multi-SAN certificate is looked up by a name that is not its CN, so the
     // term has to reach the backend rather than filter the current page.
-    expect(vi.mocked(certApi.useCertificates).mock.calls.at(-1)?.[0]).toMatchObject({
-      san: "portal.dev.att.com",
-    });
+    const searched = vi.mocked(certApi.useCertificates).mock.calls;
+    expect(searched[searched.length - 1][0]).toMatchObject({ san: "portal.dev.att.com" });
 
     fireEvent.click(screen.getByRole("button", { name: /^Clear$/i }));
 
-    expect(vi.mocked(certApi.useCertificates).mock.calls.at(-1)?.[0].san).toBeUndefined();
+    const cleared = vi.mocked(certApi.useCertificates).mock.calls;
+    expect(cleared[cleared.length - 1][0].san).toBeUndefined();
     expect(screen.getByLabelText(/Filter by subject alternative name/i)).toHaveValue("");
   });
 });
