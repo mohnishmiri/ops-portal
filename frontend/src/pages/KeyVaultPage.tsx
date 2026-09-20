@@ -1630,10 +1630,9 @@ const vaultNameFromUri = (uri: string | null) =>
   (uri || "").replace(/^https?:\/\//, "").split(".")[0] || "this vault";
 
 /**
- * Warning strip for value search. Deliberately silent on the happy path and
- * while scanning — the count badge and grid already carry that. It appears
- * only when something changes what the results *mean*: a failed search, a
- * vault the app cannot read, or a scan that did not finish.
+ * Warning strip for value search. Deliberately silent unless the user has to
+ * act: the search failed, or the app can list the vault but not read it. Any
+ * result that is merely incomplete stays quiet — the grid already shows it.
  */
 const ValueSearchStatus: React.FC<{
   vaultName: string;
@@ -1672,17 +1671,6 @@ const ValueSearchStatus: React.FC<{
           <strong>Get</strong> on secrets (Key Vault Secrets User), not just List.
           {result.read_error ? ` Azure said: ${result.read_error}` : ""}
         </span>
-      </div>
-    );
-  }
-
-  // A partial scan must not look like a complete "no matches" answer.
-  if (result.timed_out) {
-    return (
-      <div className={`${base} border-amber-200 bg-amber-50 text-amber-800`}>
-        Partial — read {result.scanned} of {result.total_secrets} values before the time
-        limit{result.unreadable > 0 ? `, ${result.unreadable} of them unreadable` : ""}. Narrow
-        the search or try again.
       </div>
     );
   }

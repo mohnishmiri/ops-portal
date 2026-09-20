@@ -12,10 +12,10 @@ import json as _json
 import re
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import structlog
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -36,7 +36,7 @@ _CACHE_TTL_DETAIL = 600  # 10 min — individual cert/key detail
 
 # Value search reads every secret in the vault one GET at a time, so it is
 # bounded on all three axes and its results are never cached.
-_VALUE_SEARCH_CONCURRENCY = 64  # parallel secret reads
+_VALUE_SEARCH_CONCURRENCY = 32  # parallel secret reads
 _VALUE_SEARCH_MAX_SCAN = 2000  # secrets read per search
 # Budget kept well under the client timeout so a slow vault returns partial
 # results with an explanation rather than the browser giving up on us. It
@@ -44,18 +44,15 @@ _VALUE_SEARCH_MAX_SCAN = 2000  # secrets read per search
 # snapshot has to be paginated 25 names at a time first, and that phase is
 # easily slow enough to blow the client timeout on its own.
 _VALUE_SEARCH_TIMEOUT = 75  # seconds for listing + scanning, end to end
-# A read that stalls holds a worker for its whole timeout, so a scan gives up
-# on one much sooner than a normal call would: 64 workers x 75s / 8s covers a
-# 600-secret vault even when every single read is hanging.
+# A stalled read is abandoned well before the overall budget so it cannot
+# monopolise one of the connection slots for the rest of the scan.
 _VALUE_SEARCH_READ_TIMEOUT = 8  # seconds per secret read
 
-# The reads are blocking urllib calls. They get their own pool so a big scan
-# neither starves the default executor (token fetches, sync jobs, other
-# requests) nor is throttled by whatever else is already using it.
-_value_search_pool = ThreadPoolExecutor(
-    max_workers=_VALUE_SEARCH_CONCURRENCY,
-    thread_name_prefix="kv-value-search",
-)
+# Scan reads go over httpx rather than the thread-per-request urllib path the
+# rest of this service uses. Hundreds of blocking threads contend for the GIL
+# hard enough to stall the event loop — unrelated endpoints were taking 30s+
+# while a scan ran — and urllib opens a fresh TCP+TLS connection every time.
+# Async requests over a keep-alive pool cost no threads and reuse connections.
 VALUE_SEARCH_MIN_QUERY = 3  # shortest term worth scanning a vault for
 _MAX_BASE64_ROUNDS = 2  # a value encoded twice still decodes
 _MIN_PRINTABLE_RATIO = 0.9  # below this, decoded bytes are a binary blob
@@ -189,8 +186,6 @@ class KeyVaultService:
         url: str,
         *,
         token: str | None = None,
-        executor: ThreadPoolExecutor | None = None,
-        timeout: int = 15,
     ) -> dict:
         """Make Key Vault REST API GET request.
 
@@ -200,9 +195,7 @@ class KeyVaultService:
         error message (network rules, permissions, etc.) is logged.
 
         ``token`` lets a caller issuing many requests in a row acquire the
-        vault token once instead of per request. ``executor`` keeps a burst
-        of such calls off the shared default thread pool, and ``timeout``
-        lets such a burst give up on a stalled read sooner.
+        vault token once instead of per request.
         """
         token = token or await self._get_vault_token()
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -212,7 +205,7 @@ class KeyVaultService:
             no_proxy_handler = urllib.request.ProxyHandler({})
             opener = urllib.request.build_opener(no_proxy_handler)
             try:
-                with opener.open(req, timeout=timeout) as resp:
+                with opener.open(req, timeout=15) as resp:
                     return _json.loads(resp.read())
             except urllib.error.HTTPError as he:
                 # Read the response body for Azure's detailed error
@@ -232,8 +225,6 @@ class KeyVaultService:
                 logger.error("vault_api_error", url=url, status=he.code, detail=detail[:300])
                 raise RuntimeError(msg) from he
 
-        if executor is not None:
-            return await asyncio.get_running_loop().run_in_executor(executor, _fetch)
         return await asyncio.to_thread(_fetch)
 
     async def _vault_request(
@@ -425,7 +416,13 @@ class KeyVaultService:
             "expires": _epoch_to_iso(attrs.get("exp")),
         }
 
-    async def _read_secret_value(self, vault_uri: str, name: str, token: str) -> tuple[str | None, str | None]:
+    async def _read_secret_value(
+        self,
+        client: httpx.AsyncClient,
+        vault_uri: str,
+        name: str,
+        token: str,
+    ) -> tuple[str | None, str | None]:
         """Return (value, error) for one secret; value is None when unreadable.
 
         Individual failures (disabled, soft-deleted, per-secret policy) are
@@ -434,19 +431,22 @@ class KeyVaultService:
         the operator needs to see rather than an empty result.
         """
         try:
-            body = await self._vault_get(
+            resp = await client.get(
                 f"{vault_uri}secrets/{name}?api-version=7.4",
-                token=token,
-                executor=_value_search_pool,
-                timeout=_VALUE_SEARCH_READ_TIMEOUT,
+                headers={"Authorization": f"Bearer {token}"},
             )
-        except (RuntimeError, urllib.error.URLError, TimeoutError, OSError) as e:
+            if resp.status_code >= 400:
+                detail = ""
+                with suppress(Exception):
+                    detail = resp.json().get("error", {}).get("message", "")
+                return None, f"HTTP Error {resp.status_code}: {resp.reason_phrase}" + (f" — {detail}" if detail else "")
+            return resp.json().get("value") or "", None
+        except httpx.HTTPError as e:
             # Deliberately narrow: these are the per-secret conditions a scan
             # should absorb. A TypeError or the like is a bug, and must fail
             # the search loudly instead of masquerading as an unreadable vault.
             logger.debug("secret_value_unreadable", vault_uri=vault_uri, name=name, error=str(e))
-            return None, str(e)
-        return body.get("value") or "", None
+            return None, str(e) or type(e).__name__
 
     async def search_secrets(
         self,
@@ -527,33 +527,47 @@ class KeyVaultService:
 
         read_errors: list[str] = []
 
-        async def _scan(secret: dict) -> tuple[str, str | None]:
-            """Return (name, "unreadable" | "value" | "value_base64" | None)."""
-            async with semaphore:
-                value, error = await self._read_secret_value(normalized, secret["name"], token)
-            if value is None:
-                if error:
-                    read_errors.append(error)
-                return secret["name"], "unreadable"
-            return secret["name"], _match_kind(value, needle)
+        # httpx.AsyncClient is truly async — no GIL contention from blocking
+        # threads, so the event loop stays responsive during bulk reads. The
+        # keepalive pool is sized to the concurrency on purpose: at the default
+        # of 20, the other 12 slots would redo a TLS handshake every wave.
+        transport = httpx.AsyncHTTPTransport(proxy=None)
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=_VALUE_SEARCH_READ_TIMEOUT,
+            limits=httpx.Limits(
+                max_connections=_VALUE_SEARCH_CONCURRENCY,
+                max_keepalive_connections=_VALUE_SEARCH_CONCURRENCY,
+            ),
+        ) as client:
 
-        # Partial results beat an error page: whatever finished inside the
-        # budget is reported, and the rest is abandoned with timed_out set.
-        tasks = [asyncio.create_task(_scan(s)) for s in candidates]
-        # Whatever listing already spent comes out of the same budget.
-        done, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
-        timed_out = bool(pending)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-            logger.warning(
-                "search_secrets_timeout",
-                vault_uri=normalized,
-                completed=len(done),
-                abandoned=len(pending),
-                timeout=_VALUE_SEARCH_TIMEOUT,
-            )
+            async def _scan(secret: dict) -> tuple[str, str | None]:
+                """Return (name, "unreadable" | "value" | "value_base64" | None)."""
+                async with semaphore:
+                    value, error = await self._read_secret_value(client, normalized, secret["name"], token)
+                if value is None:
+                    if error:
+                        read_errors.append(error)
+                    return secret["name"], "unreadable"
+                return secret["name"], _match_kind(value, needle)
+
+            # Partial results beat an error page: whatever finished inside the
+            # budget is reported, and the rest is abandoned with timed_out set.
+            tasks = [asyncio.create_task(_scan(s)) for s in candidates]
+            # Whatever listing already spent comes out of the same budget.
+            done, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
+            timed_out = bool(pending)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                logger.warning(
+                    "search_secrets_timeout",
+                    vault_uri=normalized,
+                    completed=len(done),
+                    abandoned=len(pending),
+                    timeout=_VALUE_SEARCH_TIMEOUT,
+                )
 
         outcomes = [task.result() for task in done if not task.cancelled() and task.exception() is None]
 

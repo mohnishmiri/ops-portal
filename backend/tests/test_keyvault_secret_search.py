@@ -54,17 +54,27 @@ def _service_with(values: dict, *, listed: list | None = None) -> KeyVaultServic
     async def _get_vault_token():
         return "token"
 
-    async def _vault_get(url, *, token=None, executor=None, timeout=None):
+    # The viewer reads one secret through _vault_get; the scan reads in bulk
+    # through _read_secret_value over a pooled async client. Both are backed
+    # by the same map so the two paths cannot drift apart.
+    async def _vault_get(url, *, token=None):
         name = url.split("/secrets/")[1].split("?")[0]
-        service.value_reads.append(name)
         value = values.get(name)
         if value is None:
             raise RuntimeError("HTTP Error 403: Forbidden")
         return {"value": value}
 
+    async def _read_secret_value(client, vault_uri, name, token):
+        service.value_reads.append(name)
+        value = values.get(name)
+        if value is None:
+            return None, "HTTP Error 403: Forbidden"
+        return value, None
+
     service.list_secrets = _list_secrets
     service._get_vault_token = _get_vault_token
     service._vault_get = _vault_get
+    service._read_secret_value = _read_secret_value
     return service
 
 
@@ -155,24 +165,24 @@ async def test_search_is_scoped_to_the_selected_vault():
     """The scan covers the chosen vault only — never other vaults in the tenant."""
     service = _service_with({"api-key": "needle"})
     listed_for: list[str] = []
-    read_urls: list[str] = []
+    read_vaults: list[str] = []
 
     async def _list_secrets(vault_uri, search=None, *, refresh=False):
         listed_for.append(vault_uri)
         return [_secret("api-key")]
 
-    async def _vault_get(url, *, token=None, executor=None, timeout=None):
-        read_urls.append(url)
-        return {"value": "needle"}
+    async def _read_secret_value(client, vault_uri, name, token):
+        read_vaults.append(vault_uri)
+        return "needle", None
 
     service.list_secrets = _list_secrets
-    service._vault_get = _vault_get
+    service._read_secret_value = _read_secret_value
 
     # Passed without the trailing slash to prove normalization, not re-scoping.
     await service.search_secrets("https://demo-kv.vault.azure.net", "needle", include_values=True)
 
     assert listed_for == [VAULT]
-    assert all(url.startswith(VAULT) for url in read_urls), read_urls
+    assert read_vaults == [VAULT], read_vaults
 
 
 @pytest.mark.asyncio
@@ -259,14 +269,14 @@ async def test_slow_vault_returns_partial_results_instead_of_failing(monkeypatch
     monkeypatch.setattr(keyvault_service, "_VALUE_SEARCH_TIMEOUT", 0.2)
 
     service = _service_with({"fast": "needle", "slow": "needle"})
-    original = service._vault_get
+    original = service._read_secret_value
 
-    async def _slow_for_one(url, *, token=None, executor=None, timeout=None):
-        if "/secrets/slow" in url:
+    async def _slow_for_one(client, vault_uri, name, token):
+        if name == "slow":
             await asyncio.sleep(5)
-        return await original(url, token=token)
+        return await original(client, vault_uri, name, token)
 
-    service._vault_get = _slow_for_one
+    service._read_secret_value = _slow_for_one
 
     result = await service.search_secrets(VAULT, "needle", include_values=True)
 
@@ -305,14 +315,14 @@ async def test_listing_time_is_deducted_from_the_scan_budget(monkeypatch):
         await asyncio.sleep(0.9)
         return await original_list(vault_uri, search, refresh=refresh)
 
-    original_get = service._vault_get
+    original_read = service._read_secret_value
 
-    async def _slow_read(url, *, token=None, executor=None, timeout=None):
+    async def _slow_read(client, vault_uri, name, token):
         await asyncio.sleep(1)
-        return await original_get(url, token=token)
+        return await original_read(client, vault_uri, name, token)
 
     service.list_secrets = _slowish_list
-    service._vault_get = _slow_read
+    service._read_secret_value = _slow_read
 
     started = asyncio.get_running_loop().time()
     result = await service.search_secrets(VAULT, "needle", include_values=True)
