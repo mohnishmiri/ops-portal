@@ -39,8 +39,11 @@ _CACHE_TTL_DETAIL = 600  # 10 min — individual cert/key detail
 _VALUE_SEARCH_CONCURRENCY = 64  # parallel secret reads
 _VALUE_SEARCH_MAX_SCAN = 2000  # secrets read per search
 # Budget kept well under the client timeout so a slow vault returns partial
-# results with an explanation rather than the browser giving up on us.
-_VALUE_SEARCH_TIMEOUT = 75  # seconds for the whole scan
+# results with an explanation rather than the browser giving up on us. It
+# covers listing the vault as well as reading it — a vault with no synced
+# snapshot has to be paginated 25 names at a time first, and that phase is
+# easily slow enough to blow the client timeout on its own.
+_VALUE_SEARCH_TIMEOUT = 75  # seconds for listing + scanning, end to end
 # A read that stalls holds a worker for its whole timeout, so a scan gives up
 # on one much sooner than a normal call would: 64 workers x 75s / 8s covers a
 # 600-secret vault even when every single read is hanging.
@@ -468,8 +471,22 @@ class KeyVaultService:
         """
         normalized = _normalize_vault_uri(vault_uri)
         needle = (query or "").strip().lower()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _VALUE_SEARCH_TIMEOUT
+
         if secrets is None:
-            secrets = await self.list_secrets(normalized, None, refresh=refresh)
+            try:
+                secrets = await asyncio.wait_for(
+                    self.list_secrets(normalized, None, refresh=refresh),
+                    timeout=max(1.0, deadline - loop.time()),
+                )
+            except TimeoutError:
+                logger.warning("search_secrets_list_timeout", vault_uri=normalized)
+                raise RuntimeError(
+                    f"Listing this vault's secrets took longer than {_VALUE_SEARCH_TIMEOUT}s, "
+                    "so values were not searched. Wait for the vault sync to populate, "
+                    'then retry — or use "Search: Name".'
+                ) from None
 
         name_matches = {s["name"] for s in secrets if needle and needle in s["name"].lower()}
 
@@ -523,7 +540,8 @@ class KeyVaultService:
         # Partial results beat an error page: whatever finished inside the
         # budget is reported, and the rest is abandoned with timed_out set.
         tasks = [asyncio.create_task(_scan(s)) for s in candidates]
-        done, pending = await asyncio.wait(tasks, timeout=_VALUE_SEARCH_TIMEOUT)
+        # Whatever listing already spent comes out of the same budget.
+        done, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
         timed_out = bool(pending)
         for task in pending:
             task.cancel()

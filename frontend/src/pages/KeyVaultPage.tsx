@@ -1643,14 +1643,18 @@ const ValueSearchStatus: React.FC<{
   const base = "flex items-center gap-2 border-b px-4 py-2 text-xs";
 
   if (error) {
-    // Without a FastAPI `detail` the generic text hides the real cause
-    // (timeout, network, proxy), so fall back to the axios message.
+    // A FastAPI `detail` already explains itself; only network-level failures
+    // (timeout, proxy, DNS) need the vault name wrapped around them.
     const detail = formatAxiosError(error, "");
-    const reason = detail || (error as { message?: string })?.message || "unknown error";
     return (
       <div className={`${base} border-red-200 bg-red-50 text-red-700`}>
-        Could not search secret values in{" "}
-        <span className="font-semibold">{vaultName}</span> — {reason}
+        {detail || (
+          <>
+            Could not search secret values in{" "}
+            <span className="font-semibold">{vaultName}</span> —{" "}
+            {(error as { message?: string })?.message || "unknown error"}
+          </>
+        )}
       </div>
     );
   }

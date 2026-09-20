@@ -276,6 +276,53 @@ async def test_slow_vault_returns_partial_results_instead_of_failing(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_a_slow_vault_listing_cannot_blow_the_budget(monkeypatch):
+    """Listing shares the budget — otherwise the client times out before we answer."""
+    monkeypatch.setattr(keyvault_service, "_VALUE_SEARCH_TIMEOUT", 0.3)
+    service = _service_with({"api-key": "needle"})
+
+    async def _slow_list(vault_uri, search=None, *, refresh=False):
+        await asyncio.sleep(5)
+        return [_secret("api-key")]
+
+    service.list_secrets = _slow_list
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RuntimeError, match="took longer than"):
+        await service.search_secrets(VAULT, "needle", include_values=True)
+
+    assert asyncio.get_running_loop().time() - started < 3, "must give up, not wait out the list"
+
+
+@pytest.mark.asyncio
+async def test_listing_time_is_deducted_from_the_scan_budget(monkeypatch):
+    """A slow list leaves less scan time, and the answer is still partial-but-prompt."""
+    monkeypatch.setattr(keyvault_service, "_VALUE_SEARCH_TIMEOUT", 1.0)
+    service = _service_with({"api-key": "needle", "other": "needle"})
+    original_list = service.list_secrets
+
+    async def _slowish_list(vault_uri, search=None, *, refresh=False):
+        await asyncio.sleep(0.9)
+        return await original_list(vault_uri, search, refresh=refresh)
+
+    original_get = service._vault_get
+
+    async def _slow_read(url, *, token=None, executor=None, timeout=None):
+        await asyncio.sleep(1)
+        return await original_get(url, token=token)
+
+    service.list_secrets = _slowish_list
+    service._vault_get = _slow_read
+
+    started = asyncio.get_running_loop().time()
+    result = await service.search_secrets(VAULT, "needle", include_values=True)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert result["timed_out"] is True
+    assert elapsed < 2.5, f"answered in {elapsed:.1f}s; the budget must span both phases"
+
+
+@pytest.mark.asyncio
 async def test_completed_scan_is_not_marked_partial():
     service = _service_with({"api-key": "needle"})
 
@@ -396,6 +443,33 @@ async def test_search_route_is_not_captured_by_the_secret_name_route(admin_clien
 
     assert response.status_code == 200
     assert "results" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_vault_returns_an_explanation_not_a_client_timeout(admin_client, app, monkeypatch):
+    """The whole chain: a vault too slow to list must answer with a usable reason."""
+    monkeypatch.setattr(keyvault_service, "_VALUE_SEARCH_TIMEOUT", 0.3)
+    service = _service_with({"api-key": "needle"})
+
+    async def _stalled_list(vault_uri, search=None, *, refresh=False):
+        await asyncio.sleep(30)
+        return []
+
+    service.list_secrets = _stalled_list
+    app.dependency_overrides[_get_kv_service] = lambda: service
+
+    started = asyncio.get_running_loop().time()
+    response = await admin_client.get(
+        "/api/v1/keyvault/secrets/search",
+        params={"vault_uri": VAULT, "q": "needle", "scope": "name_and_value"},
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert response.status_code == 502
+    # The message has to survive _friendly_error untouched to be actionable.
+    assert "took longer than" in response.json()["detail"]
+    assert "Search: Name" in response.json()["detail"]
+    assert elapsed < 5, f"answered in {elapsed:.1f}s; must not wait out the stalled list"
 
 
 @pytest.mark.asyncio
