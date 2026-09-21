@@ -289,13 +289,19 @@ async def test_renew_success(app, admin_client):
     assert resp.json()["thumbprint"] == "NEW"
 
 
-async def test_renew_passes_collection_context(app, admin_client):
+@pytest.mark.parametrize("collection_id", [31599, 18678, None])
+async def test_renew_passes_collection_context(app, admin_client, monkeypatch, collection_id):
+    from unittest.mock import Mock
+
+    schedule_sync = Mock()
+    monkeypatch.setattr("app.api.v1.endpoints.certificates._schedule_sync", schedule_sync)
     svc = FakeService()
     _use_service(app, svc)
-    resp = await admin_client.post("/api/v1/certificates/1/renew", json={"collection_id": 31599})
+    resp = await admin_client.post("/api/v1/certificates/1/renew", json={"collection_id": collection_id})
     assert resp.status_code == 200
     assert svc.last_renew_kwargs is not None
-    assert svc.last_renew_kwargs["collection_id"] == 31599
+    assert svc.last_renew_kwargs["collection_id"] == collection_id
+    schedule_sync.assert_called_once_with(collection_id, triggered_by="mutation")
 
 
 async def test_pfx_renew_requires_non_blank_12_character_password(app, admin_client):

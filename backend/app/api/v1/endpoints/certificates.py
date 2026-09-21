@@ -1521,7 +1521,7 @@ async def renew_certificate(
         source="renew",
         common_name=cert_cn,
     )
-    _schedule_sync(None, triggered_by="mutation")
+    _schedule_sync(payload.collection_id, triggered_by="mutation")
     return result
 
 
