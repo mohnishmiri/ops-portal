@@ -1,0 +1,321 @@
+/* review.css — owned by a single UX packet so parallel work cannot collide.
+   Use design tokens (var(--color-*), var(--space-*)) only: the design-system
+   audit in tests/web/test_ui_shell.py caps hard-coded colours per file.
+
+   Two surfaces live here:
+    1. The evidence sources page's legacy intake workflow.
+     2. The bulk proposal review table on the import coverage page. */
+
+/* ------------------------------------------------------------------ */
+/* Lane 1 / lane 2 — the distinction a user got wrong in production.    */
+/* ------------------------------------------------------------------ */
+
+.lane-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+@media (max-width: 900px) {
+  .lane-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.lane-card {
+  border-top: 3px solid var(--color-cyan-500);
+  min-width: 0;
+}
+
+.lane-card--form {
+  border-top-color: var(--color-teal-500);
+}
+
+.lane-card__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-md);
+}
+
+.lane-card__number {
+  display: inline-grid;
+  place-items: center;
+  width: 1.375rem;
+  height: 1.375rem;
+  border-radius: var(--radius-full);
+  background: var(--color-cyan-500);
+  color: var(--color-surface);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  flex: none;
+}
+
+.lane-card--form .lane-card__number {
+  background: var(--color-teal-500);
+}
+
+.lane-card__lede {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  margin: 0 0 var(--space-3);
+}
+
+.lane-card__step {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+.lane-card__form {
+  margin: 0 0 var(--space-3);
+}
+
+.dropfield {
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.dropfield input[type="file"] {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin-top: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.dropfield__hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.lane-card__warning {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--color-warning);
+  background: var(--color-warning-bg);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Imports table — what each file produced, stated plainly.            */
+/* ------------------------------------------------------------------ */
+
+.imports-section {
+  margin-top: var(--space-6);
+}
+
+.imports-table .import-row--quarantined td {
+  background: var(--color-danger-bg);
+}
+
+.import-row__file {
+  display: block;
+}
+
+.import-row__meta,
+.import-row__counts,
+.import-row__explanation {
+  display: block;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  margin-top: var(--space-1);
+}
+
+.import-row__counts {
+  color: var(--color-text-primary);
+}
+
+.import-row__explanation {
+  color: var(--color-danger);
+  max-width: 40ch;
+}
+
+.import-row__action {
+  white-space: nowrap;
+  min-width: 13rem;
+  padding-right: 3.5rem;
+}
+
+.import-row__status {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.import-row__secondary {
+  display: block;
+  font-size: var(--font-size-xs);
+  margin-top: var(--space-1);
+}
+
+/* "How to fix" replaces the dead end a quarantined import used to be. */
+.how-to-fix {
+  font-size: var(--font-size-sm);
+  white-space: normal;
+}
+
+.how-to-fix > summary {
+  cursor: pointer;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-cyan-500);
+}
+
+.how-to-fix__steps {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-5);
+  color: var(--color-text-secondary);
+}
+
+.how-to-fix__steps li {
+  margin-bottom: var(--space-1);
+}
+
+.how-to-fix__foot {
+  margin: var(--space-2) 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Coverage page — identity, quarantine, bulk results.                 */
+/* ------------------------------------------------------------------ */
+
+.identity-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.quarantine-panel {
+  border: 1px solid var(--color-danger);
+  border-left-width: 3px;
+  background: var(--color-danger-bg);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.quarantine-panel__reason {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-primary);
+}
+
+.bulk-result__summary {
+  margin: 0;
+  font-weight: var(--font-weight-semibold);
+}
+
+.bulk-result__detail {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+  font-size: var(--font-size-sm);
+}
+
+/* ------------------------------------------------------------------ */
+/* Bulk review table.                                                  */
+/* ------------------------------------------------------------------ */
+
+.bulk-review {
+  margin-top: var(--space-6);
+}
+
+.bulk-review__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.bulk-review__count {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.bulk-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.bulk-review__actions .form-label {
+  margin: 0;
+  align-self: center;
+}
+
+.bulk-review__reason {
+  width: 100%;
+  max-width: 22ch;
+}
+
+.review-table__pick {
+  width: 4.5rem;
+  text-align: center;
+}
+
+.review-row--replaces td {
+  background: var(--color-warning-bg);
+}
+
+.review-code {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
+  margin-right: var(--space-2);
+}
+
+.review-question {
+  color: var(--color-text-secondary);
+}
+
+.review-current,
+.review-source {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.review-current__none {
+  color: var(--color-text-muted);
+}
+
+.review-flag {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  color: var(--color-warning);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.review-legend {
+  margin-top: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.card--replaces {
+  border-left: 3px solid var(--color-warning);
+}

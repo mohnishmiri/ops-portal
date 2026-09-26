@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Edit {{ workspace.display_name }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ workspace.id }}" class="button secondary">Cancel</a>
+{% endblock %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="/applications" class="breadcrumb__link">Applications</a>
+  <span class="breadcrumb__sep" aria-hidden="true">/</span>
+  <a href="/applications/{{ workspace.id }}" class="breadcrumb__link">{{ workspace.display_name }}</a>
+  <span class="breadcrumb__sep" aria-hidden="true">/</span>
+  <span class="breadcrumb__current" aria-current="page">Edit</span>
+</nav>
+
+<div class="card card--elevated">
+  <div class="card-header">
+    <h1 class="card-title">Edit application</h1>
+  </div>
+  <p class="form-hint">Update the application name and identifiers. Changes use optimistic concurrency protection.</p>
+
+  <form method="POST" action="/applications/{{ workspace.id }}/edit">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="expected_version" value="{{ workspace.row_version }}">
+
+    <div class="form-group">
+      <label class="form-label form-label--required" for="display_name">Application name</label>
+      <input class="form-control" id="display_name" name="display_name" value="{{ workspace.display_name }}" required>
+    </div>
+
+    <h2 class="card-subtitle">Identifiers</h2>
+    <p class="form-hint">Leave a row blank to omit it. Add the identifier type and value used by your organisation.</p>
+
+    <div id="identifier-rows">
+      {% for ident in workspace.identifiers %}
+      <div class="identifier-row">
+        <input class="form-control" name="identifier_type" value="{{ ident.type }}" placeholder="Type">
+        <input class="form-control" name="identifier_value" value="{{ ident.raw_value }}" placeholder="Value">
+      </div>
+      {% endfor %}
+      <div class="identifier-row">
+        <input class="form-control" name="identifier_type" placeholder="Type">
+        <input class="form-control" name="identifier_value" placeholder="Value">
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <a href="/applications/{{ workspace.id }}" class="button button--ghost">Cancel</a>
+      <button type="submit" class="button button--primary">Save changes &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

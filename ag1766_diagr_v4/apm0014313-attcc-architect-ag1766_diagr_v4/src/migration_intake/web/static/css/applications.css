@@ -1,0 +1,214 @@
+/* UX-4a — Application shell styles (list, workspace, create, edit).
+   Tokens only: var(--color-*), var(--space-*), var(--radius-*).
+   No hex literals, no inline style duplicates. */
+
+/* ── Page heading ────────────────────────────────────────────────────── */
+
+.page-head {
+  margin-bottom: var(--space-4);
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+/* ── Application card grid (list view) ──────────────────────────────── */
+
+.app-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(0, 320px));
+  gap: var(--space-4);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* ── Individual application card ────────────────────────────────────── */
+
+.app-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.app-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.app-card__name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.app-card__id {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.app-card__id--muted {
+  font-style: italic;
+}
+
+.app-card__counts {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.app-card__footer {
+  margin-top: auto;
+  padding-top: var(--space-3);
+}
+
+/* Empty state card */
+.app-card--empty {
+  align-items: center;
+  text-align: center;
+  padding: var(--space-6);
+  border-style: dashed;
+}
+
+.app-card__empty-text {
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-3);
+}
+
+/* ── Workspace action grid (2×2) ────────────────────────────────────── */
+
+.app-action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(0, 320px));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+/* ── Individual action card ─────────────────────────────────────────── */
+
+.app-action-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.app-action-card--primary {
+  border-color: var(--color-cyan-500);
+  background: var(--color-active-bg);
+}
+
+.app-action-card--full-row {
+  grid-column: 1 / -1;
+}
+
+.app-action-card__title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.app-action-card__counter {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.app-action-card__action {
+  margin-top: auto;
+}
+
+/* ── Intake create form within workspace ────────────────────────────── */
+
+.intake-create-form {
+  margin-top: var(--space-3);
+}
+
+/* ── Breadcrumb ─────────────────────────────────────────────────────── */
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.breadcrumb__link {
+  color: var(--color-link);
+  text-decoration: none;
+}
+
+.breadcrumb__link:hover {
+  text-decoration: underline;
+}
+
+.breadcrumb__sep {
+  color: var(--color-border);
+  user-select: none;
+}
+
+.breadcrumb__current {
+  color: var(--color-text);
+}
+
+/* ── Form helpers (new.html, edit.html) ─────────────────────────────── */
+
+.form-actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  margin-top: var(--space-5);
+}
+
+/* Identifier row pair in edit.html */
+.identifier-row {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.identifier-row .form-control {
+  flex: 1;
+}
+
+.card-subtitle {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: var(--space-5) 0 var(--space-1);
+}
+
+/* ── Responsive collapse ────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .app-card-grid,
+  .app-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-actions {
+    flex-direction: column-reverse;
+  }
+
+  .identifier-row {
+    flex-direction: column;
+  }
+}

@@ -1,0 +1,219 @@
+{
+  "schema_version": "1.0",
+  "source_path": "Topology Guide.docx",
+  "source_sha256": "73881e6258b6f12a7dba72f44184f7724fc4494216d70a2e13fdee4957a8955e",
+  "mode": "Section",
+  "block_count": 45,
+  "records": [
+    {
+      "block": 20,
+      "kind": "p",
+      "style": "ListParagraph",
+      "heading_candidate": false,
+      "characters": 0,
+      "table_rows": 0,
+      "image_relationships": [],
+      "text": ""
+    },
+    {
+      "block": 21,
+      "kind": "p",
+      "style": "ListParagraph",
+      "heading_candidate": false,
+      "characters": 56,
+      "table_rows": 0,
+      "image_relationships": [],
+      "text": "The data for the below Box should be picked up from App "
+    },
+    {
+      "block": 22,
+      "kind": "p",
+      "style": "ListParagraph",
+      "heading_candidate": false,
+      "characters": 0,
+      "table_rows": 0,
+      "image_relationships": [
+        "rId10"
+      ],
+      "text": ""
+    }
+  ],
+  "relationships": [
+    {
+      "id": "rId8",
+      "type": "image",
+      "external": false,
+      "target": "media/image4.png"
+    },
+    {
+      "id": "rId13",
+      "type": "image",
+      "external": false,
+      "target": "media/image9.png"
+    },
+    {
+      "id": "rId3",
+      "type": "settings",
+      "external": false,
+      "target": "settings.xml"
+    },
+    {
+      "id": "rId7",
+      "type": "image",
+      "external": false,
+      "target": "media/image3.png"
+    },
+    {
+      "id": "rId12",
+      "type": "image",
+      "external": false,
+      "target": "media/image8.png"
+    },
+    {
+      "id": "rId17",
+      "type": "theme",
+      "external": false,
+      "target": "theme/theme1.xml"
+    },
+    {
+      "id": "rId2",
+      "type": "styles",
+      "external": false,
+      "target": "styles.xml"
+    },
+    {
+      "id": "rId16",
+      "type": "fontTable",
+      "external": false,
+      "target": "fontTable.xml"
+    },
+    {
+      "id": "rId1",
+      "type": "numbering",
+      "external": false,
+      "target": "numbering.xml"
+    },
+    {
+      "id": "rId6",
+      "type": "image",
+      "external": false,
+      "target": "media/image2.png"
+    },
+    {
+      "id": "rId11",
+      "type": "image",
+      "external": false,
+      "target": "media/image7.png"
+    },
+    {
+      "id": "rId5",
+      "type": "image",
+      "external": false,
+      "target": "media/image1.png"
+    },
+    {
+      "id": "rId15",
+      "type": "image",
+      "external": false,
+      "target": "media/image11.png"
+    },
+    {
+      "id": "rId10",
+      "type": "image",
+      "external": false,
+      "target": "media/image6.png"
+    },
+    {
+      "id": "rId4",
+      "type": "webSettings",
+      "external": false,
+      "target": "webSettings.xml"
+    },
+    {
+      "id": "rId9",
+      "type": "image",
+      "external": false,
+      "target": "media/image5.png"
+    },
+    {
+      "id": "rId14",
+      "type": "image",
+      "external": false,
+      "target": "media/image10.png"
+    }
+  ],
+  "media": [
+    {
+      "package_path": "word/media/image1.png",
+      "uncompressed_bytes": 25974,
+      "compressed_bytes": 25974
+    },
+    {
+      "package_path": "word/media/image2.png",
+      "uncompressed_bytes": 16324,
+      "compressed_bytes": 16324
+    },
+    {
+      "package_path": "word/media/image3.png",
+      "uncompressed_bytes": 10271,
+      "compressed_bytes": 10271
+    },
+    {
+      "package_path": "word/media/image4.png",
+      "uncompressed_bytes": 21378,
+      "compressed_bytes": 21378
+    },
+    {
+      "package_path": "word/media/image5.png",
+      "uncompressed_bytes": 3302,
+      "compressed_bytes": 3302
+    },
+    {
+      "package_path": "word/media/image6.png",
+      "uncompressed_bytes": 7800,
+      "compressed_bytes": 7800
+    },
+    {
+      "package_path": "word/media/image7.png",
+      "uncompressed_bytes": 18986,
+      "compressed_bytes": 18986
+    },
+    {
+      "package_path": "word/media/image8.png",
+      "uncompressed_bytes": 12787,
+      "compressed_bytes": 12787
+    },
+    {
+      "package_path": "word/media/image9.png",
+      "uncompressed_bytes": 18328,
+      "compressed_bytes": 18328
+    },
+    {
+      "package_path": "word/media/image10.png",
+      "uncompressed_bytes": 6048,
+      "compressed_bytes": 6048
+    },
+    {
+      "package_path": "word/media/image11.png",
+      "uncompressed_bytes": 10411,
+      "compressed_bytes": 10411
+    }
+  ],
+  "source_modified": false,
+  "limits": [
+    "DTD and external XML resolution disabled",
+    "External package relationships not followed",
+    "Media listed, not visually inspected",
+    "Varying styles may require manual section-boundary interpretation"
+  ],
+  "first_block": 20,
+  "last_block": 22,
+  "extracted_media": [
+    {
+      "relationship_id": "rId10",
+      "path": "evidence/docx/media/image6.png",
+      "sha256": "95a1556b970506fbae6bd1ecf9b57220c92f780e3e2e5226e7a03f241e260867",
+      "status": "EXTRACTED_NOT_YET_VISUALLY_REVIEWED"
+    }
+  ]
+}

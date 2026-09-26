@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "decisions": [
+    {"id":"D-001","kind":"DECISION","approval":"USER_APPROVED","decision":"Write all generated review artifacts under docs/development/topo_9_24/","source":"User instruction 2026-09-24"},
+    {"id":"D-002","kind":"DECISION","approval":"USER_APPROVED","decision":"Exclude to_archive/ entirely from the review, including searches, evidence and conclusions","source":"User follow-up 2026-09-24 during initialization"},
+    {"id":"D-003","kind":"DECISION","approval":"USER_APPROVED","decision":"Proceed with the reconciled read-only investigation and durable chunk protocol; production implementation requires separate explicit approval","source":"User acceptance of combined prompt review"},
+    {"id":"D-004","kind":"DECISION","approval":"PROPOSED","decision":"Pause broad investigation on the unmerged checkout until the user chooses resolution first or a qualified static review","source":"Initialization Git baseline and permission rules"},
+    {"id":"D-005","kind":"DECISION","approval":"PROPOSED","decision":"Treat supplied Draw.io names as candidate input/expected-output roles pending applicability verification","source":"Directory inventory; no content analysis yet"},
+    {"id":"D-006","kind":"DECISION","approval":"USER_APPROVED","decision":"Exclude tests/ entirely from review, evidence, coverage assessment, imports and execution; future test recommendations remain proposals","source":"User follow-up 2026-09-24 after initialization artifacts were written"},
+    {"id":"D-007","kind":"DECISION","approval":"USER_APPROVED","decision":"Resume the read-only investigation after user merge resolution, verified as zero unmerged paths; previous exclusions and runtime permissions remain unchanged","source":"User instruction to continue; EV-REPO-003"},
+    {"id":"D-008","kind":"DECISION","approval":"PROPOSED","decision":"Because no target-role or workbook answer was initially supplied, temporarily compare descriptively and defer workbook evidence. Superseded by D-009/D-010.","source":"Initial unavailable-user clarification response"},
+    {"id":"D-009","kind":"DECISION","approval":"USER_APPROVED","decision":"The supplied two-page output is the expected target to reproduce for this particular migrating application, used as an example. Do not hardcode its structure as universal requirements for other applications.","source":"User clarification after S05-C02 comparison execution"},
+    {"id":"D-010","kind":"DECISION","approval":"USER_APPROVED","decision":"Intake/XLSX analysis is not needed; accept intake as working for this review. Exclude workbook/import correctness analysis. Review only topology consumption, projection, generation, governance and output behavior. This is a user assumption, not independent intake certification.","source":"User clarification after S05-C02 comparison execution"}
+  ]
+}

@@ -1,0 +1,130 @@
+/*
+ * Base reset and typography for AWS Outposts Migration Intake.
+ *
+ * Depends on tokens.css being loaded first.
+ * Uses var(--...) throughout; no hard-coded colour literals.
+ */
+
+/* --- Box model reset --- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* --- Document root --- */
+html {
+  min-width: 320px;
+  background: var(--color-navy-900);
+  color-scheme: light;
+  scroll-behavior: smooth;
+}
+
+/* --- Body --- */
+body {
+  margin: 0;
+  color: var(--color-text-primary);
+  background: var(--color-canvas);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* --- Form element font inheritance --- */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* --- Heading scale --- */
+h1, h2, h3, h4, h5, h6 {
+  margin: 0 0 var(--space-3);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-tight);
+  color: var(--color-text-primary);
+}
+
+h1 { font-size: var(--font-size-lg); }
+h2 { font-size: var(--font-size-md); }
+h3 { font-size: var(--font-size-base); }
+h4 { font-size: var(--font-size-sm); }
+
+/* --- Paragraph and inline --- */
+p {
+  margin: 0 0 var(--space-3);
+}
+
+a {
+  color: var(--color-cyan-400);
+  text-decoration: underline;
+}
+
+a:hover {
+  text-decoration: none;
+}
+
+/* --- Focus management (WCAG 2.4.7) --- */
+:focus-visible {
+  outline: 3px solid rgb(0 168 214 / 0.55);
+  outline-offset: 2px;
+}
+
+/* --- Skip navigation link (hidden until focused) --- */
+.skip-link {
+  position: fixed;
+  left: var(--space-3);
+  top: -80px;
+  z-index: var(--z-skip-link);
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-surface);
+  background: var(--color-navy-900);
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-semibold);
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+
+.skip-link:focus {
+  top: var(--space-3);
+}
+
+/* --- Utility: visually hidden but accessible --- */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Eyebrow label (small all-caps section labels) --- */
+.eyebrow {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* --- Monospace --- */
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}

@@ -1,0 +1,130 @@
+/*
+ * Design tokens for AWS Outposts Migration Intake.
+ *
+ * All colours, typography, spacing, radius, and shadow values are defined
+ * here as CSS custom properties so every other stylesheet consumes var(--...)
+ * rather than hard-coded literals.
+ *
+ * Visual identity: navy global header, cyan primary actions, pale blue-gray
+ * page canvas, white compact panels with restrained borders/shadows.
+ */
+
+:root {
+  /* --- Colour: Navy header palette --- */
+  --color-navy-950: #061733;
+  --color-navy-900: #061733;
+  --color-navy-800: #082247;
+  --color-navy-700: #0d355a;
+
+  /* --- Colour: Cyan accent (primary actions, active indicators) --- */
+  --color-cyan-500: #0891b2;
+  --color-cyan-400: #00a8d6;
+  --color-cyan-300: #20c5da;
+
+  /* --- Colour: Teal --- */
+  --color-teal-500: #16a39a;
+
+  /* --- Colour: Page canvas and surfaces --- */
+  --color-canvas: #edf5f7;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f6f9fa;
+
+  /* --- Colour: Borders --- */
+  --color-border: #d1dde3;
+  --color-border-strong: #b9c8d0;
+
+  /* --- Colour: Text --- */
+  --color-text-primary: #16202a;
+  --color-text-secondary: #42505d;
+  --color-text-muted: #687783;
+
+  /* --- Colour: Semantic status (text + icon; never colour alone) --- */
+  --color-success: #16a34a;
+  --color-success-bg: #e4f4ea;
+  --color-active: #166534;
+  --color-active-bg: #dcfce7;
+  --color-active-border: #86efac;
+  --color-warning: #d97706;
+  --color-warning-bg: #fff1d6;
+  --color-danger: #dc2626;
+  --color-danger-bg: #fde8e9;
+  --color-info: #0891b2;
+  --color-info-bg: #e8f4fb;
+
+  /* --- Semantic aliases for theme-ready feature surfaces --- */
+  --color-background: var(--color-canvas);
+  --color-surface-hover: var(--color-surface-muted);
+  --color-text: var(--color-text-primary);
+  --color-action-primary: var(--color-cyan-500);
+  --color-action-primary-hover: var(--color-cyan-400);
+  --color-focus-ring: var(--color-cyan-500);
+
+  /* --- Typography --- */
+  --font-sans: 'Aptos', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  --font-size-xs: 0.6875rem;   /* 11px */
+  --font-size-sm: 0.75rem;     /* 12px */
+  --font-size-base: 0.875rem;  /* 14px */
+  --font-size-md: 1rem;        /* 16px */
+  --font-size-lg: 1.125rem;    /* 18px */
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 650;
+  --font-weight-bold: 700;
+  --line-height-tight: 1.15;
+  --line-height-base: 1.45;
+  --line-height-relaxed: 1.65;
+
+  /* --- Spacing scale --- */
+  --space-1: 0.25rem;   /*  4px */
+  --space-2: 0.5rem;    /*  8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.25rem;   /* 20px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-7: 1.75rem;   /* 28px */
+  --space-8: 2rem;      /* 32px */
+  --space-10: 2.5rem;   /* 40px */
+  --space-12: 3rem;     /* 48px */
+
+  /* --- Layout dimensions --- */
+  --header-height: 58px;
+  --command-bar-height: 82px;
+  --nav-width: 220px;
+  --nav-width-collapsed: 0px;
+  --content-max-width: 1440px;
+  --card-min-width: 280px;
+  --control-height: 40px;
+  --control-height-sm: 32px;
+  --icon-size: 18px;
+
+  /* --- Border radius --- */
+  --radius-sm: 0.25rem;    /*  4px */
+  --radius-md: 0.375rem;   /*  6px */
+  --radius-lg: 0.5rem;     /*  8px */
+  --radius-xl: 0.75rem;    /* 12px */
+  --radius-full: 9999px;
+
+  /* --- Shadows --- */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.10), 0 2px 4px -2px rgb(0 0 0 / 0.10);
+  --shadow-lg: 0 8px 24px rgb(4 29 55 / 0.10);
+
+  /* --- Z-index layers --- */
+  --z-skip-link: 200;
+  --z-header: 100;
+  --z-nav: 90;
+  --z-modal: 500;
+
+  /* --- Motion --- */
+  --duration-fast: 120ms;
+  --duration-normal: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+  }
+}

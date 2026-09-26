@@ -1,0 +1,153 @@
+{
+  "success": false,
+  "mutations": [
+    {
+      "cell_id": "0fef6c9c-af19-54d7-bb59-27c0b478c047",
+      "role": "att_internal_in_slot",
+      "token": "interface:INTERNAL:INBOUND",
+      "old": "ORACLE SCM (18249)\nDITREX (18274)\nLS-OMS (10038)\nC",
+      "new": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "cell_id": "ce45a590-2af6-5bbf-bb61-8b290c967766",
+      "role": "att_internal_out_primary_slot",
+      "token": "interface:INTERNAL:OUTBOUND",
+      "old": "<span style=\"color:#CC0000;font-weight:bold\">&lt;N",
+      "new": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "cell_id": "1d4395ed-d157-5d4f-9638-7aeea37c6851",
+      "role": "att_internal_out_secondary_slot",
+      "token": "interface:INTERNAL:OUTBOUND",
+      "old": "MyTracker (30358)\nImE FLEX (15977)\nDVT (21226)\nCRF",
+      "new": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "cell_id": "d2d9ed4d-c48c-52ff-a8e5-344bb2ad2753",
+      "role": "att_internal_in_out_slot",
+      "token": "interface:INTERNAL:BIDIRECTIONAL",
+      "old": "<span style=\"color:#CC0000;font-weight:bold\">&lt;N",
+      "new": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "cell_id": "cff92863-e75a-5559-8ad5-3200716945eb",
+      "role": "azure_apps_slot",
+      "token": "interface:AZURE:None",
+      "old": "DPG - Sales &amp; Sunrise (31479)\nAZDP (30333)\nAT&",
+      "new": "ACM-C (21084)\nAT&T-MicroStrategy (20416)\nAZDP (303"
+    },
+    {
+      "cell_id": "d55b2fb4-116c-5b46-9328-21b3d3f951b1",
+      "role": "tier2_internet_slot",
+      "token": "interface:UNKNOWN:None",
+      "old": "<span style=\"color:#CC0000;font-weight:bold\">&lt;N",
+      "new": "ATT VERINT CQM (9248)\nCCQT (32024)\nCCR-Relational "
+    },
+    {
+      "cell_id": "c3cd7832-4d7d-5b04-af8d-fb1c89c143cd",
+      "role": "nas_detail_block",
+      "token": "detail:nas_detail_block",
+      "old": "<font style=\"font-size: 12px;\"><span style=\"backgr",
+      "new": " - NAS Server: \n - EC2 Names: "
+    },
+    {
+      "cell_id": "caa2cedd-fbc7-5540-b73a-24ce3374829d",
+      "role": "ebr_detail_block",
+      "token": "detail:ebr_detail_block",
+      "old": "<div style=\"\"><span style=\"color: rgb(0, 0, 0); fo",
+      "new": " - Strategy: \n - EC2 Names: "
+    }
+  ],
+  "gaps": [
+    {
+      "role": "header_line",
+      "token": "outpost_id",
+      "pattern": "NEEDS-OUTPOST-ID",
+      "blocking": true
+    },
+    {
+      "role": "private_application_subnet",
+      "token": "subnet_cidr",
+      "pattern": "NEEDS-CIDR",
+      "blocking": true
+    },
+    {
+      "role": "private_application_subnet",
+      "token": "subnet_name",
+      "pattern": "UNRESOLVED-subnet",
+      "blocking": true
+    },
+    {
+      "role": "app_security_group",
+      "token": "app_sg_name",
+      "pattern": "UNRESOLVED-[\\w-]+-sg(?!.*db)",
+      "blocking": true
+    },
+    {
+      "role": "app_account_container",
+      "token": "aws_account_id",
+      "pattern": "ACC-[\\w-]+-UNRESOLVED",
+      "blocking": true
+    },
+    {
+      "role": "workload_vpc",
+      "token": "availability_zone",
+      "pattern": "NEEDS-AZ",
+      "blocking": true
+    },
+    {
+      "role": "workload_vpc",
+      "token": "vpc_cidr",
+      "pattern": "NEEDS-CIDR",
+      "blocking": true
+    },
+    {
+      "role": "db_security_group",
+      "token": "db_sg_name",
+      "pattern": "UNRESOLVED-[\\w-]+-db-sg",
+      "blocking": true
+    }
+  ],
+  "extraction_issues": [
+    {
+      "type": "MISSING_TOKEN",
+      "token": "app_sg_name",
+      "message": "No DB answer or identifier for token 'app_sg_name'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "availability_zone",
+      "message": "No DB answer or identifier for token 'availability_zone'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "aws_account_id",
+      "message": "No DB answer or identifier for token 'aws_account_id'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "db_sg_name",
+      "message": "No DB answer or identifier for token 'db_sg_name'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "outpost_id",
+      "message": "No DB answer or identifier for token 'outpost_id'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "subnet_cidr",
+      "message": "No DB answer or identifier for token 'subnet_cidr'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "subnet_name",
+      "message": "No DB answer or identifier for token 'subnet_name'"
+    },
+    {
+      "type": "MISSING_TOKEN",
+      "token": "vpc_cidr",
+      "message": "No DB answer or identifier for token 'vpc_cidr'"
+    }
+  ]
+}

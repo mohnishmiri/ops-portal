@@ -1,0 +1,8 @@
+docker:
+  build-path: .
+  dockerfile: Dockerfile
+  build-args: ""
+  pre-script: ""
+
+deployment:
+  workflow-id: branch-cd.yml

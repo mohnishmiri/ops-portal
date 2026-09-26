@@ -1,0 +1,130 @@
+{#
+  Question wrapper template for registry-driven response editors.
+
+  This template provides the shared structure for all question types:
+  - Stable DOM ID from intake/question code
+  - Question label with required/applicability indicator
+  - Help text association
+  - Owner/source/output metadata
+  - Hidden schema/version fields
+  - Save state indicator
+  - No-JavaScript Save button
+
+  Context variables:
+    question: dict with keys:
+      - code: str - question code
+      - text: str - question label
+      - help: str | None - help text
+      - required_level: str - REQUIRED, OPTIONAL, CONDITIONAL
+      - response_type: str - response type code
+      - schema_version: str - response schema version
+      - editor_key: str - template dispatch key
+      - is_computed: bool - whether this is a computed type
+      - options: list | None - allowed options for select types
+      - units: list | None - allowed units for measurement types
+      - field_names: list | None - field names for pair/collection types
+    answer: dict | None with keys:
+      - instance_id: str
+      - row_version: int
+      - revision_number: int
+      - value: dict - typed value
+      - value_state: str
+      - review_state: str
+      - actor_display_name: str
+      - updated_at: str
+      - change_reason: str | None
+    errors: dict | None - field-level errors
+    intake_id: str
+    csrf_token: str
+#}
+
+{% macro question_wrapper(question, answer, errors, intake_id, csrf_token) %}
+<div 
+  class="question-row{% if answer and answer.value_state == 'CONFIRMED' %} question-row--confirmed{% endif %}{% if question.is_computed %} question-row--computed{% endif %}"
+  id="question-{{ question.code }}"
+  data-question-code="{{ question.code }}"
+  data-response-type="{{ question.response_type }}"
+>
+  <div class="question-header">
+    <label 
+      for="q-{{ question.code }}-input"
+      class="question-label{% if question.required_level == 'REQUIRED' %} question-label--required{% endif %}"
+    >
+      {{ question.text }}
+    </label>
+    {% if question.required_level == 'REQUIRED' %}
+    <span class="required-indicator" aria-hidden="true">*</span>
+    {% endif %}
+    {% if answer and answer.value_state %}
+    <span class="status-pill status-pill--{{ answer.value_state | lower }}">
+      <span class="pill-dot"></span>{{ answer.value_state }}
+    </span>
+    {% endif %}
+  </div>
+
+  {% if question.help %}
+  <p class="question-help" id="q-{{ question.code }}-help">
+    {{ question.help }}
+  </p>
+  {% endif %}
+
+  <div class="question-editor">
+    {% if question.is_computed %}
+    {# Computed types use display templates, not editors #}
+    {% include "responses/displays/" ~ question.editor_key ~ ".html" ignore missing %}
+    {% else %}
+    {# Editable types use editor templates #}
+    <form 
+      method="POST" 
+      action="/applications/{{ intake_id.split('/')[0] }}/intakes/{{ intake_id }}/questions/{{ question.code }}/answer"
+      class="question-form"
+    >
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="_schema_version" value="{{ question.schema_version }}">
+      {% if answer %}
+      {# AnswerService compares expected_version against revision_number, not
+         the answer instance's row_version: sending the latter makes every
+         save of an existing answer conflict. #}
+      <input type="hidden" name="_row_version" value="{{ answer.revision_number }}">
+      {% endif %}
+
+      {% include "responses/editors/" ~ question.editor_key ~ ".html" ignore missing %}
+
+      {% if errors %}
+      <div class="validation-summary" role="alert">
+        <ul class="error-list">
+          {% for field, field_errors in errors.items() %}
+          {% for error in field_errors %}
+          <li class="form-error">{{ error }}</li>
+          {% endfor %}
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      <div class="question-actions">
+        <button type="submit" class="button button--primary button--sm">Save</button>
+        {% if answer %}
+        <button 
+          type="submit" 
+          formaction="/applications/{{ intake_id.split('/')[0] }}/intakes/{{ intake_id }}/questions/{{ question.code }}/clear"
+          class="button button--ghost button--sm"
+        >Clear</button>
+        {% endif %}
+      </div>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if answer %}
+  <div class="question-meta">
+    <span class="meta-item">
+      Last updated: {{ answer.updated_at }} by {{ answer.actor_display_name }}
+    </span>
+    {% if answer.change_reason %}
+    <span class="meta-item">Reason: {{ answer.change_reason }}</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endmacro %}

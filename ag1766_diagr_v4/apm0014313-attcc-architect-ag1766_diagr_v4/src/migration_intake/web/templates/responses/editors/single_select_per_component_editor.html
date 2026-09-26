@@ -1,0 +1,33 @@
+{#
+  Single select per component editor - select for each component.
+
+  Context:
+    question: dict with code, text, help, required_level, options, field_names (components)
+    answer: dict | None with value.selections (dict of component -> selected)
+    errors: dict | None
+#}
+<div class="single-select-per-component-editor">
+  {% for component in question.field_names or [] %}
+  <div class="form-group">
+    <label for="q-{{ question.code }}-{{ component }}" class="form-label">
+      {{ component }}
+    </label>
+    <select 
+      name="selections.{{ component }}"
+      id="q-{{ question.code }}-{{ component }}"
+      class="form-control{% if errors and errors['selections.' ~ component] %} form-control--error{% endif %}"
+    >
+      <option value="">-- Select --</option>
+      {% for option in question.options or [] %}
+      <option 
+        value="{{ option.value }}"
+        {% if answer and answer.value and answer.value.selections and answer.value.selections[component] == option.value %}selected{% endif %}
+      >{{ option.label }}</option>
+      {% endfor %}
+    </select>
+    {% if errors and errors['selections.' ~ component] %}
+    <span class="form-error">{{ errors['selections.' ~ component] | join(', ') }}</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Catalog Release {{ release.semantic_version }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/admin/catalog" class="global-nav-item active" aria-current="page">Catalog Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/admin/catalog" class="button button--ghost">Back to catalog list</a>
+{% endblock %}
+
+{% block content %}
+<section class="catalog-admin-detail">
+  <header class="page-header">
+    <h1 class="page-title">Catalog Admin &#8594; v{{ release.semantic_version }}</h1>
+    <p class="page-description">
+      State: {{ release.pub_state }}
+      &middot; Published: {{ release.published_at if release.published_at else "Not published" }}
+      &middot; Source: {{ release.source_filename }}
+    </p>
+  </header>
+
+  {% if release.sections %}
+  {% for section in release.sections %}
+  <details class="catalog-section">
+    <summary class="catalog-section__header">
+      <span class="catalog-section__name">{{ section.display_name }} ({{ section.section_code }})</span>
+      <span class="tag">{{ section.questions | length }} questions</span>
+    </summary>
+    {% if section.questions %}
+    <div class="table-wrapper">
+      <table class="data-table catalog-section__table">
+        <thead>
+          <tr>
+            <th scope="col">Code</th>
+            <th scope="col">Question</th>
+            <th scope="col">Type</th>
+            <th scope="col">Required</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for question in section.questions %}
+          <tr>
+            <td><code>{{ question.question_code }}</code></td>
+            <td>{{ question.question_text | truncate(80) }}</td>
+            <td><span class="status-pill">{{ question.response_type }}</span></td>
+            <td>{% if question.required_level == 'REQUIRED' %}<span aria-label="Required">*</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p>No questions in this section.</p>
+    {% endif %}
+  </details>
+  {% endfor %}
+  {% else %}
+  <p>No sections in this release.</p>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-header">
+      <h2 class="card-title">Compiler report</h2>
+    </div>
+    {% if release.compiler_report %}
+    <ul>
+      <li>Section count: {{ release.compiler_report.section_count }}</li>
+      <li>Question count: {{ release.compiler_report.question_count }}</li>
+      {% if release.compiler_report.type_counts %}
+      <li>Type counts:
+        <ul>
+          {% for type_name, count in release.compiler_report.type_counts.items() %}
+          <li>{{ type_name }}: {{ count }}</li>
+          {% endfor %}
+        </ul>
+      </li>
+      {% endif %}
+      {% if release.compiler_report.diagnostics %}
+      <li>Diagnostics:
+        <ul>
+          {% for diagnostic in release.compiler_report.diagnostics %}
+          <li>{{ diagnostic }}</li>
+          {% endfor %}
+        </ul>
+      </li>
+      {% endif %}
+    </ul>
+    {% else %}
+    <p>No compiler report recorded for this release.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2 class="card-title">Pinned intakes ({{ release.pinned_intake_count }})</h2>
+    </div>
+    {% if pinned_intakes %}
+    <div class="table-wrapper">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Intake ID</th>
+            <th scope="col">Application</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for intake in pinned_intakes %}
+          <tr>
+            <td>{{ intake.id }}</td>
+            <td>{{ intake.application_name }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p>No intakes are pinned to this release.</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

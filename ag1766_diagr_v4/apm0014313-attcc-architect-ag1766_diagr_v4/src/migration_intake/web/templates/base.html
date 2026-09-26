@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{% block title %}{{ title | default("Migration Intake") }}{% endblock %} — Migration Intake</title>
+
+  {# Local stylesheets only — no CDN, no external URLs. #}
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/layout.css">
+  <link rel="stylesheet" href="/static/css/components.css">
+  <link rel="stylesheet" href="/static/css/questionnaire.css">
+  <link rel="stylesheet" href="/static/css/hub.css">
+  <link rel="stylesheet" href="/static/css/review.css">
+  <link rel="stylesheet" href="/static/css/applications.css">
+  <link rel="stylesheet" href="/static/css/readiness.css">
+  <link rel="stylesheet" href="/static/css/wave_util.css">
+  <link rel="stylesheet" href="/static/css/application-design-options.css">
+
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+
+{# Skip link: visible on focus for keyboard users (WCAG 2.4.1). #}
+<a href="#main-content" class="skip-link">Skip to main content</a>
+
+<div class="app-shell">
+
+  {# ------------------------------------------------------------------ #}
+  {# Global header: navy, brand, primary nav, user tools.               #}
+  {# ------------------------------------------------------------------ #}
+  <header class="global-header" role="banner">
+
+    {# Brand lockup #}
+    <a href="/" class="brand-lockup" aria-label="Migration Intake home">
+      <span class="brand-mark" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+      <span class="brand-name">Migration Intake</span>
+    </a>
+
+    {# Primary navigation tabs #}
+    <nav class="global-nav" aria-label="Primary navigation">
+      {% block global_nav %}{% endblock %}
+    </nav>
+
+    {# User tools: mobile nav toggle + icon buttons #}
+    <div class="user-tools">
+      {# Mobile nav toggle — wired by app.js (no inline handlers). #}
+      <button
+        id="nav-toggle"
+        class="nav-toggle icon-button"
+        aria-expanded="false"
+        aria-controls="app-nav"
+        aria-label="Toggle application navigation"
+        type="button"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18"
+             viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" focusable="false">
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+
+      {% block user_tools %}{% endblock %}
+    </div>
+
+  </header>
+
+  {# ------------------------------------------------------------------ #}
+  {# Command bar: application context and quick actions.                #}
+  {# ------------------------------------------------------------------ #}
+  {% block command_bar %}
+  <section class="command-bar" aria-label="Application context">
+    <div class="command-brand">
+      <span class="eyebrow">AWS Outposts Migration</span>
+      <strong>MIGRATION INTAKE</strong>
+    </div>
+    <div class="app-identity">
+      {% if app_name %}
+      <span class="app-monogram">{{ app_name[:2] | upper }}</span>
+      <strong>{{ app_name }}</strong>
+      {% endif %}
+    </div>
+    <div class="command-actions">
+      {% block command_actions %}{% endblock %}
+    </div>
+  </section>
+  {% endblock %}
+
+  {# ------------------------------------------------------------------ #}
+  {# Workspace shell: side-nav + main content.                          #}
+  {# ------------------------------------------------------------------ #}
+  <div class="workspace-shell">
+
+    {# Side navigation — rendered from nav_items context variable. #}
+    {% include "components/nav.html" %}
+
+    {# Main content area. tabindex="-1" allows programmatic focus from  #}
+    {# HTMX navigation without exposing the element to tab order.       #}
+    <main id="main-content" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
+
+  </div>
+</div>
+
+{# Local JS only — no CDN, no inline handlers. #}
+<script src="/static/js/app.js"></script>
+{% block extra_scripts %}{% endblock %}
+
+</body>
+</html>

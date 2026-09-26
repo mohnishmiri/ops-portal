@@ -1,0 +1,2 @@
+# Profile components are hashed as raw bytes; keep them identical across platforms.
+src/migration_intake/topology/profiles/**/*.json text eol=lf

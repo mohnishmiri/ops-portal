@@ -1,0 +1,32 @@
+{#
+  Approval display - links to approval workflow, never directly saves.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.status, value.approver, value.approved_at
+    intake_id: str
+#}
+<div class="approval-display computed-display">
+  {% if answer and answer.value %}
+  <div class="approval-status">
+    <span class="status-pill status-pill--{{ answer.value.status | lower if answer.value.status else 'neutral' }}">
+      <span class="pill-dot"></span>
+      {{ answer.value.status or 'PENDING' }}
+    </span>
+    {% if answer.value.approver %}
+    <span class="meta-item">Approved by: {{ answer.value.approver }}</span>
+    {% endif %}
+    {% if answer.value.approved_at %}
+    <span class="meta-item">{{ answer.value.approved_at }}</span>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="form-hint">No approval recorded. Use the approval workflow to request or grant approval.</p>
+  {% endif %}
+  
+  <div class="workflow-link">
+    <a href="/applications/{{ intake_id.split('/')[0] }}/intakes/{{ intake_id }}/approvals/{{ question.code }}" class="button button--ghost button--sm">
+      Open Approval Workflow
+    </a>
+  </div>
+</div>

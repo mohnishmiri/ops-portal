@@ -1,0 +1,13 @@
+{
+  "id":"S16-C01","stage":"16","result":"COMPLETED",
+  "objective":"Specify the first agent-executable TDD corrective slice: fail closed on missing interface scope",
+  "inputs":["F-PROJ-001","EV-PROJ-001","EV-ARCH-001","Current containment boundary"],
+  "outputs":["analysis/remediation_options/first_slice.md"],
+  "inspected_files":[],
+  "checks":["All 42 required slice fields represented","Red-Green-Refactor is defect-specific","Scope/non-goals and downstream blocker explicit","No implementation/test execution implied","Rollback/evidence/agent prompt included"],
+  "established":["SL-PROJ-001 selected as first safe corrective slice","Small production change removes invented scope and intentionally fails closed","Later reviewed-scope slice remains necessary","Implementation and test access require explicit approval"],
+  "uncertainties":["Authorized test access/environment not granted","Known-scope canonical persistence design belongs to SL-PROJ-002","Route transaction detail for blockers needs implementation-time decision/evidence"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Specify SL-PROJ-001 from F-PROJ-001/target architecture without source modification","result":"Complete future execution/TDD/acceptance/rollback prompt written","mutation":"Analysis artifact only","output":"analysis/remediation_options/first_slice.md"}],
+  "evidence":[{"id":"EV-PLAN-001","path":"analysis/remediation_options/first_slice.md","source":"F-PROJ-001 and EV-ARCH-001","description":"Agent-executable first corrective slice with 42-field contract","kind":"Implementation plan proposal","reliability":"PROPOSED; not approved or executed"}],
+  "next_chunk":"S16-C02","next_action":"Define dependent corrective slices and execution graph without authorizing implementation"
+}

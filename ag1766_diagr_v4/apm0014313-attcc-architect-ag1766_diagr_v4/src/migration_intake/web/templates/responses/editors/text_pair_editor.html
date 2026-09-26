@@ -1,0 +1,62 @@
+{#
+  Text pair editor - two fixed, named text fields.
+
+  Context:
+    question: dict with code, text, help, required_level, field_names
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The field names must match the canonical TEXT_PAIR payload keys
+  (`{first, second}`), because the save route parses the submitted form
+  directly into the response payload: any other name is unrecognised and
+  stores a blank answer.
+
+  TEXT_PAIR is a fixed pair, not a repeatable collection, so this renders
+  exactly two inputs. The pair's *meaning* varies per question (CTL-002
+  collects application_name / acronym), which is a labelling concern only:
+  `question.field_names` renames the visible labels and never the submitted
+  keys. It is one entry per question today (built from the single
+  `field_name` column) and is unset for every published question, so the
+  neutral fallback labels are what normally render.
+#}
+{% set field_labels = question.field_names or [] %}
+{% set first_label = field_labels[0] | replace('_', ' ') | title
+     if field_labels | length > 0 and field_labels[0] else 'First' %}
+{% set second_label = field_labels[1] | replace('_', ' ') | title
+     if field_labels | length > 1 and field_labels[1] else 'Second' %}
+<div class="text-pair-editor">
+  <div class="form-grid">
+    <div class="form-group">
+      <label for="q-{{ question.code }}-first" class="form-label">{{ first_label }}</label>
+      <input
+        type="text"
+        name="first"
+        id="q-{{ question.code }}-first"
+        class="form-control{% if errors and errors.first %} form-control--error{% endif %}"
+        value="{{ answer.value.first if answer and answer.value and answer.value.first is not none else '' }}"
+        {# The response type treats both halves as optional, so a REQUIRED
+           question is expressed on the first field only: that stops a blank
+           save without forcing an invented value into the second half. #}
+        {% if question.required_level == 'REQUIRED' %}required{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+      >
+      {% if errors and errors.first %}
+      <span class="form-error">{{ errors.first | join(', ') }}</span>
+      {% endif %}
+    </div>
+
+    <div class="form-group">
+      <label for="q-{{ question.code }}-second" class="form-label">{{ second_label }}</label>
+      <input
+        type="text"
+        name="second"
+        id="q-{{ question.code }}-second"
+        class="form-control{% if errors and errors.second %} form-control--error{% endif %}"
+        value="{{ answer.value.second if answer and answer.value and answer.value.second is not none else '' }}"
+      >
+      {% if errors and errors.second %}
+      <span class="form-error">{{ errors.second | join(', ') }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>

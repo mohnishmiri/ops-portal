@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S11-C01",
+  "validated_at": "2026-09-24T17:18:00.6777372-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/statuses/run_state_machine.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/application/services/topology_recovery.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\topology_recovery.py",
+      "file_type": ".py",
+      "size_bytes": 6181,
+      "modified_utc": "2026-09-23T17:56:57.7325957Z",
+      "sha256": "b3f1e6bc5b842f0b1a87e0c22f27a05b287f05408a3d0dd9cc6168fd5ca0323c",
+      "chunk_id": "S11-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-139",
+      "relevant_section": "Inventory, expired claim, reconciliation and abandonment",
+      "evidence_id": "EV-STATUS-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/repositories/topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\repositories\\topology.py",
+      "file_type": ".py",
+      "size_bytes": 30248,
+      "modified_utc": "2026-09-23T17:56:57.7369977Z",
+      "sha256": "c30f94bf7d294cd8a6ae81d4634d9a438257d16e3a8fa0ddc5b78ff2719b5bea",
+      "chunk_id": "S11-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "191-692",
+      "relevant_section": "Reservation/attempts; lease/phase/finalization/recovery/review; inventory query",
+      "evidence_id": "EV-STATUS-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/models_topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models_topology.py",
+      "file_type": ".py",
+      "size_bytes": 13445,
+      "modified_utc": "2026-09-22T22:00:32.7135450Z",
+      "sha256": "476950b30276fef44bd4cdd584fa9f6471894cd4a6088ef5267b349cb73eb61e",
+      "chunk_id": "S11-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "78-136",
+      "relevant_section": "GenerationRun state/lease/attempt columns/constraints",
+      "evidence_id": "EV-STATUS-001",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Reservation and recovery attempt mutations distinguished",
+    "Every inspected transition checked for atomic predicates/version/token",
+    "Inventory source query and in-memory cap traced",
+    "Finalization fence retained as hypothesis without runtime proof"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

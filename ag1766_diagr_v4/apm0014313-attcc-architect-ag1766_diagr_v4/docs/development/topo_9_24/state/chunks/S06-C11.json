@@ -1,0 +1,12 @@
+{
+	"id":"S06-C11","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 33-37",
+	"inputs":["Guide blocks 33-37 and reused image2"],
+	"outputs":["evidence/docx/section-010.json","evidence/docx/media/image2.png","evidence/docx/derived/image2-ocr.json","analysis/business_rules/guide_section_10.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 33-37 and repeated legend image","symbols":"Shared N/R arrow-color instruction","further":true}],
+	"checks":["Source/image hashes unchanged","Existing identical image/OCR reused","No duplicate extraction or new rule inferred"],
+	"established":["Same legend image and N/R instruction recur after Azure fragment","No additional direction/inclusion rule in this fragment"],
+	"uncertainties":["Detailed legend rows remain visually unverified","Compare against existing approved policy before proposing a new decision"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C11; inspect_guide.ps1 blocks 33-37 section-010; read previously saved image2 OCR","result":"0; extraction complete; media hashes match prior evidence","mutation":"Section JSON and analysis note only","output":"evidence/docx/section-010.json"}],
+	"evidence":[{"id":"EV-DOCX-011","path":"analysis/business_rules/guide_section_10.md","source":"Guide blocks 33-37 and reused legend evidence","description":"Shared legend reuse, with no invented new direction rule","kind":"Verified prose and evidence reuse","reliability":"Reuse/prose VERIFIED; exact visual mapping unverified"}],
+	"next_chunk":"S06-C12","next_action":"Extract only guide blocks 38-39"
+}

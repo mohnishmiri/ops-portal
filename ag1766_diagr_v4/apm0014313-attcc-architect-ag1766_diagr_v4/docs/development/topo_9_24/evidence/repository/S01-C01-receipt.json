@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S01-C01",
+  "validated_at": "2026-09-24T13:38:36.8101624-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "inventory/repository_inventory.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "AGENTS.md",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\AGENTS.md",
+      "file_type": ".md",
+      "size_bytes": 4383,
+      "modified_utc": "2026-09-21T19:19:36.8630029Z",
+      "sha256": "9b12a0be0686f1aa282cd1f5ac1f1622dea3a5c24a8800d5c6b84533d2dce0db",
+      "chunk_id": "S01-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-68",
+      "relevant_section": "Product invariants; Architecture; Verification",
+      "evidence_id": "EV-REPO-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "pyproject.toml",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\pyproject.toml",
+      "file_type": ".toml",
+      "size_bytes": 6415,
+      "modified_utc": "2026-09-22T22:00:32.2741260Z",
+      "sha256": "c20415e443a62de7caae7fb266290c7c3ed470c6d3c981bcd6d041f8ab66563d",
+      "chunk_id": "S01-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-176, excluding full truncated force-include line",
+      "relevant_section": "project; dependencies; scripts; mypy; Ruff",
+      "evidence_id": "EV-REPO-004",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "README.md",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\README.md",
+      "file_type": ".md",
+      "size_bytes": 3960,
+      "modified_utc": "2026-09-24T12:08:58.1199617Z",
+      "sha256": "3bbd206744af72fbbbdcd703deb0aa5452a14570ffc040ce79eba2be5a08d819",
+      "chunk_id": "S01-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-105",
+      "relevant_section": "Status; Prerequisites; Project Structure",
+      "evidence_id": "EV-REPO-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "Makefile",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\Makefile",
+      "file_type": "",
+      "size_bytes": 1380,
+      "modified_utc": "2026-09-22T18:53:54.0397851Z",
+      "sha256": "66b00f5f73bd559f0fc2dabbb6409c540296fffcd931249bb9facf07bb899929",
+      "chunk_id": "S01-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-34",
+      "relevant_section": "PYTHON; lint; typecheck; verify",
+      "evidence_id": "EV-REPO-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "Dockerfile",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\Dockerfile",
+      "file_type": "",
+      "size_bytes": 3962,
+      "modified_utc": "2026-09-23T22:07:52.6935404Z",
+      "sha256": "65127ce7967769e96110aff98a821addd1010d3e65b431c08684f7c3bb3f3bbb",
+      "chunk_id": "S01-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-98",
+      "relevant_section": "FROM; BuildKit secrets; USER; HEALTHCHECK; CMD",
+      "evidence_id": "EV-REPO-004",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Five related instruction/build files only",
+    "No excluded files followed",
+    "Evidence distinguishes declarations from runtime results",
+    "Truncated packaging line explicitly unverified"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

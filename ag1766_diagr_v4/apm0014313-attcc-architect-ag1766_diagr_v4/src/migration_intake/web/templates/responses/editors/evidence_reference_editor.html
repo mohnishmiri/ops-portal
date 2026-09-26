@@ -1,0 +1,31 @@
+{#
+  Evidence reference editor - links to evidence items.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.references (list of evidence refs)
+    intake_id: str
+#}
+<div class="evidence-reference-editor">
+  {% if answer and answer.value and answer.value.references %}
+  <div class="evidence-list">
+    {% for ref in answer.value.references %}
+    <div class="evidence-item">
+      <span class="evidence-type">{{ ref.type or 'Document' }}</span>
+      <span class="evidence-name">{{ ref.name or ref.id }}</span>
+      {% if ref.uploaded_at %}
+      <span class="meta-item">{{ ref.uploaded_at }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="form-hint">No evidence linked to this question.</p>
+  {% endif %}
+  
+  <div class="evidence-actions">
+    <a href="/applications/{{ intake_id.split('/')[0] }}/intakes/{{ intake_id }}/sources" class="button button--ghost button--sm">
+      Link Evidence
+    </a>
+  </div>
+</div>

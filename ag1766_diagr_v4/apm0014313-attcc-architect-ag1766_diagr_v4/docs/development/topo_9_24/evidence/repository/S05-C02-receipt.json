@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S05-C02",
+  "validated_at": "2026-09-24T14:04:04.8049161-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/semantic_diff/edge_comparison.json",
+    "analysis/semantic_diff/edge_comparison.md",
+    "compare_diagram_edges.ps1"
+  ],
+  "inspected_files": [],
+  "checks": [
+    "Comparison JSON valid",
+    "Only redacted persisted evidence consumed",
+    "Missing endpoint/business identity retained as unknown",
+    "Latest user decisions recorded: application-specific expected target; no intake analysis"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

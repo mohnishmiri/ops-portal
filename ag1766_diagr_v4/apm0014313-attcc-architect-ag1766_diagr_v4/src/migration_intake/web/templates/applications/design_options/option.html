@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% set option_names = {"a": "Balanced card grid", "b": "Compact operational cards", "c": "Curated workspace"} %}
+{% block title %}Option {{ option | upper }} · {{ option_names[option] }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item active" aria-current="page">Applications</a>
+<a href="/admin/catalog" class="global-nav-item">Catalog Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/design-options" class="button button--ghost">Compare options</a>
+<button class="button button--primary" type="button" data-preview-dialog-open>New application</button>
+{% endblock %}
+
+{% block content %}
+<section class="application-preview application-preview--{{ option }}" data-application-preview aria-labelledby="preview-title">
+  <header class="preview-heading">
+    <div>
+      <p class="design-eyebrow">Option {{ option | upper }} · Live mockup</p>
+      <h1 id="preview-title">{{ option_names[option] }}</h1>
+      <p class="preview-heading__copy">
+        {% if option == "a" %}Browse a balanced overview of ownership, activity, and migration progress.
+        {% elif option == "b" %}Scan and act across the portfolio with consistent, compact metadata.
+        {% else %}Focus first on work that needs attention, with details available on demand.{% endif %}
+      </p>
+    </div>
+    <div class="preview-view-switch" aria-label="Preview state">
+      <button type="button" class="preview-state is-active" data-preview-state="populated" aria-pressed="true">Populated</button>
+      <button type="button" class="preview-state" data-preview-state="loading" aria-pressed="false">Loading</button>
+      <button type="button" class="preview-state" data-preview-state="empty" aria-pressed="false">Empty</button>
+      <button type="button" class="preview-state" data-preview-state="error" aria-pressed="false">Error</button>
+    </div>
+  </header>
+
+  <div class="preview-toolbar" role="search">
+    <label class="preview-search">
+      <span>Search applications</span>
+      <input type="search" data-preview-search placeholder="Name or correlation ID" autocomplete="off">
+    </label>
+    <label>
+      <span>Status</span>
+      <select data-preview-filter>
+        <option value="all">All statuses</option>
+        <option value="active">Active</option>
+        <option value="archived">Archived</option>
+      </select>
+    </label>
+    <label>
+      <span>Sort by</span>
+      <select data-preview-sort>
+        <option value="name"{% if option != "c" %} selected{% endif %}>Name</option>
+        <option value="attention"{% if option == "c" %} selected{% endif %}>Needs attention</option>
+        <option value="activity">Recent activity</option>
+      </select>
+    </label>
+    <p class="preview-result-count" aria-live="polite"><strong data-preview-count>{{ applications | length }}</strong> applications</p>
+  </div>
+
+  <div class="preview-notice preview-notice--error" data-preview-error hidden role="alert">
+    <div><strong>Applications could not be loaded</strong><span>Your filters are preserved. Try again when the service is available.</span></div>
+    <button class="button button--ghost button--sm" type="button" data-preview-retry>Try again</button>
+  </div>
+
+  <div class="preview-loading" data-preview-loading hidden aria-live="polite" aria-busy="true">
+    <span class="preview-skeleton"></span><span class="preview-skeleton"></span><span class="preview-skeleton"></span>
+    <span class="sr-only">Loading applications</span>
+  </div>
+
+  <div class="preview-empty" data-preview-empty hidden>
+    <div class="preview-empty__icon" aria-hidden="true">+</div>
+    <h2>No applications found</h2>
+    <p>Clear the filters or register an application to begin an intake.</p>
+    <button class="button button--primary" type="button" data-preview-dialog-open>Register application</button>
+  </div>
+
+  <div class="preview-cards" data-preview-cards role="list">
+    {% for app in applications %}
+    {% set proposals = app.pending_proposal_count | default(0) %}
+    <article class="preview-card" role="listitem" data-name="{{ app.display_name | lower }}" data-id="{{ app.correlation_id | default('', true) | lower }}" data-status="{{ app.state | lower }}" data-attention="{{ proposals }}" data-activity="{{ loop.revindex }}">
+      <div class="preview-card__accent" aria-hidden="true"></div>
+      <header class="preview-card__header">
+        <div class="preview-card__identity">
+          <span class="preview-monogram" aria-hidden="true">{{ app.display_name[:2] | upper }}</span>
+          <div><h2>{{ app.display_name }}</h2><p>{{ app.correlation_id | default("No correlation ID", true) }}</p></div>
+        </div>
+        <div class="preview-card__actions">
+          <span class="preview-status"><span aria-hidden="true"></span>{{ app.state | title }}</span>
+          <button class="preview-icon-button" type="button" aria-label="Actions for {{ app.display_name }}" aria-expanded="false" data-preview-menu-button>•••</button>
+          <div class="preview-menu" data-preview-menu hidden role="menu">
+            <a role="menuitem" href="/applications/{{ app.id }}">Open workspace</a>
+            <button role="menuitem" type="button" data-preview-feedback="Application link copied">Copy link</button>
+            <button role="menuitem" type="button" data-preview-feedback="Preview only: no data was changed">Archive preview</button>
+          </div>
+        </div>
+      </header>
+      <div class="preview-card__metrics">
+        <div><strong>{{ app.evidence_count | default(0) }}</strong><span>Evidence files</span></div>
+        <div><strong>{{ proposals }}</strong><span>Proposals</span></div>
+        <div><strong>{{ "Open" if app.has_open_intake else "None" }}</strong><span>Active intake</span></div>
+      </div>
+      {% if option == "c" %}
+      <details class="preview-card__details"><summary>View migration details</summary><p>{{ proposals }} proposals await review across this application's current intake.</p></details>
+      {% endif %}
+      <footer class="preview-card__footer">
+        {% if proposals %}<span class="preview-attention">{{ proposals }} need review</span>{% else %}<span class="preview-current">Up to date</span>{% endif %}
+        <a href="/applications/{{ app.id }}">Open workspace <span aria-hidden="true">→</span></a>
+      </footer>
+    </article>
+    {% endfor %}
+  </div>
+
+  <div class="preview-toast" data-preview-toast hidden role="status" aria-live="polite"></div>
+
+  <dialog class="preview-dialog" data-preview-dialog aria-labelledby="preview-dialog-title">
+    <form method="dialog">
+      <header><div><p class="design-eyebrow">Preview interaction</p><h2 id="preview-dialog-title">Register application</h2></div><button class="preview-icon-button" value="cancel" aria-label="Close dialog">×</button></header>
+      <p>This mockup demonstrates the form experience without creating production data.</p>
+      <label><span>Application name</span><input required data-preview-name></label>
+      <label><span>Correlation ID</span><input></label>
+      <footer><button class="button button--ghost" value="cancel">Cancel</button><button class="button button--primary" value="default" data-preview-save>Save preview</button></footer>
+    </form>
+  </dialog>
+</section>
+{% endblock %}
+
+{% block extra_scripts %}<script src="/static/js/application-design-options.js"></script>{% endblock %}

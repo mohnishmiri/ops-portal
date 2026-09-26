@@ -1,0 +1,13 @@
+{
+  "id":"S11-C01","stage":"11","result":"COMPLETED",
+  "objective":"Assess run lease, failure, recovery-attempt and terminal transition contracts",
+  "inputs":["application/services/topology_recovery.py","persistence/repositories/topology.py recovery/finalization methods","models_topology.py GenerationRun"],
+  "outputs":["analysis/statuses/run_state_machine.md"],
+  "inspected_files":[{"path":"src/migration_intake/application/services/topology_recovery.py","lines":"1-139","symbols":"Inventory, expired claim, reconciliation and abandonment","further":false},{"path":"src/migration_intake/persistence/repositories/topology.py","lines":"191-692","symbols":"Reservation/attempts; lease/phase/finalization/recovery/review; inventory query","further":true},{"path":"src/migration_intake/persistence/models_topology.py","lines":"78-136","symbols":"GenerationRun state/lease/attempt columns/constraints","further":false}],
+  "checks":["Reservation and recovery attempt mutations distinguished","Every inspected transition checked for atomic predicates/version/token","Inventory source query and in-memory cap traced","Finalization fence retained as hypothesis without runtime proof"],
+  "established":["Initial/rerun attempt_number is reservation attempt identity","Recovery cap reads attempt_number but claim never increments it","Lease replacement and failure transitions use conditional DML","Inventory/reconciliation see only lease-bearing runs and first 100","Final completion remains select then ORM mutation"],
+  "uncertainties":["Stale-worker finalization interleaving requires emitted SQL/runtime proof","Operational scheduler/caller boundary uninspected","Database isolation differences unexecuted","No alert/dashboard review yet"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Read RecoveryService, GenerationRun and repository reservation/transition/recovery methods","result":"Static run-state/recovery contract mapped","mutation":"None outside analysis artifacts","output":"analysis/statuses/run_state_machine.md"}],
+  "evidence":[{"id":"EV-STATUS-001","path":"analysis/statuses/run_state_machine.md","source":"Recovery service, run model and topology repository transitions","description":"State machine, fencing strengths, attempt-cap and diagnostic-scope defects","kind":"Interpreted static state evidence","reliability":"VERIFIED source; interleaving/runtime unverified"}],
+  "next_chunk":"S11-C02","next_action":"Assess review authority and visible inspection/error-state consistency"
+}

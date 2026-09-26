@@ -1,0 +1,12 @@
+{
+	"id":"S06-C10","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 28-32",
+	"inputs":["Guide blocks 28-32 and image9"],
+	"outputs":["evidence/docx/section-009.json","evidence/docx/media/image9.png","evidence/docx/derived/image9-ocr.json","analysis/business_rules/guide_section_09.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 28-32 and image9","symbols":"Azure category; inbound direction; N/R grouping/color","further":true}],
+	"checks":["Bounded extraction/OCR succeeded","Hashes unchanged","Example labels not promoted to application facts"],
+	"established":["Azure region selects Azure-category interfaces from column G","Prose specifies inbound N/R grouping and color coding","Image OCR suggests repeated application placeholders"],
+	"uncertainties":["Exact labels/connectors unverified","Multiplicity and profile binding require reviewed facts","Shared direction/legend ambiguity unresolved"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C10; inspect_guide.ps1 blocks 28-32 section-009; local_ocr.exe image9.png image9-ocr.json","result":"0; five qualified OCR lines; sources unchanged","mutation":"Analysis artifacts only","output":"evidence/docx/section-009.json; evidence/docx/derived/image9-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-010","path":"analysis/business_rules/guide_section_09.md","source":"Guide blocks 28-32 and image9 OCR","description":"Azure interface selection/direction/grouping rule","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; visual/resource correspondence unverified"}],
+	"next_chunk":"S06-C11","next_action":"Extract only guide blocks 33-37 and reuse any already verified identical media"
+}

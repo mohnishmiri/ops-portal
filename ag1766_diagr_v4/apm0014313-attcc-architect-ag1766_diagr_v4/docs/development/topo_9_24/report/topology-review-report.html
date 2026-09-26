@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Topology Generation Architecture Review</title>
+<style>
+:root { --ink:#1d2733; --muted:#5b6875; --line:#d7dee5; --paper:#ffffff; --wash:#f3f6f8; --critical:#8d1f1f; --high:#a24b12; --ok:#1d6b4c; --accent:#155e75; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:var(--wash); font:15px/1.55 system-ui, sans-serif; }
+main { max-width:1180px; margin:0 auto; padding:36px 28px 64px; background:var(--paper); min-height:100vh; }
+h1,h2,h3 { line-height:1.2; }
+h1 { margin-top:0; font-size:2.1rem; }
+h2 { margin-top:2.3rem; border-bottom:2px solid var(--line); padding-bottom:7px; }
+h3 { margin-top:1.5rem; }
+p,li { max-width:1000px; }
+.meta { color:var(--muted); }
+.callout { border-left:5px solid var(--accent); background:#eef7fa; padding:14px 18px; margin:18px 0; }
+.warning { border-left-color:var(--high); background:#fff5eb; }
+.stop { border-left-color:var(--critical); background:#fff0f0; }
+table { width:100%; border-collapse:collapse; margin:14px 0 22px; font-size:14px; }
+th,td { border:1px solid var(--line); padding:8px 9px; vertical-align:top; text-align:left; }
+th { background:#eaf0f3; }
+code { background:#eef1f3; padding:1px 4px; }
+pre { overflow:auto; background:#17212b; color:#e9f0f4; padding:15px; border-radius:4px; }
+a { color:var(--accent); }
+.badge { display:inline-block; padding:2px 7px; border-radius:3px; color:white; font-weight:700; font-size:12px; }
+.critical { background:var(--critical); }.high { background:var(--high); }.verified { background:var(--ok); }.proposed { background:#536779; }.blocked { background:#6b3f73; }
+.small { font-size:13px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<h1>Topology Generation Architecture Review</h1>
+<p class="meta"><strong>Review date:</strong> 2026-09-24 | <strong>Mode:</strong> read-only investigation | <strong>Repository:</strong> <code>aws_diag_v4</code></p>
+<div class="callout"><strong>Decision:</strong> The topology-generation pipeline has been analyzed deeply enough to prepare the final architecture review and implementation plan. Stop broad investigation. The remaining work is implementation, authorized runtime certification, and human approval of unresolved semantic/profile decisions.</div>
+<div class="callout warning"><strong>Important qualification:</strong> This report is source-grounded, not release certification. The review excluded <code>tests/</code> and <code>to_archive/</code>, did not use live cloud credentials, did not mutate a database, and did not execute browser, service, concurrency, or visual-rendering probes. Official generation and approval remain disabled.</div>
+
+<h2>1. Scope And Evidence</h2>
+<p>The review covered the production topology route and services, immutable capture and projection, persistence models and migrations, Draw.io input and application-specific two-page target, the Topology Guide DOCX, profile compatibility, renderer behavior, finalization, recovery, review, delivery, and historical plan drift. Intake/XLSX correctness was explicitly excluded by user direction; topology consumption of reviewed data remained in scope.</p>
+<table>
+<tr><th>Evidence area</th><th>Result</th><th>Primary artifact</th></tr>
+<tr><td>Pipeline and source trace</td><td><span class="badge verified">VERIFIED STATIC</span> Entry points, route/service boundaries, capture, projection, reservation, render, finalization, review and delivery were traced.</td><td><a href="../evidence/runtime_trace/upload_base.md">runtime trace</a></td></tr>
+<tr><td>Draw.io input and expected target</td><td><span class="badge verified">VERIFIED STRUCTURE</span> Input and two target pages were safely inventoried; semantic cell correspondence remains profile work.</td><td><a href="../evidence/drawio/target_preservation.json">target preservation</a></td></tr>
+<tr><td>Topology Guide</td><td><span class="badge verified">TEXT VERIFIED</span> 45 guide blocks covered; image-derived labels and direction interpretation retain qualifications.</td><td><a href="../analysis/business_rules/guide_rule_matrix.md">guide rule matrix</a></td></tr>
+<tr><td>Schema and lineage</td><td><span class="badge verified">VERIFIED STATIC</span> Authority, revision, FK, CAS, migration-target and portability gaps identified.</td><td><a href="../analysis/data_lineage/canonical_snapshot.md">data lineage</a></td></tr>
+<tr><td>Architecture and remediation</td><td><span class="badge proposed">PROPOSED</span> Evolutionary modular-monolith target and ordered corrective slices prepared.</td><td><a href="../analysis/architecture/target.md">target architecture</a></td></tr>
+</table>
+
+<h2>2. Executive Assessment</h2>
+<p>The current code contains a meaningful governed preview foundation: immutable v3 capture, typed projection, compatibility checks, reservation and leases, content-addressed artifacts, bounded recovery, and a stronger review service. However, the boundaries do not preserve one consistent semantic contract. Scope, category, endpoint identity and provenance are weakened between canonical facts, projection, profile and renderer. The actual application-specific two-page target is therefore not reproducible or certifiable from the current production profile set.</p>
+<p>There is also a safety problem in the coexistence of legacy and governed paths. Upload and approval wiring can select legacy behavior while preview requires governed pins. Artifact delivery applies inconsistent verification by mode. Several relational and concurrency invariants remain service-only or non-atomic. These are activation blockers, not cosmetic backlog items.</p>
+<p>The recommended approach is <strong>evolutionary governed vertical repair</strong> inside the existing FastAPI/Jinja/SQLAlchemy/Alembic/Draw.io modular monolith. Do not add a graph database, queue, event bus, microservice, or replacement web graph for this scope.</p>
+
+<h2>3. Current Pipeline Trace</h2>
+<pre>Reviewed canonical answers/resources/interfaces
+        |
+        v
+Immutable v3 capture or frozen snapshot authority
+        |
+        v
+Strict typed projection  ---- current gaps: missing scope fallback, category loss,
+        |                       narrow endpoint identity, provenance mismatch
+        v
+Semantic reservation and lease claim
+        |
+        v
+Synthetic profile compatibility and Draw.io renderer
+        |                       current gaps: no production target profile,
+        |                       unstyled generated cells, global cell IDs,
+        |                       overflow declared but blocked
+        v
+Artifact storage and finalization
+        |                       current gaps: late failure/state and fencing risks
+        v
+Run detail, download, review
+                                current gaps: mixed legacy/governed services,
+                                partial-bundle links, inconsistent verification</pre>
+<table>
+<tr><th>Stage</th><th>Observed implementation</th><th>Primary risk</th><th>Required target</th></tr>
+<tr><td>Entry and governance</td><td><code>web/routes/topology.py</code> exposes legacy upload/approval beside governed preview.</td><td>Fresh upload creates an unpinned DRAFT base; no complete exposed governance journey.</td><td>One governed application facade; legacy rows read-only.</td></tr>
+<tr><td>Authority capture</td><td><code>topology_runner.py</code> captures immutable v3 authority before projection.</td><td>Capture does not preserve all later scope/category needs.</td><td>Versioned authority contract with explicit scope and provenance.</td></tr>
+<tr><td>Projection</td><td><code>strict_projection.py</code> emits typed nodes/flows and exclusions.</td><td>Missing scope can become selected context; category and endpoint identity are incomplete.</td><td>Projection v2 with scoped identities, category, provenance and fail-closed UNKNOWN.</td></tr>
+<tr><td>Profile compatibility</td><td>Packaged synthetic profiles and structural selectors exist.</td><td>No reviewed profile for the supplied application-specific two-page target.</td><td>Hash-pinned approved production profile.</td></tr>
+<tr><td>Rendering</td><td><code>renderer/core.py</code> creates deterministic structural cells and bounded labels.</td><td>Prototype styles are not cloned; page-local IDs can collide; continuation is not implemented.</td><td>Page-qualified prototype cloning and explicit overflow policy.</td></tr>
+<tr><td>Finalization</td><td>Artifact receipts and metadata are validated and stored.</td><td>Some owned validation failures bypass immediate FAILED recording; final write has a fencing risk.</td><td>Atomic conditional finalization and truthful failure states.</td></tr>
+<tr><td>Recovery</td><td>Expired leases can be replaced and runs reconciled.</td><td>Recovery cap checks reservation attempt number; recovery count is not advanced.</td><td>Separate atomically incremented recovery counter and exact diagnostics.</td></tr>
+<tr><td>Review and delivery</td><td>Stronger review service exists; route and artifact modes are inconsistent.</td><td>Approval can bypass full governed review; partial or unverified bundles can surface links.</td><td>One verifier-derived read/delivery/review model.</td></tr>
+</table>
+
+<h2>4. Findings Summary</h2>
+<p>The authoritative finding register contains 40 source-grounded claims: four Critical, 25 High including one explicitly retained hypothesis, nine Medium and two Low. The complete records, evidence IDs, source locators and recommended changes are in <a href="../state/findings.json">state/findings.json</a>.</p>
+<table>
+<tr><th>ID</th><th>Status / severity</th><th>Finding</th><th>Why it blocks confidence</th></tr>
+<tr><td>F-PROJ-001</td><td><span class="badge critical">CRITICAL</span><br>VERIFIED</td><td>Projection substitutes selected context for absent interface scope.</td><td>It invents PROD/SITE_A certainty and can partition the two-page target incorrectly.</td></tr>
+<tr><td>F-PROFILE-001</td><td><span class="badge critical">CRITICAL</span><br>VERIFIED</td><td>Only synthetic profiles exist; no approved profile for the supplied target.</td><td>Structural success cannot establish target reproduction.</td></tr>
+<tr><td>F-RENDER-001</td><td><span class="badge critical">CRITICAL</span><br>VERIFIED</td><td>Structural compatibility requires prototypes but renderer creates unstyled cells.</td><td>Output cannot preserve target visual semantics.</td></tr>
+<tr><td>F-AUTH-003</td><td><span class="badge critical">CRITICAL</span><br>VERIFIED</td><td>HTTP approval uses legacy approval instead of the governed review service.</td><td>Activation could bypass authority, bundle and CAS checks.</td></tr>
+<tr><td>F-PIPE-002</td><td><span class="badge high">HIGH</span><br>VERIFIED</td><td>Owned finalization validation errors can leave a run in STORING.</td><td>Terminal state and recovery behavior become misleading.</td></tr>
+<tr><td>H-PIPE-001</td><td><span class="badge high">HIGH</span><br>PARTIALLY VERIFIED</td><td>SELECT-then-ORM finalization may allow stale-worker completion after lease replacement.</td><td>Requires an authorized two-session probe before runtime conclusion.</td></tr>
+<tr><td>F-DATA-001/002/005</td><td><span class="badge high">HIGH</span><br>VERIFIED</td><td>Run-input, authority-mode and current-revision ownership invariants are not fully relationally enforced.</td><td>Corrupt audit chains remain representable.</td></tr>
+<tr><td>F-RENDER-002/004</td><td><span class="badge high">HIGH</span><br>VERIFIED</td><td>Generated identity omits scope/category/type and lookup is document-global despite repeated page IDs.</td><td>Nodes and edges can collapse or mutate the wrong page.</td></tr>
+<tr><td>F-REC-001</td><td><span class="badge high">HIGH</span><br>VERIFIED</td><td>Recovery cap does not count recovery claims.</td><td>Initial runs can be recovered indefinitely.</td></tr>
+<tr><td>F-API-001/F-UI-003</td><td><span class="badge high">HIGH</span><br>VERIFIED</td><td>Artifact verification and link readiness differ by route/mode and bundle completeness.</td><td>Users can receive misleading availability or generic failures.</td></tr>
+</table>
+
+<h2>5. Root Causes</h2>
+<ol>
+<li><strong>Semantics are recreated differently at each boundary.</strong> Scope, category, identity and provenance are not one immutable typed contract.</li>
+<li><strong>Legacy and governed paths coexist without one facade.</strong> Route wiring can bypass stronger services.</li>
+<li><strong>The application-specific target is not an executable contract.</strong> The guide and target exist, but no reviewed production profile binds them.</li>
+<li><strong>Relational integrity stops before the audit chain.</strong> Important cross-row and authority invariants are representable as invalid states.</li>
+<li><strong>Concurrency concepts are split.</strong> CAS, ORM mutation, row versions, reparenting and recovery attempts do not use one transition protocol.</li>
+<li><strong>UI truth is derived from rows rather than verified domain state.</strong> Metadata presence is treated as readiness.</li>
+<li><strong>Completion evidence is not bound to current invariants.</strong> Historical plan statuses and HTML/Markdown copies drift from current source behavior.</li>
+</ol>
+<p>Detailed causal chains and ownership order are in <a href="../analysis/architecture/root_causes.md">root_causes.md</a>.</p>
+
+<h2>6. Proposed Target Architecture</h2>
+<p>Keep a modular monolith and relational persistence. Add a single <code>TopologyApplicationFacade</code>, immutable authority service, versioned scoped projector, approved profile registry, fenced generation protocol, page-qualified prototype renderer, atomic finalizer, bundle verifier/read model, governed review service, and bounded recovery service.</p>
+<pre>UI -> TopologyApplicationFacade -> Authority -> Scoped Projector v2
+                                  |                 |
+                                  +-> Base/Profile  +-> Immutable topology input
+                                                        |
+                                                        v
+                                                Fenced generation protocol
+                                                        |
+                                             Page-qualified prototype renderer
+                                                        |
+                                             Atomic bundle finalizer + receipts
+                                                        |
+                                               Verifier / read model / review</pre>
+<p>The central rule is: selection filters reviewed facts; it never supplies missing evidence. Missing scope, category or relationship semantics remain UNKNOWN or blocking. Projection version 1 remains readable for history but cannot be relabeled or approved as version 2.</p>
+<h3>State and data decisions</h3>
+<ul>
+<li>Separate semantic reservation attempt from worker recovery count.</li>
+<li>Additive FK/CHECK/current-revision constraints follow data preflight and backfill; legacy rows remain readable.</li>
+<li>Use page-qualified cell references and semantic IDs containing scope, category and relationship type.</li>
+<li>Clone approved Draw.io prototypes and audit protected-region mutations.</li>
+<li>Expose a verifier-derived state document to both HTTP and Jinja templates.</li>
+<li>Keep scheduler, artifact deletion, graph database, event bus, microservice split and interactive viewer deferred.</li>
+</ul>
+<p>Full component contracts, state machine, ER model, ADR proposals and rollout are in <a href="../analysis/architecture/target.md">target.md</a>.</p>
+
+<h2>7. Remediation Plan</h2>
+<p>The recommended option is evolutionary governed vertical repair. All slices remain proposed and NOT_STARTED. The portfolio has 15 slices across five release boundaries.</p>
+<table>
+<tr><th>Order</th><th>Slice</th><th>Objective</th><th>Release</th></tr>
+<tr><td>1</td><td>SL-PROJ-001</td><td>Fail closed instead of inventing interface scope.</td><td>R0 Safety</td></tr>
+<tr><td>2</td><td>SL-PROJ-002</td><td>Add reviewed interface scope authority and decision contract.</td><td>R1 Semantic authority</td></tr>
+<tr><td>3</td><td>SL-PROJ-003</td><td>Projection v2 with scoped endpoints, guide category and provenance.</td><td>R1 Semantic authority</td></tr>
+<tr><td>4</td><td>SL-DATA-001</td><td>Add authority, current-revision and review relational integrity.</td><td>R1 Integrity</td></tr>
+<tr><td>5</td><td>SL-CONC-001</td><td>Unify fenced finalization, failure, recovery and counters.</td><td>R1 Integrity</td></tr>
+<tr><td>6</td><td>SL-PROFILE-001</td><td>Create reviewed profile for the supplied base and two-page target.</td><td>R2 Target preview</td></tr>
+<tr><td>7</td><td>SL-RENDER-001</td><td>Implement page-qualified prototype rendering and overflow policy.</td><td>R2 Target preview</td></tr>
+<tr><td>8</td><td>SL-BASE-001</td><td>Expose governed base compatibility and review workflow.</td><td>R2 Target preview</td></tr>
+<tr><td>9</td><td>SL-FACADE-001</td><td>Route all mutations and reads through the governed facade.</td><td>R2 Target preview</td></tr>
+<tr><td>10</td><td>SL-REVIEW-001</td><td>Revalidate authority, projection, bundle and route CAS.</td><td>R3 Governed review</td></tr>
+<tr><td>11</td><td>SL-READ-001</td><td>Implement verified read/delivery model and truthful UI states.</td><td>R3 Governed review</td></tr>
+<tr><td>12</td><td>SL-OBS-001</td><td>Repair readiness, exact diagnostics and bounded telemetry.</td><td>R3 Operations</td></tr>
+<tr><td>13</td><td>SL-CERT-001</td><td>Standalone integrity, concurrency and cross-database certification.</td><td>R4 Certification</td></tr>
+<tr><td>14</td><td>SL-CERT-002</td><td>Real upload-to-target E2E, performance and visual signoff.</td><td>R4 Certification</td></tr>
+<tr><td>15</td><td>SL-DOC-001 / SL-ACT-001</td><td>Publish corrected evidence, then separately approve reversible activation.</td><td>R4/R5</td></tr>
+</table>
+<p>Critical path: <code>SL-PROJ-001 -> SL-PROJ-002 -> SL-PROJ-003 -> SL-PROFILE-001 -> SL-RENDER-001 -> SL-FACADE-001 -> SL-READ-001 -> SL-CERT-001 -> SL-CERT-002 -> SL-DOC-001 -> SL-ACT-001</code>. The complete dependency graph and parallelization rules are in <a href="../analysis/remediation_options/slice_dependencies.md">slice_dependencies.md</a>. Detailed specifications currently persisted include <a href="../analysis/remediation_options/slices/SL-PROJ-002.md">SL-PROJ-002</a> and <a href="../analysis/remediation_options/slices/SL-PROJ-003.md">SL-PROJ-003</a>; remaining slices are portfolio-level until expanded during authorized implementation planning.</p>
+
+<h2>8. Certification And Stop/Go Gates</h2>
+<table>
+<tr><th>Gate</th><th>Required evidence</th><th>Current status</th></tr>
+<tr><td>Semantic authority</td><td>Scoped v2 projection, explicit UNKNOWN, stable identity/category/provenance and deterministic hashes.</td><td><span class="badge blocked">NOT CERTIFIED</span></td></tr>
+<tr><td>Schema/integrity</td><td>Clean and representative migration checks, FK/CHECK/index validation, no orphan/current-revision violations.</td><td><span class="badge blocked">BLOCKED</span> Runtime/database work not authorized.</td></tr>
+<tr><td>Concurrency/recovery</td><td>Two-session stale-worker, lease replacement, bounded recovery and finalization fault evidence.</td><td><span class="badge blocked">BLOCKED</span> Static stale-worker concern retained as partial.</td></tr>
+<tr><td>Target fidelity</td><td>Approved production profile, semantic diff, page-qualified prototype/style audit, Draw.io-compatible renders and screenshots.</td><td><span class="badge blocked">NOT CERTIFIED</span></td></tr>
+<tr><td>Governed review</td><td>Route uses governed service; source authority, projection and complete receipts revalidated; CAS audit history.</td><td><span class="badge blocked">NOT CERTIFIED</span></td></tr>
+<tr><td>Official activation</td><td>All prior gates, manual target signoff, rollback drill and explicit user approval.</td><td><span class="badge stop">DISABLED</span></td></tr>
+</table>
+<p>Representative future certification fixtures are defined in <a href="../analysis/renderer/semantic_acceptance.md">semantic_acceptance.md</a>: linear, one-to-many, many-to-one, cycle, orphan, unknown, cross-region/account, duplicate, stale/deleted, partial failure, multi-edge, empty, capacity and failed-run cases.</p>
+
+<h2>9. Limitations And Handoff</h2>
+<ul>
+<li>Static source conclusions are verified; runtime impact is labeled unknown or blocked where no execution occurred.</li>
+<li>Guide image labels and direction/category interpretation require explicit product decisions where prose and legend conflict.</li>
+<li>The supplied two-page Draw.io file is the expected target for this application, not a universal template.</li>
+<li>No client evidence, credentials, live AWS resources, excluded tests, or archived material were used.</li>
+<li>No production behavior was changed by this review.</li>
+</ul>
+<p>Canonical investigation state is in <a href="../STATE.json">STATE.json</a>, the complete evidence map is <a href="../EVIDENCE_INDEX.md">EVIDENCE_INDEX.md</a>, and the complete claim register is <a href="../state/findings.json">findings.json</a>. The lightweight handoff index is in <a href="../topology_review_workspace/README.md">topology_review_workspace/README.md</a>.</p>
+</main>
+</body>
+</html>

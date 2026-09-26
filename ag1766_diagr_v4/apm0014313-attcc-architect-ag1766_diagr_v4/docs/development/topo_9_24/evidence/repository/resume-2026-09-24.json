@@ -1,0 +1,11 @@
+{
+  "checked_at":"2026-09-24T13:34:20.5004191-05:00",
+  "commit":"80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count":0,
+  "unmerged_paths":[],
+  "changed_previously_inspected_sources":[],
+  "previous_artifacts_verified":21,
+  "result":"VERIFIED",
+  "excluded_repository_paths":["to_archive/","tests/"],
+  "limitations":["Dirty staged changes remain; this is not a clean-commit certification","No application execution, database connection or suite inspection"]
+}

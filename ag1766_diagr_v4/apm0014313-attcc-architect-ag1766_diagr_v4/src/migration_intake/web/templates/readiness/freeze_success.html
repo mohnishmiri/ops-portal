@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{#
+  Freeze success — Screen 13 of the approved mockup (UX-4b).
+
+  Shown after a successful intake freeze. Tailwind-free: styling in readiness.css.
+#}
+
+{% block title %}Intake frozen{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/intakes/{{ intake_id }}/snapshot" class="button button--primary button--sm">View snapshot &rarr;</a>
+{% endblock %}
+
+{% block content %}
+<div class="readiness-page readiness-page--centered">
+
+  <div class="card readiness-outcome readiness-outcome--success">
+
+    {# Checkmark icon #}
+    <div class="readiness-outcome__icon" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="9 12 11 14 15 10"/>
+      </svg>
+    </div>
+
+    <h1 class="readiness-outcome__heading">Intake frozen</h1>
+    <p class="readiness-outcome__desc">
+      The intake has been frozen and an immutable snapshot created.
+      {% if not result.is_new %}
+      A snapshot already existed and has been returned.
+      {% endif %}
+    </p>
+
+    <dl class="readiness-outcome__meta">
+      <div class="readiness-meta-row">
+        <dt>Snapshot ID</dt>
+        <dd><code>{{ result.snapshot_id }}</code></dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>SHA-256</dt>
+        <dd><code class="readiness-meta-hash">{{ result.sha256_hex }}</code></dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Created at</dt>
+        <dd>{{ result.created_at }}</dd>
+      </div>
+    </dl>
+
+    <div class="readiness-outcome__actions">
+      <a href="/intakes/{{ intake_id }}/snapshot" class="button button--primary">View snapshot &rarr;</a>
+      {% if app_id %}
+      <a href="/applications/{{ app_id }}" class="button button--ghost">Back to workspace</a>
+      {% else %}
+      <a href="/applications" class="button button--ghost">Back to applications</a>
+      {% endif %}
+    </div>
+
+  </div>
+
+</div>
+{% endblock %}

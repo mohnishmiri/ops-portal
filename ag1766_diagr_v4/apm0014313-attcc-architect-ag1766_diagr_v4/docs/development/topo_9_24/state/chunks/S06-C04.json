@@ -1,0 +1,14 @@
+{
+	"id":"S06-C04","stage":"06","result":"COMPLETED",
+	"objective":"Extract and analyze guide blocks 8-13",
+	"inputs":["Topology Guide.docx blocks 8-13 and image4"],
+	"outputs":["evidence/docx/section-003.json","evidence/docx/media/image4.png","evidence/docx/derived/image4-ocr.json","analysis/business_rules/guide_section_03.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 8-13 and embedded image4","symbols":"AWS Tier 1 category selector and N/R grouping prose","further":true}],
+	"checks":["Safe bounded extraction; DOCX hash unchanged","Local OCR returned 12 lines; image hash unchanged","OCR labels distinguished from verified prose and deployed resources","No external OCR or intake/test/archive inspection"],
+	"established":["AWS Tier 1 selects AWS-category interfaces from column G","Prose specifies inbound connectivity and N/R grouping/color coding","Illustrated service/application labels are candidates, not universal deployment facts"],
+	"uncertainties":["Exact image layout/connectors unverified","Standard versus application-derived illustrated content requires profile evidence","Shared direction/legend policy ambiguity remains"],
+	"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"inspect_guide.ps1 -Mode Section -FirstBlock 8 -LastBlock 13 -SectionId section-003","result":"0; six blocks and image4 extracted; source unchanged","mutation":"Analysis artifacts only","output":"evidence/docx/section-003.json"},{"command":"local_ocr.exe <analysis>/evidence/docx/media/image4.png <analysis>/evidence/docx/derived/image4-ocr.json","result":"0; 12 qualified OCR lines; source unchanged","mutation":"Local OCR JSON only","output":"evidence/docx/derived/image4-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-004","path":"analysis/business_rules/guide_section_03.md","source":"Guide blocks 8-13, image4 and qualified local OCR","description":"AWS Tier 1 category/direction/grouping rule with illustration limits","kind":"Interpreted prose and qualified OCR","reliability":"Text VERIFIED; visual relationships unverified"}],
+	"next_chunk":"S06-C05","next_action":"Extract and analyze only guide blocks 14-16 and their referenced image"
+}

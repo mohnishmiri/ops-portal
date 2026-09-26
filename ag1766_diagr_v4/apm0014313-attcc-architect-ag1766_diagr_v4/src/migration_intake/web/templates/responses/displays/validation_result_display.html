@@ -1,0 +1,48 @@
+{#
+  Validation result display - shows computed validation results.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.is_valid, value.errors, value.warnings
+#}
+<div class="validation-result-display computed-display">
+  {% if answer and answer.value %}
+  <div class="validation-summary">
+    {% if answer.value.is_valid %}
+    <span class="status-pill status-pill--success">
+      <span class="pill-dot"></span>
+      VALID
+    </span>
+    {% else %}
+    <span class="status-pill status-pill--danger">
+      <span class="pill-dot"></span>
+      INVALID
+    </span>
+    {% endif %}
+  </div>
+  
+  {% if answer.value.errors %}
+  <div class="validation-errors">
+    <h4 class="form-label">Errors</h4>
+    <ul class="error-list">
+      {% for error in answer.value.errors %}
+      <li class="form-error">{{ error }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  
+  {% if answer.value.warnings %}
+  <div class="validation-warnings">
+    <h4 class="form-label">Warnings</h4>
+    <ul class="warning-list">
+      {% for warning in answer.value.warnings %}
+      <li class="form-hint">{{ warning }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="form-hint">No validation results computed yet.</p>
+  {% endif %}
+</div>

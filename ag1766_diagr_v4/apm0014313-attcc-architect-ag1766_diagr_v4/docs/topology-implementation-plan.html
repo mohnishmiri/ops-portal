@@ -1,0 +1,1938 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Topology Review and Implementation Plan</title>
+  <style>
+    :root { --ink: #202b30; --muted: #566267; --line: #cdd8db; --accent: #086b76; --paper: #ffffff; --soft: #f1f6f6; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font: 17px/1.65 Georgia, "Times New Roman", serif; letter-spacing: 0; }
+    a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+    a:focus-visible, summary:focus-visible, .table-scroll:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .document-bar { padding: 16px max(20px, calc((100% - 1240px) / 2)); background: var(--soft); border-bottom: 1px solid var(--line); font: 15px/1.5 "Segoe UI", sans-serif; display: flex; gap: 12px 24px; flex-wrap: wrap; }
+    main { max-width: 1288px; padding: 32px 24px 72px; margin: auto; min-width: 0; }
+    h1, h2, h3, h4, summary, th { font-family: "Segoe UI", sans-serif; line-height: 1.3; }
+    h1 { font-size: 32px; margin: 0 0 24px; padding-bottom: 16px; border-bottom: 4px solid var(--accent); }
+    h2 { font-size: 25px; margin: 44px 0 18px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+    h3 { font-size: 21px; margin: 30px 0 14px; }
+    h4 { font-size: 18px; margin: 24px 0 10px; }
+    h1, h2, h3, h4 { overflow-wrap: anywhere; scroll-margin-top: 20px; }
+    p, li { overflow-wrap: anywhere; }
+    li { margin: 6px 0; }
+    code, pre { font-family: Consolas, "Courier New", monospace; }
+    code { font-size: 0.88em; background: var(--soft); padding: 2px 4px; overflow-wrap: anywhere; }
+    pre { padding: 18px; background: var(--soft); border-left: 3px solid var(--line); overflow: auto; font-size: 14px; line-height: 1.6; max-width: 100%; }
+    pre code { padding: 0; background: transparent; overflow-wrap: normal; }
+    .table-scroll { overflow-x: auto; margin: 20px 0; max-width: 100%; }
+    table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 15px; line-height: 1.5; }
+    th, td { border: 1px solid var(--line); padding: 11px 12px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    th { background: #e6f0f1; font-weight: 600; }
+    tbody tr:nth-child(even) { background: #f8fafb; }
+    td:first-child { min-width: 72px; }
+    nav { margin: 0 0 28px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+    summary { cursor: pointer; font-weight: 600; }
+    .contents { columns: 2; column-gap: 32px; padding-left: 24px; font: 15px/1.65 "Segoe UI", sans-serif; }
+    .contents li { break-inside: avoid; }
+    .mermaid { overflow-x: auto; background: var(--soft); padding: 20px; margin: 20px 0; }
+    .mermaid svg { display: block; margin: auto; max-width: none; height: auto; }
+    .diagram-source { margin-bottom: 20px; color: var(--muted); }
+    .diagram-source pre { color: var(--ink); white-space: pre; }
+    footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); font: 14px/1.5 "Segoe UI", sans-serif; }
+    @media (max-width: 640px) { body { font-size: 16px; } main { padding: 24px 16px 48px; } h1 { font-size: 28px; } h2 { font-size: 23px; } .contents { columns: 1; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print { .document-bar, nav, footer { display: none; } main { max-width: none; padding: 0; } body { font-size: 10pt; } h1 { font-size: 21pt; } h2 { font-size: 16pt; } h3 { font-size: 13pt; } h1, h2, h3, h4 { break-after: avoid; } .table-scroll { overflow: visible; } table { min-width: 0; font-size: 8pt; } th, td { padding: 5px; } tr { break-inside: avoid; } pre { white-space: pre-wrap; font-size: 8pt; } .mermaid { padding: 8px; overflow: visible; } .mermaid svg { max-width: 100%; } a { color: inherit; } }
+  </style>
+</head>
+<body>
+  <header class="document-bar">
+    <strong>Architecture Review</strong>
+    <span>2026-09-22</span>
+    <a href="implementation/topology-implementation-plan.md">Markdown source</a>
+  </header>
+  <main>
+<h1 id="topology-review-and-implementation-plan">Topology Review and Implementation Plan</h1>
+<section id="next-shift-session-handoff">
+  <h2>Next-Shift Session Handoff — 2026-09-23</h2>
+  <h3>Current checkout and boundary</h3>
+  <p>This HTML is the reading copy; <a href="implementation/topology-implementation-plan.md">the Markdown plan</a> is authoritative. Branch <code>ag1766_diagr_v4</code>; latest user synchronization before current TP14/TP15 work: <code>9eb1a71</code>. Inspect status/diff/log and preserve the uncommitted certification/remediation work.</p>
+  <p>The system is an intake-evidence-to-draw.io generator, not an AWS collector. Reviewed canonical facts alone feed immutable v3 authority, typed projection and governed rendering. Official generation and external approval remain disabled. Draft preview is non-authoritative and receipt-verified. Never weaken hashes, scope/UNKNOWN, provenance, review/CAS/lease/parser/profile controls or expose secrets/private <code>_data</code>.</p>
+  <h3>Completed slices</h3>
+  <ul>
+    <li><strong>TP01–TP08:</strong> containment, schema/repository contracts, approved policy, interface fencing, immutable authority, typed projection and repeated-region/safe-parser contracts.</li>
+    <li><strong>TP09:</strong> deterministic repeated node/edge rendering; focused evidence <code>58 passed</code>.</li>
+    <li><strong>TP10:</strong> receipt-verified atomic bundle finalization and truthful status; <code>24 passed</code>.</li>
+    <li><strong>TP11:</strong> scoped governed preview HTTP and verified downloads; route evidence <code>20 passed</code>.</li>
+    <li><strong>TP12:</strong> fail-closed bundle/base/input review and CAS supersession; <code>68 passed</code>.</li>
+    <li><strong>TP13:</strong> truthful responsive run UI and verified-download inspection; route <code>21 passed</code>, browser <code>5 passed</code>.</li>
+    <li><strong>TP14:</strong> bounded recovery, diagnostics and lease fencing; <code>19 passed</code>.</li>
+  </ul>
+  <h3>TP15 completed evidence</h3>
+  <ul>
+    <li>Authorized nonprivileged Oracle Thick mode; Alembic <code>0021→0022</code>; portable types 21, smoke 1, topology parity 2, populated fixture 1 and Oracle E2E 1 passed. Combined Oracle TP15 bundle: <code>26 passed</code>.</li>
+    <li>SQLite topology/schema/migration/web: <code>376 passed</code>, zero collection errors.</li>
+    <li>D06 10/100/1,000/5,000 budget certification: <code>4 passed</code>; redacted receipts in <code>.pytest_cache/tp15-evidence/</code>.</li>
+    <li>Three migrated Playwright restart/hash journeys: <code>3 passed</code>; review package in <code>docs/output/tp15-signoff/</code>. Manual signoff is complete on the regenerated non-empty journey-1 diagram.</li>
+    <li>Latest local Docker image is healthy at <code>http://localhost:8000</code>, volume-backed SQLite at migration 0022; internal pip credentials are BuildKit secrets, not image layers.</li>
+  </ul>
+  <h3>TP15 blockers and next steps</h3>
+  <ol>
+    <li>Continue broad pytest remediation first: one LLM-config fixture mismatch is fixed, workspace action-card expectation is updated to six, and stale design-options browser tests are being migrated to current <code>/applications/design-options/...</code> routes.</li>
+    <li>Then complete mypy and Ruff gates: current mypy is <code>318 errors in 68 files</code>; Ruff safe autofix reduced <code>1231 → 398</code> remaining.</li>
+    <li>Rerun all broad and topology/Oracle/performance/browser gates, update evidence, then mark TP15 complete only if requirements pass or have explicit release disposition.</li>
+    <li>Do not begin TP16 until TP15 is complete and explicit human release approval is recorded.</li>
+  </ol>
+  <p>Oracle pytest must initialize Thick mode in the same Python process. Never print database/client/credential values or run destructive clean-schema tests against the authorized schema.</p>
+</section>
+<nav aria-label="Table of contents">
+  <details>
+    <summary>Contents</summary>
+    <ol class="contents">
+      <li>
+        <a href="#review-baseline-and-authority">Review Baseline and Authority</a>
+      </li>
+      <li>
+        <a href="#confirmed-initial-findings">Confirmed Initial Findings</a>
+      </li>
+      <li>
+        <a href="#execution-rules">Execution Rules</a>
+      </li>
+      <li>
+        <a href="#current-architecture">Current Architecture</a>
+      </li>
+      <li>
+        <a href="#current-flow">Current Flow</a>
+      </li>
+      <li>
+        <a href="#evidence-discipline">Evidence Discipline</a>
+      </li>
+      <li>
+        <a href="#source-comparison">Source Comparison</a>
+      </li>
+      <li>
+        <a href="#database-inventory">Database Inventory</a>
+      </li>
+      <li>
+        <a href="#http-and-ui-inventory">HTTP and UI Inventory</a>
+      </li>
+      <li>
+        <a href="#gaps-and-risks">Gaps and Risks</a>
+      </li>
+      <li>
+        <a href="#proposed-target-design">Proposed Target Design</a>
+      </li>
+      <li>
+        <a href="#components">Components</a>
+      </li>
+      <li>
+        <a href="#generation-sequence">Generation Sequence</a>
+      </li>
+      <li>
+        <a href="#stage-contracts">Stage Contracts</a>
+      </li>
+      <li>
+        <a href="#node-and-edge-identity">Node and Edge Identity</a>
+      </li>
+      <li>
+        <a href="#persistence-failure-and-delivery">Persistence, Failure and Delivery</a>
+      </li>
+      <li>
+        <a href="#current-versus-proposed">Current Versus Proposed</a>
+      </li>
+      <li>
+        <a href="#decisions-requiring-approval">Decisions Requiring Approval</a>
+      </li>
+      <li>
+        <a href="#agent-execution-contract">Agent Execution Contract</a>
+      </li>
+      <li>
+        <a href="#implementation-slices">Implementation Slices</a>
+      </li>
+      <li>
+        <a href="#tp01-contain-unsafe-generation-and-enforce-capabilities">TP01 - Contain Unsafe Generation and Enforce Capabilities</a>
+      </li>
+      <li>
+        <a href="#tp02-reconcile-governed-schema-and-orm">TP02 - Reconcile Governed Schema and ORM</a>
+      </li>
+      <li>
+        <a href="#tp03-restore-repository-reservation-and-cas-contracts">TP03 - Restore Repository, Reservation and CAS Contracts</a>
+      </li>
+      <li>
+        <a href="#tp04-approve-guide-rules-and-mapping-fixtures">TP04 - Approve Guide Rules and Mapping Fixtures</a>
+      </li>
+      <li>
+        <a href="#tp05-deterministic-interface-reads-and-mutation-fencing">TP05 - Deterministic Interface Reads and Mutation Fencing</a>
+      </li>
+      <li>
+        <a href="#tp06-version-immutable-authority-and-complete-publication">TP06 - Version Immutable Authority and Complete Publication</a>
+      </li>
+      <li>
+        <a href="#tp07-typed-node-and-relationship-projection">TP07 - Typed Node and Relationship Projection</a>
+      </li>
+      <li>
+        <a href="#tp08-repeated-region-profile-and-safe-parsing-contracts">TP08 - Repeated-Region Profile and Safe Parsing Contracts</a>
+      </li>
+      <li>
+        <a href="#tp09-render-and-verify-repeated-nodes-and-edges">TP09 - Render and Verify Repeated Nodes and Edges</a>
+      </li>
+      <li>
+        <a href="#tp10-atomic-artifacts-and-truthful-run-status">TP10 - Atomic Artifacts and Truthful Run Status</a>
+      </li>
+      <li>
+        <a href="#tp11-governed-preview-http-integration">TP11 - Governed Preview HTTP Integration</a>
+      </li>
+      <li>
+        <a href="#tp12-fail-closed-review-integrity-and-supersession">TP12 - Fail-Closed Review, Integrity and Supersession</a>
+      </li>
+      <li>
+        <a href="#tp13-run-states-and-diagram-inspection-ui">TP13 - Run States and Diagram Inspection UI</a>
+      </li>
+      <li>
+        <a href="#tp14-bounded-recovery-and-diagnostics">TP14 - Bounded Recovery and Diagnostics</a>
+      </li>
+      <li>
+        <a href="#tp15-cross-database-load-and-end-to-end-certification">TP15 - Cross-Database, Load and End-to-End Certification</a>
+      </li>
+      <li>
+        <a href="#tp16-official-activation-and-operational-handoff">TP16 - Official Activation and Operational Handoff</a>
+      </li>
+      <li>
+        <a href="#topology-certification-matrix">Topology Certification Matrix</a>
+      </li>
+      <li>
+        <a href="#cross-layer-release-checklist">Cross-Layer Release Checklist</a>
+      </li>
+      <li>
+        <a href="#verification-and-recorded-baseline">Verification and Recorded Baseline</a>
+      </li>
+      <li>
+        <a href="#safe-test-harness">Safe Test Harness</a>
+      </li>
+      <li>
+        <a href="#baseline-results-2026-09-22">Baseline Results (2026-09-22)</a>
+      </li>
+      <li>
+        <a href="#existing-tests-and-missing-proof">Existing Tests and Missing Proof</a>
+      </li>
+      <li>
+        <a href="#review-completion-and-next-action">Review Completion and Next Action</a>
+      </li>
+    </ol>
+  </details>
+</nav>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 1">
+  <table>
+    <thead>
+      <tr>
+        <th>Slice</th>
+        <th>Description</th>
+        <th>Status</th>
+        <th>Dependencies</th>
+        <th>Next Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>TP01</td>
+        <td>Contain unsafe generation and enforce route capabilities</td>
+        <td>COMPLETE</td>
+        <td>Approved and verified 2026-09-22</td>
+        <td>Preserve fail-closed boundary; TP02 is next</td>
+      </tr>
+      <tr>
+        <td>TP02</td>
+        <td>Reconcile governed migrations and ORM metadata</td>
+        <td>COMPLETE</td>
+        <td>TP01 complete; verified 2026-09-22</td>
+        <td>Preserve parity; TP03 is next</td>
+      </tr>
+      <tr>
+        <td>TP03</td>
+        <td>Restore governed repository and reservation contracts</td>
+        <td>COMPLETE</td>
+        <td>TP02 complete; verified 2026-09-22</td>
+        <td>Preserve contracts; TP04 decisions are next</td>
+      </tr>
+      <tr>
+        <td>TP04</td>
+        <td>Approve guide rules and synthetic mapping contract</td>
+        <td>COMPLETE</td>
+        <td>Human approval and fixtures verified 2026-09-22</td>
+        <td>Preserve policy version; TP05 completed next</td>
+      </tr>
+      <tr>
+        <td>TP05</td>
+        <td>Add deterministic interface reads and mutation fencing</td>
+        <td>COMPLETE</td>
+        <td>TP03/TP04 complete; verified 2026-09-22</td>
+        <td>Preserve epoch fencing; TP06 is next</td>
+      </tr>
+      <tr>
+        <td>TP06</td>
+        <td>Version immutable authority and capture interface lineage</td>
+        <td>COMPLETE</td>
+        <td>TP05 complete; verified 2026-09-22</td>
+        <td>Preserve v3 authority; TP07 is next</td>
+      </tr>
+      <tr>
+        <td>TP07</td>
+        <td>Build pure typed node and relationship projection</td>
+        <td>COMPLETE</td>
+        <td>TP04/TP06 complete; verified 2026-09-22</td>
+        <td>Preserve typed projection; TP08 is next</td>
+      </tr>
+      <tr>
+        <td>TP08</td>
+        <td>Define repeated-node and edge profile contracts</td>
+        <td>COMPLETE</td>
+        <td>TP04/TP07 complete; verified 2026-09-22</td>
+        <td>Preserve profile/parser contracts; TP09 is next</td>
+      </tr>
+      <tr>
+        <td>TP09</td>
+        <td>Render and verify repeated nodes and edges</td>
+        <td>COMPLETE</td>
+        <td>TP08 complete; verified 2026-09-22</td>
+        <td>Preserve renderer invariants; TP10 is next</td>
+      </tr>
+      <tr>
+        <td>TP10</td>
+        <td>Finalize governed artifacts and truthful run status</td>
+        <td>COMPLETE</td>
+        <td>TP03/TP06/TP09 complete; verified 2026-09-23</td>
+        <td>Preserve atomic bundle/status; TP11 is next</td>
+      </tr>
+      <tr>
+        <td>TP11</td>
+        <td>Wire governed preview and scoped artifact contracts</td>
+        <td>COMPLETE</td>
+        <td>TP01/TP10 complete; verified 2026-09-23</td>
+        <td>Preserve preview boundary; TP12/TP14 are next</td>
+      </tr>
+      <tr>
+        <td>TP12</td>
+        <td>Harden review, integrity and supersession</td>
+        <td>COMPLETE</td>
+        <td>TP10/TP11 complete; verified 2026-09-23</td>
+        <td>Preserve review integrity; TP13 is next</td>
+      </tr>
+      <tr>
+        <td>TP13</td>
+        <td>Complete run UI states and diagram inspection</td>
+        <td>NOT_STARTED</td>
+        <td>TP11, TP12</td>
+        <td>Agree preview boundary and browser cases</td>
+      </tr>
+      <tr>
+        <td>TP14</td>
+        <td>Recovery, bounded retries and diagnostics</td>
+        <td>NOT_STARTED</td>
+        <td>TP10, TP11</td>
+        <td>Verify leases, retries and orphan handling</td>
+      </tr>
+      <tr>
+        <td>TP15</td>
+        <td>Cross-database, load and end-to-end certification</td>
+        <td>NOT_STARTED</td>
+        <td>TP12, TP13, TP14</td>
+        <td>Obtain disposable Oracle authorization</td>
+      </tr>
+      <tr>
+        <td>TP16</td>
+        <td>Explicit official activation and operational handoff</td>
+        <td>NOT_STARTED</td>
+        <td>TP15, release approval</td>
+        <td>Keep official generation disabled until certified</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<h2 id="review-baseline-and-authority">Review Baseline and Authority</h2>
+<ul>
+  <li>Review date: 2026-09-22. Checkout: <code>b787d51</code>, branch <code>ag1766_diagr_v4</code>.</li>
+  <li>Scope: review and documentation only. No production implementation is authorized.</li>
+  <li>Requested sources: <a href="TOPOLOGY_GENERATION_ASSESSMENT.html">HTML assessment</a> and <a href="architecture/Topology%20Guide.docx">Topology Guide DOCX</a>.</li>
+  <li>The HTML is an assessment, not proof of current runtime behavior. The DOCX is a requirements source, not an approved executable policy.</li>
+  <li>
+    <a href="../STATE.md">STATE.md</a> contains conflicting historical claims. Earlier test counts and certification notes must not be carried forward as evidence for this checkout.</li>
+  <li>Evidence categories: <strong>CONFIRMED STATIC</strong> means inspected code; <strong>EXECUTED</strong> means a recorded command completed; <strong>UNKNOWN</strong> means not established. A test existing is not evidence that it passes.</li>
+  <li>Implementation slices remain <code>NOT_STARTED</code> until explicitly approved. No slice may be marked <code>COMPLETE</code> without all acceptance criteria and required checks passing.</li>
+</ul>
+<h2 id="confirmed-initial-findings">Confirmed Initial Findings</h2>
+<ol>
+  <li>The active HTTP workflow calls <code>TopologyGenerationService</code>, not <code>GovernedTopologyRunner</code>: <a href="../src/migration_intake/web/routes/topology.py#L79">routes</a>.</li>
+  <li>The service records snapshot metadata but <code>_generate_diagram()</code> ignores <code>_snapshot</code> and calls <code>extract_topology_data(session, intake_id)</code>: <a href="../src/migration_intake/application/services/topology_generation.py#L590">service</a>. This can label mutable live-answer output as snapshot-backed.</li>
+  <li>The active renderer is label replacement over an uploaded draw.io document, not AWS API resource discovery or relational graph storage.</li>
+  <li>The guide's editable paragraphs request inbound interfaces grouped by columns N/R, partitioned by column G into internal, AWS and Azure sections. Direct image review confirms IN/OUT examples conflict with inbound-only prose; direction, identity mappings and exact machine styles require explicit approval.</li>
+  <li>The governed runner imports <code>GenerationConflictError</code> and calls capture/input/compatibility repository methods, whereas the inspected topology ORM exports only the three legacy classes. Migration and repository parity must be proven before route activation.</li>
+</ol>
+<h2 id="execution-rules">Execution Rules</h2>
+<ul>
+  <li>One approved slice per pull request; never combine activation with foundation repairs.</li>
+  <li>Preserve current public paths where practical; keep routes thin and workflow decisions in services/domain policies.</li>
+  <li>Use synthetic fixtures and disposable databases. Do not load the workspace <code>.env</code>, connect to Oracle, use private evidence, or call an external model during routine checks.</li>
+  <li>Never infer missing application values, resource scope or approval from absence. Preserve conflict candidates and provenance.</li>
+  <li>No node/edge tables, AWS collectors, background queue or external viewer are assumed to exist. New components must be explicitly identified as proposed.</li>
+  <li>At slice completion, record files, tests, exact commands, outcomes, database/API/UI validation and remaining issues; identify the next dependency-ready slice. A failed or skipped required gate means <code>BLOCKED</code> or <code>IN_PROGRESS</code>, never <code>COMPLETE</code>.</li>
+</ul>
+<h2 id="current-architecture">Current Architecture</h2>
+<p>
+  <strong>This is an intake-evidence-to-draw.io generator, not an AWS inventory collector.</strong> No AWS discovery step is present in the traced HTTP generation path. AWS SDK discovery, scheduled reconciliation and a graph JSON API are <strong>UNKNOWN / not established capabilities</strong>; adding them would require separate product approval. In this plan, discovery means reading reviewed intake/register evidence, not interrogating AWS accounts.</p>
+<p>There are two distinct implementations. The active <a href="../src/migration_intake/web/routes/topology.py">HTTP routes</a> construct <code>TopologyGenerationService</code>. Its <a href="../src/migration_intake/application/services/topology_generation.py#L246">generation method</a> calls the legacy adapter and label filler. The separate <a href="../src/migration_intake/application/services/topology_runner.py">GovernedTopologyRunner</a> provides an immutable-input orchestration foundation but is not wired to those routes and depends on missing persistence contracts. Its existence does not prove production functionality.</p>
+<h3 id="current-flow">Current Flow</h3>
+<pre class="mermaid">flowchart TD
+	User[User uploads base or requests generation] --&gt; Route[Scoped FastAPI topology routes]
+	Route --&gt; Service[TopologyGenerationService]
+	Service --&gt; Metadata[Intake, optional snapshot metadata and base metadata]
+	Metadata --&gt; Run[Create RUNNING gen_runs record]
+	Run --&gt; Adapter[Read live identifiers and current answer revisions]
+	Adapter --&gt; Tokens[Resolve scalar tokens; interfaces are empty]
+	Tokens --&gt; Fill[Replace labels in uploaded draw.io XML]
+	Fill --&gt; Report[Build HTML gap report]
+	Report --&gt; Store[FilesystemStore diagram and report bytes]
+	Store --&gt; Persist[gen_artifacts and terminal gen_runs status]
+	Persist --&gt; Detail[Server-rendered run detail and downloads]
+	Detail --&gt; Viewer[User opens downloaded diagram separately]
+	Run -. exception .-&gt; Failure[Attempt FAILED status persistence, then re-raise]
+</pre>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 2">
+  <table>
+    <thead>
+      <tr>
+        <th>Requested stage</th>
+        <th>Actual implementation, inputs and outputs</th>
+        <th>Reads / writes</th>
+        <th>Failure, retry, tests and gaps</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1. Start</td>
+        <td>
+          <code>generate_topology</code> route calls <code>TopologyGenerationService.generate_topology(intake_id, base_artifact_id, actor)</code>; form selection becomes a run and redirect</td>
+        <td>Intake and base lookup; inserts <code>gen_runs</code></td>
+        <td>Readiness/scope/CSRF validation exists. Capability denial and fail-closed expectations diverge from route code. See route tests; no automatic retry in this service.</td>
+      </tr>
+      <tr>
+        <td>2. Discover AWS resources</td>
+        <td>Not an implemented stage in this call chain. <code>extract_topology_data</code> reads intake evidence, not AWS APIs</td>
+        <td>Application identifiers and current answer revisions</td>
+        <td>No confirmed region/account enumeration, permission-denied or throttling handling. Do not promise AWS completeness.</td>
+      </tr>
+      <tr>
+        <td>3. Normalize</td>
+        <td>
+          <a href="../src/migration_intake/topology/adapter.py">adapter</a>, <a href="../src/migration_intake/topology/resolution.py">resolution</a> and binding configuration create <code>TopologyData</code> and scalar tokens</td>
+        <td>Live SQLAlchemy reads, no normalized graph persistence</td>
+        <td>Missing/ambiguous facts are represented by unresolved tokens/issues; adapter answer-field contract needs repair. Interfaces are explicitly empty.</td>
+      </tr>
+      <tr>
+        <td>4. Create nodes</td>
+        <td>
+          <a href="../src/migration_intake/topology/fill.py">fill_diagram</a> updates labels of existing cells in the uploaded XML</td>
+        <td>No node-table writes</td>
+        <td>Existing geometry/structure are preserved. This does not discover or create arbitrary resource nodes. Separate governed <code>render_structural</code> only adds profile-declared cells.</td>
+      </tr>
+      <tr>
+        <td>5. Create edges</td>
+        <td>Existing base XML supplies its edges; active service has no interface relationship builder</td>
+        <td>No edge-table writes</td>
+        <td>Direction, relationship completeness and repeated interface edges are not inferred or validated against register evidence by this path.</td>
+      </tr>
+      <tr>
+        <td>6. Save</td>
+        <td>Service writes content-addressed diagram and report, then <code>gen_artifacts</code> metadata and run status</td>
+        <td>
+          <code>topo_base</code>, <code>gen_runs</code>, <code>gen_artifacts</code>; external filesystem blobs</td>
+        <td>Bytes precede database commit; partial blobs/rows are possible on failure. Catch attempts to commit FAILED then re-raises; commit failures themselves are not durably recovered here. Successful path always persists READY_FOR_REVIEW even when report says GENERATED_WITH_GAPS.</td>
+      </tr>
+      <tr>
+        <td>7. Retrieve</td>
+        <td>Scoped run lookup and artifact download routes call the service/repository</td>
+        <td>Run/artifact metadata and stored bytes</td>
+        <td>This is HTML/download retrieval, not a paginated topology-node/edge API. Legacy artifact retrieval does not recompute receipt hashes.</td>
+      </tr>
+      <tr>
+        <td>8. Display</td>
+        <td>
+          <a href="../src/migration_intake/web/templates/topology/index.html">topology templates</a> display forms, run status and download actions</td>
+        <td>Service read models; no browser graph store</td>
+        <td>No embedded node canvas is established. Zoom/pan/selection/search in an external draw.io editor is not an application feature. Browser journey exists but is not current passing evidence.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<h3 id="evidence-discipline">Evidence Discipline</h3>
+<ul>
+  <li>Tests below are evidence of intent until execution is recorded. Missing import contracts and module-level skips must not be relabeled as passing tests.</li>
+  <li>The interrupted response saved only the initial plan. Its transport/interruption cause is <strong>UNKNOWN</strong>; no application restart is implied or needed to resume documentation.</li>
+  <li>Re-review baseline is the current checkout, not older certification counts, local Oracle sessions or claims in historical handoffs.</li>
+</ul>
+<h2 id="source-comparison">Source Comparison</h2>
+<p>Both requested documents were read. DOCX text was extracted through ZIP/XML APIs and all 11 embedded PNGs were viewed locally. No private workbook was opened to reproduce the HTML's customer-specific metrics.</p>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 3">
+  <table>
+    <thead>
+      <tr>
+        <th>Source statement</th>
+        <th>Code or direct-document evidence</th>
+        <th>Assessment</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTML sections 1-3: HTTP uses legacy generation</td>
+        <td>
+          <code>get_topology_service</code>, <code>TopologyGenerationService._generate_diagram</code></td>
+        <td>Confirmed. Do not mistake the separate governed runner for the deployed route.</td>
+      </tr>
+      <tr>
+        <td>HTML: interfaces are ignored</td>
+        <td>
+          <a href="../src/migration_intake/topology/adapter.py#L157">extract_topology_facts</a> returns <code>interfaces: []</code></td>
+        <td>Confirmed; resource and link registers are also absent from this active adapter.</td>
+      </tr>
+      <tr>
+        <td>HTML: snapshots/captures omit interfaces</td>
+        <td>
+          <a href="../src/migration_intake/application/services/snapshots.py">SnapshotService</a>, <a href="../src/migration_intake/application/services/topology_runner.py#L306">runner capture</a></td>
+        <td>Confirmed. Additionally, <code>_build_canonical_target_resources</code> is an empty-list placeholder despite resource persistence existing.</td>
+      </tr>
+      <tr>
+        <td>HTML: migration/ORM mismatch</td>
+        <td>
+          <a href="../src/migration_intake/persistence/migrations/versions/0020_topology_capture_governance.py">0020</a>, <a href="../src/migration_intake/persistence/migrations/versions/0021_intake_content_epoch.py">0021</a>, <a href="../src/migration_intake/persistence/models_topology.py">ORM</a></td>
+        <td>Confirmed by disposable SQLite probe: five missing ORM tables, 13 missing base columns and 12 missing run columns.</td>
+      </tr>
+      <tr>
+        <td>HTML: eight import errors</td>
+        <td>Baseline B02 below</td>
+        <td>Reproduced: 236 collected, eight import errors.</td>
+      </tr>
+      <tr>
+        <td>HTML sections 11: renderer tests passed / 60 tests passed</td>
+        <td>Baseline B01 below; module-level skip markers</td>
+        <td>Not valid for this checkout. Retry: 47 passed and 55 skipped across the explicitly listed suites. Of those, 49 renderer and six governed-renderer tests were skipped.</td>
+      </tr>
+      <tr>
+        <td>HTML: arrow colors unreadable</td>
+        <td>DOCX <code>word/media/image2.png</code></td>
+        <td>Corrected by direct visual inspection: black Multiple Protocols, violet HTTPS 443, green SSH/SFTP 22, orange SQL/ODBC 1433, teal JDBC 5433/1433/1521, red SMTP 25/587, magenta GG, yellow DataGuard 1521. Exact machine color values and GG wildcard interpretation still require an approved profile.</td>
+      </tr>
+      <tr>
+        <td>DOCX paragraphs: G classifies internal/AWS/Azure; inbound; group N/R</td>
+        <td>
+          <a href="../src/migration_intake/persistence/models_interfaces.py">InterfaceRecord</a>, <a href="../tests/unit/imports/test_interface_sheet.py">interface parser</a></td>
+        <td>Matching stored fields exist: <code>interface_system_location</code>, <code>data_traffic_direction</code>, <code>target_protocol</code>, <code>future_port</code>. No active rendering implementation.</td>
+      </tr>
+      <tr>
+        <td>DOCX: inbound-only inclusion</td>
+        <td>DOCX image1 shows IN/OUT, OUT, IN; image9 shows both Azure directions</td>
+        <td>Requirement conflict. Do not choose by code convenience. Decision D01 required.</td>
+      </tr>
+      <tr>
+        <td>DOCX: InterfaceName (MOTS ID) and App Acronym (MOTS ID)</td>
+        <td>Images 1/9; register has acronym and correlation ID fields</td>
+        <td>Displayed MOTS identity is not proven equivalent to correlation ID. Mapping is UNKNOWN pending D02.</td>
+      </tr>
+      <tr>
+        <td>DOCX: standard diagram sections</td>
+        <td>Images 3/5/7/8/10/11 show CI/CD, DNS PHZs, home-region/connectivity, Tier 2, Conexus/GPN, Windows-only email</td>
+        <td>Reviewed template content, not discovered per-application resources. Never turn example hostnames, applications or service icons into approved facts.</td>
+      </tr>
+      <tr>
+        <td>DOCX: application-derived box</td>
+        <td>Image6 shows NAS path/EC2 access lists and EBR strategy/EC2 lists</td>
+        <td>Intended fields visible, exact canonical question/resource selectors UNKNOWN. Must not hard-code example strategy or infer NAS absence.</td>
+      </tr>
+      <tr>
+        <td>HTML: private workbook row counts and quality metrics</td>
+        <td>Underlying workbook was not part of this review execution</td>
+        <td>UNKNOWN independently; not reused as fixtures, acceptance counts or topology truth.</td>
+      </tr>
+      <tr>
+        <td>HTML proposed rollback to legacy service</td>
+        <td>Legacy snapshot/live mismatch still present</td>
+        <td>Rejected as a safe activation rollback. Disable generation while retaining verified read-only history; do not restore misleading authority.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<h2 id="database-inventory">Database Inventory</h2>
+<p>These are actual objects, not proposed node/edge tables. Draw.io cells/edges live in XML artifacts. Register rows are canonical evidence identities, not a second materialized layout graph.</p>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 4">
+  <table>
+    <thead>
+      <tr>
+        <th>Objects and owner</th>
+        <th>Keys, integrity and indexes</th>
+        <th>Current use and limits</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <code>applications</code>, <code>app_identifiers</code>, <code>intakes</code>, <code>actors</code>; <a href="../src/migration_intake/persistence/models.py">models</a></td>
+        <td>UUID PKs and application/intake/actor references</td>
+        <td>Active scope, identity, request and approval actors. Route scope does not by itself prove user tenancy authorization.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>ans_instances</code>, <code>ans_revisions</code>, <code>cat_questions</code>; same models</td>
+        <td>Current revision pointer and question/intake scope; <code>AnswerRevision.response_json</code> is actual payload</td>
+        <td>Active adapter asks for nonexistent <code>value_text</code>/<code>value_json</code>, skipping real answer values. Snapshot publisher uses <code>response_json</code> correctly.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>int_snaps</code>; <a href="../src/migration_intake/persistence/models_snapshots.py">snapshot models</a></td>
+        <td>Snapshot ID, intake/catalog references, immutable canonical bytes and hashes</td>
+        <td>Legacy generation records snapshot pins but does not use the bytes for rendering. Existing snapshots must remain immutable/readable after versioning.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>interfaces</code>; <a href="../src/migration_intake/persistence/models_interfaces.py">interface ORM</a></td>
+        <td>UUID PK; FK application with cascade delete; actor FKs; no natural-key uniqueness or <code>(application_id,state)</code> index in this model</td>
+        <td>Mutable application-wide 33-field register with row version; no per-intake historical view. Repeated correlation IDs are allowed intentionally. Repository exact-row dedup is a Python scan, not a concurrency uniqueness guarantee.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>res_resources</code>, <code>res_revisions</code>; <a href="../src/migration_intake/persistence/models_resources.py">resource ORM</a></td>
+        <td>Head UUID PK; unique <code>(intake_id,logical_key,lifecycle,scope_key)</code>; intake/parent/successor FKs; revision unique <code>(resource_id,revision_number)</code>; intake/kind/scope/parent indexes</td>
+        <td>Stable identities and append-only revisions are reusable. Head current-revision pointer has no declared FK here; parent FK alone does not enforce same intake, revision ownership or acyclicity.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>res_links</code>, <code>res_link_revisions</code>; same ORM</td>
+        <td>Unique <code>(intake_id,relationship_type,source_resource_id,target_resource_id)</code>; endpoint/intake FKs; revision unique <code>(link_id,revision_number)</code>; endpoint/intake indexes</td>
+        <td>Endpoint existence does not enforce same-intake membership, selected scope or allowed type/direction. No port dimension in head identity: do not overload this register for distinct interface flows without a contract change.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>topo_base</code>; <a href="../src/migration_intake/persistence/models_topology.py">topology ORM</a></td>
+        <td>UUID PK; app/intake/uploader FKs; intake/hash indexes</td>
+        <td>Migration adds governance/profile/selection/review pins omitted by ORM. Separate app and intake FKs do not enforce their pairing.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>gen_runs</code>; same ORM</td>
+        <td>UUID PK; app/intake/snapshot/base/actor/self-supersession FKs; intake/status indexes</td>
+        <td>Status and approval are mutable despite model prose calling whole rows immutable. <code>0020/0021</code> add input/authority/lease/attempt/manifest/rerun fields absent from ORM. <code>input_id</code> is indexed but lacks an FK in <code>0020</code>.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>gen_artifacts</code>; same ORM and <code>0020</code></td>
+        <td>UUID PK, FK run; run/type indexes; migrated unique <code>(generation_run_id,artifact_type)</code></td>
+        <td>Migrated uniqueness is absent from ORM metadata. <code>create_all</code> fixtures can therefore differ from production migrations. Filesystem receipts need independent byte verification.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>topo_compat</code>; <code>0020</code></td>
+        <td>PK, base/actor FKs, unique compatibility key, base index</td>
+        <td>Immutable compatibility pins; ORM absent. <code>topo_base.compatibility_id</code> is not FK-constrained in <code>0020</code>.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>topo_captures</code>; <code>0020</code></td>
+        <td>PK, intake/actor FKs, intake index, content epoch and canonical hash</td>
+        <td>Immutable preview evidence design; ORM absent. Interface mutations are outside intake-only epoch coverage.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>topo_inputs</code>; <code>0020/0021</code></td>
+        <td>PK; app/intake/base/snapshot/capture/actor/compatibility FKs; unique <code>(intake_id,semantic_input_hash)</code></td>
+        <td>Persisted projection and policy identity. No source XOR check in these migrations; enforce exactly one matching mode/source plus ownership before activation.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>gen_keys</code>; <code>0020</code></td>
+        <td>PK, intake/run FKs; unique <code>(intake_id,semantic_input_hash)</code>; run index</td>
+        <td>Reuse for duplicate-request reservation; ORM and repository implementation absent.</td>
+      </tr>
+      <tr>
+        <td>
+          <code>topo_reviews</code>; <code>0020</code></td>
+        <td>PK and entity index; entity/run/base/actor columns without declared FKs</td>
+        <td>Append-only review intent; ORM absent. Referential integrity and valid entity combinations need migration/service validation.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<p>
+  <strong>Executed schema scope:</strong> only a fresh disposable SQLite database was upgraded to <code>0021</code>; <code>PRAGMA foreign_key_check</code> returned zero rows on that empty migrated database. This does not certify populated data, FK enforcement on every application connection, Oracle migrations or production schema state. Those remain UNKNOWN. Before adding constraints, preflight existing orphan/duplicate/scope-mismatch rows and quarantine/report them; never silently delete or rewrite history.</p>
+<h2 id="http-and-ui-inventory">HTTP and UI Inventory</h2>
+<p>All existing paths below use prefix <code>/applications/{app_id}/intakes/{intake_id}/topology</code>; <a href="../src/migration_intake/web/routes/topology.py">route implementation</a>.</p>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 5">
+  <table>
+    <thead>
+      <tr>
+        <th>Method and suffix</th>
+        <th>Contract and existing controls</th>
+        <th>Gap</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>GET empty suffix</td>
+        <td>HTML landing page with bases, runs and form controls</td>
+        <td>Full lists; no confirmed pagination/filtering; no node/edge JSON response.</td>
+      </tr>
+      <tr>
+        <td>POST <code>/upload-base</code></td>
+        <td>Multipart file and metadata, CSRF, scope, 10 MB check; 303 redirect; invalid upload 400, unexpected error sanitized 500</td>
+        <td>File is read before size check; no generate/upload capability enforcement here; upload and base approval must be separate decisions.</td>
+      </tr>
+      <tr>
+        <td>POST <code>/generate</code></td>
+        <td>Base ID form input, CSRF, scope; 303 on success; readiness page or 400 on handled failures</td>
+        <td>Legacy synchronous execution; no enforced generation capability, durable request idempotency or retry policy.</td>
+      </tr>
+      <tr>
+        <td>GET <code>/runs/{run_id}</code></td>
+        <td>Scoped run lookup, 404 if not found; HTML detail</td>
+        <td>Run lists/status lack full immutable-input and stale/partial disclosure.</td>
+      </tr>
+      <tr>
+        <td>POST <code>/runs/{run_id}/approval</code></td>
+        <td>Decision/rationale, CSRF, TOPOLOGY_APPROVE; invalid decision 400, review conflict 409, success 303</td>
+        <td>Legacy service trusts snapshot presence and status, not full bundle/base/input integrity.</td>
+      </tr>
+      <tr>
+        <td>GET <code>/runs/{run_id}/diagram</code></td>
+        <td>Scoped lookup; draw.io response; 404 absent, 500 unavailable bytes</td>
+        <td>No download capability check or receipt revalidation in active service; whole bytes loaded into memory.</td>
+      </tr>
+      <tr>
+        <td>GET <code>/runs/{run_id}/report</code></td>
+        <td>Scoped lookup; HTML report attachment</td>
+        <td>Same authorization/integrity issue. No manifest route currently established.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<p>
+  <a href="../src/migration_intake/web/templates/topology/index.html">Landing</a> and <a href="../src/migration_intake/web/templates/topology/run_detail.html">run detail</a> have empty lists, forms, status pills, failure text and artifact links. They are not a diagram canvas. Loading feedback for long generation, authoritative partial/stale states, graph search/filtering, zoom/pan/selection, accessible node details and large-diagram behavior are not established application capabilities. Downloading an XML file is not proof of correct browser rendering. Existing synthetic <a href="../tests/browser/test_topology_workflow.py">browser journey</a> must be re-enabled and run against the real selected service before claiming coverage.</p>
+<h2 id="gaps-and-risks">Gaps and Risks</h2>
+<p>Each recommendation's affected components and DB/API/UI impact are included to make implementation proportional. Evidence is static unless B01-B03 explicitly cover it.</p>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 6">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Area</th>
+        <th>Problem</th>
+        <th>Evidence</th>
+        <th>Impact</th>
+        <th>Recommendation</th>
+        <th>Priority</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>G01</td>
+        <td>Authority</td>
+        <td>Snapshot pins describe output rendered from live answers</td>
+        <td>
+          <a href="../src/migration_intake/application/services/topology_generation.py#L590">service</a>
+        </td>
+        <td>Unreproducible output may be approved as official</td>
+        <td>TP01/06/11: block unsafe generation/review, then render immutable approved input only. DB input pins; HTTP authority gate; UI historical-unverified label.</td>
+        <td>Critical</td>
+      </tr>
+      <tr>
+        <td>G02</td>
+        <td>Persistence</td>
+        <td>Governed migration/model/repository mismatch</td>
+        <td>B02/B03; <a href="../src/migration_intake/persistence/repositories/topology.py">repository</a></td>
+        <td>Runner cannot import; test fixtures hide real constraints</td>
+        <td>TP02/03: restore portable mappings and real CAS/reservation operations. DB parity/additive constraints; no activation yet.</td>
+        <td>Critical</td>
+      </tr>
+      <tr>
+        <td>G03</td>
+        <td>Security</td>
+        <td>Generate/upload/download lack required capability enforcement</td>
+        <td>
+          <a href="../src/migration_intake/web/routes/topology.py">routes</a>
+        </td>
+        <td>Scope-correct users can still bypass operation policy</td>
+        <td>TP01: capability matrix at route/service boundary, no side effects on denied requests. API 403/404; hide unauthorized UI actions.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G04</td>
+        <td>Data</td>
+        <td>Adapter reads nonexistent revision fields</td>
+        <td>
+          <a href="../src/migration_intake/topology/adapter.py#L218">adapter</a>, <a href="../src/migration_intake/persistence/models.py#L460">AnswerRevision</a>, B03</td>
+        <td>Real answers are omitted while fakes can pass</td>
+        <td>TP06/07: canonical response-type-aware selectors; real ORM fixtures. No schema rewrite; visible missing-data issues. Do not revive unsafe live official rendering.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G05</td>
+        <td>Evidence</td>
+        <td>Snapshots publish no resources; no interfaces in official/preview capture</td>
+        <td>
+          <a href="../src/migration_intake/application/services/snapshots.py#L321">snapshots</a>, <a href="../src/migration_intake/application/services/topology_runner.py">runner</a></td>
+        <td>Governed output incomplete even after imports fixed</td>
+        <td>TP05/06: versioned authority with resource/link/interface lineage, consistent capture. DB canonical contract/epoch; API version rejection; UI completeness disclosure.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G06</td>
+        <td>Concurrency</td>
+        <td>Interfaces mutable at application scope; no deterministic read order or capture fence</td>
+        <td>
+          <a href="../src/migration_intake/persistence/repositories/interfaces.py">interface repository</a>
+        </td>
+        <td>Mixed-time captures, same request changes under concurrent edit</td>
+        <td>TP05: ordered reads and application register epoch, all mutators participate. Additive DB epoch/index; no raw interface expansion in HTTP.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G07</td>
+        <td>Identity</td>
+        <td>Repeated IDs are not necessarily duplicate relationships</td>
+        <td>
+          <a href="../src/migration_intake/persistence/models_interfaces.py">interface model</a>
+        </td>
+        <td>Collapsed legitimate flows or duplicate visible edges</td>
+        <td>TP04/07: separate record identity, counterpart identity and flow identity; retain provenance union. DB rows preserved; render/report distinctions.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G08</td>
+        <td>Rules</td>
+        <td>Guide direction/label/group semantics ambiguous</td>
+        <td>DOCX paragraphs versus images 1/9</td>
+        <td>Incorrect arrows or mislabeled applications</td>
+        <td>TP04: signed rule decisions and fixtures before projection. No DB change; profile/API version pins; UI uses same legend.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G09</td>
+        <td>Scope</td>
+        <td>Missing environment/site is inferred global in preview capture</td>
+        <td>
+          <a href="../src/migration_intake/application/services/topology_runner.py#L675">runner <code>_capture_resources</code></a>
+        </td>
+        <td>Unscoped facts can appear in every context</td>
+        <td>TP06/07: explicit global versus unknown scope; fail or report unresolved. Versioned payload; cross-region/account output unsupported until explicit evidence.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G10</td>
+        <td>Graph integrity</td>
+        <td>Endpoint FKs do not prove same-intake scope/type/direction; excluded relationships need accounting</td>
+        <td>
+          <a href="../src/migration_intake/persistence/models_resources.py">resource model</a>, <a href="../src/migration_intake/topology/strict_projection.py">strict projection</a></td>
+        <td>Orphan/misdirected edges or silent omissions</td>
+        <td>TP07: validate referential ownership and typed relationship matrix, explicit exclusion reasons; TP02 constraints where appropriate. No duplicate graph store.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G11</td>
+        <td>Rendering</td>
+        <td>No repeated interface nodes/edges or reviewed overflow layout</td>
+        <td>
+          <a href="../src/migration_intake/topology/renderer/core.py#L813">render_structural</a>
+        </td>
+        <td>Guide cannot be generated by current capabilities</td>
+        <td>TP08/09: profile-defined repeat regions/prototypes, stable IDs, capacities and continuation pages. Profile schema update, no graph DB.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G12</td>
+        <td>Status</td>
+        <td>Persisted success differs from gap report</td>
+        <td>
+          <a href="../src/migration_intake/application/services/topology_generation.py">generation service</a>
+        </td>
+        <td>UI approval readiness overstates completeness</td>
+        <td>TP10: one status policy from projection/render issues to DB/manifest/report/UI. Same authoritative result everywhere.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G13</td>
+        <td>Atomicity</td>
+        <td>Blob writes precede commit; no active recovery lease/idempotency</td>
+        <td>Same service; <a href="../src/migration_intake/application/services/topology_finalization.py">finalization foundation</a></td>
+        <td>Duplicate runs, partial bundles, orphan blobs, lost errors</td>
+        <td>TP03/10/14: reuse reservations, stage artifacts, atomic metadata completion, CAS leases and bounded recovery. Add audit/phase fields; HTTP conflict/retry rules.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G14</td>
+        <td>Review</td>
+        <td>Approval does not fully verify artifacts/base and warning rationale values</td>
+        <td>
+          <a href="../src/migration_intake/application/services/topology_generation.py">legacy approval</a>, <a href="../src/migration_intake/application/services/topology_review.py">governed review</a></td>
+        <td>Tampered or ineligible output may be approved</td>
+        <td>TP12: verify every blob and pin, base review, nonblank per-warning decisions, CAS and append-only review. DB review integrity; API 409; UI disables ineligible review.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G15</td>
+        <td>Security</td>
+        <td>Active XML validation is separate from bounded governed parser; read-all uploads</td>
+        <td>
+          <a href="../src/migration_intake/application/services/topology_generation.py">upload service</a>, <a href="../src/migration_intake/topology/renderer/core.py">renderer parser</a></td>
+        <td>Inconsistent limits and memory/resource exhaustion risk</td>
+        <td>TP01/08/11: bounded reads, shared safe parser, no remote XML/style asset loading. API size errors; no client content in logs. Exploitability not tested here.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G16</td>
+        <td>Tests</td>
+        <td>Eight import errors and renderer skip markers</td>
+        <td>B01/B02</td>
+        <td>Claimed regression confidence is false</td>
+        <td>TP02/03 restore collection; TP08/09 enable relevant tests; TP15 reject skipped required gates. No production schema/API impact from tests.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G17</td>
+        <td>Performance</td>
+        <td>Full lists, Python duplicate scans, synchronous SQL/render/blob work</td>
+        <td>
+          <a href="../src/migration_intake/persistence/repositories/interfaces.py">interfaces</a>, <a href="../src/migration_intake/application/services/topology_generation.py">service</a></td>
+        <td>Unbounded memory/latency; long transactions</td>
+        <td>TP05/10/11/15: index measured queries, bulk ordered reads, release DB before rendering, bounded responses and pagination. Queue only if measured need.</td>
+        <td>Medium</td>
+      </tr>
+      <tr>
+        <td>G18</td>
+        <td>UI</td>
+        <td>Download workflow lacks actual diagram inspection and partial/stale distinctions</td>
+        <td>
+          <a href="../src/migration_intake/web/templates/topology/run_detail.html">templates</a>
+        </td>
+        <td>Users cannot validate graph correctness in application</td>
+        <td>TP13: truthful states, accessible node/edge list; choose local isolated read-only viewer if approved. New viewer is proposed, not present.</td>
+        <td>Medium</td>
+      </tr>
+      <tr>
+        <td>G19</td>
+        <td>Diagnostics</td>
+        <td>Active service stores raw exception text; explicit stage audit not wired</td>
+        <td>
+          <a href="../src/migration_intake/application/services/topology_generation.py">service</a>
+        </td>
+        <td>Poor recovery correlation and potential sensitive details in UI</td>
+        <td>TP10/14: sanitized issue code, run/input/stage correlation, duration/count metrics and audit transitions. No fact values/credentials in logs.</td>
+        <td>Medium</td>
+      </tr>
+      <tr>
+        <td>G20</td>
+        <td>Freshness</td>
+        <td>No AWS polling/reconciliation; historical interface state not frozen</td>
+        <td>Current evidence-based pipeline</td>
+        <td>Cannot claim cloud discovery freshness or infer deletions from absence</td>
+        <td>TP06/07/13: explicit source age and lifecycle evidence, immutable old runs, stale indicator. AWS collector remains separate scope.</td>
+        <td>Medium</td>
+      </tr>
+      <tr>
+        <td>G21</td>
+        <td>Portability</td>
+        <td>SQLite migration success does not prove Oracle semantics/concurrency</td>
+        <td>B03; <a href="../src/migration_intake/persistence/migrations/versions/0021_intake_content_epoch.py">0020/0021</a></td>
+        <td>Release failure despite local green tests</td>
+        <td>TP02/05/15: empty-string normalization, portable types/names, authorized Oracle migration/repository/CAS suite. Block release if unavailable.</td>
+        <td>High</td>
+      </tr>
+      <tr>
+        <td>G22</td>
+        <td>Documentation</td>
+        <td>Historical state and assessment overclaim tests and image uncertainty</td>
+        <td>Source comparison and <a href="../STATE.md">STATE</a></td>
+        <td>Next agent may activate an unproven implementation</td>
+        <td>This review supplies current baseline; TP15 records fresh evidence. Documentation only; preserve source documents as historical assessments.</td>
+        <td>Low</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<h2 id="proposed-target-design">Proposed Target Design</h2>
+<p>Everything in this section is a proposal requiring approval. Reuse existing repositories, canonical serializers, resource/register identities, governed runner, safe XML parser, profile loader, finalizer and review service. Repair their contracts before route wiring; do not introduce a cloud collector, graph database, queue or external diagram service as part of this plan.</p>
+<h3 id="components">Components</h3>
+<pre class="mermaid">flowchart LR
+	UI[Scoped run and inspection UI] --&gt; API[Thin FastAPI routes]
+	API --&gt; Policy[Capability, scope and mode policy]
+	Policy --&gt; Runner[GovernedTopologyRunner]
+	Runner --&gt; Authority[Approved snapshot or fenced preview capture]
+	Authority --&gt; Repos[Answers, resources, links and interfaces repositories]
+	Repos --&gt; DB[(Existing relational database)]
+	Authority --&gt; Project[Pure typed projection and validation]
+	Project --&gt; Pins[Immutable input and run reservation]
+	Pins --&gt; DB
+	Runner --&gt; Renderer[Profile-based label or structural renderer]
+	Renderer --&gt; Verify[Geometry, graph and protected-cell verification]
+	Verify --&gt; Finalize[Receipt-verified bundle finalization]
+	Finalize --&gt; Store[(Content-addressed artifact store)]
+	Finalize --&gt; DB
+	API --&gt; Review[Review and verified retrieval service]
+	Review --&gt; DB
+	Review --&gt; Store
+</pre>
+<h3 id="generation-sequence">Generation Sequence</h3>
+<pre class="mermaid">sequenceDiagram
+	actor User
+	participant Route
+	participant Runner
+	participant DB
+	participant Projection
+	participant Renderer
+	participant Store
+	User-&gt;&gt;Route: Generate with base, mode and explicit scope
+	Route-&gt;&gt;Route: Authorize, CSRF and validate bounds
+	Route-&gt;&gt;Runner: Validated command
+	Runner-&gt;&gt;DB: Read approved snapshot OR atomically capture preview
+	Runner-&gt;&gt;Projection: Canonical bytes, mappings and selected contexts
+	Projection--&gt;&gt;Runner: Typed nodes, relationships, issues and hash
+	Runner-&gt;&gt;DB: T1 persist immutable input and reserve semantic key
+	alt Existing completed or in-progress reservation
+		DB--&gt;&gt;Runner: Existing run or bounded conflict
+	else New reservation
+		DB--&gt;&gt;Runner: Committed run, attempt and lease
+		Runner-&gt;&gt;Renderer: Pinned input, base and profile outside SQL transaction
+		Renderer--&gt;&gt;Runner: Diagram, issues and structural verification
+		Runner-&gt;&gt;Store: Store immutable diagram, report and manifest
+		Store--&gt;&gt;Runner: Receipts; verify bytes and hashes
+		Runner-&gt;&gt;DB: T2 CAS complete bundle, status and audit atomically
+	end
+	Runner--&gt;&gt;Route: Scoped run identity and truthful result
+	Route--&gt;&gt;User: 303 run detail; verified artifact links
+	Note over Runner,DB: Failure persists sanitized state in a fresh transaction; expired lease recovery is bounded
+</pre>
+<h3 id="stage-contracts">Stage Contracts</h3>
+<ol>
+  <li>
+    <strong>Authorize/select:</strong> validate actor capability, application/intake ownership, explicit lifecycle/environment/site selection, base/profile/capability eligibility and limits. Official mode stays disabled until TP16; preview must never become approvable through a missing flag.</li>
+  <li>
+    <strong>Capture authority:</strong> official uses a reviewed, versioned immutable canonical snapshot only. Preview is immutable but nonauthoritative, with confirmed versus proposed facts visible. Capture answers, resources, relationships and interface allowlist with revision IDs, row versions, source/provenance, review state, raw/normalized values and retrieval/as-of time. Fence both intake mutations and application interface mutations in one transaction.</li>
+  <li>
+    <strong>Normalize/project:</strong> pure functions validate source schema, response types and all scopes. Normalize only approved aliases, use integer ports 1-65535 or approved explicit range representation, preserve invalid/raw values as issues, and never infer missing No, region, account or global scope.</li>
+  <li>
+    <strong>Build graph:</strong> create stable semantic node and relationship identities, preserve explicit direction and provenance, validate endpoints/types/cycles by relationship class, retain inclusion/exclusion decisions. Projection must not read the database or storage.</li>
+  <li>
+    <strong>Reserve:</strong> compute semantic hash over authority bytes/schema, selected contexts, projection, base/profile, generator and parser/layout/result/mapping policy versions. Unique intake/hash reservation prevents concurrent duplicate work. Retry attempt IDs are operational metadata, not new semantic identities.</li>
+  <li>
+    <strong>Render:</strong> mutate only declared labels/generated regions. Preserve manual cells, containers and unrelated edges. Stable sort and fixed layout constraints prevent input-order jitter. Multiple contexts use an overview plus per-context detail pages; shared resources require explicit scope, not blank fields. Repetition and pagination are new profile capabilities.</li>
+  <li>
+    <strong>Verify/finalize:</strong> verify graph-to-cell completeness, unique IDs, endpoint existence, protected content and bounds before storing. Publish one complete DIAGRAM/GAP_REPORT/MANIFEST bundle using receipt verification and CAS completion. Incomplete blobs are never successful artifacts.</li>
+  <li>
+    <strong>Review/serve:</strong> use one status policy; verify source pins and all receipts, approved base and issue decisions. Serve only appropriately authorized preview or approved official content. Preserve superseded history and exact bytes across restarts.</li>
+</ol>
+<h3 id="node-and-edge-identity">Node and Edge Identity</h3>
+<ul>
+  <li>Canonical resource identity remains <code>res_resources.id</code>, with source revision IDs pinned in input. Existing uniqueness <code>(intake_id,logical_key,lifecycle,scope_key)</code> must not be replaced by display-name matching. Projection IDs include namespace, stable resource ID and explicit context; overview aliases reference the same canonical identity rather than inventing duplicate facts.</li>
+  <li>Interface record identity is its row UUID and version. Counterpart identity and flow identity are separate: prefer an approved canonical application identifier plus explicit scope; an unresolved counterpart stays source-row-scoped with an issue. A correlation ID is not automatically a MOTS ID and a shared display label is not an identity.</li>
+  <li>A proposed flow key is <code>(source_node_id,target_node_id,relationship_type,normalized_protocol,normalized_port,context)</code>. Collapse exact equivalent flows only under approved policy, preserving all contributing record/version references. Different ports/protocols remain distinct unless a reviewed aggregation policy groups them with a member list.</li>
+  <li>Inbound means counterpart -&gt; migrating application; outbound means migrating application -&gt; counterpart, subject to D01 approval. Explicit bidirectional evidence produces two directed semantic flows; a two-headed visual connector may summarize them only with both members traceable. Do not derive direction from color, position, provider/consumer labels or missing fields.</li>
+  <li>Containment edges must be acyclic and have approved parent kinds. Communication cycles are valid; preserve them. Missing endpoints and unsupported relationship kinds are blocking issues for affected official output, not silently dropped edges.</li>
+  <li>Region/account/partition belong in scope when supported by evidence. Same name in different regions/accounts never merges. Missing account is UNKNOWN, not the current account. Cloud-global is an explicit supported scope. Cross-account discovery remains unsupported; cross-scope evidence rendering requires reviewed mapping and fixtures.</li>
+  <li>Retired/deleted resources appear only under explicit lifecycle/as-of policy. A missing inventory row is not evidence of deletion. Existing captures and artifacts never change after source retirement.</li>
+</ul>
+<h3 id="persistence-failure-and-delivery">Persistence, Failure and Delivery</h3>
+<p>Keep graph/projection bytes in <code>topo_inputs.projection_json</code> with hash, and evidence in snapshots/captures; do not create redundant node/edge tables without a proven query requirement. Restore migration/ORM parity before adding interface epoch/schema fields in a new additive migration. Do not edit already-applied migrations to conceal drift.</p>
+<p>Use short T1/T2 transactions. Catch failure outside a damaged transaction and persist sanitized failure in a fresh unit of work. Retry only classified transient storage/network/database-conflict failures, at most three attempts with bounded exponential backoff and jitter; validation, authorization, unsupported schema and hash mismatch are never auto-retried. A lease/CAS guards every completion; late workers cannot overwrite a recovered attempt. Explicit rerun requires reason and new attempt metadata; historical artifacts remain immutable. No background queue is required until measured synchronous bounds demand one.</p>
+<p>Determinism means identical pinned input and recorded render context yields identical artifact bytes. Independent runs may legitimately have different envelope timestamps/run IDs; compare normalized semantic payloads separately rather than falsely requiring identical run-specific reports. Retrieval after restart must always be byte-identical for the same run.</p>
+<p>Preserve existing HTML routes and 303 flow. Proposed bounded pagination defaults to 25 runs, maximum 100, stable <code>(requested_at,id)</code> ordering. New filters are explicit mode/status/context, with unknown values rejected. Proposed manifest retrieval and preview inspection endpoints must be scoped and contract-tested before being named public APIs. Do not add a bulk live graph endpoint; an inspection read model comes from a pinned projection and uses bounded pages. Distinguish 403 denied operation, 404 missing/wrong scope, 409 stale or conflicting decision, 413 oversize and sanitized 503 temporary unavailable; freeze exact contract in TP11.</p>
+<p>UI shows input authority, as-of time, selected scopes, blockers/warnings, stale-source indicator, retry eligibility and history. Disable duplicate submits, retain user form choices on recoverable errors, show loading/empty/failed/partial/completed states without claiming partial output is official. Provide an accessible node/edge details list and search/filter. D05 chooses download-only plus details or a self-hosted isolated read-only viewer with zoom/pan/fit/selection. Do not send diagrams to public draw.io services or execute uploaded HTML/URLs. Large diagrams use approved continuation pages and bounded inspection, never silent truncation.</p>
+<p>Audit state transitions with actor, run/input/base IDs, phase, semantic hash and decision codes. Metrics: capture/project/render/store durations, selected/excluded nodes/edges, issue counts by code, retry/lease conflicts, hash failures and artifact bytes. No fact payloads, database URLs, endpoint names, contacts or secrets in logs/metric labels. Use low-cardinality metrics and correlation IDs in logs.</p>
+<h3 id="current-versus-proposed">Current Versus Proposed</h3>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 7">
+  <table>
+    <thead>
+      <tr>
+        <th>Current</th>
+        <th>Proposed</th>
+        <th>Reason and trade-off</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Live reads with snapshot labels</td>
+        <td>Explicit immutable official snapshot or draft capture</td>
+        <td>Reproducibility and honest authority; requires versioned data contract and migration tests.</td>
+      </tr>
+      <tr>
+        <td>Legacy label filler selected by routes</td>
+        <td>Governed runner, label-only preserved and structural opt-in</td>
+        <td>Reuse governance work; costs contract repair before visible feature work.</td>
+      </tr>
+      <tr>
+        <td>No interface graph</td>
+        <td>Pure typed projection over existing registers</td>
+        <td>Testable mapping and provenance; rule approval is a real dependency.</td>
+      </tr>
+      <tr>
+        <td>Three legacy ORM classes</td>
+        <td>Parity with existing governed tables, targeted new constraints</td>
+        <td>Avoid parallel persistence architecture; preserve populated history.</td>
+      </tr>
+      <tr>
+        <td>Whole flow in request transaction</td>
+        <td>Short reservation/finalization transactions</td>
+        <td>Better failure isolation; requires recovery/lease tests, not necessarily a queue.</td>
+      </tr>
+      <tr>
+        <td>Status-only approval</td>
+        <td>Verified complete bundle and append-only decision</td>
+        <td>Strong integrity; corrupted/missing artifacts deliberately block approval.</td>
+      </tr>
+      <tr>
+        <td>Download-only diagram</td>
+        <td>Truthful run UI plus approved local inspection boundary</td>
+        <td>Better review; viewer adds security/performance surface and is optional pending D05.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<h2 id="decisions-requiring-approval">Decisions Requiring Approval</h2>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 8">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Decision and conservative default</th>
+        <th>Blocks</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>D01</td>
+        <td>Inbound-only guide prose versus inbound/outbound/bidirectional images; default no inferred inclusion/direction</td>
+        <td>TP04/07</td>
+      </tr>
+      <tr>
+        <td>D02</td>
+        <td>Exact source for InterfaceName/MOTS, scope and endpoint identity; define missing label behavior</td>
+        <td>TP04/07</td>
+      </tr>
+      <tr>
+        <td>D03</td>
+        <td>Protocol/port aliases, multiple-protocol aggregation, exact legend styles and GG wildcard meaning</td>
+        <td>TP04/08</td>
+      </tr>
+      <tr>
+        <td>D04</td>
+        <td>Approve next canonical schema containing interfaces/resources/links; legacy snapshots read-only, no retrofit</td>
+        <td>TP06</td>
+      </tr>
+      <tr>
+        <td>D05</td>
+        <td>Download-plus-accessible-details versus self-hosted read-only diagram viewer; no external upload</td>
+        <td>TP13</td>
+      </tr>
+      <tr>
+        <td>D06</td>
+        <td>Approved per-page/context capacities, overflow pages and reference performance budget</td>
+        <td>TP08/15</td>
+      </tr>
+      <tr>
+        <td>D07</td>
+        <td>Official release authority, actor provisioning and authorized disposable Oracle schema</td>
+        <td>TP15/16</td>
+      </tr>
+      <tr>
+        <td>D08</td>
+        <td>Which standard boxes vary by OS/site/cloud, and exact NAS/EBR/EC2 source selectors</td>
+        <td>TP04/08</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<p>Recommended first implementation is <strong>TP01 only</strong>, after approval: prevent new misleading authority and enforce operation permissions. TP02/03 restore the governed foundation next. Mapping decisions may be reviewed in parallel by people, but agents implement only one approved slice at a time. Foundation completion does not authorize official generation.</p>
+<h2 id="agent-execution-contract">Agent Execution Contract</h2>
+<ul>
+  <li>Read this document and the current diff before acting. Confirm approval for the named slice; do not infer it from the existence of this plan.</li>
+  <li>Use one PR per slice. The listed files are ownership hints, not permission for unrelated cleanup. New schema fields/components are proposals, never claims about existing behavior.</li>
+  <li>Begin with a failing focused test. Use real model/repository contracts where boundary behavior matters; do not replace missing methods with mocks just to get collection green.</li>
+  <li>Run the slice checks plus impacted neighboring suites. Required tests must execute, not skip. For TP01, keep a standalone boundary test free of the broken governed imports; this narrowly scoped containment PR may complete while the unrelated baseline is explicitly recorded. TP02 may complete schema parity independently; TP03 must restore collection. TP15 requires the full applicable feature baseline green.</li>
+  <li>All pytest commands below use the safe harness in the Verification section; paths in commands are repository-relative selectors resolved to absolute paths by that harness. Never run the snippets against an inherited <code>.env</code> or live database.</li>
+  <li>After each slice, fill its completion record with exact commands/results, evidence location and next dependency-ready slice. <code>NOT_STARTED</code> means no implementation; <code>IN_PROGRESS</code> means approved and active; <code>BLOCKED</code> means a gate/dependency cannot pass; <code>COMPLETE</code> requires every stated acceptance criterion. A design document or passing mocked unit test alone cannot certify a user journey.</li>
+  <li>Do not push, commit, apply migrations to a shared database, enable official mode or make outbound LLM calls without separate authorization.</li>
+</ul>
+<h2 id="implementation-slices">Implementation Slices</h2>
+<h3 id="tp01-contain-unsafe-generation-and-enforce-capabilities">TP01 - Contain Unsafe Generation and Enforce Capabilities</h3>
+<p>
+  <strong>Objective / reason:</strong> Stop new falsely authoritative runs and unauthorized operations (G01/G03/G15) before foundation repair. Dependencies: explicit user approval only.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/web/routes/topology.py">topology routes</a>, <a href="../src/migration_intake/application/services/topology_generation.py">generation service</a>, <a href="../src/migration_intake/web/security.py">security</a>, topology templates and <a href="../tests/unit/topology/test_topology_boundaries.py">boundary tests</a>. DB: no migration; denied requests write nothing. API: fail-closed generation/approval until governed path is ready; explicit operation capabilities and bounded upload. UI: unavailable-generation state; preserve scoped, permission-checked historical access with unverified labels.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Freeze route capability matrix, response codes and treatment of legacy artifacts with the architect. Keep historical bytes; prohibit promotion of LEGACY_UNPINNED output.</li>
+  <li>Add standalone synthetic route/service denial tests without importing the broken runner. Reuse an existing web security test home where possible; only add a test file if imports prevent isolation.</li>
+  <li>Guard legacy generation and approval, enforce upload/generate/download permissions, use bounded upload reads, and render an honest unavailable state. Do not auto-approve uploads.</li>
+  <li>Retain scoped historical retrieval under the agreed policy; include authority metadata rather than relabel old runs official.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: denied actor or disabled generator currently reaches service/write; unsafe official approval succeeds; oversize stream is read fully. Green: deny before side effects and cap reads. Refactor: one local guard used consistently; avoid a broader authentication rewrite.</p>
+<p>
+  <strong>Validation / acceptance:</strong> 403 missing capability, 404 wrong app/intake, frozen and draft generation both fail closed while disabled, CSRF invalid rejected, no run/blob/review writes on every denial. Authorized historical access follows explicit policy. Use a standalone <code>tests/web/</code> boundary selection plus scoped tests once collection is restored; verify UI unavailable state and no active submit. No DB constraint change, no node/edge changes, sanitized reason code logged once. Existing eight collection errors remain explicitly tracked under TP03, not hidden.</p>
+<p>
+  <strong>Rollback:</strong> Disable topology commands at the deployment boundary; preserve read-only authorized history. Do not roll back by reopening the unsafe legacy official path.</p>
+<h4 id="tp01-completion">TP01 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Scope remained containment, capability enforcement, bounded upload and truthful unavailable UI only.</li>
+  <li>Files changed: <code>src/migration_intake/web/routes/topology.py</code>, topology landing/run-detail templates, <code>tests/web/test_topology_containment.py</code>, topology route tests, both plans and <code>STATE.md</code>.</li>
+  <li>Tests added: standalone TP01 boundary harness covering capability denial before side effects, 413 bounded upload without writes, disabled generation/approval without writes, scoped permissioned historical access and <code>LEGACY_UNPINNED</code> authority; integration assertions added pending TP03 collection repair.</li>
+  <li>Commands executed: focused containment/security/capability suite (<code>54 passed</code>); focused Ruff check, route compilation and <code>git diff --check</code> passed.</li>
+  <li>Database validation: standalone spy boundary proves zero service writes on denied/disabled/oversize requests; migrated repository integration remains blocked by TP03 imports and was not claimed. API validation: standalone 403/404/413/503 contracts pass. UI validation: generation and approval forms are hidden while disabled; unavailable and <code>LEGACY_UNPINNED</code> states are rendered by source contract, with browser evidence deferred to TP13.</li>
+  <li>Remaining issues: broader topology collection still fails on missing <code>GenerationConflictError</code>/<code>TopologyInput</code> contracts assigned to TP02/TP03; governed preview, official generation and approval remain disabled. Next dependency-ready slice: TP02.</li>
+</ul>
+<h3 id="tp02-reconcile-governed-schema-and-orm">TP02 - Reconcile Governed Schema and ORM</h3>
+<p>
+  <strong>Objective / reason:</strong> Make migrated databases and model-created test schemas describe the same governed objects (G02/G10/G21). Dependencies: TP01.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/persistence/models_topology.py">topology ORM</a>, <a href="../src/migration_intake/persistence/models_resources.py">resource ORM</a>, migration registration, existing <a href="../tests/unit/topology/test_capture_persistence.py">capture persistence tests</a> and migration tests. DB: restore ORM for <code>0020/0021</code>; add a new migration only for additional constraints after data preflight. API/UI: unchanged and generation disabled.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Record actual columns, types, defaults, nullability, FKs, uniqueness and indexes from a migrated disposable SQLite database; compare metadata-created database.</li>
+  <li>Restore five governed models, 13 base columns, 12 run columns and artifact uniqueness using portable types. Register metadata in application/migration initialization consistently.</li>
+  <li>Specify source/mode checks, review references and input ownership. Preflight duplicates/orphans before any new FK/check; report remediation, never auto-delete.</li>
+  <li>Test pre-0020 populated legacy upgrade and current-head upgrade; preserve LEGACY_UNPINNED and all historical bytes/IDs. Keep additive migration separate from historical scripts.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: schema comparator fails known omissions; duplicate run/artifact type succeeds under current metadata. Green: exact parity for existing migrations and explicit new invariants. Refactor: reuse naming/type conventions; do not rename existing tables.</p>
+<p>
+  <strong>Validation / acceptance:</strong> Both schema creation paths expose the same governed columns/constraints; duplicate artifact type and invalid declared FKs rejected with SQLite FK enforcement ON; legacy rows retain hashes/authority. Run isolated migration tests and direct metadata introspection without importing missing repository APIs. Document any constraints requiring populated-data remediation. Oracle SQL/type compatibility reviewed; actual Oracle execution is deferred to TP15 and cannot be claimed. API/UI unchanged; no graph produced; migration failures are surfaced.</p>
+<p>
+  <strong>Rollback:</strong> Revert model code only to the fail-closed deployment; leave additive tables/columns and history in place. Destructive downgrade only on disposable fixtures; production repair uses a forward migration.</p>
+<h4 id="tp02-completion">TP02 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Scope remained migrated-schema/ORM parity and existing <code>0020/0021</code> governed constraints; generation stayed disabled and no new migration was added.</li>
+  <li>Files changed: <code>src/migration_intake/persistence/models_topology.py</code>, Alembic metadata registration, schema parity tests, both plans and <code>STATE.md</code>.</li>
+  <li>Tests added: migration-to-ORM parity for all eight governed topology tables covering exact columns, named unique constraints and named foreign keys. Restored five missing ORM models, 13 base columns, 12 run columns and migrated run/artifact uniqueness.</li>
+  <li>Commands executed: focused schema/model/migration suite (<code>25 passed</code>); focused Ruff, focused mypy and <code>git diff --check</code> passed. Topology plus route collection now reports <code>246 collected, 7 errors</code>, with remaining repository contracts assigned to TP03.</li>
+  <li>Database validation: fresh disposable SQLite reached <code>0021</code>, <code>PRAGMA foreign_key_check</code> returned no rows and all eight governed tables were present. API/UI stayed fail-closed; no graph was generated. Oracle-safe type/name metadata was reviewed and tested; actual Oracle execution remains TP15.</li>
+  <li>Remaining issues: populated legacy-data preflight beyond existing migration checks and Oracle execution remain deferred; missing repository errors/methods block seven modules and belong to TP03. Next dependency-ready slice: TP03.</li>
+</ul>
+<h3 id="tp03-restore-repository-reservation-and-cas-contracts">TP03 - Restore Repository, Reservation and CAS Contracts</h3>
+<p>
+  <strong>Objective / reason:</strong> Make the governed runner importable with durable duplicate/concurrency handling, not stubbed compatibility (G02/G13/G16). Dependencies: TP02.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/persistence/repositories/topology.py">TopologyRepository</a>, <a href="../src/migration_intake/application/services/topology_runner.py">runner</a>, <a href="../tests/unit/topology/test_capture_persistence.py">capture tests</a>, <a href="../tests/unit/topology/test_governed_runner.py">runner tests</a>. DB: use existing governed tables/unique keys; no new graph tables. API/UI: still disabled, no route wiring.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Inventory runner/base/finalizer/review/recovery repository calls against signatures; restore missing error types and methods with real persistence semantics.</li>
+  <li>Implement immutable input/capture/compatibility access, semantic-key reservation and artifact-type uniqueness handling.</li>
+  <li>Enforce row-version/lease CAS transitions and ownership on lookup; map uniqueness races to domain conflicts without losing the existing run.</li>
+  <li>Remove import errors without deleting tests or relaxing assertions; classify subsequent behavior failures for owning slices.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: eight current imports fail; parallel same-key reservation must produce one winner; stale CAS update must fail. Green: real transactions/unique constraints and typed errors. Refactor: repository conversion helpers only after cross-module contract tests pass.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>pytest tests/unit/topology tests/integration/web/test_topology_routes.py --collect-only -q</code> has zero import errors. Focused <code>test_capture_persistence.py</code> reservation/read/CAS cases execute, two sessions produce one reservation, stale worker cannot finalize, duplicate artifact type rejected. Validate <code>gen_keys</code>, <code>topo_inputs</code>, <code>gen_runs</code> ownership and versions. No new user-facing generation; no graph output; conflicts have sanitized codes. Remaining renderer/review behavior tests belong to later slices and must be recorded, never blanket-skipped anew.</p>
+<p>
+  <strong>Rollback:</strong> Revert repository callers together while keeping generation disabled and additive data intact. Do not drop reservations or immutable inputs.</p>
+<h4 id="tp03-completion">TP03 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Scope remained governed repository errors/methods, immutable records, reservation uniqueness, ownership and CAS/lease contracts; generation stayed disabled.</li>
+  <li>Files changed: topology repository, both plans and <code>STATE.md</code>; TP02 governed ORM models remain the persistence basis.</li>
+  <li>Contracts restored: typed conflicts; capture/input/compatibility persistence; reservation reuse; input ownership; base/run CAS; lease/recovery fencing; atomic artifact metadata finalization/rollback; failure transitions; review/supersession CAS with append-only records; scoped reads.</li>
+  <li>Commands executed: focused parity/persistence/finalization/recovery/review suite (<code>31 passed</code>); repository/model Ruff and mypy plus <code>git diff --check</code> passed. Topology plus route collection reports <code>312 collected</code>, zero errors.</li>
+  <li>Database validation: duplicate artifact and stale CAS are rejected; independent-session reservation returned the original run. API/UI remained fail-closed; no generation route or graph was enabled.</li>
+  <li>Remaining issues: five base-governance tests remain pre-existing blanket-skipped; true simultaneous two-writer and Oracle concurrency remain TP15 evidence. Next dependency-ready work: TP04 decision approval, then TP05.</li>
+</ul>
+<h3 id="tp04-approve-guide-rules-and-mapping-fixtures">TP04 - Approve Guide Rules and Mapping Fixtures</h3>
+<p>
+  <strong>Objective / reason:</strong> Resolve ambiguity before generating plausible but incorrect graph content (G07/G08). Dependencies: user/architect decisions D01-D03/D08; independent of production activation.</p>
+<p>
+  <strong>Scope:</strong> This plan's decision ledger, <a href="../src/migration_intake/topology/profiles/synthetic_structural/mappings.json">profile mappings</a>, <a href="../tests/unit/topology/test_scope.py">scope tests</a>, projection synthetic fixtures. DB: no changes. API/UI: no production behavior change; proposed rules only until approved.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Record approver/date/version for direction, field-to-label identity, internal/AWS/Azure aliases and exact grouping semantics. Explicitly resolve same-port/different-protocol and multiple-protocol style precedence.</li>
+  <li>Specify unknown/null/invalid port, duplicates/conflicts, retired rows, scope and sensitive-field allowlist.</li>
+  <li>Define standard-template versus application-derived content; map NAS/EBR/EC2 selectors or label them unresolved blockers.</li>
+  <li>Create synthetic examples with expected nodes, edges, directions, labels, issues and source references; no client identifiers or evidence copies.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: table-driven rule validator rejects missing decisions, unsupported aliases and contradictory expected directions. Green: approved versioned contract and complete fixtures, without route wiring. Refactor: consolidate only repeated policy vocabulary, not parser/source data.</p>
+<p>
+  <strong>Validation / acceptance:</strong> Every D01-D03/D08 decision is approved or an explicit supported-scope exclusion; fixtures cover inbound/outbound/bidirectional according to decision, missing identity, repeated ID and protocol/port conflict. Expected graph counts are exact; no production tables written, HTTP unchanged, legend approval visually checked. Test command: focused <code>test_scope.py</code> plus named new mapping-fixture tests recorded here. No UNKNOWN silently acquires a default.</p>
+<p>
+  <strong>Rollback:</strong> Retain previous signed rule version; mark superseded version inactive, do not rewrite prior manifests. Implementation remains disabled.</p>
+<h4 id="tp04-completion">TP04 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Human approval recorded: 2026-09-22. Approved defaults preserve all explicit reviewed directions, represent bidirectional as two flows, use canonical IDs, retain UNKNOWN values, keep protocol/port/scope in identity, merge exact duplicates only, block conflicts, render reviewed ACTIVE facts only, prohibit truncation and apply a strict label allowlist.</li>
+  <li>Files changed: versioned guide policy, synthetic fixture tests, both plans and <code>STATE.md</code>.</li>
+  <li>Tests added: direction, missing identity/direction, grouping alias/UNKNOWN, protocol-port identity/invalid port and sensitive-field exclusion cases.</li>
+  <li>Commands executed: focused policy/scope selection (<code>12 passed</code>); focused Ruff passed.</li>
+  <li>Database/API/UI validation: pure policy, no writes or route changes; generation remains disabled. Exact profile layout/style/capacity stays assigned to TP08.</li>
+  <li>Remaining issues: D04 is TP06; profile layout/style/capacity is TP08. Next available: TP05.</li>
+</ul>
+<h3 id="tp05-deterministic-interface-reads-and-mutation-fencing">TP05 - Deterministic Interface Reads and Mutation Fencing</h3>
+<p>
+  <strong>Objective / reason:</strong> Capture one coherent application register state under concurrent editing/import (G06/G17). Dependencies: TP03, TP04.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/persistence/repositories/interfaces.py">interface repository</a>, <a href="../tests/unit/application/test_interface_review.py">interface review tests</a>, interface mutation services, <a href="../src/migration_intake/application/services/topology_runner.py">runner capture</a>. DB: proposed application interface epoch plus measured <code>(application_id,state,id)</code> access index through an additive migration. API/UI: existing edit concurrency conflict contract preserved; no new topology route.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Find every create/update/retire/import acceptance path and require its transaction to increment/lock the same application interface epoch.</li>
+  <li>Add repository ordered reads by stable ID and a projection allowlist with row versions/source lineage. Exclude contacts and free-text endpoints unless expressly approved.</li>
+  <li>Capture with intake epoch and interface epoch fence; use a portable compare-and-swap check so a concurrent mutation retries the whole capture, never a fragment.</li>
+  <li>Measure ordered query plan; preserve distinct same-correlation rows and current import dedup semantics. Do not add a destructive natural-key unique index.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: interleaved update yields mixed rows or nondeterministic ordering; one uninstrumented mutation bypasses epoch. Green: transactional fence and all mutation coverage. Refactor: centralize epoch operation behind the repository boundary only.</p>
+<p>
+  <strong>Validation / acceptance:</strong> Reversed insertion order yields identical canonical order; concurrent edit/retire/import either precedes or follows capture, never mixes; capture retry bounded to three conflicts. Actual SQLite two-connection tests and all <code>test_interface_review.py</code> cases pass. Inspect index/query plan at 1,000 synthetic rows, epoch increments once per mutation transaction, rollback leaves epoch and rows unchanged. API edit 409 preserved, UI changes unnecessary; graph remains not rendered. No private data appears in logs.</p>
+<p>
+  <strong>Rollback:</strong> Leave epoch/index additive objects, disable new capture path and preserve old read-only history. Never run old mutators concurrently with a capture service relying on their fencing.</p>
+<h4 id="tp05-completion">TP05 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Application-scoped interface epoch and additive migration were explicitly approved after preflight; generation remained disabled.</li>
+  <li>Files changed: migration <code>0022</code>, application/interface ORM, interface repository, fence tests, migration head test, both plans and <code>STATE.md</code>.</li>
+  <li>Implementation: application interface epoch, deterministic access index, transaction-local epoch increments for every interface mutation, stable ordered allowlisted reads and epoch-pinned capture view excluding sensitive/free-text fields.</li>
+  <li>Commands executed: focused TP04/TP05/interface/migration/model selection (<code>65 passed</code>); focused Ruff, mypy and <code>git diff --check</code> passed. Disposable migration reached <code>0022</code>.</li>
+  <li>Database validation: orphan preflight, rollback preservation and unchanged duplicate semantics verified. API/UI unchanged; no graph rendered.</li>
+  <li>Remaining issues: true overlapping two-writer and Oracle concurrency remain TP15; TP06 must pin interface epoch/rows into immutable authority. Next available: TP06.</li>
+</ul>
+<h3 id="tp06-version-immutable-authority-and-complete-publication">TP06 - Version Immutable Authority and Complete Publication</h3>
+<p>
+  <strong>Objective / reason:</strong> Produce real immutable inputs containing the facts generation needs, with valid lineage (G01/G04/G05/G09/G20). Dependencies: TP05 and D04.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/application/services/snapshots.py">snapshot service</a>, <a href="../src/migration_intake/application/snapshots.py">canonical payload</a>, <a href="../src/migration_intake/topology/contracts.py">contracts</a>, <a href="../src/migration_intake/application/services/topology_runner.py">runner</a>, <a href="../tests/unit/topology/test_contracts.py">contract tests</a>. DB: versioned snapshot/capture bytes and source epoch pins, additive metadata only where needed. API: old versions readable but ineligible for new official generation; UI shows authority/version/as-of.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Approve the next schema version without guessing v3 compatibility; define interface allowlist, resource/link revisions, explicit scope/global flags and provenance.</li>
+  <li>Replace empty-resource publication with repository-backed reviewed resources/relationships. Read <code>response_json</code> through response-type-aware canonical adapters.</li>
+  <li>Capture preview and freeze official authority under TP05 fencing. Preserve original snapshot IDs/bytes; never backfill interfaces into an existing hash.</li>
+  <li>Validate source ownership, mode/source XOR, schema/hash, completeness and explicit unresolved scope before persisting input.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: real ORM answer is omitted, resources empty, interface edit changes rerender or scope becomes global. Green: canonical complete publication and pinned loading only. Refactor: share serialization primitives, not a live-read fallback.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_contracts.py</code>, <code>test_governed_runner.py</code> and snapshot publication tests execute. Real response payload maps correctly; reorder produces same canonical hash; edited/retired sources do not change old input; changed interface version changes new semantic hash. Snapshot/capture source exclusive and correct; no approved fact from candidates. Inspect rows/hashes; old snapshot retrieval works and new generation rejects unsupported old authority deterministically. No new viewer; errors name unresolved field without secret value.</p>
+<p>
+  <strong>Rollback:</strong> Stop publishing the new version and keep its readers/data; revert producer only behind generation gate. Never rewrite or delete committed snapshots.</p>
+<h4 id="tp06-completion">TP06 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Schema v3 pins application/intake/catalog identity, interface epoch and allowlisted rows, confirmed answers/resources/links with revision provenance, and active WaveUtil state; generation remains disabled.</li>
+  <li>Files changed: v3 contracts, governed capture, repositories, authority publisher, snapshot publication entry point, profile pins, tests, both plans and <code>STATE.md</code>.</li>
+  <li>Tests added: deterministic ordering/hash, mutation/old-byte immutability, sensitive-field exclusion, resource/link provenance, candidate/unconfirmed/retired exclusion, legacy no-relabel, strict loading and no mutable-answer SQL.</li>
+  <li>Commands executed: focused TP06 selection (<code>52 passed, 6 deselected</code>); focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database validation: one-snapshot-per-intake and legacy readability remain; v3 publication is idempotent and strict-hash validated. API/UI: explicit publisher added; no generation route enabled.</li>
+  <li>Remaining issues: six rerun/concurrency/renderer cases belong to TP10/TP11/TP15. Next available: TP07.</li>
+</ul>
+<h3 id="tp07-typed-node-and-relationship-projection">TP07 - Typed Node and Relationship Projection</h3>
+<p>
+  <strong>Objective / reason:</strong> Deterministically build the approved semantic graph without silent merges, direction guesses or omissions (G07/G09/G10/G20). Dependencies: TP04, TP06.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/topology/strict_projection.py">strict projection</a>, <a href="../src/migration_intake/topology/scope.py">scope</a>, <a href="../tests/unit/topology/test_strict_projection.py">projection tests</a>, <a href="../tests/unit/persistence/test_resource_repository.py">resource repository tests</a>. DB: existing register integrity and persisted projection, no graph tables. API/UI: later consume this immutable projection; no wiring now.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Add immutable typed interface/node/flow records under the existing topology module; version the projection contract.</li>
+  <li>Implement approved raw/normalized field mapping, counterpart identity, exact-flow aggregation with provenance union and deterministic ordering.</li>
+  <li>Validate resource/link same-intake ownership, allowed endpoints/types, scope and containment cycles; emit reasons for every excluded row/link.</li>
+  <li>Project selected contexts and shared resources explicitly; preserve communication cycles, distinct ports and account/region identities. Fix snapshot identity lineage rather than using intake ID as a surrogate snapshot ID.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: duplicate IDs collapse distinct ports; dangling/cross-intake endpoints accepted; unknown scope treated global; wrong source snapshot identity. Green: pure typed projector and explicit issue/exclusion result. Refactor: one identity normalizer; no database access in policy functions.</p>
+<p>
+  <strong>Validation / acceptance:</strong> Run <code>test_strict_projection.py</code>, <code>test_scope.py</code>, <code>test_resource_repository.py</code>. Certification cases C00-C12 have exact nodes/edges and directions; permutation gives same hash; duplicate semantic flows preserve contributors; containment cycle blocks and communication cycle survives. All endpoints exist; no silent drop or manufactured account/region. Canonical projection stored/reloaded with equal hash; HTTP/UI unchanged; issues use stable codes. Source tables remain untouched.</p>
+<p>
+  <strong>Rollback:</strong> Disable the new projection version; retain bytes and compatible reader. Never regenerate historical runs using a different mapping version.</p>
+<h4 id="tp07-completion">TP07 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Extended the existing strict projection; no parallel graph subsystem or graph tables were introduced.</li>
+  <li>Files changed: strict projection, fixtures, TP07 certification tests, both plans and <code>STATE.md</code>.</li>
+  <li>Implementation: frozen typed scope/node/flow/exclusion records; directed interface flows; protocol/port/scope keys; exact duplicate provenance union; stable exclusions/issues; deterministic ordering/hashes; strict persisted typed-shape validation.</li>
+  <li>Synthetic evidence: C00-C12 boundaries cover empty/simple/one-to-many, identity/duplicate/port variants, missing endpoint, communication cycle, unknown direction, account/region scope, partial source, retired omission and 1,000-flow bounds; scope/resource suites retain containment/cross-intake checks.</li>
+  <li>Commands executed: focused TP07 selection (<code>45 passed</code>); focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database/API/UI validation: pure projection only; source tables unchanged, persisted projection hash round-trip verified, HTTP/UI unchanged and generation disabled. Next available: TP08.</li>
+</ul>
+<h3 id="tp08-repeated-region-profile-and-safe-parsing-contracts">TP08 - Repeated-Region Profile and Safe Parsing Contracts</h3>
+<p>
+  <strong>Objective / reason:</strong> Describe structural mutation precisely before rendering repeated interfaces (G08/G11/G15). Dependencies: TP04, TP07, D03/D06/D08.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/topology/profiles/loader.py">profile loader</a>, <a href="../src/migration_intake/topology/profiles/synthetic_structural/slots.json">structural profile</a>, <a href="../src/migration_intake/topology/compatibility.py">compatibility</a>, <a href="../src/migration_intake/topology/renderer/core.py">renderer parser</a>, <a href="../tests/unit/topology/test_profile_loader.py">profile tests</a>, <a href="../tests/unit/topology/test_compatibility.py">compatibility tests</a>. DB: new immutable compatibility result, no layout tables. API/UI: no activation; incompatible bases are explicit blockers.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Version profile schema for node/edge prototypes, approved containers/regions, data selectors, semantic relationship styles, fixed geometry, capacity and continuation-page rules.</li>
+  <li>Validate exact profile/base/capability/context pins and required containers before mutation; distinguish protected manual edges/cells from generated IDs.</li>
+  <li>Reuse safe parser limits for upload and rendering; reject external entities, compressed/unsupported input, duplicate IDs and remote active content.</li>
+  <li>Enable parser/profile/compatibility tests relevant to this slice; do not remove unrelated test skips without execution.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: missing container, duplicate generated prefix, wrong capability, unsupported repeat schema or limit overflow accepted. Green: validated profile types and compatibility diagnostics. Refactor: shared parser/policy hashes, unchanged LABEL_ONLY contract.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_profile_loader.py</code>, <code>test_compatibility.py</code>, parser selection in <code>test_renderer.py</code> run with zero required skips. Reject malformed/oversize/entity input before storage; no mutation on incompatible base. Verify profile hash changes with rules/styles/capacity and old profiles remain loadable. DB compatibility key pins exact versions; denied API upload produces no base row; UI shows incompatibility code. No generated edges yet.</p>
+<p>
+  <strong>Rollback:</strong> Deactivate new profile version, retain compatibility history and parser protections. Revert only new profile selection, never restore unsafe parsing.</p>
+<h4 id="tp08-completion">TP08 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Added typed repeated-region/profile contracts and safe parsing/compatibility gates without enabling routes.</li>
+  <li>Files changed: profile loader, compatibility, typed renderer adapter, packaged structural profile/hash, profile/compatibility/parser tests, TP08 tests, plans and <code>STATE.md</code>.</li>
+  <li>Implementation: closed region schema, container/node/edge prototypes, generated prefix, selectors, positive capacities, BLOCK/continuation overflow and continuation naming; duplicate prefixes/missing cells block compatibility.</li>
+  <li>Security evidence: XML DTD/entities/UTF-16, compressed/archive, duplicate IDs and bounded page/node/depth/attribute/text/file cases execute with blanket skips removed.</li>
+  <li>Commands executed: focused TP08 suite <code>97 passed</code>, zero skipped; focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database/API/UI validation: no migration or route activation; profile hash changes with capacity/rules. Repeated rendering/layout belongs to TP09. Next available: TP09.</li>
+</ul>
+<h3 id="tp09-render-and-verify-repeated-nodes-and-edges">TP09 - Render and Verify Repeated Nodes and Edges</h3>
+<p>
+  <strong>Objective / reason:</strong> Render the typed graph in approved regions without damaging the template (G11). Dependencies: TP08.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/topology/renderer/core.py">renderer core</a>, structural profile assets, <a href="../tests/unit/topology/test_renderer.py">renderer tests</a>, <a href="../tests/unit/topology/test_governed_renderer.py">governed renderer tests</a>. DB: unchanged. API: unchanged. UI impact: new downloadable diagram content only until later route wiring.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Allocate deterministic cell IDs from semantic identity plus page/context; clone only approved node/edge prototypes under valid parents.</li>
+  <li>Apply stable grouping/sort order, approved direction/labels/style and fixed row/page capacities. Do not connect unresolved identities to arbitrary nodes.</li>
+  <li>Produce continuation pages using declared regions; explicit bounded overflow error when maximum document capacity is exceeded.</li>
+  <li>Verify rendered graph against projection, including endpoints, cardinality, parent, geometry and protected-cell digest. Enable both renderer suites and retain LABEL_ONLY regression behavior.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: repeated nodes/edges missing, collisions accepted, protected edges changed or items overlap. Green: minimum profile-driven repeat layout and invariant verifier. Refactor: factor shared label/structural verification only after both modes pass.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_renderer.py</code> and <code>test_governed_renderer.py</code> execute without blanket skips. C00-C12 fixtures match exact projected cells/edges; no duplicate ID, dangling edge, out-of-container geometry or manual-cell mutation. Every edge direction/style matches approved legend; long labels wrap within boxes. Same pinned context yields identical XML bytes; excess capacity reports a blocker, not truncation. Visually inspect synthetic exported pages at desktop/mobile inspection sizes; no DB writes/API change, deterministic error codes retained.</p>
+<p>
+  <strong>Rollback:</strong> Deactivate structural repeat profile while keeping LABEL_ONLY and read-only historical artifacts. Never transform already-generated files in place.</p>
+<h4 id="tp09-completion">TP09 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-22. Extended the existing structural renderer without route activation or a parallel renderer.</li>
+  <li>Files changed: renderer core, governed fixtures, TP09 repeated renderer tests, plans and <code>STATE.md</code>.</li>
+  <li>Implementation: selector-driven repeated nodes/edges, SHA-256 semantic IDs, exact endpoints, fixed-grid placement, bounded labels, collision/endpoint/profile denial, overflow failure without partial output and audited writes inside approved roots.</li>
+  <li>Tests added/enabled: repeated IDs/endpoints, deterministic bytes and overflow; governed renderer blanket skip removed.</li>
+  <li>Commands executed: focused TP09 renderer selection <code>58 passed</code>, zero skipped; focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database/API/UI validation: pure renderer only; no DB writes/routes/activation. Continuation-page cloning and full visual style certification remain future/TP15 evidence; current overflow blocks rather than truncates. Next available: TP10.</li>
+</ul>
+<h3 id="tp10-atomic-artifacts-and-truthful-run-status">TP10 - Atomic Artifacts and Truthful Run Status</h3>
+<p>
+  <strong>Objective / reason:</strong> A completed run must mean a verified complete bundle with consistent status (G12/G13/G19). Dependencies: TP03, TP06, TP09.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/application/services/topology_finalization.py">finalization</a>, <a href="../src/migration_intake/application/services/topology_runner.py">runner</a>, <a href="../src/migration_intake/topology/status.py">status policy</a>, <a href="../tests/unit/topology/test_artifact_finalization.py">artifact tests</a>, <a href="../tests/unit/topology/test_topology_status.py">status tests</a>. DB: governed run phases/manifest pin/artifact rows and audit; no new graph tables. API/UI: terminal status/readiness contract used by next slices.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Derive a single result status from capture, projection, compatibility and render issues; include authoritative counts, exclusions and source completeness.</li>
+  <li>Store/read back diagram/report bytes, then build a manifest covering their receipts and input pins. Store manifest and pin its own hash on the run without a circular self-hash.</li>
+  <li>CAS commit artifact metadata and COMPLETED status together after verification; do not hold SQL transaction while rendering or writing blobs.</li>
+  <li>On failure, roll back partial metadata and persist sanitized FAILED state in a fresh transaction. Leave unreferenced content-addressed blobs quarantined for later bounded cleanup.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: second blob failure leaves READY_FOR_REVIEW or incomplete metadata; report/DB status diverges; late completion wins. Green: verified receipts, one status result and atomic T2. Refactor: reuse finalizer/status policy, retire duplicated decision logic.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_artifact_finalization.py</code>, <code>test_topology_status.py</code>, relevant runner tests pass. Inject each store/read/commit/CAS failure; zero completed partial bundles, one artifact per type, manifest pins match and failures persist where database is available. DB/readiness/report/manifest statuses equal for success and gaps. Approved official output remains disabled; API/UI cannot treat partial content as success. Logs contain stage/code/run ID but no raw evidence. Restart retrieval returns identical bytes.</p>
+<p>
+  <strong>Rollback:</strong> Disable commands, retain immutable bundles and failed-run history, revert finalizer only with compatible input version. Orphan cleanup is not a destructive rollback step.</p>
+<h4 id="tp10-completion">TP10 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-23. Hardened the existing finalizer/repository/status path without route activation.</li>
+  <li>Implementation: validates run/input pins; stores/read-verifies diagram/report/manifest; verifies receipts and manifest pins; enforces supported status and success agreement; atomically inserts metadata and completes under lease/CAS; rolls back late insert failures and records sanitized failure in a fresh transaction.</li>
+  <li>Tests: successful bundle, stale lease, corrupt object, status agreement/disagreement, late metadata failure, duplicate artifact, stale CAS, recovery and status policy.</li>
+  <li>Commands executed: focused TP10 selection <code>24 passed</code>; focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database/API/UI validation: no completed partial SQLite bundle; persisted statuses agree across run/readiness/manifest; API/UI remain fail-closed and official mode disabled.</li>
+  <li>Remaining issues: orphan blob retention/cleanup remains TP14 operations work. Next available: TP11.</li>
+</ul>
+<h3 id="tp11-governed-preview-http-integration">TP11 - Governed Preview HTTP Integration</h3>
+<p>
+  <strong>Objective / reason:</strong> Prove real user requests reach immutable generation, not just a unit-test runner (G01/G03/G17). Dependencies: TP01, TP10.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/web/routes/topology.py">topology routes</a>, dependency wiring, <a href="../src/migration_intake/application/services/topology_runner.py">runner</a>, <a href="../tests/integration/web/test_topology_routes.py">route tests</a>, topology templates. DB: existing input/reservation/run/bundle rows. API: retain existing paths, add explicit validated preview selection and scoped manifest retrieval only with a documented contract. UI: preview authority and bounded run history.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Replace route service wiring with an application facade over governed preview capture/render; no live fallback. Keep official gate disabled.</li>
+  <li>Validate actor/scope/base/profile/capability and explicit context selection; preserve CSRF and safe upload limits.</li>
+  <li>Connect receipt-verified preview artifact retrieval; use stable pagination/filter validation for histories. Document status and error response schema for proposed endpoints.</li>
+  <li>Exercise real route -&gt; repositories -&gt; projection -&gt; renderer -&gt; store -&gt; retrieval using synthetic migrated SQLite, not service mocks.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: existing route calls legacy service, missing permissions bypass, repeated request creates two runs, wrong-scope manifest leaks. Green: thin governed facade and scoped verified contracts. Refactor: remove dead legacy wiring, retain historical read compatibility without activation fallback.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_topology_routes.py</code> executes green; 303 success, 403 denied, 404 wrong scope, 409 conflict, 413 oversize and sanitized failure contracts exact. Duplicate same-input request reuses reservation/run; stale base/profile rejected. DB capture/input/run/artifacts link correctly; generated graph matches fixture counts; manifest/download hashes verify. UI shows DRAFT_PREVIEW, gaps and pagination; official and approval remain disabled. No unexpected 5xx, SQL in routes or evidence in logs.</p>
+<p>
+  <strong>Rollback:</strong> Turn preview flag off and retain read-only authorized history. Keep governed tables and routes for historical retrieval; do not switch to legacy live official generation.</p>
+<h4 id="tp11-completion">TP11 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-23. Added a distinct governed draft-preview HTTP boundary; legacy generation and official approval remain disabled.</li>
+  <li>Implementation: public governed runner/review dependencies, scoped CSRF/capability/base/context preview POST, immutable capture/projection/reservation/render/finalization, duplicate run reuse and receipt-verified diagram/report/manifest routes. Landing UI exposes draft preview only for approved bases.</li>
+  <li>Tests: exact 303/403/404/409/413 behavior, duplicate reuse, wrong-scope denial, verified manifest and no 422 dependency regression.</li>
+  <li>Commands executed: full topology route suite <code>20 passed</code>; focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database/API/UI validation: synthetic SQLite scoped repository integration; legacy generate remains 503, preview is non-authoritative and approval disabled.</li>
+  <li>Remaining issues: full renderer/storage browser journey remains TP13/TP15 evidence. Next available: TP12; TP14 separately.</li>
+</ul>
+<h3 id="tp12-fail-closed-review-integrity-and-supersession">TP12 - Fail-Closed Review, Integrity and Supersession</h3>
+<p>
+  <strong>Objective / reason:</strong> Approval must prove complete immutable authority and preserve accountable history (G14). Dependencies: TP10, TP11.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/application/services/topology_review.py">review service</a>, <a href="../src/migration_intake/application/services/base_diagram.py">base service</a>, <a href="../src/migration_intake/topology/approval.py">approval policy</a>, <a href="../tests/unit/topology/test_topology_review_service.py">review tests</a>, routes/templates. DB: append-only <code>topo_reviews</code>, CAS approval/supersession pointers; additive integrity constraints only after preflight. API/UI: reviewability and issue decisions; official activation still disabled externally.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Verify diagram/report/manifest bytes and receipts, immutable input ownership/hash, base approval/current compatibility and complete source authority.</li>
+  <li>Require nonblank overall and per-warning rationale values; block unresolved blockers regardless of text supplied.</li>
+  <li>Write decision and actor in append-only review row; CAS transition once, enforce allowed self-review policy explicitly rather than inventing two-person requirements.</li>
+  <li>Enforce same application/intake and compatible authority on supersession; reject self/cycle/duplicate successor chains and preserve historical downloads.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: corrupt diagram/report still approved, rejected base passes, blank warning rationale passes, stale review/supersession wins. Green: explicit checks before atomic review write. Refactor: use one verifier for review and downloads, keeping authorization separate from integrity.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_topology_review_service.py</code>, <code>test_approval.py</code>, base-governance and scoped route cases pass. Every corruption/ineligibility probe fails with no approval/review mutation; valid synthetic official bundle is reviewable only through authorized test boundary. Review and supersession concurrency allow one winner, all actor references valid. UI cannot offer approval on preview/legacy/blocking rows; HTTP 409 for stale decisions, no secret bytes in diagnostics. Graph bytes unchanged by review.</p>
+<p>
+  <strong>Rollback:</strong> Disable review/official commands; keep decisions and approved artifacts immutable. Do not remove or rewrite review history to undo release selection.</p>
+<h4 id="tp12-completion">TP12 Completion</h4>
+<ul>
+  <li>Status: COMPLETE. Approved and completed: 2026-09-23. Review/supersession remain fail-closed; preview and legacy runs remain ineligible.</li>
+  <li>Implementation: official/input/base/compatibility/policy pins and all three artifact receipts are reverified; rationale values are typed/nonblank and warning IDs exact; review/supersession use CAS and append-only rows; base governance authority/history contracts restored.</li>
+  <li>Negative evidence: corrupt diagram/report/manifest, rejected/superseded base, stale compatibility, blockers, invalid/unknown rationale decisions, unauthorized and stale/concurrent operations fail without review mutation.</li>
+  <li>Commands executed: focused TP12 suite <code>68 passed</code>, zero skipped; focused Ruff, mypy and <code>git diff --check</code> passed.</li>
+  <li>Database/API/UI validation: append-only rows and one CAS winner verified on SQLite; approval remains externally disabled and preview offers no approval.</li>
+  <li>Remaining issues: browser presentation is TP13; Oracle concurrency is TP15. Next available: TP13.</li>
+</ul>
+<h3 id="tp13-run-states-and-diagram-inspection-ui">TP13 - Run States and Diagram Inspection UI</h3>
+<p>
+  <strong>Objective / reason:</strong> Let users distinguish authority/completeness and inspect graph content safely (G18/G20). Dependencies: TP11, TP12 and D05.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/web/templates/topology/index.html">landing</a>, <a href="../src/migration_intake/web/templates/topology/run_detail.html">detail</a>, existing static design-system assets, scoped read models and <a href="../tests/browser/test_topology_workflow.py">browser tests</a>. DB: read-only pinned projection/bundle. API: bounded inspection read model only if needed; no live graph recomputation. UI: functional states and approved inspection mode, not a new marketing layout.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Show authority, source age, selected contexts, counts, excluded items, blockers/warnings and retry/review eligibility consistently with run result.</li>
+  <li>Add submit/loading/recovery feedback, empty and failed states, bounded run filtering and accessible node/edge details with search/context filters.</li>
+  <li>Implement D05: either explicit verified download plus details, or self-hosted isolated read-only viewer with zoom/pan/fit/page selector/node details. No external viewer upload or active remote asset loading.</li>
+  <li>Preserve existing design tokens and responsive layout; user-facing controls expose accurate current state, not implementation explanations.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: mismatched statuses, duplicate submit, blank empty screen, forbidden review, unsafe diagram link or missing details. Green: state read model and UI controls, optional approved viewer. Refactor: share existing components, no new frontend framework unless specifically justified.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>tests/browser/test_topology_workflow.py -m browser</code> and web read-model tests pass. At 375px and 1440px: no overflow/overlap, keyboard-accessible controls, correct loading/empty/failure/gaps/stale/complete states, no console errors/failed first-party assets/unexpected API errors. For viewer option: fit/zoom/pan/selection/filter/page navigation actually work; graph pixel/screenshot and node/edge counts agree. Download-only option is explicitly documented, never certified as in-app canvas. Stored bytes never change with filtering. Sensitive fields remain absent.</p>
+<p>
+  <strong>Rollback:</strong> Disable optional viewer and use verified download/details with truthful status; preserve backend contracts and history. No data migration to reverse.</p>
+<h4 id="tp13-completion">TP13 Completion</h4>
+<ul>
+  <li>Status: NOT_STARTED. Files changed: none. Tests added: none.</li>
+  <li>Commands executed: none for implementation. Test results: NOT_RUN.</li>
+  <li>Database validation: NOT_RUN. API validation: NOT_RUN. UI validation: NOT_RUN.</li>
+  <li>Remaining issues: D05 inspection boundary and browser evidence. Next available: TP14 if not yet completed.</li>
+</ul>
+<h3 id="tp14-bounded-recovery-and-diagnostics">TP14 - Bounded Recovery and Diagnostics</h3>
+<p>
+  <strong>Objective / reason:</strong> Recover interrupted attempts without duplicate success or hidden failure (G13/G19). Dependencies: TP10, TP11.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../src/migration_intake/application/services/topology_recovery.py">recovery</a>, <a href="../src/migration_intake/application/services/topology_runner.py">runner</a>, <a href="../tests/unit/topology/test_topology_recovery.py">recovery tests</a>, audit/logging integration. DB: existing leases/attempts/reservations plus retention metadata only if needed. API/UI: retry eligibility and transient-unavailable state; no queue by default.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Enumerate crash points before/after T1, each blob write and T2; recover expired leases with version/token CAS.</li>
+  <li>Classify retryable failures, cap attempts at three with bounded exponential backoff/jitter; preserve same immutable input and record attempt reason.</li>
+  <li>Reject late completions and unsafe retries of validation/hash/authorization failures. Add structured stage durations/counts and audit transitions without evidence payloads.</li>
+  <li>Define orphan-blob dry-run inventory and retention grace period; deletion requires no live references or leases and explicit operational approval.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: crashed run remains stuck, two recoverers win, late worker overwrites, invalid input retries. Green: lease/CAS recovery and bounded classification. Refactor: inject clock/backoff for deterministic tests; no sleeps in tests or ad hoc background thread.</p>
+<p>
+  <strong>Validation / acceptance:</strong>
+  <code>test_topology_recovery.py</code>, <code>test_artifact_finalization.py</code>, reservation tests pass. Simulated crash at every boundary yields at most one completed bundle, maximum three attempts, no retry for integrity/policy failures, no active reference removed. Recovery audit links prior attempt and input; logs redacted, metric labels bounded. API/UI report retryable versus blocked correctly; graph/hash unchanged across same-input retry. Restart proof retrieves original successful bytes.</p>
+<p>
+  <strong>Rollback:</strong> Disable recovery scheduling/entrypoint, retain leases and audit, leave generation gated if leases cannot safely progress. Never mass-delete reservations or blobs.</p>
+<h4 id="tp14-completion">TP14 Completion</h4>
+<ul>
+  <li>Status: NOT_STARTED. Files changed: none. Tests added: none.</li>
+  <li>Commands executed: none for implementation. Test results: NOT_RUN.</li>
+  <li>Database validation: NOT_RUN. API validation: NOT_RUN. UI validation: NOT_RUN.</li>
+  <li>Remaining issues: crash/retry matrix and operational retention approval. Next available after TP12/13/14: TP15.</li>
+</ul>
+<h3 id="tp15-cross-database-load-and-end-to-end-certification">TP15 - Cross-Database, Load and End-to-End Certification</h3>
+<p>
+  <strong>Objective / reason:</strong> Certify the actual integrated workflow and supported database, not isolated helpers (G16/G17/G21). Dependencies: TP12, TP13, TP14; D06/D07; explicit disposable Oracle authorization.</p>
+<p>
+  <strong>Scope:</strong>
+  <a href="../tests/browser/test_topology_workflow.py">browser journey</a>, topology unit/integration tests, existing migration/persistence suites, synthetic fixtures and this evidence ledger. DB: disposable SQLite and authorized Oracle only. API/UI: validate final contracts; no production activation.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Run complete applicable topology/unit/persistence/web suites without skip masking; execute migration upgrades with populated legacy fixtures and metadata parity checks.</li>
+  <li>Run the same identity, null/empty-string, FK/unique/CAS, capture-fence and transaction-failure contract on Oracle. Check catalog views using the authorized test schema only.</li>
+  <li>Execute C00-C12, capacity boundaries and 10/100/1,000/5,000-row synthetic loads. Freeze D06 budgets and reference machine before benchmarking; record p50/p95, peak memory, SQL count, artifact size and DOM/viewer limits.</li>
+  <li>Run three independent browser journeys with fresh migrated DB/storage, no retries; restart each server and verify identical artifact downloads. Retain redacted JUnit/screenshots/receipts and manual diagram signoff.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: missing certification fixture/gate, skipped required cases, mismatched migration constraints or exceeded budget fails certification script. Green: fix only owning defects in separate corrective PRs, then rerun affected gates and final suite. Refactor: consolidate existing fixture builders only when verified.</p>
+<p>
+  <strong>Validation / acceptance:</strong> Zero collection errors, zero skipped required topology cases, all C00-C12 applicable cases pass every DB/API/UI/graph assertion. Same normalized source produces same semantic projection on SQLite/Oracle. Three retry-free browser runs and restart hashes pass; no unexpected 5xx/console errors; no unbounded scan/N+1 in capture/render. Performance meets approved numeric D06 limits, or slice BLOCKED. Required broader commands: <code>python -m pytest tests/ -v</code>, <code>python -m mypy src/migration_intake</code>, <code>python -m ruff check src/</code> from isolated/configured environments; unrelated failures require explicit release disposition, never silently counted green. Oracle unavailable means BLOCKED for Oracle-supported release.</p>
+<p>
+  <strong>Rollback:</strong> No production deployment in this slice. Preserve failed evidence and re-open owning slice; clean disposable data only after evidence retention, never shared schemas.</p>
+<h4 id="tp15-completion">TP15 Completion</h4>
+<ul>
+  <li>Status: NOT_STARTED. Files changed: none. Tests added: none.</li>
+  <li>Commands executed: none for implementation. Test results: NOT_RUN.</li>
+  <li>Database validation: NOT_RUN. API validation: NOT_RUN. UI validation: NOT_RUN.</li>
+  <li>Remaining issues: Oracle authorization, D06 budgets and all integrated evidence. Next available: TP16 only after approval.</li>
+</ul>
+<h3 id="tp16-official-activation-and-operational-handoff">TP16 - Official Activation and Operational Handoff</h3>
+<p>
+  <strong>Objective / reason:</strong> Release only certified capabilities with explicit human authority and a reversible switch. Dependencies: TP15 and release approval D07.</p>
+<p>
+  <strong>Scope:</strong> application feature/configuration gate, reviewed profile release allowlist, deployment runbook and this plan. DB: apply preflighted additive migrations through approved deployment, no fact/history rewrite. API/UI: enable only approved official modes/profiles and authorized review; draft remains clearly separate.</p>
+<p>
+  <strong>Steps:</strong>
+</p>
+<ol>
+  <li>Confirm schema preflight, backup/restore plan, actor capability assignment, storage retention, profile hashes, performance limits and monitoring ownership.</li>
+  <li>Obtain signed acceptance of all certification evidence and unresolved exclusions. Record exact revision, dependency versions and activation scope.</li>
+  <li>Enable official mode only for approved profiles/environments; execute a synthetic post-deploy smoke through real HTTP and verify snapshot-only reads and complete receipts.</li>
+  <li>Hand off failure recovery, key rotation, rollback switch, profile publication and historical retrieval procedures. Update state and next maintenance slice.</li>
+</ol>
+<p>
+  <strong>TDD:</strong> Red: official request enabled without allowlisted profile, missing approval or mismatched schema. Green: explicit release gate and allowlist. Refactor: remove temporary containment wiring only after equivalent permanent protections pass.</p>
+<p>
+  <strong>Validation / acceptance:</strong> Default remains fail-closed; authorized approved deployment alone enables official path. Synthetic post-deploy generation/review/download/restart passes, candidate/live changes cannot affect pinned output, monitoring signals present, rollback exercised. No private evidence external calls. API permissions and UI authority correct; node/edge certification tied to exact deployed profile. Human release approval and operational owner recorded.</p>
+<p>
+  <strong>Rollback:</strong> Disable official generation/review, preserve authorized verified historical retrieval and all immutable records. Roll application back only to a schema-compatible fail-closed release; restore neither legacy authority claims nor destructive schema downgrade.</p>
+<h4 id="tp16-completion">TP16 Completion</h4>
+<ul>
+  <li>Status: NOT_STARTED. Files changed: none. Tests added: none.</li>
+  <li>Commands executed: none for implementation. Test results: NOT_RUN.</li>
+  <li>Database validation: NOT_RUN. API validation: NOT_RUN. UI validation: NOT_RUN.</li>
+  <li>Remaining issues: certification and explicit release approval. Next available: approved maintenance work only; no automatic new feature scope.</li>
+</ul>
+<h2 id="topology-certification-matrix">Topology Certification Matrix</h2>
+<p>The expected graph below is the application-derived semantic graph, excluding fixed template decorations and layout alias cells. IDs A/B/C are synthetic canonical identities; each fixture records exact context and provenance. For <strong>every row</strong>, assert source/revision and <code>topo_inputs</code> records; exact projection counts and unique keys; directed typed relationships; XML cell-to-semantic mapping and protected template digest; scoped API/manifest and truthful status; UI details and rendered/exported diagram. Where generation is blocked, assert no successful bundle, exact issue code, API error and UI blocker instead of pretending diagram checks passed. Cross-account discovery is not supported; evidence-based cross-scope rendering must be approved or explicitly rejected.</p>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 9">
+  <table>
+    <thead>
+      <tr>
+        <th>Case</th>
+        <th>Fixture / expected nodes and edges</th>
+        <th>Direction/type and duplicates</th>
+        <th>DB / API / UI / error checks</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>C00 Empty topology</td>
+        <td>No approved resources/interfaces: zero semantic nodes/edges, or only an explicitly approved application anchor if profile requires it</td>
+        <td>No inferred defaults or decorative icons counted as discoveries</td>
+        <td>Exact empty projection; status EMPTY or blocking missing-anchor per approved contract; UI empty state; no manufactured official content.</td>
+      </tr>
+      <tr>
+        <td>C01 Simple relationship</td>
+        <td>A/B and one reviewed communication flow: 2 nodes, 1 edge</td>
+        <td>B -&gt; A for approved inbound TCP/HTTPS 443 example; no reverse edge</td>
+        <td>One flow key and contributor; manifest counts 2/1; correct arrow, protocol/port label and legend style.</td>
+      </tr>
+      <tr>
+        <td>C02 One-to-many</td>
+        <td>A/B/C, two inbound flows: 3 nodes, 2 edges</td>
+        <td>B -&gt; A and C -&gt; A; endpoints preserved</td>
+        <td>Both records/revisions represented; API/details expose both; no overlapping repeated boxes.</td>
+      </tr>
+      <tr>
+        <td>C03 Duplicate resource records</td>
+        <td>Same canonical A revision repeated in input: 1 A; conflicting values for A create a blocker</td>
+        <td>Do not silently merge different IDs solely by label</td>
+        <td>Identical input dedup traceable; conflicting source preserved as issue; no double node or hidden chosen value.</td>
+      </tr>
+      <tr>
+        <td>C04 Duplicate relationships</td>
+        <td>A/B and two exact same flows: 2 nodes, 1 semantic edge with 2 contributor refs</td>
+        <td>Different port/protocol variant must instead yield 2 edges</td>
+        <td>Raw source rows retained; flow member lineage complete; API counts distinguish sources/flows; UI grouping explicit.</td>
+      </tr>
+      <tr>
+        <td>C05 Isolated and orphaned</td>
+        <td>Standalone valid A: 1 node, 0 edges; A -&gt; missing B fixture is blocked</td>
+        <td>Isolated node allowed by kind; missing endpoint is not allowed</td>
+        <td>No dangling res_link FK accepted; malformed canonical graph blocked with endpoint issue; API/UI not success.</td>
+      </tr>
+      <tr>
+        <td>C06 Cycles</td>
+        <td>Communication A -&gt; B -&gt; C -&gt; A: 3 nodes, 3 edges</td>
+        <td>Communication cycle preserved; containment cycle blocked</td>
+        <td>Correct type-specific policy in DB/service/projection; UI shows all arrows; no infinite traversal/layout.</td>
+      </tr>
+      <tr>
+        <td>C07 Unknown type</td>
+        <td>One unsupported source type: 0 promoted typed nodes, 1 retained unresolved issue</td>
+        <td>No default EC2/resource kind</td>
+        <td>Raw source/reference preserved; blocked official or explicit preview issue; unknown visible in details, not silently absent.</td>
+      </tr>
+      <tr>
+        <td>C08 Cross-region</td>
+        <td>Two resources named alike in distinct explicit regions: 2 nodes; 1 reviewed cross-region link if allowed</td>
+        <td>Separate context identities; never name-based merge</td>
+        <td>Scope pins in input/API; overview aliases traceable; detail pages show correct regions and link. Missing region is UNKNOWN.</td>
+      </tr>
+      <tr>
+        <td>C09 Cross-account</td>
+        <td>Two same-name resources in explicit different accounts: 2 distinct identities and one link only if supported/approved</td>
+        <td>Otherwise deterministic unsupported-scope blocker, zero official bundle</td>
+        <td>No discovery claim; account authorization/allowlist test mandatory before support; sanitized UI scope and no external query.</td>
+      </tr>
+      <tr>
+        <td>C10 Partial source/discovery failure</td>
+        <td>Three expected sources, one unavailable: successful records plus explicit failure envelope</td>
+        <td>Never call 2/3 complete; no invented edge to missing data</td>
+        <td>Immutable capture completeness/issue; preview-only result if policy permits, official blocked. Transient read may retry &lt;=3; integrity/policy failure never retries. AWS discovery case remains out of scope.</td>
+      </tr>
+      <tr>
+        <td>C11 Stale/retired/deleted</td>
+        <td>Old pinned A/B flow remains 2/1; new authority explicitly retires B: A only and 0 active edges</td>
+        <td>Deletion inferred only from explicit lifecycle evidence</td>
+        <td>Old hashes/rows unchanged; new input hash changes; API/UI shows as-of/stale and retirement exclusion, no dangling edge.</td>
+      </tr>
+      <tr>
+        <td>C12 Large topology</td>
+        <td>Approved synthetic maximum, e.g. 5,000 nodes and 4,999 chain edges; test one above maximum too</td>
+        <td>Exact counts, deterministic pages, no duplicate generated IDs</td>
+        <td>Within approved budgets and bounds, all DB/API pages accounted for, UI filters/details usable; excess rejected or paginated by contract, never truncated.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<h3 id="cross-layer-release-checklist">Cross-Layer Release Checklist</h3>
+<ul class="contains-task-list">
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Input schema, authority, actor/application/intake scope, hash and all source revision/epoch pins validated.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Nodes have stable canonical IDs; scope/unknown handling explicit; no display-label identity merges.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Every edge has present endpoints, approved type/direction, exact protocol/port semantics and source lineage.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> DB migrated schema matches ORM; declared FKs are enabled/tested; unique keys and CAS reject duplicates/stale writes; populated upgrade retains history.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> No cross-intake resource parents/links, mismatched current revisions, invalid source mode or orphan review/run/input records pass validation.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> API denial/wrong scope/error/pagination/oversize/retry contracts verified; partial/stale results do not appear official.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Run/readiness/report/manifest/UI status agrees; every artifact size/hash verifies and survives restart unchanged.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Base and profile are approved/pinned; manual cells remain protected; generated IDs/endpoints/geometry/labels/styles/pages are correct.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Empty/loading/failed/partial/stale/success UI and permitted actions verified at 375px/1440px; no console/API errors or overlap.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Search/filter/selection/zoom/pan tested if viewer is approved; download-only limitation otherwise explicitly accepted.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Required tests execute without skip masking; failure/retry/concurrency/crash matrix passes; Oracle evidence obtained for Oracle release.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Logs/metrics/audit provide correlation without secrets, contacts or raw evidence; outbound network denied for synthetic tests.</li>
+  <li class="task-list-item">
+    <input disabled="disabled" type="checkbox" /> Three independent retry-free integrated runs, restart receipts, D06 performance evidence and human diagram/release signoff recorded.</li>
+</ul>
+<h2 id="verification-and-recorded-baseline">Verification and Recorded Baseline</h2>
+<h3 id="safe-test-harness">Safe Test Harness</h3>
+<p>Use the explicit supported <code>.venv</code> interpreter. This review executed Python 3.13.13, not an assumed editor interpreter. The following PowerShell pattern is the exact isolation approach used; change only <code>$relativeTests</code> and <code>$pytestArguments</code> for each slice. It does not read the workspace <code>.env</code>, touch its database or call external AI. Set both prefixed and unprefixed storage/actor/CSRF aliases when a browser fixture owns them, per the fixture's documented contract.</p>
+<pre>
+  <code class="language-powershell">$repo = (Get-Location).Path
+$python = Join-Path $repo '.venv/Scripts/python.exe'
+$relativeTests = @(
+	'tests/unit/topology/test_contracts.py',
+	'tests/unit/topology/test_scope.py',
+	'tests/unit/topology/test_strict_projection.py',
+	'tests/unit/topology/test_topology_status.py',
+	'tests/unit/persistence/test_resource_repository.py',
+	'tests/unit/imports/test_interface_sheet.py',
+	'tests/unit/topology/test_renderer.py',
+	'tests/unit/topology/test_governed_renderer.py'
+)
+$pytestArguments = @('-q', '-rs', '-p', 'no:cacheprovider')
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ('topology-check-' + [guid]::NewGuid())
+[IO.Directory]::CreateDirectory($scratch) | Out-Null
+$saved = @{}
+$pattern = '^(AWS_OUTPOST_|DATABASE_URL$|ORACLE_|APP_ENV$|EVIDENCE_ROOT$|LLM_|PYTHONPATH$)'
+foreach ($entry in Get-ChildItem Env: | Where-Object Name -match $pattern) {
+	$saved[$entry.Name] = $entry.Value
+	Remove-Item ('Env:' + $entry.Name)
+}
+try {
+	$env:PYTHONPATH = Join-Path $repo 'src'
+	$env:APP_ENV = 'local'
+	$env:DATABASE_URL = 'sqlite:///:memory:'
+	$env:LLM_ENABLED = 'false'
+	$env:LLM_OUTBOUND_ENABLED = 'false'
+	Push-Location $scratch
+	try {
+		$targets = $relativeTests | ForEach-Object { Join-Path $repo $_ }
+		&amp; $python -m pytest @targets @pytestArguments
+		$testExitCode = $LASTEXITCODE
+	} finally { Pop-Location }
+} finally {
+	foreach ($entry in Get-ChildItem Env: | Where-Object Name -match $pattern) {
+		Remove-Item ('Env:' + $entry.Name)
+	}
+	foreach ($name in $saved.Keys) { Set-Item ('Env:' + $name) $saved[$name] }
+}
+if ($testExitCode -ne 0) { throw "pytest failed with exit $testExitCode" }
+</code>
+</pre>
+<p>Full suite and browser tests can contain independent fixture defaults: inspect them before expanding the target list, provide disposable explicit URLs/storage, disable outbound network, and never assume this environment wrapper alone certifies every fixture. Oracle tests use a separately authorized test schema with credentials supplied outside model-visible logs.</p>
+<h3 id="baseline-results-2026-09-22">Baseline Results (2026-09-22)</h3>
+<div class="table-scroll" role="region" tabindex="0" aria-label="Plan table 10">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Executed check</th>
+        <th>Result and scope</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>B01</td>
+        <td>
+          <code>python -m pytest</code> with the eight files in the harness above, <code>-q -rs -p no:cacheprovider</code></td>
+        <td>
+          <strong>47 passed, 55 skipped</strong>, 0.66s, exit 0. Includes 42 policy/resource tests and five interface-parser tests. All 49 renderer and six governed-renderer cases skipped. Not renderer certification.</td>
+      </tr>
+      <tr>
+        <td>B02</td>
+        <td>
+          <code>python -m pytest tests/unit/topology tests/integration/web/test_topology_routes.py --collect-only -q -p no:cacheprovider</code> using absolute paths in temporary cwd</td>
+        <td>
+          <strong>236 collected, eight errors</strong>, exit 2. Missing imports: <code>GenerationConflictError</code>, <code>DuplicateArtifactError</code>, <code>TopologyInput</code>. No full-suite passing claim.</td>
+      </tr>
+      <tr>
+        <td>B03</td>
+        <td>
+          <code>alembic.command.upgrade(Config(), 'head')</code> against an explicit temporary SQLite URL; SQLAlchemy inspector versus registered <code>Base.metadata</code>; <code>PRAGMA foreign_key_check</code>; <code>hasattr(AnswerRevision, ...)</code></td>
+        <td>Head <code>0021</code>, zero empty-DB FK violations; five governed ORM tables missing, 13 <code>topo_base</code> and 12 <code>gen_runs</code> columns missing. Migrated artifact unique exists. <code>response_json=True</code>, <code>value_json=False</code>, <code>value_text=False</code>. No Oracle/live DB connection.</td>
+      </tr>
+      <tr>
+        <td>B04</td>
+        <td>Document local-link/line-anchor, slice-field, status, Mermaid-fence and whitespace checks; editor diagnostics</td>
+        <td>PASS: 16 complete slice specifications, 13 certification cases, three Mermaid blocks, valid local references, balanced fences, no trailing whitespace and no editor diagnostics. Structural validation only, not runtime certification or rendered Mermaid pixels.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<p>B02 failures affect <code>test_artifact_finalization</code>, <code>test_base_diagram_governance</code>, <code>test_capture_persistence</code>, <code>test_governed_runner</code>, <code>test_topology_boundaries</code>, <code>test_topology_recovery</code>, <code>test_topology_review_service</code> and <code>test_topology_routes</code>. Required repairs are TP02/03; subsequent failing behavior stays with its owning slice. Do not fix these during this documentation-only review.</p>
+<p>To reproduce B03 safely, use the harness's cleared environment and temporary working directory, then execute this Python probe with the repository path as its only argument. This reads source metadata and writes only the temporary SQLite file:</p>
+<pre>
+  <code class="language-python">import sys
+from pathlib import Path
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect, text
+import migration_intake.persistence.models_topology
+import migration_intake.persistence.models_snapshots
+from migration_intake.persistence.models import AnswerRevision
+from migration_intake.persistence.naming import Base
+
+repo = Path(sys.argv[1])
+url = 'sqlite:///' + (Path.cwd() / 'review.db').as_posix()
+config = Config()
+config.set_main_option('script_location',
+					   (repo / 'src/migration_intake/persistence/migrations').as_posix())
+config.set_main_option('sqlalchemy.url', url)
+command.upgrade(config, 'head')
+engine = create_engine(url)
+inspector = inspect(engine)
+with engine.connect() as connection:
+	print(connection.execute(text('select version_num from alembic_version')).scalar_one())
+	print(connection.execute(text('pragma foreign_key_check')).all())
+for name in ('topo_base', 'gen_runs', 'gen_artifacts', 'topo_captures',
+			 'topo_inputs', 'topo_compat', 'gen_keys', 'topo_reviews'):
+	if name not in Base.metadata.tables:
+		print(name, 'MISSING_ORM_TABLE')
+	else:
+		actual = {column['name'] for column in inspector.get_columns(name)}
+		print(name, sorted(actual - set(Base.metadata.tables[name].columns.keys())))
+print(inspector.get_unique_constraints('gen_artifacts'))
+print({name: hasattr(AnswerRevision, name)
+	   for name in ('response_json', 'value_json', 'value_text')})
+engine.dispose()
+</code>
+</pre>
+<h3 id="existing-tests-and-missing-proof">Existing Tests and Missing Proof</h3>
+<ul>
+  <li>Unit foundations: <a href="../tests/unit/topology/test_contracts.py">contracts</a>, <a href="../tests/unit/topology/test_scope.py">scope</a>, <a href="../tests/unit/topology/test_strict_projection.py">strict projection</a>, <a href="../tests/unit/topology/test_topology_status.py">status</a> and <a href="../tests/unit/persistence/test_resource_repository.py">resource repository</a> executed in B01.</li>
+  <li>Parser/import: <a href="../tests/unit/imports/test_interface_sheet.py">interface sheet</a> executed; <a href="../tests/unit/imports/test_interface_tracking_v1.py">interface tracking</a> and <a href="../tests/unit/application/test_interface_review.py">interface review</a> exist but were not executed in this retry.</li>
+  <li>Database/governance: capture, base, runner, finalization, review and recovery tests exist; B02 collection blocks their evidence. Populated migrations, concurrent sessions and Oracle need fresh executed results.</li>
+  <li>API: <a href="../tests/integration/web/test_topology_routes.py">route tests</a> exist but cannot collect; no current end-to-end authority/security proof from their presence.</li>
+  <li>UI/end-to-end: <a href="../tests/browser/test_topology_workflow.py">topology browser test</a> and <a href="../tests/browser/conftest.py">harness</a> exist; not run during review. Full browser states, graphical inspection, large topology and failure/retry journeys remain unverified.</li>
+  <li>Renderer fixtures: existing synthetic label-only/structural profiles are reusable. Skipped suites do not prove supported graph repetition, protected regions, XML security or deterministic bytes.</li>
+</ul>
+<h2 id="review-completion-and-next-action">Review Completion and Next Action</h2>
+<ul>
+  <li>Review and design deliverables are consolidated here; production implementation has <strong>not</strong> started and all TP slices remain <code>NOT_STARTED</code>.</li>
+  <li>Files changed for this documentation task: this plan and the current review pointer in <a href="../STATE.md">STATE.md</a>. Original HTML/DOCX and production code remain unchanged.</li>
+  <li>Retry diagnosed an incomplete prior response, not a proven application crash. The chat interruption cause remains <strong>UNKNOWN</strong>. Separate repository collection failures were reproduced and documented, not repaired without approval.</li>
+  <li>Next action: obtain approval for <strong>TP01 only</strong> and resolve D01-D08 with the appropriate owners before their dependent slices. Do not activate generation on the strength of this review.</li>
+</ul>
+<footer>
+  <a href="#topology-review-and-implementation-plan">Back to top</a>
+</footer>
+  </main>
+  <script type="module">
+    const diagrams = [...document.querySelectorAll("pre.mermaid")];
+    for (const diagram of diagrams) {
+      const source = document.createElement("details");
+      source.className = "diagram-source";
+      const summary = document.createElement("summary");
+      summary.textContent = "Diagram source";
+      const code = document.createElement("pre");
+      code.textContent = diagram.textContent;
+      source.append(summary, code);
+      diagram.after(source);
+    }
+    try {
+      const { default: mermaid } = await import("https://cdn.jsdelivr.net/npm/mermaid@11.12.1/dist/mermaid.esm.min.mjs");
+      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral", flowchart: { useMaxWidth: false }, sequence: { useMaxWidth: false } });
+      for (const diagram of diagrams) {
+        if (diagram.textContent.trimStart().startsWith("sequenceDiagram")) {
+          diagram.textContent = diagram.textContent.replace(/(:[^\n]*)/g, message => message.replaceAll(";", "#59;"));
+        }
+      }
+      await mermaid.run({ nodes: diagrams });
+    } catch {
+      for (const diagram of diagrams) {
+        const source = diagram.nextElementSibling;
+        if (source?.classList.contains("diagram-source")) {
+          source.open = true;
+          diagram.hidden = true;
+        }
+      }
+    }
+  </script>
+</body>
+</html>

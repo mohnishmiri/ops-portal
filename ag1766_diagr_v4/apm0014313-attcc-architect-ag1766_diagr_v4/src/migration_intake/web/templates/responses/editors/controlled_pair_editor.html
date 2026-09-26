@@ -1,0 +1,106 @@
+{#
+  Controlled pair editor - two fixed, named controlled-vocabulary fields.
+
+  Context:
+    question: dict with code, text, help, required_level, options, field_names
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The field names must match the canonical CONTROLLED_PAIR payload keys
+  (`{first, second}`), because the save route parses the submitted form
+  directly into the response payload: any other name is unrecognised and
+  stores a blank answer.
+
+  CONTROLLED_PAIR is a fixed pair, not a repeatable collection, so this
+  renders exactly two controls. The pair's *meaning* varies per question
+  (APP-004 collects business_criticality / emergency_tier, NET-007 collects
+  internet_required / proxy_required), which is a labelling concern only:
+  `question.field_names` renames the visible labels and never the submitted
+  keys.
+
+  Both halves are controlled vocabularies, so each renders as a <select>
+  over `question.options`. Options are published per question, not per half,
+  so both selects offer the same vocabulary. When a question has no
+  persisted options (APP-004 has none today) a <select> could only ever
+  render an empty list and no answer could be given at all, so each half
+  falls back to a text input. The response type upper-cases and trims what
+  it receives, so a typed code normalises the same way a selected one does.
+#}
+{% set field_labels = question.field_names or [] %}
+{% set first_label = field_labels[0] | replace('_', ' ') | title
+     if field_labels | length > 0 and field_labels[0] else 'First' %}
+{% set second_label = field_labels[1] | replace('_', ' ') | title
+     if field_labels | length > 1 and field_labels[1] else 'Second' %}
+{% set first_value = answer.value.first if answer and answer.value and answer.value.first is not none else '' %}
+{% set second_value = answer.value.second if answer and answer.value and answer.value.second is not none else '' %}
+<div class="controlled-pair-editor">
+  <div class="form-grid">
+    <div class="form-group">
+      <label for="q-{{ question.code }}-first" class="form-label">{{ first_label }}</label>
+      {% if question.options %}
+      <select
+        name="first"
+        id="q-{{ question.code }}-first"
+        class="form-control{% if errors and errors.first %} form-control--error{% endif %}"
+        {# The response type treats both halves as optional, so a REQUIRED
+           question is expressed on the first field only: that stops a blank
+           save without forcing an invented value into the second half. #}
+        {% if question.required_level == 'REQUIRED' %}required{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+      >
+        <option value="">-- Select an option --</option>
+        {% for option in question.options %}
+        <option
+          value="{{ option.value }}"
+          {% if first_value == option.value %}selected{% endif %}
+        >{{ option.label }}</option>
+        {% endfor %}
+      </select>
+      {% else %}
+      <input
+        type="text"
+        name="first"
+        id="q-{{ question.code }}-first"
+        class="form-control{% if errors and errors.first %} form-control--error{% endif %}"
+        value="{{ first_value }}"
+        {% if question.required_level == 'REQUIRED' %}required{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+      >
+      <span class="form-hint">No allowed values are published for this question yet; enter the code.</span>
+      {% endif %}
+      {% if errors and errors.first %}
+      <span class="form-error">{{ errors.first | join(', ') }}</span>
+      {% endif %}
+    </div>
+
+    <div class="form-group">
+      <label for="q-{{ question.code }}-second" class="form-label">{{ second_label }}</label>
+      {% if question.options %}
+      <select
+        name="second"
+        id="q-{{ question.code }}-second"
+        class="form-control{% if errors and errors.second %} form-control--error{% endif %}"
+      >
+        <option value="">-- Select an option --</option>
+        {% for option in question.options %}
+        <option
+          value="{{ option.value }}"
+          {% if second_value == option.value %}selected{% endif %}
+        >{{ option.label }}</option>
+        {% endfor %}
+      </select>
+      {% else %}
+      <input
+        type="text"
+        name="second"
+        id="q-{{ question.code }}-second"
+        class="form-control{% if errors and errors.second %} form-control--error{% endif %}"
+        value="{{ second_value }}"
+      >
+      {% endif %}
+      {% if errors and errors.second %}
+      <span class="form-error">{{ errors.second | join(', ') }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>

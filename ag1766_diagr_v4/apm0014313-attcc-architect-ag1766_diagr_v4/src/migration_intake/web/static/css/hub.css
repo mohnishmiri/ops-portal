@@ -1,0 +1,236 @@
+/* hub.css — owned by a single UX packet so parallel work cannot collide.
+   Use design tokens (var(--color-*), var(--space-*)) only: the design-system
+   audit in tests/web/test_ui_shell.py caps hard-coded colours per file. */
+
+/* ---------------------------------------------------------------------
+   Layout
+   --------------------------------------------------------------------- */
+
+.hub {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.hub-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.hub-title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-tight);
+  color: var(--color-text-primary);
+}
+
+.hub-subtitle {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.hub-continue {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------------
+   The three counters
+   --------------------------------------------------------------------- */
+
+.hub-counters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-4);
+}
+
+.hub-counter {
+  margin: 0;
+}
+
+.hub-counter--progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.hub-counter--decisions {
+  border-left: 3px solid var(--color-info);
+}
+
+.hub-counter-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.hub-counter-line {
+  margin: 0;
+  font-size: var(--font-size-base);
+  color: var(--color-text-secondary);
+}
+
+.hub-counter-figure {
+  margin: 0;
+  font-size: 1.875rem;
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+.hub-counter--decisions .hub-counter-figure {
+  color: var(--color-info);
+}
+
+.hub-counter-action {
+  margin-top: var(--space-2);
+}
+
+.hub-legend {
+  display: block;
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* Completion ring. The filled sweep is driven by --hub-ring-percent, set
+   inline per render because it is data, not style. */
+.hub-ring {
+  flex: none;
+  width: 5.5rem;
+  height: 5.5rem;
+  border-radius: var(--radius-full);
+  display: grid;
+  place-items: center;
+  background: conic-gradient(
+    var(--color-teal-500) 0 var(--hub-ring-percent, 0%),
+    var(--color-border) var(--hub-ring-percent, 0%) 100%
+  );
+}
+
+.hub-ring-face {
+  width: 4.25rem;
+  height: 4.25rem;
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  display: grid;
+  place-items: center;
+  font-weight: var(--font-weight-bold);
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+/* ---------------------------------------------------------------------
+   Section grid
+   --------------------------------------------------------------------- */
+
+.hub-section-heading {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.hub-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.hub-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  text-decoration: none;
+  color: var(--color-text-primary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hub-section:hover,
+.hub-section:focus-visible {
+  border-color: var(--color-cyan-500);
+  box-shadow: var(--shadow-sm);
+}
+
+.hub-section--derived {
+  background: var(--color-surface-muted);
+}
+
+.hub-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  /* Pushes the progress block to the bottom of the card so bars line up
+     across a row whose titles wrap to different heights. */
+  margin-bottom: auto;
+}
+
+.hub-section-name {
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+}
+
+.hub-section-derived-note {
+  margin-top: var(--space-2);
+}
+
+.hub-badge-new {
+  flex: none;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-info);
+  background: var(--color-info-bg);
+  color: var(--color-info);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  padding: 0 var(--space-2);
+  white-space: nowrap;
+}
+
+.hub-bar {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin-top: var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.hub-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--color-teal-500);
+}
+
+.hub-empty {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* ---------------------------------------------------------------------
+   Narrow viewports — the browser suite asserts no horizontal overflow
+   at 375px.
+   --------------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .hub-counters,
+  .hub-sections {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hub-continue {
+    width: 100%;
+    text-align: center;
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id":"S05-C02","stage":"05","result":"COMPLETED","completed_stage":"05","out_of_scope_stages":["07"],
+  "objective":"Compare resolvable endpoint-label descriptors without inventing missing connection semantics",
+  "inputs":["Persisted input/expected hierarchy and connection JSON"],
+  "outputs":["analysis/semantic_diff/edge_comparison.json","analysis/semantic_diff/edge_comparison.md","compare_diagram_edges.ps1"],
+  "inspected_files":[],
+  "checks":["Comparison JSON valid","Only redacted persisted evidence consumed","Missing endpoint/business identity retained as unknown","Latest user decisions recorded: application-specific expected target; no intake analysis"],
+  "established":["Only six input edges have both labeled named endpoints; target pages have 13 and 12","Four/three input descriptors occur in target pages but do not establish canonical flow identity","User confirms two-page output as target for this specific migrating application","User excludes intake/XLSX analysis and accepts intake as working for this review"],
+  "uncertainties":["Per-page context and business relationships still require guide/profile interpretation","Descriptor matches are not semantic identity or correctness certification","Intake correctness is an explicit user assumption, not independently verified"],
+  "unblock_chunks":["S07-C01"],"resolve_questions":["Q-002","Q-003"],
+  "commands":[{"command":"& ./docs/development/topo_9_24/compare_diagram_edges.ps1","result":"0; per-page descriptor counts persisted","mutation":"Comparison JSON only","output":"analysis/semantic_diff/edge_comparison.json"},{"command":"Apply corrected review-only note after rejected unintended patch target; record explicit user scope update","result":"Comparison note restored; prior JSON intact","mutation":"Investigation documentation only","output":"analysis/semantic_diff/edge_comparison.md"}],
+  "evidence":[{"id":"EV-DIFF-002","path":"analysis/semantic_diff/edge_comparison.json","source":"EV-DRAWIO-002/003/005/006","description":"Qualified edge-descriptor comparison; target role subsequently confirmed in D-009","kind":"Interpreted comparison","reliability":"VERIFIED descriptor counts; not canonical flow certification"},{"id":"EV-SCOPE-002","path":"state/decisions.json","source":"Latest explicit user clarification","description":"Application-specific expected target and intake/XLSX scope exclusion","kind":"User scope decision","reliability":"USER_APPROVED scope; intake correctness assumed, not independently verified"}],
+  "next_chunk":"S06-C01","next_action":"Inventory the guide DOCX sections/tables/images using safe local package/XML parsing"
+}

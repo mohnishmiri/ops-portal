@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    - concordia-linux-cpu4-ram14gi
+    - apm0014313-runner-group-primary
+    - 40ff645c-df8e-4f2b-bf1a-408d82a89c05

@@ -1,0 +1,28 @@
+{
+  "AWS": {
+    "style": "sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=left;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.outposts;",
+    "width": "78",
+    "height": "78"
+  },
+  "AZURE": {
+    "style": "rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5FE;strokeColor=#0288D1;fontColor=#0D47A1;",
+    "width": "180",
+    "height": "36"
+  },
+  "INTERNAL": {
+    "style": "rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontColor=#333333;",
+    "width": "180",
+    "height": "36"
+  },
+  "UNKNOWN": {
+    "style": "rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#F5F5F5;strokeColor=#666666;fontColor=#333333;",
+    "width": "180",
+    "height": "36"
+  },
+  "EDGE": {
+    "style": "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6C8EBF;"
+  },
+  "LABEL": {
+    "style": "text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];"
+  }
+}

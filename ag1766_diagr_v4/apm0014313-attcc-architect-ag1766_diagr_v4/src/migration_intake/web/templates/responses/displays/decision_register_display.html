@@ -1,0 +1,33 @@
+{#
+  Decision register display - shows computed decision register.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.decisions (list), value.pending_count, value.completed_count
+#}
+<div class="decision-register-display computed-display">
+  {% if answer and answer.value %}
+  <div class="register-summary">
+    <span class="count-badge count-badge--warning">{{ answer.value.pending_count or 0 }} pending</span>
+    <span class="count-badge count-badge--success">{{ answer.value.completed_count or 0 }} completed</span>
+  </div>
+  
+  {% if answer.value.decisions %}
+  <div class="decision-list">
+    {% for decision in answer.value.decisions[:5] %}
+    <div class="decision-item">
+      <span class="status-pill status-pill--{{ decision.status | lower if decision.status else 'neutral' }} status-pill--sm">
+        {{ decision.status or 'PENDING' }}
+      </span>
+      <span class="decision-title">{{ decision.title or 'Untitled decision' }}</span>
+    </div>
+    {% endfor %}
+    {% if answer.value.decisions | length > 5 %}
+    <p class="form-hint">... and {{ answer.value.decisions | length - 5 }} more</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="form-hint">No decisions registered.</p>
+  {% endif %}
+</div>

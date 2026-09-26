@@ -1,0 +1,153 @@
+{
+  "run_id": "20260926_065735",
+  "status": "PASSED",
+  "steps": [
+    {
+      "step": "Topology page loaded \u2014 6 cards visible",
+      "status": "OK",
+      "detail": "Expected >= 3, got 6"
+    },
+    {
+      "step": "Card 3 title visible",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Variant dropdown present",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Variant options: ['basic', 'tlgw', 'f5', 'hadr']",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Generate button found",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Redirected to run page: http://localhost:8000/applications/96353d13-12fd-4984-bec1-719d1fd8e6da/intakes/26385e58-8954-4312-bf27-9d8414c79421/topology/runs/67aef30f-d16d-4636-9194-f63849abba50",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "No error on run detail page",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Diagram download link found: /applications/96353d13-12fd-4984-bec1-719d1fd8e6da/intakes/26385e58-8954-4312-bf27-9d8414c79421/topology/runs/67aef30f-d16d-4636-9194-f63849abba50/diagram",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Diagram downloaded: 132050 bytes",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Valid XML, tab name: 'Without LBs'",
+      "status": "OK",
+      "detail": "Expected 'Without LBs', got 'Without LBs'"
+    },
+    {
+      "step": "Total cells: 168, haf-role cells: 45",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "ATT Internal generated cells: 21",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "AWS Tier 1 generated cells: 0",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Section 'GitHub Runners'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'JFrog'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'DNS PHZ'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'AWS Home Region'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'DirectConnect'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'Conexus'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'Tier 2'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'Internet'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'VPCE'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'SMTP'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "Section 'CloudWatch'",
+      "status": "OK",
+      "detail": "present"
+    },
+    {
+      "step": "NEEDS-CIDR remaining: 0",
+      "status": "OK",
+      "detail": "none"
+    },
+    {
+      "step": "Gap report downloaded: 24641 bytes",
+      "status": "OK",
+      "detail": ""
+    },
+    {
+      "step": "Successful runs visible: 7",
+      "status": "OK",
+      "detail": ""
+    }
+  ],
+  "artifacts": [
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\01_topology_page.png",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\02_card3_visible.png",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\03_variant_selected.png",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\04_run_detail_page.png",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\generated_diagram.drawio",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\gap_report.html",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\08_topology_page_after.png",
+    "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\artifacts\\card3-e2e\\20260926_065735\\09_final_state.png"
+  ],
+  "passed": 27,
+  "failed": 0
+}

@@ -1,0 +1,55 @@
+{#
+  Boolean with rationale editor - Yes/No with required explanation.
+
+  Context:
+    question: dict with code, text, help, required_level
+    answer: dict | None with value.selected, value.rationale
+    errors: dict | None
+#}
+<div class="boolean-with-rationale-editor">
+  <fieldset class="boolean-editor">
+    <legend class="sr-only">{{ question.text }}</legend>
+    
+    <div class="radio-group">
+      <label class="radio-option">
+        <input 
+          type="radio" 
+          name="selected" 
+          value="true"
+          id="q-{{ question.code }}-yes"
+          {% if answer and answer.value and answer.value.selected == true %}checked{% endif %}
+          {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+        >
+        <span class="radio-label">Yes</span>
+      </label>
+      
+      <label class="radio-option">
+        <input 
+          type="radio" 
+          name="selected" 
+          value="false"
+          id="q-{{ question.code }}-no"
+          {% if answer and answer.value and answer.value.selected == false %}checked{% endif %}
+        >
+        <span class="radio-label">No</span>
+      </label>
+    </div>
+  </fieldset>
+  
+  <div class="form-group">
+    <label for="q-{{ question.code }}-rationale" class="form-label form-label--required">
+      Rationale
+    </label>
+    <textarea 
+      name="rationale"
+      id="q-{{ question.code }}-rationale"
+      class="form-control{% if errors and errors.rationale %} form-control--error{% endif %}"
+      rows="3"
+      required
+      placeholder="Explain your decision"
+    >{{ answer.value.rationale if answer and answer.value and answer.value.rationale else '' }}</textarea>
+    {% if errors and errors.rationale %}
+    <span class="form-error">{{ errors.rationale | join(', ') }}</span>
+    {% endif %}
+  </div>
+</div>

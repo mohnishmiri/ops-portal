@@ -1,0 +1,8 @@
+local:
+  configuration_files: >
+    ./.github/variables/shared_vars.yaml ./.github/variables/ci_vars.yaml
+
+environment:
+  perf:
+    configuration_files: >
+      ./.github/variables/shared_vars.yaml ./.github/variables/perf/cd_vars.yaml

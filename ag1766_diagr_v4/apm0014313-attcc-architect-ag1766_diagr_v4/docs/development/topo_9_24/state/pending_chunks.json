@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "derived_from": "../STATE.json",
+  "chunks": [
+    {
+      "id": "S07-C01",
+      "status": "OUT_OF_SCOPE_BY_USER"
+    },
+    {
+      "id": "S07-C02",
+      "status": "OUT_OF_SCOPE_BY_USER"
+    },
+    {
+      "id": "S12-C01",
+      "status": "BLOCKED"
+    },
+    {
+      "id": "S12-C02",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S12-C03",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S12-C04",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C05",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C06",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C07",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C08",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C09",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C10",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C11",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C12",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C13",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C14",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C15",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C16",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S16-C17",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S17-C01",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S17-C02",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S18-C01",
+      "status": "NOT_STARTED"
+    },
+    {
+      "id": "S18-C02",
+      "status": "NOT_STARTED"
+    }
+  ]
+}

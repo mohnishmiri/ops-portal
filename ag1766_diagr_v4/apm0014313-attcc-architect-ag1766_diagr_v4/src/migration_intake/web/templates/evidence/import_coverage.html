@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+
+{% block title %}Review extracted data{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources" class="global-nav-item">Evidence</a>
+{% endblock %}
+
+{% block content %}
+<section class="evidence-page">
+  <header class="page-header">
+    <h1 class="page-title">Review extracted data</h1>
+    <p class="page-description">
+      Accepting a proposal writes it into the questionnaire as the current answer. Nothing here
+      changes the questionnaire until you accept it.
+    </p>
+  </header>
+
+  <p class="identity-strip">
+    {% if coverage.identity_decision == "APPLICATION_MATCHED" %}
+    <span class="status-pill status-pill--success">Identity verified</span>
+    <code>APPLICATION_MATCHED</code>
+    {% elif coverage.identity_decision %}
+    <span class="status-pill status-pill--danger">Quarantined</span>
+    <code>{{ coverage.identity_decision }}</code>
+    {% else %}
+    <span class="status-pill status-pill--neutral">Identity not evaluated</span>
+    {% endif %}
+    <a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}">Back to import details</a>
+  </p>
+
+  {% if not review_allowed %}
+  <div class="quarantine-panel">
+    <p class="quarantine-panel__reason">
+      {{ identity.explanation }}
+      Proposals below are kept for audit but cannot be accepted.
+    </p>
+    <details class="how-to-fix">
+      <summary>How to fix</summary>
+      <ol class="how-to-fix__steps">
+        {% for step in identity.fix_steps %}<li>{{ step }}</li>{% endfor %}
+      </ol>
+      <p class="how-to-fix__foot">
+        Once corrected, upload the file again from
+        <a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources">Evidence Sources</a>.
+      </p>
+    </details>
+  </div>
+  {% endif %}
+
+  {% if bulk_message %}
+  <div class="notice notice--{{ bulk_message_type }}" role="status">
+    <p class="bulk-result__summary">{{ bulk_message }}</p>
+    {% if bulk_detail %}
+    <ul class="bulk-result__detail">
+      {% for line in bulk_detail %}<li>{{ line }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <section>
+    <h2>Question coverage</h2>
+    <div class="table-wrapper">
+    <table class="data-table">
+      <thead><tr><th>Required questions</th><th>Proposed by this import</th><th>Still unanswered</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>{{ coverage.required_question_count }}</td>
+          <td>{{ coverage.proposed_question_count }}</td>
+          <td>{{ coverage.remaining_required_question_count }}</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section class="review-question-list">
+    <h2>All required and conditional questions</h2>
+    <p class="form-hint">
+      Questions without an extracted proposal can be completed directly in the questionnaire.
+      Extracted proposals can be accepted here before they become current answers.
+    </p>
+    <div class="table-wrapper">
+      <table class="data-table review-table">
+        <thead>
+          <tr>
+            <th scope="col">Question</th>
+            <th scope="col">Current answer</th>
+            <th scope="col">Extracted proposal</th>
+            <th scope="col">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for question in coverage.review_questions %}
+          {% set candidate = question.candidate %}
+          <tr id="question-row-{{ question.code }}">
+            <td>
+              <span class="review-code">{{ question.code }}</span>
+              <span class="review-question">{{ question.text }}</span>
+              <span class="import-row__meta">{{ question.required_level | lower }}</span>
+            </td>
+            <td>
+              {% if question.current_value_json %}
+              {{ question.current_value_json | human_value }}
+              {% else %}
+              <span class="review-current__none">Not answered</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if candidate %}
+              <strong>{{ candidate.normalized_value_json | human_value }}</strong>
+              <span class="import-row__meta">{{ candidate.source_locator | human_locator }}</span>
+              {% else %}
+              <span class="review-current__none">No proposal from this import</span>
+              {% endif %}
+            </td>
+            <td>
+              <a class="button button--primary button--sm"
+                 href="/applications/{{ app_id }}/intakes/{{ intake_id }}/questionnaire/{{ question.section_code }}#question-{{ question.code }}">
+                {% if question.current_value_json %}Edit{% else %}Fill{% endif %}
+              </a>
+              {% if candidate and candidate.bulk_eligible %}
+              <form method="post"
+                    action="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/candidates/{{ candidate.id }}/accept">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="_row_version" value="{{ candidate.row_version }}">
+                <button type="submit" class="button button--primary button--sm">Accept proposal</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {% if review_allowed and reviewable_candidates %}
+  <section class="bulk-review">
+    <h2>Decide in bulk</h2>
+    <form method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/candidates/bulk">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+      <div class="bulk-review__toolbar">
+        <p class="bulk-review__count">
+          {{ reviewable_count }} proposal{% if reviewable_count != 1 %}s{% endif %} awaiting a decision ·
+          {{ preselected_count }} pre-selected{% if replacement_count %} ·
+          {{ replacement_count }} would replace an existing answer{% endif %}
+        </p>
+        <div class="bulk-review__actions">
+          <label class="form-label" for="bulk-reason">Reason (required to reject)</label>
+          <input id="bulk-reason" name="reason" class="form-control bulk-review__reason" placeholder="Why are these wrong?">
+          <button type="submit" name="decision" value="reject" class="button button--secondary">Reject selected</button>
+          <button type="submit" name="decision" value="accept" class="button button--primary">Accept selected ({{ preselected_count }})</button>
+        </div>
+      </div>
+
+      <div class="table-wrapper">
+        <table class="data-table review-table">
+          <thead>
+            <tr>
+              <th scope="col" class="review-table__pick">Include</th>
+              <th scope="col">Question</th>
+              <th scope="col">Current answer</th>
+              <th scope="col">Proposed</th>
+              <th scope="col">Source</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for candidate in reviewable_candidates %}
+            <tr class="review-row{% if candidate.replaces_existing %} review-row--replaces{% endif %}" id="review-row-{{ candidate.target_key }}">
+              <td class="review-table__pick">
+                <input
+                  type="checkbox"
+                  id="select-{{ candidate.id }}"
+                  name="selected"
+                  value="{{ candidate.id }}:{{ candidate.row_version }}"
+                  {% if not candidate.replaces_existing %}checked{% endif %}
+                >
+                <label class="sr-only" for="select-{{ candidate.id }}">
+                  Include {{ candidate.target_key }} in the bulk decision
+                </label>
+              </td>
+              <td>
+                <span class="review-code">{{ candidate.target_key }}</span>
+                {% if candidate.question_text %}<span class="review-question">{{ candidate.question_text }}</span>{% endif %}
+              </td>
+              <td class="review-current">
+                {% if candidate.replaces_existing %}
+                {{ candidate.current_value_json | human_value }}
+                {% else %}
+                <span class="review-current__none">— none —</span>
+                {% endif %}
+              </td>
+              <td class="review-proposed">
+                <strong>{{ candidate.normalized_value_json | human_value }}</strong>
+                {% if candidate.replaces_existing %}
+                <span class="review-flag">replaces current</span>
+                {% endif %}
+              </td>
+              <td class="review-source">{{ candidate.source_locator | human_locator }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <p class="review-legend">
+        Rows that would <strong>replace</strong> an existing answer are highlighted and never
+        pre-selected. Each decision is applied one candidate at a time, and the result reports
+        exactly how many succeeded.
+      </p>
+    </form>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Proposed answers</h2>
+    {% if coverage.candidates %}
+    {% for candidate in coverage.candidates %}
+    <article class="card{% if candidate.replaces_existing %} card--replaces{% endif %}">
+      <div class="card-header">
+        <h3 class="card-title">{{ candidate.target_key }}{% if candidate.question_text %} — {{ candidate.question_text }}{% endif %}</h3>
+        <span class="status-pill {% if candidate.state == 'PROPOSED' %}status-pill--progress{% elif candidate.state == 'ACCEPTED' %}status-pill--success{% else %}status-pill--neutral{% endif %}">{{ candidate.state }}</span>
+      </div>
+
+      <dl class="candidate-facts">
+        <dt>Current answer</dt>
+        <dd>
+          {% if candidate.replaces_existing %}
+          {{ candidate.current_value_json | human_value }}
+          <span class="review-flag">accepting replaces this</span>
+          {% else %}
+          <span class="review-current__none">— none —</span>
+          {% endif %}
+        </dd>
+        <dt>Proposed value</dt>
+        <dd>{{ candidate.normalized_value_json | human_value }}</dd>
+        <dt>From</dt>
+        <dd>{{ candidate.source_locator | human_locator }}</dd>
+      </dl>
+
+      <details>
+        <summary>Source detail</summary>
+        <dl class="candidate-facts">
+          <dt>Raw value in file</dt>
+          <dd>{{ candidate.raw_value_json | human_value }}</dd>
+          <dt>Scope</dt>
+          <dd>{{ candidate.scope_json | human_value }}</dd>
+          {% if candidate.validation_json %}
+          <dt>Validation</dt>
+          <dd>{{ candidate.validation_json | human_value }}</dd>
+          {% endif %}
+        </dl>
+      </details>
+
+      {% if candidate.bulk_eligible %}
+      <div class="candidate-actions">
+        <form method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/candidates/{{ candidate.id }}/accept">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="_row_version" value="{{ candidate.row_version }}">
+          <button type="submit" class="button button--primary">Accept</button>
+        </form>
+
+        <details>
+          <summary>Reject…</summary>
+          <form method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/candidates/{{ candidate.id }}/reject" class="form-group">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="_row_version" value="{{ candidate.row_version }}">
+            <label class="form-label form-label--required" for="reject-{{ candidate.id }}">Why is this wrong?</label>
+            <input id="reject-{{ candidate.id }}" name="reason" class="form-control" required>
+            <button type="submit" class="button button--danger">Confirm reject</button>
+          </form>
+        </details>
+
+        <details>
+          <summary>Defer…</summary>
+          <form method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/candidates/{{ candidate.id }}/defer" class="form-group">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="_row_version" value="{{ candidate.row_version }}">
+            <label class="form-label form-label--required" for="defer-{{ candidate.id }}">What needs to happen first?</label>
+            <input id="defer-{{ candidate.id }}" name="reason" class="form-control" required>
+            <button type="submit" class="button button--secondary">Confirm defer</button>
+          </form>
+        </details>
+      </div>
+      {% elif candidate.state == "PROPOSED" and candidate.target_kind != "QUESTION" %}
+      <p class="form-hint">Register evidence — retained for traceability, never accepted as a questionnaire answer.</p>
+      {% elif candidate.state == "PROPOSED" and not review_allowed %}
+      <p class="form-hint">Cannot be accepted while this import is quarantined.</p>
+      {% elif candidate.state == "PROPOSED" %}
+      <p class="form-hint">Not eligible for questionnaire acceptance.</p>
+      {% endif %}
+    </article>
+    {% endfor %}
+    {% else %}
+    <p>This import produced no proposed answers.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Findings</h2>
+    {% if coverage.finding_counts %}
+    <div class="table-wrapper">
+    <table class="data-table">
+      <thead><tr><th>Type</th><th>Count</th></tr></thead>
+      <tbody>
+        {% for finding, count in coverage.finding_counts.items() %}
+        <tr><td>{{ finding }}</td><td>{{ count }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if "UNMAPPED_FIELD" in coverage.finding_counts %}
+    <p class="form-hint">
+      <code>UNMAPPED_FIELD</code> means the source column was populated but has no approved mapping
+      to a catalog question yet. It is informational and blocks nothing.
+    </p>
+    {% endif %}
+    {% if "UNRECOGNIZED_SHEET" in coverage.finding_counts %}
+    <p class="form-hint">
+      <code>UNRECOGNIZED_SHEET</code> means a worksheet's name matched no supported source
+      contract, so none of its rows were read. Nothing in that sheet was imported.
+    </p>
+    {% endif %}
+    {% else %}
+    <p>No findings.</p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

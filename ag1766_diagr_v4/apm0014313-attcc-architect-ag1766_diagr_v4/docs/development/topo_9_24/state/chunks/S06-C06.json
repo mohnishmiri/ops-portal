@@ -1,0 +1,12 @@
+{
+	"id":"S06-C06","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 17-19",
+	"inputs":["Guide blocks 17-19 and image5"],
+	"outputs":["evidence/docx/section-005.json","evidence/docx/media/image5.png","evidence/docx/derived/image5-ocr.json","analysis/business_rules/guide_section_05.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 17-19 and image5","symbols":"Standard box prose; qualified DNS/PHZ OCR label","further":true}],
+	"checks":["Original hashes unchanged","Section/OCR JSON saved","Standard presentation distinguished from deployed resources"],
+	"established":["Prose explicitly calls the box standard across topology diagrams","Local OCR offers a DNS/PHZ label candidate"],
+	"uncertainties":["Exact labels/layout unverified","No deployed zone identity or application connectivity established"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C06; inspect_guide.ps1 blocks 17-19 section-005; local_ocr.exe image5.png image5-ocr.json","result":"All completed successfully; source/image unchanged; two OCR lines","mutation":"Analysis artifacts only","output":"evidence/docx/section-005.json; evidence/docx/derived/image5-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-006","path":"analysis/business_rules/guide_section_05.md","source":"Guide blocks 17-19 and image5 OCR","description":"Standard-content prose and qualified DNS label candidate","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; resource/visual semantics unverified"}],
+	"next_chunk":"S06-C07","next_action":"Extract and analyze only guide blocks 20-22"
+}

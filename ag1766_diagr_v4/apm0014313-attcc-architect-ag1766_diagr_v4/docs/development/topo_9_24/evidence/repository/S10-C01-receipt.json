@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S10-C01",
+  "validated_at": "2026-09-24T17:14:54.8089617-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/renderer/capabilities.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/topology/renderer/core.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\renderer\\core.py",
+      "file_type": ".py",
+      "size_bytes": 50750,
+      "modified_utc": "2026-09-23T11:09:28.4330244Z",
+      "sha256": "2c14cecdd6c11bafb626191e0a0a2d213175e793d21a55097599178424b3fe37",
+      "chunk_id": "S10-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "590-1005",
+      "relevant_section": "Projection adaptation; label/structural render; generated identity/mutations",
+      "evidence_id": "EV-RENDER-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/topology/compatibility.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\compatibility.py",
+      "file_type": ".py",
+      "size_bytes": 15369,
+      "modified_utc": "2026-09-22T23:24:31.1119267Z",
+      "sha256": "e3da9113d63043509852e0110f2d05a899e597afd26e0a1e16fead2e3812088b",
+      "chunk_id": "S10-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-357",
+      "relevant_section": "Base inventory, page/slot/region compatibility pins",
+      "evidence_id": "EV-RENDER-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_structural/manifest.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_structural\\manifest.json",
+      "file_type": ".json",
+      "size_bytes": 1069,
+      "modified_utc": "2026-09-22T23:24:31.1171173Z",
+      "sha256": "934f99422577d9e1ac0d67ec145293613d8f5d56835188e5e1991d1df0b28221",
+      "chunk_id": "S10-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "Synthetic structural profile identity/version/components",
+      "evidence_id": "EV-RENDER-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_structural/slots.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_structural\\slots.json",
+      "file_type": ".json",
+      "size_bytes": 717,
+      "modified_utc": "2026-09-22T23:24:31.1171173Z",
+      "sha256": "b939fba2bcf5465acfeaf34706cf6914f3254316c637577d3958c74b997f8001",
+      "chunk_id": "S10-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "Overview slot/generated region/prototypes/capacity/continuation policy",
+      "evidence_id": "EV-RENDER-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_structural/mappings.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_structural\\mappings.json",
+      "file_type": ".json",
+      "size_bytes": 96,
+      "modified_utc": "2026-09-21T19:20:13.7392022Z",
+      "sha256": "ef93cbce4de1471fd32fcbba0f1aa9e5d1e31c26da41409c1a0ed58a8bdad280",
+      "chunk_id": "S10-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "APPLICATION_NAME token mapping",
+      "evidence_id": "EV-RENDER-001",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Exactly five renderer/profile files",
+    "Compatibility checks compared with actual renderer mutations",
+    "Prototype declarations followed to usages",
+    "Every generated identity component enumerated",
+    "Declared overflow policy compared with branch behavior",
+    "Page qualification checked in compatibility and renderer",
+    "No runtime/visual success claimed"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S06-C12",
+  "validated_at": "2026-09-24T14:31:44.1622250-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/docx/section-011.json",
+    "evidence/docx/media/image10.png",
+    "evidence/docx/derived/image10-ocr.json",
+    "analysis/business_rules/guide_section_11.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "docs/development/topo_9_24/Topology Guide.docx",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\development\\topo_9_24\\Topology Guide.docx",
+      "file_type": ".docx",
+      "size_bytes": 171024,
+      "modified_utc": "2026-09-18T12:20:58.6804466Z",
+      "sha256": "73881e6258b6f12a7dba72f44184f7724fc4494216d70a2e13fdee4957a8955e",
+      "chunk_id": "S06-C12",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Blocks 38-39 and image10",
+      "relevant_section": "Standard network box prose and qualified label",
+      "evidence_id": "EV-DOCX-012",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Safe extraction/local OCR succeeded",
+    "Hashes unchanged",
+    "Network label not treated as verified application connectivity"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

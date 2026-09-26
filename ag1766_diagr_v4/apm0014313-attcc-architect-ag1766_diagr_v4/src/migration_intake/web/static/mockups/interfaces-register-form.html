@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interfaces — Mockup (Edit form) — Migration Intake</title>
+
+<link rel="stylesheet" href="../css/tokens.css">
+<link rel="stylesheet" href="../css/base.css">
+<link rel="stylesheet" href="../css/layout.css">
+<link rel="stylesheet" href="../css/components.css">
+<link rel="stylesheet" href="../css/wave_util.css">
+<link rel="stylesheet" href="../css/hub.css">
+<style>
+  .mockup-banner {
+    background: var(--color-warning-bg); color: var(--color-warning);
+    padding: var(--space-2) var(--space-4); font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold); text-align: center;
+  }
+  .provenance-note {
+    display: flex; gap: var(--space-2); align-items: flex-start;
+    background: var(--color-surface-muted); border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); padding: var(--space-3); margin-bottom: var(--space-4);
+    font-size: var(--font-size-xs); color: var(--color-text-secondary);
+  }
+  .form-actions { display: flex; gap: var(--space-3); margin-top: var(--space-4); }
+</style>
+</head>
+<body>
+<div class="mockup-banner">MOCKUP — static preview, not wired to the app (synthetic data)</div>
+
+<div class="app-shell">
+  <header class="global-header" role="banner">
+    <a href="#" class="brand-lockup"><span class="brand-mark"><span></span><span></span><span></span></span><span class="brand-name">Migration Intake</span></a>
+    <nav class="global-nav" aria-label="Primary navigation">
+      <a href="#" class="global-nav-item">Applications</a>
+      <a href="#" class="global-nav-item">CCPM</a>
+      <a href="interfaces-register-list.html" class="global-nav-item">Interfaces</a>
+      <a href="#" class="global-nav-item active" aria-current="page">INT-20401</a>
+    </nav>
+    <div class="user-tools"></div>
+  </header>
+
+  <section class="command-bar" aria-label="Application context">
+    <div class="command-brand"><span class="eyebrow">AWS Outposts Migration</span><strong>MIGRATION INTAKE</strong></div>
+    <div class="app-identity"><span class="app-monogram">CC</span><strong>CCPM</strong></div>
+    <div class="command-actions">
+      <a href="interfaces-register-list.html" class="button button--ghost">← Back to list</a>
+    </div>
+  </section>
+
+  <div class="workspace-shell">
+    <nav class="side-nav" aria-label="Application navigation">
+      <div class="side-nav-heading" aria-hidden="true">Application</div>
+      <a href="#" class="side-nav-item"><span>Intake overview</span></a>
+      <a href="#" class="side-nav-item"><span>Questionnaire</span></a>
+      <a href="#" class="side-nav-item"><span>Evidence</span></a>
+      <a href="interfaces-register-list.html" class="side-nav-item active" aria-current="page"><span>Interfaces</span></a>
+      <a href="#" class="side-nav-item"><span>WaveUtil</span></a>
+      <a href="#" class="side-nav-item"><span>Readiness</span></a>
+      <a href="#" class="side-nav-item"><span>Topology</span></a>
+    </nav>
+
+    <main id="main-content">
+      <div class="wave-util-detail-page">
+        <header class="page-header">
+          <h1 class="page-title">Interface INT-20401</h1>
+          <div class="page-meta">
+            <span class="status-pill status-pill--success"><span class="pill-dot"></span>Active</span>
+            <span class="meta-item">Version 3</span>
+          </div>
+        </header>
+
+        <!-- Provenance / audit trail: every field is traceable to its
+             origin (import row vs. manual edit) via the append-only
+             int_revisions history. -->
+        <div class="provenance-note">
+          ℹ️ Imported from <code>App Data Capture_ccpm.xlsx</code> → Interface sheet, row 6
+          on 2026-09-10 by the import service, then manually edited by
+          <strong>M. Alvarez</strong> on 2026-09-15. Fields below are pre-populated
+          from the current revision; saving creates revision&nbsp;4.
+        </div>
+
+        <section class="card card--elevated">
+          <h2 class="card-title">Interface details</h2>
+          <form>
+            <div class="form-grid">
+              <div class="form-group">
+                <label class="form-label form-label--required" for="corr-id">Interface Correlation ID</label>
+                <input class="form-control" id="corr-id" name="interface_correlation_id" value="INT-20401" required>
+                <span class="form-hint">Natural key — matches the counterpart application's own tracking ID.</span>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label form-label--required" for="app-acronym">Interface Application Acronym</label>
+                <input class="form-control" id="app-acronym" name="interface_app_acronym" value="ORDR-SVC" required>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label form-label--required" for="sys-location">Interface System Location</label>
+                <select class="form-control" id="sys-location" name="interface_system_location" required>
+                  <option>Mainframe</option>
+                  <option>Midrange</option>
+                  <option selected>Azure</option>
+                  <option>AWS</option>
+                  <option>Conexus</option>
+                  <option>Private Cloud</option>
+                  <option>Other</option>
+                </select>
+                <span class="form-hint">Mainframe, Midrange, Azure, AWS, Conexus, Private Cloud, etc.</span>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label form-label--required" for="traffic-direction">Architecture Data Traffic</label>
+                <select class="form-control" id="traffic-direction" name="data_traffic_direction" required>
+                  <option>Inbound</option>
+                  <option selected>Outbound</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label" for="target-protocol">Target Protocol</label>
+                <input class="form-control" id="target-protocol" name="target_protocol" value="HTTPS / TLS 1.2">
+              </div>
+
+              <div class="form-group">
+                <label class="form-label" for="future-port">Future Port</label>
+                <input class="form-control" id="future-port" name="future_port" value="8443" inputmode="numeric">
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" class="button button--primary">Save interface</button>
+              <a href="interfaces-register-list.html" class="button button--ghost">Cancel</a>
+              <button type="button" class="button button--danger" style="margin-left:auto">Retire interface</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

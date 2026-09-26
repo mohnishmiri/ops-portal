@@ -1,0 +1,57 @@
+site_name: Drawpyo
+site_url: https://merrimanind.github.io/drawpyo/
+site_author: Xander Cesari
+
+# Repository
+repo_name: MerrimanInd/drawpyo
+repo_url: https://github.com/MerrimanInd/drawpyo
+
+# theme: readthedocs
+theme:
+  name: "material"
+  features:
+    - navigation.expand
+
+plugins:
+  - search
+  - mkdocstrings
+
+nav:
+  - Home: index.md
+  - About: about.md
+  - Basic Diagrams:
+    - Usage: usage/basic_usage.md
+    - Formatting Text: usage/text_format.md
+    - Load Diagrams: usage/load_diagrams.md
+    - Color Management: usage/color_management.md
+    - Objects: usage/objects.md
+    - Parent and Child Objects: usage/parent_child_objects.md
+    - Extended Objects: usage/extended_objects.md
+    - Edges: usage/edges.md
+    - Shape Libraries: usage/shape_libs.md
+  - Custom Diagram Types:
+    - Tree Diagrams: diagram_types/tree_diagrams.md
+    - Binary Tree Diagrams: diagram_types/binary_tree_diagrams.md
+    - Bar Charts: diagram_types/bar_charts.md
+    - Pie Charts: diagram_types/pie_charts.md
+    - Legends: diagram_types/legends.md
+  - API:
+    - Architecture: api/architecture.md
+    - Basic Diagrams:
+      - File: api/file.md
+      - Page: api/page.md
+      - Text Format: api/text_format.md
+      - Edges: api/edges.md
+      - Objects: api/objects.md
+      - Extended Objects: api/extended_objects.md
+      - Parsed Diagrams: api/parsed_diagrams.md
+    - Custom Diagram Types:
+      - Tree Diagram:
+        - TreeDiagram: api/tree_diagram/treediagram.md
+        - NodeObject: api/tree_diagram/nodeobject.md
+      - Binary Tree Diagram:
+        - BinaryTreeDiagram: api/binary_tree_diagram/binarytreediagram.md
+        - BinaryNodeObject: api/binary_tree_diagram/binarynodeobject.md
+      - Bar Chart: api/bar_chart/barchart.md
+      - Pie Chart: api/pie_chart/piechart.md
+      - Legend: api/legend/legend.md

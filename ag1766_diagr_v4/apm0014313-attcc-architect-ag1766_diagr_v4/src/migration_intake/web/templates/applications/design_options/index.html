@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Application design options{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item active" aria-current="page">Applications</a>
+<a href="/admin/catalog" class="global-nav-item">Catalog Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications" class="button button--ghost">Current screen</a>
+{% endblock %}
+
+{% block content %}
+<section class="design-options" aria-labelledby="design-options-title">
+  <div class="design-options__heading">
+    <p class="design-eyebrow">Isolated preview</p>
+    <h1 id="design-options-title">Application directory concepts</h1>
+    <p>Three interaction-ready directions using the current application data. No preview action changes production data.</p>
+  </div>
+  <div class="design-options__grid">
+    {% set options = [
+      ("a", "Balanced card grid", "Visual browsing", "A calm grid with visible status, metrics, and direct workspace access."),
+      ("b", "Compact operational cards", "Fast scanning", "A dense list with aligned metadata for frequent operational use."),
+      ("c", "Curated workspace", "Guided attention", "A spacious view that prioritizes applications needing attention.")
+    ] %}
+    {% for key, name, fit, description in options %}
+    <article class="design-choice design-choice--{{ key }}">
+      <div class="design-choice__preview" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="design-eyebrow">Option {{ key | upper }} · {{ fit }}</p>
+      <h2>{{ name }}</h2>
+      <p>{{ description }}</p>
+      <a class="button button--primary" href="/applications/design-options/{{ key }}">Open option {{ key | upper }}</a>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

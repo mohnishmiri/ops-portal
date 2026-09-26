@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "result": "PASS",
+  "validated_at": "2026-09-24T13:29:54.2361066-05:00",
+  "chunk": "S00-C01",
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "excluded_suite_dependencies": 0,
+  "chunk_count": 43,
+  "completed_chunks": 1,
+  "pending_chunks": 42,
+  "metadata_records": 10,
+  "protected_reference_hashes_unchanged": 7,
+  "scoped_git_status_unchanged": true,
+  "checkpoint_sha256": "cc421df12ca6e3b88dfe53033db0b2ed32e73a90086708bcfad7885e035473aa",
+  "artifact_count": 21,
+  "application_tests_run": false,
+  "overall_status": "BLOCKED",
+  "blocker": "Q-001: unmerged baseline requires user direction"
+}

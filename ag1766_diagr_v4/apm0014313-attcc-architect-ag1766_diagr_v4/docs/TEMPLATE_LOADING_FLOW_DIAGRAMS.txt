@@ -1,0 +1,167 @@
+================================================================================
+TEMPLATE LOADING ARCHITECTURE — FLOW DIAGRAMS
+================================================================================
+
+================================================================================
+PATH 1: USER-UPLOADED TEMPLATE (Card 1 → Card 2)
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: USER UPLOADS DIAGRAM (Card 1)                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    User's Computer                          Web Browser
+    ┌──────────────┐                        ┌─────────────────────────┐
+    │ my_topo.     │                        │ Topology Page           │
+    │ drawio       │ ──[Select File]──→     │ ┌───────────────────┐   │
+    │ (148 cells)  │                        │ │ Card 1: Upload    │   │
+    │              │                        │ │ [Choose File]     │   │
+    │ Variant:     │ ──[Select Variant]──→  │ │ Variant: [basic ▼]   │
+    │ "basic"      │                        │ │ [Upload diagram]  │   │
+    └──────────────┘                        │ └───────────────────┘   │
+                                            └─────────────────────────┘
+                                                      │
+                                                      │ POST /topology/upload-base
+                                                      │ (file bytes + variant)
+                                                      ▼
+                                            ┌─────────────────────────┐
+                                            │ Route Handler           │
+                                            │ topology.py:229         │
+                                            │ upload_base_diagram()   │
+                                            │                         │
+                                            │ 1. Validate CSRF        │
+                                            │ 2. Check file size      │
+                                            │ 3. Read file bytes      │
+                                            │ 4. Call service         │
+                                            └─────────────────────────┘
+                                                      │
+                                                      │
+                                                      ▼
+                                            ┌─────────────────────────┐
+                                            │ Service Layer           │
+                                            │ topology_generation.py  │
+                                            │ upload_base_diagram()   │
+                                            │                         │
+                                            │ 1. Validate XML         │
+                                            │ 2. Compute SHA-256      │
+                                            │ 3. Store file bytes     │
+                                            │ 4. Create DB record     │
+                                            └─────────────────────────┘
+                                                      │
+                                    ┌───────────────┬─────────────────┐
+                                    │               │                 │
+                                    ▼               ▼                 ▼
+                        ┌──────────────────┐  ┌──────────────┐  ┌──────────┐
+                        │ Filesystem       │  │ Database     │  │ Response │
+                        │                  │  │              │  │          │
+                        │ evidence/        │  │ topo_base    │  │ Redirect │
+                        │ topology/        │  │ ┌──────────┐ │  │ to       │
+                        │ base_diagrams/   │  │ │ id       │ │  │ topology │
+                        │ {artifact_id}    │  │ │ filename │ │  │ page     │
+                        │                  │  │ │ variant  │ │  │          │
+                        │ (148 cells)      │  │ │ sha256   │ │  └──────────┘
+                        │                  │  │ │ uploaded │ │
+                        │                  │  │ │ _by_id   │ │
+                        │                  │  │ │ uploaded │ │
+                        │                  │  │ │ _at      │ │
+                        │                  │  │ └──────────┘ │
+                        └──────────────────┘  └──────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: USER GENERATES FROM UPLOADED TEMPLATE (Card 2)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    Web Browser
+    ┌─────────────────────────────┐
+    │ Topology Page               │
+    │ ┌───────────────────────┐   │
+    │ │ Card 2: Generate      │   │
+    │ │ Uploaded base:        │   │
+    │ │ [my_topo.drawio ▼]    │   │
+    │ │ [Generate topology]   │   │
+    │ └───────────────────────┘   │
+    └─────────────────────────────┘
+                  │
+                  │ POST /topology/generate
+                  │ (base_artifact_id)
+                  ▼
+    ┌─────────────────────────────┐
+    │ Route Handler               │
+    │ topology.py:296             │
+    │ generate_topology()         │
+    │                             │
+    │ 1. Validate CSRF            │
+    │ 2. Verify base_artifact_id  │
+    │ 3. Call service             │
+    └─────────────────────────────┘
+                  │
+                  ▼
+    ┌─────────────────────────────┐
+    │ Service Layer               │
+    │ topology_generation.py:257  │
+    │ generate_topology()         │
+    │                             │
+    │ 1. Load base from DB        │
+    │ 2. Read file from FS        │
+    │ 3. Extract variant          │ ← Variant from topo_base
+    │ 4. Select profile           │
+    │ 5. Run HAF pipeline         │
+    │ 6. Store artifacts          │
+    │ 7. Create gen_runs record   │
+    └─────────────────────────────┘
+                  │
+        ┌─────────┼─────────┐
+        │         │         │
+        ▼         ▼         ▼
+    ┌────────┐ ┌────────┐ ┌──────────┐
+    │ HAF    │ │ DB     │ │ FS       │
+    │ Pipe   │ │        │ │          │
+    │ line   │ │gen_runs│ │generated/│
+    │        │ │        │ │{diagram} │
+    │ (Fill  │ │(links  │ │{report}  │
+    │ cells) │ │to base)│ │          │
+    └────────┘ └────────┘ └──────────┘
+        │
+        ▼
+    ┌─────────────────────────────┐
+    │ Generated Diagram           │
+    │ + Gap Report                │
+    │                             │
+    │ (Same quality as Path 2)    │
+    └─────────────────────────────┘
+
+
+================================================================================
+PATH 2: BUNDLED STANDARD TEMPLATE (Card 3)
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: USER SELECTS VARIANT (Card 3)                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    Web Browser
+    ┌─────────────────────────────┐
+    │ Topology Page               │
+    │ ┌───────────────────────┐   │
+    │ │ Card 3: Generate from │   │
+    │ │ Standard Template      │   │
+    │ │ Variant: [basic ▼]    │   │
+    │ │ [Generate from        │   │
+    │ │  template]            │   │
+    │ └───────────────────────┘   │
+    └─────────────────────────────┘
+                  │
+                  │ POST /topology/generate-standard
+                  │ (variant="basic")
+                  ▼
+    ┌─────────────────────────────┐
+    │ Route Handler               │
+    │ topology.py:366             │
+    │ generate_from_standard_     │
+    │ template()                  │
+    │                             │
+    │ 1. Validate CSRF            │
+    │ 2. Verify variant           │
+    │ 3. Call service             │
+  

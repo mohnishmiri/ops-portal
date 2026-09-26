@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S13-C02",
+  "validated_at": "2026-09-24T17:22:49.9987451-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/implementation_plan_gap/current_plan.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "docs/implementation/topology-implementation-plan.md",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\implementation\\topology-implementation-plan.md",
+      "file_type": ".md",
+      "size_bytes": 136213,
+      "modified_utc": "2026-09-24T12:08:58.1281465Z",
+      "sha256": "360e74f49520156998d6cbc9c5f5b5b5b4d2697f12207c547a26d0c6c41218aa",
+      "chunk_id": "S13-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "552-770 plus existing header/status inventory",
+      "relevant_section": "TP07-TP15 completion records",
+      "evidence_id": "EV-DOC-002",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "docs/topology-implementation-plan.html",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\topology-implementation-plan.html",
+      "file_type": ".html",
+      "size_bytes": 154354,
+      "modified_utc": "2026-09-24T12:08:58.1755914Z",
+      "sha256": "35ed2b1ddf3c9f80d817b217b0a234bc00cbc00060eed4cc7d2afcd78a946ecd",
+      "chunk_id": "S13-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1540-1615 plus completion-heading inventory",
+      "relevant_section": "TP13-TP15 completion blocks",
+      "evidence_id": "EV-DOC-002",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Two active plan documents only",
+    "Each owning completion claim compared with current source finding",
+    "Historical test counts not used as current evidence",
+    "HTML/Markdown status synchronization checked",
+    "Canonical plans left unchanged"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

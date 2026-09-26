@@ -1,0 +1,1 @@
+{"naming_rules":[{"rule_id":"APPLICATION_NAME","pattern":"{application_name}","tokens":{"application_name":"APPLICATION_NAME"},"authority":"PROPOSE"}]}

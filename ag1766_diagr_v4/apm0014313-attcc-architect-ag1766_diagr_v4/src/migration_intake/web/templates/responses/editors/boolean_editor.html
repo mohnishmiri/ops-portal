@@ -1,0 +1,57 @@
+{#
+  Boolean editor - three-option YES / NO / UNKNOWN radio group.
+
+  Context:
+    question: dict with code, text, help, required_level
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The field name must match the canonical BOOLEAN payload key
+  (`{value: YES|NO|UNKNOWN}`), because the save route parses the submitted
+  form field names through the response type. BOOLEAN is never a checkbox
+  and never a Python boolean: the stored value is the string enum, so the
+  pre-selection comparison is against `'YES'` / `'NO'` / `'UNKNOWN'`.
+#}
+<fieldset class="boolean-editor">
+  <legend class="sr-only">{{ question.text }}</legend>
+
+  <div class="radio-group">
+    <label class="radio-option">
+      <input
+        type="radio"
+        name="value"
+        value="YES"
+        id="q-{{ question.code }}-yes"
+        {% if answer and answer.value and answer.value.value == 'YES' %}checked{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+      >
+      <span class="radio-label">Yes</span>
+    </label>
+
+    <label class="radio-option">
+      <input
+        type="radio"
+        name="value"
+        value="NO"
+        id="q-{{ question.code }}-no"
+        {% if answer and answer.value and answer.value.value == 'NO' %}checked{% endif %}
+      >
+      <span class="radio-label">No</span>
+    </label>
+
+    <label class="radio-option">
+      <input
+        type="radio"
+        name="value"
+        value="UNKNOWN"
+        id="q-{{ question.code }}-unknown"
+        {% if answer and answer.value and answer.value.value == 'UNKNOWN' %}checked{% endif %}
+      >
+      <span class="radio-label">Unknown</span>
+    </label>
+  </div>
+
+  {% if errors and errors.value %}
+  <span class="form-error">{{ errors.value | join(', ') }}</span>
+  {% endif %}
+</fieldset>

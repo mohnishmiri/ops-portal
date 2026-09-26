@@ -1,0 +1,1 @@
+{"issue_rules":[{"rule_id":"APPLICATION_NAME_REQUIRED","condition":"$.application.name == null","severity":"ERROR","message":"Application name is required","blocking":true}]}

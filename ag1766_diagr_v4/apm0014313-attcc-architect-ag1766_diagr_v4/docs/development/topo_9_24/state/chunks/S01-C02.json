@@ -1,0 +1,13 @@
+{
+  "id":"S01-C02","stage":"01","result":"COMPLETED",
+  "objective":"Identify production topology entry points and direct owners from five bounded symbol inventories",
+  "inputs":["src/migration_intake/web/routes/topology.py","src/migration_intake/application/services/topology_runner.py","src/migration_intake/topology/strict_projection.py","src/migration_intake/topology/renderer/core.py","src/migration_intake/persistence/repositories/topology.py"],
+  "outputs":["inventory/symbols_and_entry_points.md"],
+  "inspected_files":[{"path":"src/migration_intake/web/routes/topology.py","lines":"Declaration/import matches through 712 only","symbols":"Routes and dependency functions","further":true},{"path":"src/migration_intake/application/services/topology_runner.py","lines":"Declaration/import matches through 780 only","symbols":"GovernedTopologyRunner; PersistedLabelRenderer","further":true},{"path":"src/migration_intake/topology/strict_projection.py","lines":"Declaration/import matches through 681 only","symbols":"Projection records and projector/loader","further":true},{"path":"src/migration_intake/topology/renderer/core.py","lines":"Declaration matches through 1224 only","symbols":"Parser; label-only/structural/legacy renderers","further":true},{"path":"src/migration_intake/persistence/repositories/topology.py","lines":"Declaration/import matches through 802 only","symbols":"TopologyRepository reservation/lease/finalization/review methods","further":true}],
+  "checks":["Search restricted to exactly five src files","No claims of body behavior based on names","174 declaration/import matches inventoried"],
+  "established":["Separate legacy and governed HTTP/service declarations exist","Typed projection, label/structural renderer, and persistence/review/lease abstractions located"],
+  "uncertainties":["Active call order, guards, SQL predicates, and data semantics not yet inspected","Existing suite remains excluded"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"grep_search declarations/imports restricted to the five recorded src paths","result":"174 matches in five files","mutation":"None","output":"inventory/symbols_and_entry_points.md"}],
+  "evidence":[{"id":"EV-REPO-005","path":"inventory/symbols_and_entry_points.md","source":"Five production topology modules with line/symbol locators","description":"Bounded declaration/import inventory, not a runtime trace","kind":"Normalized source index","reliability":"VERIFIED symbol declarations; behavior unverified"}],
+  "next_chunk":"S01-C03","next_action":"Inspect production configuration, application wiring, observability, and persistence initialization"
+}

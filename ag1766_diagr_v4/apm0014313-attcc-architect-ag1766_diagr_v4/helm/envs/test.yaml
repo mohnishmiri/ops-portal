@@ -1,0 +1,10 @@
+ingress:
+  enabled: true
+  host: aws-outpost.test.att.com
+  tlsSecretName: aws-outpost-test-tls
+
+app:
+  env: shared_test
+
+persistence:
+  enabled: true

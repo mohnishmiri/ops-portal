@@ -1,0 +1,13 @@
+{
+  "id":"S03-C01","stage":"03","result":"COMPLETED",
+  "objective":"Safely inventory input Draw.io pages and cell categories without exposing raw labels",
+  "inputs":["Supplied input Draw.io only; XML parser settings with DTD/network resolution disabled"],
+  "outputs":["evidence/drawio/input_inventory.json","inventory_drawio.ps1"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio","lines":"XML page/cell category inventory only","symbols":"mxfile/diagram/mxGraphModel/mxCell counts; no raw labels extracted","further":true}],
+  "checks":["DTD prohibited and external resolution disabled","Input hash unchanged before/after parsing","Generated JSON parses","Raw page names/labels/identifiers excluded from output"],
+  "established":["One uncompressed XML page","141 cells: 98 vertices, 41 edges, two other cells","Zero duplicate explicit cell IDs; three anonymous cells and three wrapper objects","Six unresolved-marker candidate cells; 20 edges omit endpoint attributes"],
+  "uncertainties":["Counts do not establish semantic correctness","Wrapper IDs need hierarchy analysis before treating anonymous cells as invalid","Manual connectors may legitimately omit endpoints","Reference scope/application applicability remains unverified"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/inventory_drawio.ps1 -Source Input","result":"0; INVENTORIED; source hash unchanged","mutation":"Generated redacted inventory JSON only","output":"evidence/drawio/input_inventory.json"}],
+  "evidence":[{"id":"EV-DRAWIO-001","path":"evidence/drawio/input_inventory.json","source":"Supplied input Draw.io","description":"Safe structural page/cell inventory with no raw labels or identifiers","kind":"Normalized document metadata","reliability":"VERIFIED counts; semantics/applicability not verified"}],
+  "next_chunk":"S03-C02","next_action":"Inspect input hierarchy/protected-region category using stable opaque locators"
+}

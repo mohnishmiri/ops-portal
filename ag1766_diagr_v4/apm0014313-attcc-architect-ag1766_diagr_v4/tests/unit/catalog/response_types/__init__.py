@@ -1,0 +1,1 @@
+"""Response type unit tests."""

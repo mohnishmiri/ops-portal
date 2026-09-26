@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "captured_at": "2026-09-24T13:54:28.4570365-05:00",
+  "source_path": "CCPM_out_put_18678_TargetState_AWS_OutPosts_v01 (1).drawio",
+  "source_sha256": "3df0f756a748277a6cc7d32abffdba8737ee463dcf7dc913cba721e89d0dc8af",
+  "parser": {
+    "dtd": "PROHIBITED",
+    "external_resolution": "DISABLED",
+    "max_characters": 16777216
+  },
+  "source_modified": false,
+  "page_count": 2,
+  "pages": [
+    {
+      "page_ref": "page-001",
+      "encoding": "UNCOMPRESSED_XML",
+      "inspected": true,
+      "cell_count": 244,
+      "vertex_count": 179,
+      "edge_count": 63,
+      "other_cell_count": 2,
+      "anonymous_cell_count": 3,
+      "duplicate_id_count": 0,
+      "wrapper_object_count": 3,
+      "unresolved_marker_candidate_cells": 0,
+      "edges_with_missing_endpoint_attributes": 41
+    },
+    {
+      "page_ref": "page-002",
+      "encoding": "UNCOMPRESSED_XML",
+      "inspected": true,
+      "cell_count": 262,
+      "vertex_count": 184,
+      "edge_count": 76,
+      "other_cell_count": 2,
+      "anonymous_cell_count": 2,
+      "duplicate_id_count": 0,
+      "wrapper_object_count": 2,
+      "unresolved_marker_candidate_cells": 0,
+      "edges_with_missing_endpoint_attributes": 53
+    }
+  ],
+  "redaction": "No raw labels, account/resource identifiers, page names, XML content or images copied into this inventory",
+  "limitations": [
+    "Counts are structural, not semantic correctness",
+    "Unresolved marker detection is a heuristic only",
+    "Missing endpoint attributes may represent manual connectors; not automatically a defect",
+    "Compressed pages are marked uninspected rather than silently decoded",
+    "Wrapper IDs and cross-page identity need separate hierarchy/connection inspection"
+  ]
+}

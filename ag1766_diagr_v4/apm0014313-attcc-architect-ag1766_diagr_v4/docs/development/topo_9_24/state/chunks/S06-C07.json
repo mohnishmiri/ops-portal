@@ -1,0 +1,12 @@
+{
+	"id":"S06-C07","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 20-22",
+	"inputs":["Guide blocks 20-22 and image6"],
+	"outputs":["evidence/docx/section-006.json","evidence/docx/media/image6.png","evidence/docx/derived/image6-ocr.json","analysis/business_rules/guide_section_06.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 20-22 and image6","symbols":"App-sourced box prose and qualified repeated-detail labels","further":true}],
+	"checks":["Bounded extraction and local OCR succeeded","Source/image hashes unchanged","No example label promoted to canonical resource identity"],
+	"established":["Prose names App as the data source, rather than standard content","OCR suggests application-dependent NAS/EC2 list/details"],
+	"uncertainties":["Exact canonical field mapping and list cardinality unspecified","Some image labels and visual layout unverified","No intake/import defect asserted"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C07; inspect_guide.ps1 blocks 20-22 section-006; local_ocr.exe image6.png image6-ocr.json","result":"0; bounded extraction/OCR succeeded; sources unchanged","mutation":"Analysis artifacts only","output":"evidence/docx/section-006.json; evidence/docx/derived/image6-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-007","path":"analysis/business_rules/guide_section_06.md","source":"Guide blocks 20-22 and image6 OCR","description":"App-sourced variable box and unresolved topology field mapping","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; exact resource/visual semantics unverified"}],
+	"next_chunk":"S06-C08","next_action":"Extract only guide blocks 23-24 and their image"
+}

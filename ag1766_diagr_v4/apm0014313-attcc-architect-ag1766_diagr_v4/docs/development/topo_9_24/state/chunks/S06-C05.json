@@ -1,0 +1,12 @@
+{
+	"id":"S06-C05","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 14-16",
+	"inputs":["Guide blocks 14-16 and reused image2"],
+	"outputs":["evidence/docx/section-004.json","evidence/docx/media/image2.png","evidence/docx/derived/image2-ocr.json","analysis/business_rules/guide_section_04.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 14-16; reused legend relationship","symbols":"Repeated N/R arrow-color instruction","further":true}],
+	"checks":["Original guide/image hashes unchanged","Existing identical image reused","Local OCR JSON retained with explicit limitations"],
+	"established":["N/R arrow-color instruction repeats with the same legend image","OCR recognizes DATA FLOW LEGEND and Multiple Protocols only"],
+	"uncertainties":["Small row labels/directions/colors not reliably transcribed","Prior direction ambiguity requires approved policy/visual confirmation"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"inspect_guide.ps1 -Mode Section -FirstBlock 14 -LastBlock 16 -SectionId section-004; local_ocr.exe image2.png image2-ocr.json","result":"Both operations exit 0; two OCR lines; sources unchanged","mutation":"Analysis text/OCR artifacts only","output":"evidence/docx/section-004.json; evidence/docx/derived/image2-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-005","path":"analysis/business_rules/guide_section_04.md","source":"Guide blocks 14-16 and shared image2","description":"Repeated N/R legend instruction; OCR row limitations preserved","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; detailed visual mapping unverified"}],
+	"next_chunk":"S06-C06","next_action":"Extract only guide blocks 17-19 and their image"
+}

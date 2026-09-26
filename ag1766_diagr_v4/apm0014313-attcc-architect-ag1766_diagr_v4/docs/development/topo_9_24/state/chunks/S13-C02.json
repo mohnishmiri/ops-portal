@@ -1,0 +1,13 @@
+{
+  "id":"S13-C02","stage":"13","result":"COMPLETED","completed_stage":"13","stage_result":"COMPLETE_WITH_LIMITATIONS",
+  "objective":"Reconcile active Markdown/HTML TP07-TP15 completion claims with current-worktree evidence",
+  "inputs":["Relevant completion sections in both active plans","Persisted current findings/evidence"],
+  "outputs":["analysis/implementation_plan_gap/current_plan.md"],
+  "inspected_files":[{"path":"docs/implementation/topology-implementation-plan.md","lines":"552-770 plus existing header/status inventory","symbols":"TP07-TP15 completion records","further":true},{"path":"docs/topology-implementation-plan.html","lines":"1540-1615 plus completion-heading inventory","symbols":"TP13-TP15 completion blocks","further":true}],
+  "checks":["Two active plan documents only","Each owning completion claim compared with current source finding","Historical test counts not used as current evidence","HTML/Markdown status synchronization checked","Canonical plans left unchanged"],
+  "established":["TP07-TP14 completion claims conflict with current owning invariants and require corrective reopening","TP15 remains incomplete with a broader blocker set","HTML TP13-TP15 completion blocks are stale","Markdown TP15 manual-signoff statements are internally inconsistent","Stage 13 documentation comparison completed with runtime limitations"],
+  "uncertainties":["Historical command results not rerun due tests exclusion","Prior checkout compliance not reconstructed","TP01-TP06 not re-audited in this chunk","Exact canonical document amendment awaits final user-approved plan"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Inventory/read bounded TP07-TP15 Markdown completion ranges and TP13-TP15 HTML completion ranges; compare with persisted current findings","result":"Status/claim reconciliation and document drift mapped","mutation":"None outside analysis artifacts","output":"analysis/implementation_plan_gap/current_plan.md"}],
+  "evidence":[{"id":"EV-DOC-002","path":"analysis/implementation_plan_gap/current_plan.md","source":"Active Markdown/HTML completion records and current evidence index","description":"Current plan claim contradictions, reopening dispositions and synchronization drift","kind":"Evidence reconciliation","reliability":"Current source/doc claims VERIFIED; historical executions unreviewed"}],
+  "next_chunk":"S14-C01","next_action":"Synthesize root causes from validated findings without reopening broad source discovery"
+}

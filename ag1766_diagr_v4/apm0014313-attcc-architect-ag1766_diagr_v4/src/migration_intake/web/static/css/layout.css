@@ -1,0 +1,357 @@
+/*
+ * Application shell layout for AWS Outposts Migration Intake.
+ *
+ * Defines the three-zone chrome: global header, command bar, and the
+ * workspace shell (left side-nav + main content area).
+ *
+ * Uses CSS custom properties from tokens.css throughout.
+ * No hard-coded colour literals.
+ */
+
+/* ================================================================
+   App shell wrapper
+   ================================================================ */
+.app-shell {
+  min-height: 100vh;
+  background: linear-gradient(
+    180deg,
+    #d9f1f5 0,
+    #eef5f7 185px,
+    var(--color-canvas) 100%
+  );
+}
+
+/* ================================================================
+   Global header (navy, fixed height)
+   ================================================================ */
+.global-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
+  height: var(--header-height);
+  display: grid;
+  grid-template-columns: var(--nav-width) minmax(0, 1fr) auto;
+  align-items: stretch;
+  padding: 0 var(--space-7);
+  color: var(--color-surface);
+  background: var(--color-navy-900);
+  border-bottom: 1px solid rgb(255 255 255 / 0.12);
+}
+
+/* Brand mark / lockup */
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--font-weight-bold);
+  font-size: var(--font-size-lg);
+  text-decoration: none;
+  color: inherit;
+}
+
+.brand-mark {
+  width: 29px;
+  height: 29px;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  overflow: hidden;
+  border: 2px solid var(--color-cyan-300);
+  border-radius: 50%;
+  transform: rotate(-9deg);
+  flex-shrink: 0;
+}
+
+.brand-mark span {
+  display: block;
+  height: 2px;
+  background: var(--color-cyan-300);
+}
+
+.brand-mark span:nth-child(1) { width: 18px; margin-left: -2px; }
+.brand-mark span:nth-child(2) { width: 27px; margin-left: -2px; }
+.brand-mark span:nth-child(3) { width: 19px; margin-left: 6px; }
+
+/* Global nav (tabs in header) */
+.global-nav {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.global-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.global-nav-item {
+  position: relative;
+  min-width: max-content;
+  padding: 0 var(--space-5);
+  border: 0;
+  color: #b8c7d8;
+  background: transparent;
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+}
+
+.global-nav-item::after {
+  content: "";
+  position: absolute;
+  left: var(--space-4);
+  right: var(--space-4);
+  bottom: 0;
+  height: 3px;
+  background: transparent;
+}
+
+.global-nav-item:hover {
+  color: var(--color-surface);
+  background: rgb(255 255 255 / 0.04);
+}
+
+.global-nav-item.active,
+.global-nav-item[aria-current="page"] {
+  color: var(--color-surface);
+  font-weight: var(--font-weight-semibold);
+}
+
+.global-nav-item.active::after,
+.global-nav-item[aria-current="page"]::after {
+  background: var(--color-cyan-300);
+}
+
+/* User tools area (icons, profile) */
+.user-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Mobile nav toggle — visible only below breakpoint */
+.nav-toggle {
+  display: none;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.nav-toggle:hover {
+  border-color: rgb(255 255 255 / 0.25);
+  background: rgb(255 255 255 / 0.07);
+}
+
+/* ================================================================
+   Command bar (context row below header)
+   ================================================================ */
+.command-bar {
+  min-height: var(--command-bar-height);
+  display: grid;
+  grid-template-columns: var(--nav-width) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-7);
+  color: var(--color-surface);
+  background: linear-gradient(110deg, var(--color-navy-800), #0a3159 65%, #0d3b63);
+  box-shadow: 0 3px 12px rgb(2 21 43 / 0.18);
+}
+
+.command-brand {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.command-brand .eyebrow {
+  color: #8fdbe7;
+}
+
+.command-brand strong {
+  max-width: 210px;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-tight);
+}
+
+.command-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ================================================================
+   Workspace shell (side-nav + main)
+   ================================================================ */
+.workspace-shell {
+  min-height: calc(100vh - var(--header-height) - var(--command-bar-height));
+  display: grid;
+  grid-template-columns: var(--nav-width) minmax(0, 1fr);
+}
+
+/* ================================================================
+   Side navigation
+   ================================================================ */
+.side-nav {
+  min-height: calc(100vh - var(--header-height) - var(--command-bar-height));
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5) var(--space-3) var(--space-4);
+  border-right: 1px solid var(--color-border);
+  background: rgb(255 255 255 / 0.86);
+  backdrop-filter: blur(12px);
+}
+
+.side-nav-heading {
+  padding: 0 var(--space-3) var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.side-nav-item {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  background: transparent;
+  text-align: left;
+  text-decoration: none;
+  font-size: var(--font-size-base);
+  cursor: pointer;
+}
+
+.side-nav-item:hover {
+  color: var(--color-navy-700);
+  background: #eef7f8;
+}
+
+.side-nav-item.active,
+.side-nav-item[aria-current="page"] {
+  color: var(--color-navy-800);
+  border-left-color: var(--color-cyan-400);
+  background: #e6f5f8;
+  font-weight: var(--font-weight-bold);
+}
+
+.side-nav-footer {
+  margin-top: auto;
+  padding: var(--space-4) var(--space-3) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  border-top: 1px solid var(--color-border);
+}
+
+.side-nav-footer strong {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ================================================================
+   Main content area
+   ================================================================ */
+main#main-content {
+  min-height: calc(100vh - var(--header-height) - var(--command-bar-height));
+  padding: var(--space-6) var(--space-7);
+  outline: 0;
+}
+
+/* ================================================================
+   Responsive breakpoints
+   ================================================================ */
+
+/* Tablet (1024px) — narrow nav */
+@media (max-width: 1024px) {
+  :root {
+    --nav-width: 190px;
+  }
+
+  .global-header {
+    grid-template-columns: var(--nav-width) minmax(0, 1fr) auto;
+    padding: 0 var(--space-4);
+  }
+
+  .command-bar {
+    grid-template-columns: var(--nav-width) minmax(0, 1fr) auto;
+    padding: var(--space-3) var(--space-4);
+  }
+
+  main#main-content {
+    padding: var(--space-4);
+  }
+}
+
+/* Tablet portrait / large phone (768px) — collapse side-nav */
+@media (max-width: 768px) {
+  .global-header {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .command-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .command-brand {
+    display: none;
+  }
+
+  .workspace-shell {
+    /* minmax(0, 1fr), not 1fr: a bare 1fr track has min-width:auto, so a wide
+       child (a data table, a long identifier) forces the track — and the whole
+       document — wider than the viewport instead of scrolling inside itself. */
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .side-nav {
+    position: fixed;
+    top: var(--header-height);
+    left: 0;
+    bottom: 0;
+    z-index: var(--z-nav);
+    width: var(--nav-width);
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .side-nav.nav--open {
+    transform: translateX(0);
+  }
+
+  .nav-toggle {
+    display: flex;
+  }
+}
+
+/* Mobile (390px) — tighten spacing */
+@media (max-width: 480px) {
+  main#main-content {
+    padding: var(--space-3);
+  }
+
+  .command-actions {
+    gap: var(--space-1);
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S13-C01",
+  "validated_at": "2026-09-24T17:21:27.1631709-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/implementation_plan_gap/assessment_claims.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "docs/TOPOLOGY_GENERATION_ASSESSMENT.html",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\TOPOLOGY_GENERATION_ASSESSMENT.html",
+      "file_type": ".html",
+      "size_bytes": 25370,
+      "modified_utc": "2026-09-22T18:53:54.0448891Z",
+      "sha256": "527d20e6c2a7c9b081c23eea6dffa91855b2c4a5e52aec43fed5012e4fd33c4a",
+      "chunk_id": "S13-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "152-165, section 7 only",
+      "relevant_section": "Ten historical gap/impact rows",
+      "evidence_id": "EV-DOC-001",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "One assessment section only",
+    "Every historical row classified against current persisted evidence",
+    "Historical test claims excluded",
+    "No source document edit"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

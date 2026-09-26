@@ -1,0 +1,14 @@
+{
+  "id":"S01-C01","stage":"01","result":"COMPLETED",
+  "objective":"Verify stack, instruction boundaries, and declared operating commands from five configuration documents",
+  "inputs":["AGENTS.md","pyproject.toml","README.md","Makefile","Dockerfile"],
+  "outputs":["inventory/repository_inventory.md"],
+  "inspected_files":[{"path":"AGENTS.md","lines":"1-68","symbols":"Product invariants; Architecture; Verification","further":false},{"path":"pyproject.toml","lines":"1-176, excluding full truncated force-include line","symbols":"project; dependencies; scripts; mypy; Ruff","further":true},{"path":"README.md","lines":"1-105","symbols":"Status; Prerequisites; Project Structure","further":false},{"path":"Makefile","lines":"1-34","symbols":"PYTHON; lint; typecheck; verify","further":false},{"path":"Dockerfile","lines":"1-98","symbols":"FROM; BuildKit secrets; USER; HEALTHCHECK; CMD","further":false}],
+  "checks":["Five related instruction/build files only","No excluded files followed","Evidence distinguishes declarations from runtime results","Truncated packaging line explicitly unverified"],
+  "established":["Declared Python 3.13 FastAPI/Jinja SQLAlchemy/Alembic application with Oracle and workbook dependencies","README Python prerequisite and Ruff target differ from package Python requirement","Aggregate Make targets are not safe to execute under current exclusions"],
+  "uncertainties":["Installed versions and active settings unverified","Actual topology UI/render contracts await source trace","Long packaging force-include line not fully inspected","Existing suite and its results out of scope"],
+  "unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"read_file of AGENTS.md, pyproject.toml, README.md, Makefile, Dockerfile; no commands declared in those files were executed","result":"Success; packaging display truncation noted","mutation":"None","output":"inventory/repository_inventory.md"}],
+  "evidence":[{"id":"EV-REPO-004","path":"inventory/repository_inventory.md","source":"Five configuration/instruction files with locators in artifact","description":"Declared stack, command boundary, and Python-documentation drift","kind":"Interpreted static evidence","reliability":"VERIFIED declarations; runtime unknown"}],
+  "next_chunk":"S01-C02","next_action":"Locate production topology entry points with source-scoped searches only"
+}

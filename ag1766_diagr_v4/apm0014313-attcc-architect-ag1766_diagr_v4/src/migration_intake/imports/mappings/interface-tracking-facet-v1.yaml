@@ -1,0 +1,24 @@
+version: interface-tracking-facet-v1
+source_format: INTERFACE_TRACKING_FACET_V1
+sheets:
+  - Migrating App Data
+  - Interfaces
+  - Contact & Data Impact
+  - Scan Data
+ignored_sheets:
+  - Sample Interface Data
+  - Read Me
+aggregate_rules:
+  - target: {kind: QUESTION, key: INT-001}
+    predicate: valid_interface_row
+    proposed_value: IN_PROGRESS
+  - target: {kind: QUESTION, key: INT-002}
+    predicate: interface_change_detail
+    proposed_value: IN_PROGRESS
+  - finding: INT_003_GOVERNANCE_GAP
+    predicate: commitment_funding_connectivity_or_uat_missing
+  - finding: MIG_005_TEST_STATUS_GAP
+    predicate: connectivity_or_uat_missing
+disabled_pending_header_review:
+  - NET-006
+  - SEC-006

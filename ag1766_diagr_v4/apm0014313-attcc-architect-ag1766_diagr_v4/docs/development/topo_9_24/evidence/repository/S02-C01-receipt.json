@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S02-C01",
+  "validated_at": "2026-09-24T13:43:39.9502578-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/runtime_trace/upload_base.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/web/routes/topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\web\\routes\\topology.py",
+      "file_type": ".py",
+      "size_bytes": 30219,
+      "modified_utc": "2026-09-23T13:43:23.8539132Z",
+      "sha256": "6dd5f8c28d6fdd0fc55d9a58effcd5111a5acbebdcce09f93d9bee9a36805212",
+      "chunk_id": "S02-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-294",
+      "relevant_section": "get_topology_service; topology_landing; upload_base_diagram",
+      "evidence_id": "EV-FLOW-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/web/templates/topology/index.html",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\web\\templates\\topology\\index.html",
+      "file_type": ".html",
+      "size_bytes": 11930,
+      "modified_utc": "2026-09-23T13:43:23.8555704Z",
+      "sha256": "cc843e212a8c57022db9e55b2a65443d9d25cb7466d5cb8137606407eab6679e",
+      "chunk_id": "S02-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-330",
+      "relevant_section": "Upload/preview forms; eligible-base filter",
+      "evidence_id": "EV-FLOW-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/application/services/topology_generation.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\topology_generation.py",
+      "file_type": ".py",
+      "size_bytes": 27328,
+      "modified_utc": "2026-09-22T18:53:54.0579123Z",
+      "sha256": "ca445fa62b717e5797af8e134b9a2f2e66e542a1d7ce1259663f634d330a8208",
+      "chunk_id": "S02-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "90-184 and declaration matches",
+      "relevant_section": "upload_base_diagram",
+      "evidence_id": "EV-FLOW-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/application/services/base_diagram.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\base_diagram.py",
+      "file_type": ".py",
+      "size_bytes": 15054,
+      "modified_utc": "2026-09-24T12:08:58.2116339Z",
+      "sha256": "304465dbbc795981283a829e580df4d0217c44e90a1ec2fd18cce261b1a30fee",
+      "chunk_id": "S02-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "63-222 and declaration matches",
+      "relevant_section": "upload_base_diagram; check_compatibility; approve_base_diagram",
+      "evidence_id": "EV-FLOW-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/models_topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models_topology.py",
+      "file_type": ".py",
+      "size_bytes": 13445,
+      "modified_utc": "2026-09-22T22:00:32.7135450Z",
+      "sha256": "476950b30276fef44bd4cdd584fa9f6471894cd4a6088ef5267b349cb73eb61e",
+      "chunk_id": "S02-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "review_state/compatibility_id declarations at 37,51,64",
+      "relevant_section": "TopologyBaseArtifact defaults",
+      "evidence_id": "EV-FLOW-001",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Fresh upload defaults traced to model DRAFT state",
+    "UI filter compared with actual service create payload",
+    "No named governance references in scoped web search",
+    "Five source files maximum"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

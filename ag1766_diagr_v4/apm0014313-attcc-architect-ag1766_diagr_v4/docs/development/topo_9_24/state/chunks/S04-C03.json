@@ -1,0 +1,13 @@
+{
+  "id":"S04-C03","stage":"04","result":"COMPLETED","completed_stage":"04",
+  "objective":"Inspect candidate expected-output endpoints and arrow/geometry categories",
+  "inputs":["Supplied candidate expected-output Draw.io; validated per-page hierarchy"],
+  "outputs":["evidence/drawio/expected_connections.json","analysis/semantic_diff/expected_connections.md"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/CCPM_out_put_18678_TargetState_AWS_OutPosts_v01 (1).drawio","lines":"Per-page connection category only","symbols":"Edge refs; point anchors; arrow categories","further":true}],
+  "checks":["Safe parser; source hash unchanged","No raw labels/IDs persisted","Business direction not inferred from arrows"],
+  "established":["139 edges across two pages","64 omit source and 83 omit target attributes; counts overlap","No dangling named endpoints","101 explicit source points and 118 explicit target points","Stage 04 structural inspection complete"],
+  "uncertainties":["Expected-output normative role/application/scope requires confirmation before semantic gap conclusions","Intake XLSX source remains undesignated","No visual correctness or generated output equivalence claimed"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/inspect_drawio_category.ps1 -Source Expected -Category Connections","result":"0; INSPECTED; source unchanged","mutation":"Redacted JSON artifact only","output":"evidence/drawio/expected_connections.json"}],
+  "evidence":[{"id":"EV-DRAWIO-006","path":"evidence/drawio/expected_connections.json","source":"Expected-output candidate connection category","description":"Opaque per-page endpoint and geometry/arrow records","kind":"Normalized structural evidence","reliability":"VERIFIED structure; business meaning/application scope unverified"}],
+  "next_chunk":"S05-C01","next_action":"Clarify Q-003 expected-output role and Q-002 workbook path, then compare nodes/hierarchy with applicability limits explicit"
+}

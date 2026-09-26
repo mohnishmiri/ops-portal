@@ -1,0 +1,515 @@
+/* questionnaire.css — owned by a single UX packet so parallel work cannot collide.
+   Use design tokens (var(--color-*), var(--space-*)) only: the design-system
+   audit in tests/web/test_ui_shell.py caps hard-coded colours per file.
+
+   Layout note: base.html always renders the workspace side-nav, and the
+   questionnaire passes it no items, so the page used to carry an empty 220px
+   column *plus* a bullet list of sections stacked above the content. The
+   :has() rules below reclaim that column for the section rail instead of
+   editing base.html, which another packet owns. */
+
+.workspace-shell:has(.questionnaire-page) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace-shell:has(.questionnaire-page) .side-nav {
+  display: none;
+}
+
+.workspace-shell:has(.questionnaire-page) main#main-content {
+  padding: 0;
+}
+
+/* ================================================================
+   Shell
+   ================================================================ */
+.qx-shell {
+  display: grid;
+  grid-template-columns: var(--nav-width) minmax(0, 1fr);
+  align-items: start;
+}
+
+/* ================================================================
+   Section rail
+   ================================================================ */
+.qx-rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: var(--space-4) 0;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+}
+
+.qx-rail-heading {
+  margin: 0 var(--space-4) var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qx-rail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qx-rail-heading-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1);
+  padding-left: var(--space-3);
+  padding-right: var(--space-2);
+}
+
+.qx-rail-heading-row .qx-rail-heading {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.qx-rail-overall {
+  color: var(--color-text-muted);
+  flex: none;
+  font-size: 0.6rem;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.qx-rail-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-left: 3px solid transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+}
+
+.qx-rail-item:hover {
+  background: var(--color-canvas);
+}
+
+.qx-rail-item--on {
+  border-left-color: var(--color-cyan-500);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.qx-rail-name {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.qx-rail-count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+
+.qx-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-border-strong);
+}
+
+.qx-dot--done { background: var(--color-success); }
+.qx-dot--part { background: var(--color-warning); }
+.qx-dot--derived { background: var(--color-border); }
+
+.qx-badge {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-info);
+  border-radius: var(--radius-full);
+  background: var(--color-info-bg);
+  color: var(--color-info);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+}
+
+.qx-rail-tools {
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.qx-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.qx-rail-note {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* ================================================================
+   Main column
+   ================================================================ */
+.qx-main {
+  min-width: 0;
+  padding: var(--space-5) var(--space-6) 0;
+}
+
+.qx-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-bottom: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.qx-title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.qx-sub,
+.qx-legend {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.qx-head-progress {
+  text-align: right;
+}
+
+.qx-bar {
+  width: 220px;
+  max-width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+}
+
+.qx-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--color-teal-500);
+}
+
+/* ================================================================
+   Question card
+   ================================================================ */
+.qx-questions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.qx-question {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.qx-question:hover {
+  border-color: var(--color-border-strong);
+}
+
+.qx-question--answered {
+  background: var(--color-surface-muted);
+}
+
+.qx-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  list-style: none;
+}
+
+.qx-summary::-webkit-details-marker {
+  display: none;
+}
+
+.qx-summary:focus-visible {
+  outline: 2px solid var(--color-cyan-400);
+  outline-offset: -2px;
+}
+
+.qx-code {
+  flex: none;
+  margin-top: 1px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.qx-question-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: var(--font-weight-semibold);
+}
+
+.qx-required {
+  color: var(--color-danger);
+}
+
+.qx-value {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-normal);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.qx-value--hint {
+  color: var(--color-text-muted);
+}
+
+.qx-pill {
+  flex: none;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  white-space: nowrap;
+  /* The pill text is the canonical state code (DRAFT / CONFIRMED) because the
+     journey specs assert on it; only its presentation is sentence-cased. */
+  text-transform: lowercase;
+}
+
+.qx-pill::first-letter {
+  text-transform: uppercase;
+}
+
+.qx-pill--confirmed {
+  border-color: var(--color-active-border);
+  background: var(--color-active-bg);
+  color: var(--color-active);
+}
+
+.qx-pill--draft {
+  border-color: var(--color-warning);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.qx-pill--proposal {
+  border-color: var(--color-info);
+  background: var(--color-info-bg);
+  color: var(--color-info);
+}
+
+.qx-body {
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.qx-help {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+/* ================================================================
+   Inline proposal strip
+   ================================================================ */
+.qx-proposal {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-info);
+  border-radius: var(--radius-md);
+  background: var(--color-info-bg);
+  font-size: var(--font-size-sm);
+}
+
+.qx-proposal-label {
+  color: var(--color-info);
+  font-weight: var(--font-weight-semibold);
+}
+
+.qx-proposal-value {
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-info);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-weight: var(--font-weight-semibold);
+}
+
+.qx-proposal-source {
+  flex: 1;
+  min-width: 140px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.qx-proposal-blocked {
+  color: var(--color-danger);
+  font-size: var(--font-size-xs);
+}
+
+.qx-proposal-form {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.qx-proposal-form--reject {
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+.qx-proposal-reject[open] {
+  flex-basis: 100%;
+}
+
+.qx-field-label {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.qx-linklike {
+  display: inline-block;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ================================================================
+   Autosave affordances
+   ================================================================ */
+.qx-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.qx-actions-spacer {
+  flex: 1;
+}
+
+.qx-save {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.qx-save[data-state="saved"] { color: var(--color-success); }
+.qx-save[data-state="saving"] { color: var(--color-text-muted); }
+.qx-save[data-state="error"] { color: var(--color-danger); }
+
+.qx-retry {
+  margin-left: var(--space-2);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+/* ================================================================
+   Metadata / history
+   ================================================================ */
+.qx-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.qx-history-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--space-3);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.qx-history-list dt {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+.qx-history-list dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+/* ================================================================
+   Sticky footer
+   ================================================================ */
+.qx-sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-nav);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-6) var(--space-2) 0;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: var(--font-size-sm);
+}
+
+/* ================================================================
+   Responsive
+   ================================================================ */
+@media (max-width: 900px) {
+  .qx-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .qx-rail {
+    position: static;
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .qx-main {
+    padding: var(--space-4) var(--space-4) 0;
+  }
+
+  .qx-sticky {
+    padding-right: var(--space-4);
+  }
+}

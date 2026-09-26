@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+
+{#
+  Questionnaire section page (UX-1).
+
+  Three shapes carry the redesign:
+
+  * ``details.qx-question`` — an answered question with no undecided proposal
+    collapses to one line. The body stays in the DOM (closed, not removed) so
+    the response-type matrix and the journey specs can still read the editor's
+    value back without expanding anything.
+  * ``form[data-autosave]`` — there is no Save button. app.js posts the form on
+    blur and writes the returned revision number back into ``_row_version``.
+  * ``.qx-proposal`` — imported evidence appears on the question it concerns,
+    posting to the *existing* candidate decision routes.
+
+  No inline ``on*`` handlers: every behaviour is bound in /static/js/app.js.
+#}
+
+{% set section_label = current_section.title %}
+{% if current_section.code == 'INTERFACES' %}{% set section_label = 'Interface Tracking' %}{% endif %}
+
+{% block title %}{{ section_label }} - {{ application.display_name }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">{{ application.display_name }}</a>
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/questionnaire" class="global-nav-item active" aria-current="page">Questionnaire</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ app_id }}" class="button secondary">Back to workspace</a>
+{% endblock %}
+
+{% block content %}
+{% set base = "/applications/" ~ app_id ~ "/intakes/" ~ intake_id %}
+<div class="questionnaire-page" id="questionnaire-page">
+  <div class="qx-shell">
+
+    {# ---------------------------------------------------------------- #}
+    {# Side rail: where you are, what is left, what is waiting on you.   #}
+    {# ---------------------------------------------------------------- #}
+    <nav class="qx-rail" aria-label="Questionnaire sections">
+      <div class="qx-rail-heading-row">
+        <h2 class="qx-rail-heading">Sections</h2>
+        <span class="qx-rail-overall">{{ overall_status.completed_count }}/{{ overall_status.question_count }} answered</span>
+      </div>
+      <ul class="qx-rail-list">
+        {% for section in sections %}
+        <li>
+          <a href="{{ base }}/questionnaire/{{ section.code }}"
+             class="qx-rail-item{% if section.code == current_section.code %} qx-rail-item--on{% endif %}"
+             {% if section.code == current_section.code %}aria-current="page"{% endif %}>
+            <span class="qx-dot qx-dot--{{ section.progress_state }}" aria-hidden="true"></span>
+            <span class="qx-rail-name">{{ 'Interface Tracking' if section.code == 'INTERFACES' else section.title }}</span>
+            {% if section.proposed_count %}
+            <span class="qx-badge" title="{{ section.proposed_count }} proposals waiting for a decision">{{ section.proposed_count }}</span>
+            {% endif %}
+            <span class="qx-rail-count">
+              {% if section.answerable_count %}{{ section.answered_count }}/{{ section.answerable_count }}{% else %}Derived{% endif %}
+            </span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+
+    </nav>
+
+    {# ---------------------------------------------------------------- #}
+    {# Questions                                                        #}
+    {# ---------------------------------------------------------------- #}
+    <div class="qx-main">
+      <header class="qx-head">
+        <div>
+          <h1 class="qx-title">{{ section_label }}</h1>
+          <p class="qx-sub">
+            {{ current_section.answered_count }} of {{ current_section.answerable_count }} answered
+            {%- if current_section.proposed_count %} &middot; {{ current_section.proposed_count }} proposal{{ '' if current_section.proposed_count == 1 else 's' }} waiting{% endif %}
+          </p>
+        </div>
+        <div class="qx-head-progress">
+          <div class="qx-bar"><i style="width: {{ current_section.progress_percent }}%"></i></div>
+          <p class="qx-legend">Section {{ current_section.position }} of {{ current_section.total }} &middot; catalog {{ intake.catalog_version }} &middot; {{ intake.state }}</p>
+        </div>
+      </header>
+
+      <div class="qx-questions">
+        {% for question in questions %}
+        {% set answer = question.current_answer %}
+        <article class="qx-question{% if question.is_collapsed %} qx-question--answered{% endif %}"
+                 id="question-{{ question.code }}"
+                 data-question-code="{{ question.code }}"
+                 data-derived="{{ 'true' if question.is_computed else 'false' }}"
+                 data-answered="{{ 'true' if question.is_answered else 'false' }}"
+                 data-proposals="{{ question.proposed_candidate_count }}">
+          <details class="qx-disclosure"{% if not question.is_collapsed %} open{% endif %}>
+            <summary class="qx-summary">
+              <span class="qx-code">{{ question.code }}</span>
+              <span class="qx-question-text">
+                {{ question.text }}
+                {% if question.required_level == 'REQUIRED' %}<span class="qx-required" aria-label="Required">*</span>{% endif %}
+                {% if answer and answer.display_value %}
+                <span class="qx-value">{{ answer.display_value }}</span>
+                {% elif question.needs_person %}
+                <span class="qx-value qx-value--hint">Needs a person &mdash; no source file answers this</span>
+                {% endif %}
+              </span>
+              {% if question.proposed_candidate_count %}
+              <span class="qx-pill qx-pill--proposal">{{ question.proposed_candidate_count }} pending review</span>
+              {% endif %}
+              {% if answer %}
+              <span class="qx-pill qx-pill--{{ answer.review_state | lower }}">{{ answer.review_state }}</span>
+              {% else %}
+              <span class="qx-pill qx-pill--empty">Not answered</span>
+              {% endif %}
+            </summary>
+
+            <div class="qx-body">
+              {% if question.help %}
+              <p class="qx-help" id="q-{{ question.code }}-help">{{ question.help }}</p>
+              {% endif %}
+
+              {# ---- Inline proposals: the evidence pipeline's output ---- #}
+              {% for proposal in question.proposals %}
+              <div class="qx-proposal" id="proposal-{{ proposal.candidate_id }}">
+                <span class="qx-proposal-label">Evidence suggests</span>
+                <span class="qx-proposal-value">{{ proposal.display_value or 'no value' }}</span>
+                <span class="qx-proposal-source">
+                  {{ proposal.source_label }}
+                  {%- if proposal.confidence_percent is not none %} &middot; confidence {{ proposal.confidence_percent }}%{% endif %}
+                </span>
+                <a class="qx-linklike" href="{{ base }}">review in questionnaire</a>
+                {% if proposal.decidable %}
+                <form method="post"
+                      action="{{ base }}/imports/{{ proposal.import_run_id }}/candidates/{{ proposal.candidate_id }}/accept"
+                      class="qx-proposal-form"
+                      data-proposal-decision="accept">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="_row_version" value="{{ proposal.row_version }}">
+                  <button type="submit" class="button button--primary button--sm" id="accept-{{ proposal.candidate_id }}">Accept</button>
+                </form>
+                <details class="qx-proposal-reject">
+                  <summary class="qx-linklike">Reject&hellip;</summary>
+                  <form method="post"
+                        action="{{ base }}/imports/{{ proposal.import_run_id }}/candidates/{{ proposal.candidate_id }}/reject"
+                        class="qx-proposal-form qx-proposal-form--reject"
+                        data-proposal-decision="reject">
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="_row_version" value="{{ proposal.row_version }}">
+                    <label class="qx-field-label" for="reject-{{ proposal.candidate_id }}">Why is this wrong?</label>
+                    <input id="reject-{{ proposal.candidate_id }}" name="reason" class="form-control" required>
+                    <button type="submit" class="button button--sm">Confirm reject</button>
+                  </form>
+                </details>
+                {% else %}
+                <span class="qx-proposal-blocked">Cannot be accepted &mdash; this import is not matched to this application.</span>
+                {% endif %}
+              </div>
+              {% endfor %}
+
+              {# ---- Editor (autosaving) or computed display ---- #}
+              {% if not question.is_computed %}
+              <form method="POST"
+                    action="{{ base }}/questions/{{ question.code }}/answer"
+                    class="question-form"
+                    data-autosave="true"
+                    data-question-code="{{ question.code }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="_schema_version" value="{{ question.schema_version }}">
+                {# AnswerService compares expected_version against the current
+                   revision number, not the answer instance's row_version, and
+                   0 is the correct token for "no revision yet". app.js rewrites
+                   this value from the save response, otherwise the second edit
+                   of the same field conflicts with itself. #}
+                <input type="hidden" name="_row_version" value="{{ answer.revision_number if answer else 0 }}" id="q-{{ question.code }}-version">
+
+                {% set editor_template = "responses/editors/" ~ question.editor_key ~ ".html" %}
+                {% include editor_template ignore missing %}
+
+                <div class="qx-actions">
+                  <span class="qx-save" id="q-{{ question.code }}-save" data-state="idle" role="status" aria-live="polite"></span>
+                  <span class="qx-actions-spacer"></span>
+                  {% if answer %}
+                  <button type="submit"
+                          formaction="{{ base }}/questions/{{ question.code }}/clear"
+                          formnovalidate
+                          class="button button--ghost button--sm">Clear</button>
+                  <button type="submit"
+                          formaction="{{ base }}/questions/{{ question.code }}/confirm"
+                          formnovalidate
+                          class="button button--secondary button--sm">Confirm</button>
+                  {% endif %}
+                </div>
+              </form>
+              {% else %}
+              {% set display_template = "responses/displays/" ~ question.editor_key ~ ".html" %}
+              {% include display_template ignore missing %}
+              {% endif %}
+
+              {# ---- Humanised metadata; provenance behind "history" ---- #}
+              {% if answer %}
+              <div class="qx-meta">
+                <span>Updated {{ answer.updated_at_relative }} by {{ answer.actor_display_name }}</span>
+                <details class="qx-history">
+                  <summary class="qx-linklike">history</summary>
+                  <dl class="qx-history-list">
+                    <dt>Saved</dt><dd>{{ answer.updated_at_display }}</dd>
+                    <dt>By</dt><dd>{{ answer.actor_display_name }}</dd>
+                    <dt>Revision</dt><dd>{{ answer.revision_number }} of {{ question.history_count }}</dd>
+                    <dt>State</dt><dd>{{ answer.review_state }}</dd>
+                    {% if answer.change_reason_display %}
+                    <dt>Reason</dt><dd>{{ answer.change_reason_display }}</dd>
+                    {% endif %}
+                  </dl>
+                </details>
+                {% if question.candidate_count > question.proposed_candidate_count %}
+                <span class="qx-meta-quiet">{{ question.candidate_count - question.proposed_candidate_count }} reviewed candidate{{ '' if question.candidate_count - question.proposed_candidate_count == 1 else 's' }}</span>
+                {% endif %}
+              </div>
+              {% endif %}
+            </div>
+          </details>
+        </article>
+        {% endfor %}
+      </div>
+
+      {# ---------------------------------------------------------------- #}
+      {# Sticky footer: progress and the two moves worth one click.       #}
+      {# ---------------------------------------------------------------- #}
+      <div class="qx-sticky">
+        <strong>{{ current_section.answered_count }} of {{ current_section.answerable_count }} answered</strong>
+        <span class="qx-legend">&middot; {{ overall_status.completed_count }} of {{ overall_status.question_count }} completed</span>
+        <span class="qx-legend">&middot; all changes save automatically</span>
+        <span class="qx-actions-spacer"></span>
+        {% if current_section.previous_code %}
+        <a href="{{ base }}/questionnaire/{{ current_section.previous_code }}" class="button button--ghost button--sm">Previous section</a>
+        {% else %}
+        <span class="button button--ghost button--sm button--disabled">Previous section</span>
+        {% endif %}
+        <button type="button" class="button button--sm" id="skip-to-unanswered">Skip to next unanswered</button>
+        {% if current_section.next_code %}
+        <a href="{{ base }}/questionnaire/{{ current_section.next_code }}" class="button button--primary button--sm">Next section: {{ current_section.next_title }}</a>
+        {% else %}
+        <span class="button button--ghost button--sm button--disabled">Next section</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

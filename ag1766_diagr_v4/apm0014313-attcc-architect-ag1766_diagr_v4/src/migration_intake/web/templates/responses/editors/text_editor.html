@@ -1,0 +1,24 @@
+{#
+  Text editor - single-line text input.
+
+  Context:
+    question: dict with code, text, help, required_level
+    answer: dict | None with value.text
+    errors: dict | None
+#}
+<div class="text-editor">
+  <input 
+    type="text"
+    name="text"
+    id="q-{{ question.code }}-input"
+    class="form-control{% if errors and errors.text %} form-control--error{% endif %}"
+    value="{{ answer.value.text if answer and answer.value and answer.value.text else '' }}"
+    {% if question.required_level == 'REQUIRED' %}required{% endif %}
+    {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+    placeholder="Enter text"
+  >
+  
+  {% if errors and errors.text %}
+  <span class="form-error">{{ errors.text | join(', ') }}</span>
+  {% endif %}
+</div>

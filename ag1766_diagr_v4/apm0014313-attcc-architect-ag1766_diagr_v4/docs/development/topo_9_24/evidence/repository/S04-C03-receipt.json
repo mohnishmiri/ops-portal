@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S04-C03",
+  "validated_at": "2026-09-24T13:57:27.7325163-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/drawio/expected_connections.json",
+    "analysis/semantic_diff/expected_connections.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "docs/development/topo_9_24/CCPM_out_put_18678_TargetState_AWS_OutPosts_v01 (1).drawio",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\development\\topo_9_24\\CCPM_out_put_18678_TargetState_AWS_OutPosts_v01 (1).drawio",
+      "file_type": ".drawio",
+      "size_bytes": 720354,
+      "modified_utc": "2026-09-17T16:11:41.2327127Z",
+      "sha256": "3df0f756a748277a6cc7d32abffdba8737ee463dcf7dc913cba721e89d0dc8af",
+      "chunk_id": "S04-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Per-page connection category only",
+      "relevant_section": "Edge refs; point anchors; arrow categories",
+      "evidence_id": "EV-DRAWIO-006",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Safe parser; source hash unchanged",
+    "No raw labels/IDs persisted",
+    "Business direction not inferred from arrows"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

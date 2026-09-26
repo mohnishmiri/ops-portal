@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Catalog{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/admin/catalog" class="global-nav-item active" aria-current="page">Catalog Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/admin/catalog" class="button button--ghost">Cancel</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.catalog-upload-actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  grid-column: 1 / -1;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Catalog Admin &#8594; Upload</h2>
+    </div>
+
+    <p class="form-hint">
+        Upload a reviewed catalog CSV to compile and publish a new immutable
+        catalog release. Existing intakes keep their current pinned release;
+        only new intakes can use the new version.
+    </p>
+
+    <form method="POST" action="/admin/catalog/publish" enctype="multipart/form-data" class="form-grid">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="semantic_version" class="form-label form-label--required">
+                Semantic Version
+            </label>
+            <input
+                type="text"
+                id="semantic_version"
+                name="semantic_version"
+                class="form-control"
+                required
+                placeholder="e.g. 0.3.0"
+            >
+            <span class="form-hint">Must not already be published with different content.</span>
+        </div>
+
+        <div class="form-group">
+            <label for="file" class="form-label form-label--required">
+                Catalog CSV File
+            </label>
+            <input
+                type="file"
+                id="file"
+                name="file"
+                class="form-control"
+                accept=".csv,text/csv"
+                required
+            >
+            <span class="form-hint">The reviewed, approved question catalog in CSV format.</span>
+        </div>
+
+        <div class="catalog-upload-actions">
+            <a href="/admin/catalog" class="button button--ghost">Cancel</a>
+            <button type="submit" class="button button--primary">Compile &amp; Publish</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

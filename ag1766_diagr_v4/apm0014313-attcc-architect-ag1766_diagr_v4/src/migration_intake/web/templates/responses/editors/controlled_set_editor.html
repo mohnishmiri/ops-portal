@@ -1,0 +1,44 @@
+{#
+  Controlled set editor - repeatable controlled rows from a vocabulary.
+
+  Context:
+    question: dict with code, text, help, required_level, options
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The canonical CONTROLLED_SET payload is `{items: [{code, detail?, scope?}]}`,
+  a list of objects rather than a list of codes, and the save route parses the
+  submitted form field names through the response type. Each option therefore
+  posts `items[<n>].code`, which the route folds into one object per checked
+  row; unchecked rows post nothing and are simply absent from the list.
+
+  Read the payload with `.get('items')`, never `answer.value.items`: Jinja
+  resolves attribute access before subscripting, so `.items` on a dict returns
+  the built-in `dict.items` method instead of the stored list.
+#}
+<fieldset class="controlled-set-editor">
+  <legend class="sr-only">{{ question.text }}</legend>
+
+  {% set stored_items = (answer.value.get('items') if answer and answer.value else None) or [] %}
+  {% set selected_codes = stored_items | map(attribute='code') | list %}
+  <div class="checkbox-group">
+    {% for option in question.options or [] %}
+    <label class="checkbox-option">
+      <input
+        type="checkbox"
+        name="items[{{ loop.index0 }}].code"
+        value="{{ option.value }}"
+        {% if option.value in selected_codes %}checked{% endif %}
+      >
+      <span class="checkbox-label">{{ option.label }}</span>
+      {% if option.description %}
+      <span class="checkbox-description">{{ option.description }}</span>
+      {% endif %}
+    </label>
+    {% endfor %}
+  </div>
+
+  {% if errors and errors.get('items') %}
+  <span class="form-error">{{ errors.get('items') | join(', ') }}</span>
+  {% endif %}
+</fieldset>

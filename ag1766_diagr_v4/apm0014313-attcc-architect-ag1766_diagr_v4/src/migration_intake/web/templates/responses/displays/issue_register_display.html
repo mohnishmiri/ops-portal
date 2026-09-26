@@ -1,0 +1,33 @@
+{#
+  Issue register display - shows computed issue register.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.issues (list), value.open_count, value.resolved_count
+#}
+<div class="issue-register-display computed-display">
+  {% if answer and answer.value %}
+  <div class="register-summary">
+    <span class="count-badge count-badge--warning">{{ answer.value.open_count or 0 }} open</span>
+    <span class="count-badge count-badge--success">{{ answer.value.resolved_count or 0 }} resolved</span>
+  </div>
+  
+  {% if answer.value.issues %}
+  <div class="issue-list">
+    {% for issue in answer.value.issues[:5] %}
+    <div class="issue-item">
+      <span class="status-pill status-pill--{{ issue.status | lower if issue.status else 'neutral' }} status-pill--sm">
+        {{ issue.status or 'OPEN' }}
+      </span>
+      <span class="issue-title">{{ issue.title or 'Untitled issue' }}</span>
+    </div>
+    {% endfor %}
+    {% if answer.value.issues | length > 5 %}
+    <p class="form-hint">... and {{ answer.value.issues | length - 5 }} more</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="form-hint">No issues registered.</p>
+  {% endif %}
+</div>

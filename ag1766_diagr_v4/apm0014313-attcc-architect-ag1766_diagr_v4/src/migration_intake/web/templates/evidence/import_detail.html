@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{#
+  Build nav context from app_id/intake_id already in route context.
+  These {% set %} tags execute before base.html renders, making nav_items
+  available to the {% include "components/nav.html" %} call in base.html.
+#}
+{% set active_nav = "sources" %}
+{% set nav_items = [
+  {"key": "hub",           "label": "Intake overview", "href": "/applications/" ~ app_id ~ "/intakes/" ~ intake_id,                    "active": false},
+  {"key": "questionnaire", "label": "Questionnaire",   "href": "/applications/" ~ app_id ~ "/intakes/" ~ intake_id ~ "/questionnaire", "active": false},
+  {"key": "sources",       "label": "Evidence",         "href": "/applications/" ~ app_id ~ "/intakes/" ~ intake_id ~ "/sources",      "active": true},
+  {"key": "interfaces",    "label": "Interfaces",       "href": "/applications/" ~ app_id ~ "/intakes/" ~ intake_id ~ "/interfaces",   "active": false},
+  {"key": "wave_util",     "label": "WaveUtil",         "href": "/applications/" ~ app_id ~ "/intakes/" ~ intake_id ~ "/wave-util",    "active": false},
+  {"key": "readiness",     "label": "Readiness",        "href": "/intakes/" ~ intake_id ~ "/readiness",                                "active": false},
+] %}
+
+{% block title %}Import run — {{ run.id[:8] if run else "details" }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources" class="global-nav-item">Evidence</a>
+<a href="#" class="global-nav-item active" aria-current="page">Import run</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources" class="button button--ghost">← Back to sources</a>
+{% endblock %}
+
+{% block content %}
+<div class="import-detail-page">
+
+  {# Run summary card #}
+  <section class="card card--elevated">
+    <h1 class="card-title">Import Run Details</h1>
+    <div class="run-summary">
+
+      {# Identity verdict #}
+      <div class="run-summary__verdict">
+        {% if run.status == "COMPLETED" %}
+        <span class="status-pill status-pill--success">
+          <span class="pill-dot"></span>Parsed successfully
+        </span>
+        {% elif run.status == "QUARANTINED" %}
+        <span class="status-pill status-pill--warning">
+          <span class="pill-dot"></span>Quarantined — identity unverified
+        </span>
+        {% else %}
+        <span class="status-pill">{{ run.status }}</span>
+        {% endif %}
+      </div>
+
+      {# Stats line #}
+      <p class="run-summary__stats">
+        {{ candidate_count }} proposal{{ "" if candidate_count == 1 else "s" }}
+        · {{ findings | length if findings else 0 }} finding{{ "" if (findings | length if findings else 0) == 1 else "s" }}
+      </p>
+
+      {# Review proposals in the sectioned questionnaire #}
+      {% if candidate_count > 0 and run.status != "QUARANTINED" %}
+      <p class="run-summary__callout">
+        {{ candidate_count }} proposed answer{{ "" if candidate_count == 1 else "s" }} need review before they appear in the questionnaire.
+      </p>
+      <a
+        href="/applications/{{ app_id }}/intakes/{{ intake_id }}/questionnaire"
+        class="button button--primary"
+      >Review proposals →</a>
+      {% endif %}
+      <a
+        href="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/coverage"
+        class="button button--ghost"
+      >Review extracted data</a>
+
+      <p class="run-summary__links">
+        <a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ run.id }}/diagnostics.csv">
+          Download diagnostics (CSV)
+        </a>
+      </p>
+    </div>
+  </section>
+
+  {# Sheet results #}
+  <section class="card">
+    <h2 class="card-title">Sheet results</h2>
+    {% if sheet_results %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th scope="col">Sheet</th>
+          <th scope="col">Outcome</th>
+          <th scope="col">Proposals</th>
+          <th scope="col">Findings</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for sheet in sheet_results %}
+        <tr>
+          <td>{{ sheet.sheet_name }}</td>
+          <td>{{ sheet.outcome or "—" }}</td>
+          <td>{{ sheet.candidate_count }}</td>
+          <td>{{ sheet.finding_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-muted">No recognized sheets were found in this file.</p>
+    {% endif %}
+  </section>
+
+  {# Findings accordion grouped by severity #}
+  <section class="card">
+    <h2 class="card-title">Findings</h2>
+    {% if finding_groups %}
+    {% for group in finding_groups %}
+    <details
+      class="finding-group finding-group--{{ group.severity | lower }}"
+      {% if group.action_required %}open{% endif %}
+    >
+      <summary class="finding-group__summary">
+        <span class="tag tag--{{ group.severity | lower }}">{{ group.severity }}</span>
+        <span class="finding-group__type">{{ group.finding_type }}</span>
+        <span class="finding-group__count">{{ group.count }}</span>
+      </summary>
+      <ul class="finding-group__list">
+        {% for finding in group.findings %}
+        <li class="finding-item finding-item--{{ group.severity | lower }}">
+          <div class="finding-item__main">
+            {{ finding.detail | human_value }}
+            {% if finding.source_locator %}
+            <span class="finding-locator">({{ finding.source_locator | human_locator }})</span>
+            {% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endfor %}
+    {% else %}
+    <p class="text-muted">No findings.</p>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

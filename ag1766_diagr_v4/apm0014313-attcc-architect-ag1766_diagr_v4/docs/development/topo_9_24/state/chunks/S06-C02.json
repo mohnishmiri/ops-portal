@@ -1,0 +1,14 @@
+{
+  "id":"S06-C02","stage":"06","result":"COMPLETED",
+  "objective":"Extract and analyze guide blocks 1-5 with only their embedded image relationships",
+  "inputs":["docs/development/topo_9_24/Topology Guide.docx blocks 1-5","EV-DOCX-001"],
+  "outputs":["evidence/docx/section-001.json","evidence/docx/media/image1.png","evidence/docx/media/image2.png","analysis/business_rules/guide_section_01.md"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"DOCX body blocks 1-5 and embedded image relationships rId5/rId6","symbols":"ATT Internal Interfaces text and color legend","further":true}],
+  "checks":["Bounded range 1-5 only","DTD/external resolution disabled","Two allowlisted embedded PNGs extracted by relationship with hashes","Both images viewed locally","DOCX source hash unchanged","Section JSON valid"],
+  "established":["Guide sources ATT Internal Interfaces from column G values Midrange/Hybrid/Private/Conexus/OnPrem","Prose says inbound connectivity grouped by columns N and R","Arrow legend visibly includes both IN and OUT","Text/image direction contract is ambiguous and requires an explicit decision"],
+  "uncertainties":["Exact N/R value-to-color policy not ratified","Profile page/region binding not yet correlated","No workbook/import validation due D-010","No direction rule selected silently"],
+  "unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"inspect_guide.ps1 -Mode Section -FirstBlock 1 -LastBlock 5 -SectionId section-001; read section JSON; view image1.png and image2.png","result":"0; five blocks and two images reviewed; source unchanged","mutation":"Generated analysis copies/artifacts only","output":"evidence/docx/section-001.json; evidence/docx/media/image1.png; evidence/docx/media/image2.png; analysis/business_rules/guide_section_01.md"}],
+  "evidence":[{"id":"EV-DOCX-002","path":"evidence/docx/section-001.json","source":"Topology Guide.docx blocks 1-5 and extracted media image1/image2","description":"ATT Internal Interfaces source/grouping prose and IN/OUT visual-legend conflict","kind":"Raw bounded text plus interpreted visual evidence","reliability":"VERIFIED document evidence; policy decision unresolved"}],
+  "next_chunk":"S06-C03","next_action":"Register and inspect the next bounded guide fragment selected from image/text boundaries"
+}

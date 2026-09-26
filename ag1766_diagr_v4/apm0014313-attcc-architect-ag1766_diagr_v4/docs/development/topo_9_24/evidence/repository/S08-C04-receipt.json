@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S08-C04",
+  "validated_at": "2026-09-24T17:09:59.9499815-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/data_lineage/resource_relationship_revisions.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/persistence/models_resources.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models_resources.py",
+      "file_type": ".py",
+      "size_bytes": 9157,
+      "modified_utc": "2026-09-21T19:20:15.8972316Z",
+      "sha256": "37fed4f87951574568f2111cd1be6d2a25f493b68a1ecc077c79f3eef533b597",
+      "chunk_id": "S08-C04",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-270",
+      "relevant_section": "Resource/link heads and revisions",
+      "evidence_id": "EV-DATA-003",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/repositories/resources.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\repositories\\resources.py",
+      "file_type": ".py",
+      "size_bytes": 28341,
+      "modified_utc": "2026-09-24T12:08:58.4940537Z",
+      "sha256": "a3076f830073b6e10ce718338662ab38c1f11958799b36c192f05968df2d1953",
+      "chunk_id": "S08-C04",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-780",
+      "relevant_section": "Resource create/revision/CAS/lifecycle/reparent and link readers",
+      "evidence_id": "EV-DATA-003",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/application/services/resources.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\resources.py",
+      "file_type": ".py",
+      "size_bytes": 25902,
+      "modified_utc": "2026-09-24T12:08:58.2479475Z",
+      "sha256": "83a9b67bc368190d7c2dc7f940b279bc259760a311c50842fe10b53b5c9e6fad",
+      "chunk_id": "S08-C04",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-580",
+      "relevant_section": "Resource payload/scope/review/adoption commands",
+      "evidence_id": "EV-DATA-003",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/versions/0018_resources_and_relationships.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\versions\\0018_resources_and_relationships.py",
+      "file_type": ".py",
+      "size_bytes": 6496,
+      "modified_utc": "2026-09-24T12:08:58.4676037Z",
+      "sha256": "2567b055c9431ad8a5074ac8cf08c88cb48e03d395ae6f0e54bd8164e5f4c65f",
+      "chunk_id": "S08-C04",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-127",
+      "relevant_section": "Resource/link head and revision tables",
+      "evidence_id": "EV-DATA-003",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/versions/0019_resource_revision_lineage.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\versions\\0019_resource_revision_lineage.py",
+      "file_type": ".py",
+      "size_bytes": 1267,
+      "modified_utc": "2026-09-24T12:08:58.4711435Z",
+      "sha256": "c911e5cc9c4a784d0b1c12ba7a29abf009745f4e62c5265583c1b7a0e71d6bdb",
+      "chunk_id": "S08-C04",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-47",
+      "relevant_section": "Revision parent/state/change reason",
+      "evidence_id": "EV-DATA-003",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Exactly five source files",
+    "Head/revision fields compared with migration FKs/unique constraints",
+    "Reparent call traced through common CAS update",
+    "Production-source writer search for link models/commands",
+    "No database/runtime assertion"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

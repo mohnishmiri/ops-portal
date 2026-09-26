@@ -1,0 +1,13 @@
+{
+  "id":"S05-C01","stage":"05","result":"COMPLETED",
+  "objective":"Compare node/hierarchy structure descriptively using persisted redacted inventories",
+  "inputs":["Input and expected hierarchy JSON; applicability remains unconfirmed"],
+  "outputs":["analysis/semantic_diff/node_comparison.json","analysis/semantic_diff/node_comparison.md","compare_diagram_nodes.ps1"],
+  "inspected_files":[],
+  "checks":["Comparison script syntax valid","All previously inspected source hashes unchanged at stage boundary","Generated JSON valid; raw values not copied","Every correspondence remains non-authoritative"],
+  "established":["34 shared normalized-label groups for each expected page","Only 21 and 15 groups are unique one-to-one label candidates","Repeated/unlabeled vertices prevent label-only identity matching"],
+  "uncertainties":["Q-003 applicability/expected-target authority unresolved; descriptive comparison only","Node correspondence cannot be approved from normalized labels or style hashes","Workbook evidence still undesignated"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/compare_diagram_nodes.ps1","result":"0; per-page descriptive candidate counts persisted","mutation":"New comparison JSON only","output":"analysis/semantic_diff/node_comparison.json"}],
+  "evidence":[{"id":"EV-DIFF-001","path":"analysis/semantic_diff/node_comparison.json","source":"EV-DRAWIO-002 and EV-DRAWIO-005","description":"Descriptive normalized-label candidate comparison with ambiguity retained","kind":"Interpreted comparison","reliability":"VERIFIED descriptive counts; canonical identity/applicability unverified"}],
+  "next_chunk":"S05-C02","next_action":"Compare only structurally resolvable edge descriptors; retain unknown endpoint/business semantics"
+}

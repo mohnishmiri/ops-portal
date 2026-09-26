@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "comparison_mode": "DESCRIPTIVE_ONLY",
+  "input_sha256": "1975ea8e046760e359a4339e1d259b418ff7eeff0c4f6881555e01b0b2d84acb",
+  "expected_sha256": "3df0f756a748277a6cc7d32abffdba8737ee463dcf7dc913cba721e89d0dc8af",
+  "comparisons": [
+    {
+      "expected_page": "page-001",
+      "input_edges": 41,
+      "expected_edges": 63,
+      "input_label_descriptors": 6,
+      "expected_label_descriptors": 13,
+      "input_unresolved": 35,
+      "expected_unresolved": 50,
+      "input_descriptors_also_present_in_expected": 4,
+      "approved_flow_matches": 0
+    },
+    {
+      "expected_page": "page-002",
+      "input_edges": 41,
+      "expected_edges": 76,
+      "input_label_descriptors": 6,
+      "expected_label_descriptors": 12,
+      "input_unresolved": 35,
+      "expected_unresolved": 64,
+      "input_descriptors_also_present_in_expected": 3,
+      "approved_flow_matches": 0
+    }
+  ],
+  "limitations": [
+    "Endpoint labels and arrow decoration are not typed business-flow identity",
+    "Unknown endpoints/labels remain unresolved instead of inferred from geometry",
+    "Repeated labels can produce ambiguous descriptor matches",
+    "No approved page/app/account/region correspondence established"
+  ]
+}

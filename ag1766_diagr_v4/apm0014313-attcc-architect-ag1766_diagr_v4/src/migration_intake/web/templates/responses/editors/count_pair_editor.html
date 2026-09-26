@@ -1,0 +1,91 @@
+{#
+  Count pair editor - two fixed, named nonnegative counts plus their unit.
+
+  Context:
+    question: dict with code, text, help, required_level, units, field_names
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The field names must match the canonical COUNT_PAIR payload keys
+  (`{first, second, unit}`), because the save route parses the submitted
+  form directly into the response payload: any other name is unrecognised
+  and stores a blank answer.
+
+  COUNT_PAIR is a fixed pair, not a repeatable collection, so this renders
+  exactly two count inputs. The pair's *meaning* varies per question
+  (APP-006 collects internal_users / external_users), which is a labelling
+  concern only: `question.field_names` renames the visible labels and never
+  the submitted keys.
+
+  The unit is shown but not editable, and deliberately carries no `name`:
+  `CountPairType.parse_form` always writes the unit configured on the
+  response type and ignores any submitted `unit`, so an editable unit input
+  would be silently discarded — and, because it would always submit a
+  value, a save with both counts left blank would then be rejected as an
+  unrecognised submission rather than accepted as an empty answer.
+
+  null differs from zero for these counts (null is unknown, 0 is a real
+  count of zero), so a stored 0 must render as "0" and never as blank.
+#}
+{% set field_labels = question.field_names or [] %}
+{% set first_label = field_labels[0] | replace('_', ' ') | title
+     if field_labels | length > 0 and field_labels[0] else 'First' %}
+{% set second_label = field_labels[1] | replace('_', ' ') | title
+     if field_labels | length > 1 and field_labels[1] else 'Second' %}
+{% set stored_unit = answer.value.unit if answer and answer.value and answer.value.unit else None %}
+{% set unit = stored_unit or (question.units[0] if question.units else None) or 'count' %}
+<div class="count-pair-editor">
+  <div class="form-grid">
+    <div class="form-group">
+      <label for="q-{{ question.code }}-first" class="form-label">{{ first_label }}</label>
+      <input
+        type="number"
+        name="first"
+        id="q-{{ question.code }}-first"
+        class="form-control{% if errors and errors.first %} form-control--error{% endif %}"
+        value="{{ answer.value.first if answer and answer.value and answer.value.first is not none else '' }}"
+        {# The response type treats both counts as optional, so a REQUIRED
+           question is expressed on the first field only: that stops a blank
+           save without forcing an invented count into the second half. #}
+        {% if question.required_level == 'REQUIRED' %}required{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+        min="0"
+        step="1"
+        placeholder="0"
+      >
+      {% if errors and errors.first %}
+      <span class="form-error">{{ errors.first | join(', ') }}</span>
+      {% endif %}
+    </div>
+
+    <div class="form-group">
+      <label for="q-{{ question.code }}-second" class="form-label">{{ second_label }}</label>
+      <input
+        type="number"
+        name="second"
+        id="q-{{ question.code }}-second"
+        class="form-control{% if errors and errors.second %} form-control--error{% endif %}"
+        value="{{ answer.value.second if answer and answer.value and answer.value.second is not none else '' }}"
+        min="0"
+        step="1"
+        placeholder="0"
+      >
+      {% if errors and errors.second %}
+      <span class="form-error">{{ errors.second | join(', ') }}</span>
+      {% endif %}
+    </div>
+
+    <div class="form-group">
+      <label for="q-{{ question.code }}-unit" class="form-label">Unit</label>
+      <input
+        type="text"
+        id="q-{{ question.code }}-unit"
+        class="form-control"
+        value="{{ unit }}"
+        readonly
+        aria-readonly="true"
+      >
+      <span class="form-hint">Set by the catalog definition, not entered here.</span>
+    </div>
+  </div>
+</div>

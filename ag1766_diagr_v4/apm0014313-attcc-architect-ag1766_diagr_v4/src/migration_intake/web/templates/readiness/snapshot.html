@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{#
+  Snapshot view — Screen 14b of the approved mockup (UX-4b).
+
+  Read-only display of a frozen intake snapshot. Tailwind-free: styling in readiness.css.
+  No freeze form — the intake is already locked.
+#}
+
+{% block title %}Snapshot{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/intakes/{{ intake_id }}/export" class="button button--ghost button--sm">Export package</a>
+{% endblock %}
+
+{% block content %}
+<div class="readiness-page">
+
+  {# ------------------------------------------------------------------ #}
+  {# Frozen banner                                                        #}
+  {# ------------------------------------------------------------------ #}
+  <div class="readiness-frozen-banner" role="status">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+    </svg>
+    This intake was frozen on {{ snapshot.created_at }} and is read-only.
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Snapshot metadata card                                               #}
+  {# ------------------------------------------------------------------ #}
+  <div class="card">
+    <div class="card-header">
+      <h1 class="card-title">Snapshot details</h1>
+      <a href="/intakes/{{ intake_id }}/export/manifest.json" class="button button--ghost button--sm">View manifest</a>
+    </div>
+
+    <dl class="readiness-outcome__meta">
+      <div class="readiness-meta-row">
+        <dt>Snapshot ID</dt>
+        <dd><code>{{ snapshot.id }}</code></dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Intake ID</dt>
+        <dd><code>{{ snapshot.intake_id }}</code></dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Schema version</dt>
+        <dd>{{ snapshot.schema_version }}</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Created at</dt>
+        <dd>{{ snapshot.created_at }}</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Payload SHA-256</dt>
+        <dd><code class="readiness-meta-hash">{{ snapshot.sha256_hex }}</code></dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Catalog SHA-256</dt>
+        <dd><code class="readiness-meta-hash">{{ snapshot.catalog_sha256 }}</code></dd>
+      </div>
+    </dl>
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Payload summary card                                                 #}
+  {# ------------------------------------------------------------------ #}
+  <div class="card">
+    <div class="card-header">
+      <h2 class="card-title">Payload summary</h2>
+    </div>
+
+    <dl class="readiness-outcome__meta">
+      <div class="readiness-meta-row">
+        <dt>Application</dt>
+        <dd>{{ payload.application.name }} ({{ payload.application.id[:8] }}…)</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Catalog version</dt>
+        <dd>{{ payload.catalog.version }}</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Intake state</dt>
+        <dd>{{ payload.intake.state }}</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Frozen at</dt>
+        <dd>{{ payload.intake.frozen_at }}</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>Answers</dt>
+        <dd>{{ payload.answers | length }} answer(s)</dd>
+      </div>
+      <div class="readiness-meta-row">
+        <dt>WaveUtil rows</dt>
+        <dd>{{ payload.wave_util_rows | length }} row(s)</dd>
+      </div>
+    </dl>
+  </div>
+
+</div>
+{% endblock %}

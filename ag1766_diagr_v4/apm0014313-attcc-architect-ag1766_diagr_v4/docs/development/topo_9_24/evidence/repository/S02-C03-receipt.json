@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S02-C03",
+  "validated_at": "2026-09-24T13:48:31.0425644-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/runtime_trace/render_inspection.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/application/services/topology_finalization.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\topology_finalization.py",
+      "file_type": ".py",
+      "size_bytes": 8632,
+      "modified_utc": "2026-09-23T13:43:23.8497088Z",
+      "sha256": "b827ebb6c8c3a32721634c008fc7fe0ab70c03c990fb256bad40c233c2dc831b",
+      "chunk_id": "S02-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-205",
+      "relevant_section": "finalize_render_output; failure/receipt helpers",
+      "evidence_id": "EV-FLOW-003",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/repositories/topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\repositories\\topology.py",
+      "file_type": ".py",
+      "size_bytes": 30248,
+      "modified_utc": "2026-09-23T17:56:57.7369977Z",
+      "sha256": "c30f94bf7d294cd8a6ae81d4634d9a438257d16e3a8fa0ddc5b78ff2719b5bea",
+      "chunk_id": "S02-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "285-450;692-805",
+      "relevant_section": "Leased transitions; finalization; recovery claim; CAS helpers",
+      "evidence_id": "EV-FLOW-003",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/web/routes/topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\web\\routes\\topology.py",
+      "file_type": ".py",
+      "size_bytes": 30219,
+      "modified_utc": "2026-09-23T13:43:23.8539132Z",
+      "sha256": "6dd5f8c28d6fdd0fc55d9a58effcd5111a5acbebdcce09f93d9bee9a36805212",
+      "chunk_id": "S02-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "435-684",
+      "relevant_section": "view_generation_run; review_generation_run; downloads",
+      "evidence_id": "EV-FLOW-003",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/web/templates/topology/run_detail.html",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\web\\templates\\topology\\run_detail.html",
+      "file_type": ".html",
+      "size_bytes": 15281,
+      "modified_utc": "2026-09-23T13:43:23.8561154Z",
+      "sha256": "1d21020314aad89f4fd94df0243cf7f4a2e4f3f926505829d74b283a20a2193c",
+      "chunk_id": "S02-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "310-415 and artifact-related matches",
+      "relevant_section": "inspection_ready text; individual artifact links",
+      "evidence_id": "EV-FLOW-003",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/application/services/topology_review.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\topology_review.py",
+      "file_type": ".py",
+      "size_bytes": 14618,
+      "modified_utc": "2026-09-23T13:43:23.8507839Z",
+      "sha256": "7ef98707bc1895d81f6c0098f5ee7f0a84200555faeef905d8c1e853c3ebe6d3",
+      "chunk_id": "S02-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-92;161-335",
+      "relevant_section": "review_run; verified delivery; _validate_reviewable_run",
+      "evidence_id": "EV-FLOW-003",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Finalization exception branches compared with prior runner STORING commit",
+    "Template link conditions compared with route inspection_ready",
+    "Full review-validation method checked for projection/source-authority reload",
+    "Race hypothesis kept separate from runtime-proven findings"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

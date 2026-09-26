@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block title %}Template Release Detail{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/admin/catalog" class="global-nav-item">Catalog Admin</a>
+<a href="/admin/templates" class="global-nav-item active" aria-current="page">Template Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/admin/templates" class="button button--ghost">Back to list</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.release-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.release-meta dt { font-weight: 600; color: var(--color-text-secondary, #555); }
+.release-meta dd { margin: 0; }
+.state-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.state-badge--published { background: #d4edda; color: #155724; }
+.state-badge--draft { background: #fff3cd; color: #856404; }
+.state-badge--retired { background: #e2e3e5; color: #383d41; }
+.release-actions {
+  margin-top: var(--space-4);
+  display: flex;
+  gap: var(--space-2);
+}
+.action-result {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  display: none;
+}
+.action-result--success {
+  background: var(--color-success-bg, #d4edda);
+  border: 1px solid var(--color-success-border, #c3e6cb);
+  color: var(--color-success-text, #155724);
+}
+.action-result--error {
+  background: var(--color-danger-bg, #f8d7da);
+  border: 1px solid var(--color-danger-border, #f5c6cb);
+  color: var(--color-danger-text, #721c24);
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card card--elevated">
+  <div class="card-header">
+    <h1 class="card-title">Template Release v{{ release.template_version }}</h1>
+  </div>
+
+  <dl class="release-meta">
+    <dt>State</dt>
+    <dd>
+      {% set state_cls = 'published' if release.pub_state == 'PUBLISHED' else ('retired' if release.pub_state == 'RETIRED' else 'draft') %}
+      <span class="state-badge state-badge--{{ state_cls }}">{{ release.pub_state }}</span>
+    </dd>
+    <dt>Source file</dt>
+    <dd>{{ release.source_filename }}</dd>
+    <dt>Source SHA-256</dt>
+    <dd><code>{{ release.source_sha256[:16] }}&hellip;</code></dd>
+    <dt>Compiler version</dt>
+    <dd>{{ release.compiler_version }}</dd>
+    <dt>Tabs</dt>
+    <dd>{{ release.variant_manifest | length }}</dd>
+    {% if release.published_at %}
+    <dt>Published at</dt>
+    <dd>{{ release.published_at }}</dd>
+    {% endif %}
+    {% if release.retired_at %}
+    <dt>Retired at</dt>
+    <dd>{{ release.retired_at }}</dd>
+    {% endif %}
+  </dl>
+
+  <h2>Variant Manifest</h2>
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th scope="col">Variant</th>
+          <th scope="col">Tab Name</th>
+          <th scope="col">Role Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in release.variant_manifest %}
+        <tr>
+          <td>{{ item.variant }}</td>
+          <td>{{ item.tab_name }}</td>
+          <td>{{ item.role_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="release-actions">
+    {% if release.pub_state == 'PUBLISHED' %}
+    <button type="button" id="btnActivate" class="button button--primary"
+            data-action="activate" data-release-id="{{ release.id }}">
+      Set as Active
+    </button>
+    <button type="button" id="btnRetire" class="button button--danger"
+            data-action="retire" data-release-id="{{ release.id }}">
+      Retire
+    </button>
+    {% elif release.pub_state == 'RETIRED' %}
+    <span class="form-hint">This release has been retired.</span>
+    {% endif %}
+  </div>
+
+  <div id="actionResult" class="action-result"></div>
+</div>
+
+<script>
+(function() {
+  var csrfToken = '{{ csrf_token }}';
+  var resultBox = document.getElementById('actionResult');
+
+  function showResult(cls, html) {
+    resultBox.className = 'action-result action-result--' + cls;
+    resultBox.innerHTML = html;
+    resultBox.style.display = 'block';
+    resultBox.scrollIntoView({behavior: 'smooth'});
+  }
+
+  function doAction(action, releaseId) {
+    var formData = new FormData();
+    formData.append('_csrf_token', csrfToken);
+
+    var url = '/admin/templates/' + releaseId + '/' + action;
+    fetch(url, {method: 'POST', body: formData})
+      .then(function(resp) { return resp.json().then(function(data) { return {status: resp.status, data: data}; }); })
+      .then(function(result) {
+        if (result.status >= 200 && result.status < 300) {
+          showResult('success',
+            '<strong>Success!</strong> State changed to <strong>' + result.data.pub_state + '</strong>. Reloading...'
+          );
+          setTimeout(function() { window.location.reload(); }, 1200);
+        } else {
+          showResult('error', '<strong>Error:</strong> ' + (result.data.detail || JSON.stringify(result.data)));
+        }
+      })
+      .catch(function(err) {
+        showResult('error', '<strong>Network error:</strong> ' + err.message);
+      });
+  }
+
+  document.querySelectorAll('[data-action]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var action = btn.getAttribute('data-action');
+      var releaseId = btn.getAttribute('data-release-id');
+      var confirmMsg = action === 'retire'
+        ? 'Are you sure you want to retire this template release? This cannot be undone.'
+        : 'Set this template as the active version for standard topology generation?';
+      if (confirm(confirmMsg)) {
+        btn.disabled = true;
+        doAction(action, releaseId);
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

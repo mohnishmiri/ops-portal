@@ -1,0 +1,36 @@
+{#
+  components/nav.html — Side-navigation component for the application workspace.
+
+  Context variables expected:
+    nav_items   list[dict]  Each item has keys: key, label, href, count (optional),
+                            count_variant (optional: "warning" | "danger")
+    active_nav  str         The key of the currently active nav item.
+    app_name    str         Current application name (optional, shown in footer).
+
+  Rendered inside base.html as the <aside> / side-nav element.
+#}
+<nav class="side-nav" id="app-nav" aria-label="Application navigation">
+  {% if nav_items %}
+  <div class="side-nav-heading" aria-hidden="true">Application</div>
+  {% for item in nav_items %}
+  <a
+    href="{{ item.href }}"
+    class="side-nav-item{% if item.active or item.key == active_nav %} active{% endif %}"
+    {% if item.active or item.key == active_nav %}aria-current="page"{% endif %}
+  >
+    <span class="sr-only"></span>
+    <span>{{ item.label }}</span>
+    {% if item.count is defined and item.count %}
+    <span class="side-count{% if item.count_variant is defined and item.count_variant %} side-count--{{ item.count_variant }}{% endif %}">{{ item.count }}</span>
+    {% endif %}
+  </a>
+  {% endfor %}
+  {% endif %}
+
+  <div class="side-nav-footer">
+    {% if app_name %}
+    <span class="eyebrow">Application</span>
+    <strong>{{ app_name }}</strong>
+    {% endif %}
+  </div>
+</nav>

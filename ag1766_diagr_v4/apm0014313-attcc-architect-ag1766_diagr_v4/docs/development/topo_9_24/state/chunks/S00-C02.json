@@ -1,0 +1,14 @@
+{
+  "id":"S00-C02","stage":"00","result":"COMPLETED",
+  "objective":"Verify user merge resolution and resume the preserved investigation",
+  "inputs":["Saved manifest/checkpoints/logs","User confirmation of merge resolution","Scoped Git metadata","Hashes of previously inspected sources"],
+  "outputs":["evidence/repository/resume-2026-09-24.json"],
+  "inspected_files":[],
+  "checks":["No unmerged paths","21 previous artifacts exist","No previously inspected source hashes changed","Both exclusions preserved"],
+  "established":["User resolved the merge; Git reports zero unmerged paths","Commit remains 80d0994f1a5cdf49f11a836f81660a06ccf2f7cd","Existing dirty staged work remains preserved","Q-001 resolved; resume without repeating initialization"],
+  "uncertainties":["XLSX source not designated","Diagram applicability not yet verified","Runtime probes still require a standalone approved boundary; excluded suite cannot be used"],
+  "unblock_chunks":["S01-C01"],"resolve_questions":["Q-001"],
+  "commands":[{"command":"git --no-optional-locks status --short --branch --untracked-files=normal -- . ':(exclude)to_archive/**' ':(exclude)tests/**' ':(exclude)docs/development/topo_9_24/**'; separate scoped unmerged check and Get-FileHash recovery verification","result":"0; VERIFIED at 2026-09-24T13:34:20.5004191-05:00","mutation":"None","output":"evidence/repository/resume-2026-09-24.json"}],
+  "evidence":[{"id":"EV-REPO-003","path":"evidence/repository/resume-2026-09-24.json","source":"Scoped Git metadata and recovery artifacts","description":"Merge resolved; old evidence remains readable and unchanged","kind":"Normalized metadata","reliability":"VERIFIED; not runtime certification"}],
+  "next_chunk":"S01-C01","next_action":"Announce and inspect the five planned stack/instruction files; preserve tests/ and to_archive/ exclusions"
+}

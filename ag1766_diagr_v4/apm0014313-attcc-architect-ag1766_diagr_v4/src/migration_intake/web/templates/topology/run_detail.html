@@ -1,0 +1,438 @@
+{% extends "base.html" %}
+{#
+  Generation run detail page — T05.
+
+  Shows:
+  - Run status and metadata
+  - Input references (snapshot, base diagram)
+  - Generated artifacts with download links
+  - Approval actions (future)
+
+  Styling uses existing design tokens and components from components.css.
+  No inline event handlers. No hex literals.
+#}
+
+{% block title %}Generation Run{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="{{ intake_base }}/topology" class="global-nav-item active" aria-current="page">Topology</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="{{ intake_base }}/topology" class="button button--ghost button--sm">Back to topology</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.run-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.run-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.run-header__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.run-header__id {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+}
+
+.run-status-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.run-status-card__icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  flex-shrink: 0;
+}
+
+.run-status-card__icon--success {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.run-status-card__icon--danger {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
+.run-status-card__icon--warning {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.run-status-card__icon--neutral {
+  color: var(--color-text-secondary);
+  background: var(--color-surface-muted);
+}
+
+.run-status-card__icon--progress {
+  color: var(--color-cyan-500);
+  background: var(--color-info-bg);
+}
+
+.run-status-card__body {
+  flex: 1;
+}
+
+.run-status-card__title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.run-status-card__meta {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.run-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-4);
+}
+
+.detail-card__title {
+  margin: 0 0 var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.detail-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+
+.detail-list dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.detail-list dd {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  word-break: break-all;
+}
+
+.detail-list dd code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-muted);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.artifacts-section {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.artifact-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.artifact-card__icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  color: var(--color-cyan-500);
+  background: var(--color-info-bg);
+}
+
+.artifact-card__title {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+}
+
+.artifact-card__meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.artifact-card__actions {
+  margin-top: auto;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="run-page">
+
+  {# ------------------------------------------------------------------ #}
+  {# Header                                                              #}
+  {# ------------------------------------------------------------------ #}
+  <header class="run-header">
+    <div>
+      <h1 class="run-header__title">Generation Run</h1>
+      <p class="run-header__id">{{ run.id }}</p>
+    </div>
+    <div>
+      <span class="status-pill status-pill--{{ run_status_tone }}">{{ run.status }}</span>
+      <span class="status-pill status-pill--neutral">{{ authority }}</span>
+      {% if is_preview %}<span class="status-pill status-pill--warning">DRAFT PREVIEW</span>{% endif %}
+    </div>
+  </header>
+
+  {# ------------------------------------------------------------------ #}
+  {# Status card                                                         #}
+  {# ------------------------------------------------------------------ #}
+  <div class="card run-status-card">
+    <div class="run-status-card__icon run-status-card__icon--{{ run_status_tone }}" aria-hidden="true">
+      {% if run.status == 'READY_FOR_REVIEW' or run.status == 'SUCCESS' %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="9 12 11 14 15 10"/>
+      </svg>
+      {% elif run.status == 'FAILED' %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="15" y1="9" x2="9" y2="15"/>
+        <line x1="9" y1="9" x2="15" y2="15"/>
+      </svg>
+      {% elif run.status == 'RUNNING' %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+      {% elif run.status == 'GENERATED_WITH_GAPS' %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {% else %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+      </svg>
+      {% endif %}
+    </div>
+    <div class="run-status-card__body">
+      <h2 class="run-status-card__title">
+        {% if run.status == 'READY_FOR_REVIEW' %}
+        Generation complete — ready for review
+        {% elif run.status == 'SUCCESS' %}
+        Generation completed successfully
+        {% elif run.status == 'FAILED' %}
+        Generation failed
+        {% elif run.status == 'RUNNING' %}
+        Generation in progress
+        {% elif run.status == 'GENERATED_WITH_GAPS' %}
+        Generated with gaps requiring review
+        {% else %}
+        Generation pending
+        {% endif %}
+      </h2>
+      <p class="run-status-card__meta">
+        Requested {{ run.requested_at }}
+        {% if run.completed_at %} &middot; Completed {{ run.completed_at }}{% endif %}
+      </p>
+      {% if run.error_message %}
+      <p class="run-status-card__meta" style="color: var(--color-danger);">
+        Error: {{ run.error_message }}
+      </p>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Input details                                                       #}
+  {# ------------------------------------------------------------------ #}
+  <div class="run-details">
+    <div class="card detail-card">
+      <h3 class="detail-card__title">Snapshot Input</h3>
+      {% if run.snapshot_id %}
+      <dl class="detail-list">
+        <dt>Snapshot ID</dt>
+        <dd><code>{{ run.snapshot_id }}</code></dd>
+        <dt>Snapshot SHA-256</dt>
+        <dd><code>{{ run.snapshot_sha256[:32] }}...</code></dd>
+        <dt>Catalog SHA-256</dt>
+        <dd><code>{{ run.catalog_sha256[:32] }}...</code></dd>
+      </dl>
+      {% else %}
+      <p class="detail-card__meta">Generated from current intake data (no frozen snapshot).</p>
+      {% endif %}
+    </div>
+
+    <div class="card detail-card">
+      <h3 class="detail-card__title">Base Diagram Input</h3>
+      <dl class="detail-list">
+        <dt>Artifact ID</dt>
+        <dd><code>{{ run.base_artifact_id }}</code></dd>
+        <dt>Base SHA-256</dt>
+        <dd><code>{{ run.base_sha256[:32] }}...</code></dd>
+        {% if run.config_version %}
+        <dt>Config Version</dt>
+        <dd>{{ run.config_version }}</dd>
+        {% endif %}
+      </dl>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Generated artifacts                                                 #}
+  {# ------------------------------------------------------------------ #}
+  {% if diagram_artifact or report_artifact or manifest_artifact %}
+  <section aria-labelledby="artifact-heading">
+    <p class="artifact-card__meta">
+      {% if inspection_ready %}Complete receipt-verified bundle available for inspection.{% else %}Artifact bundle is incomplete or not yet inspectable.{% endif %}
+    </p>
+    <h2 class="detail-card__title" style="margin-bottom: var(--space-4);">Generated Artifacts</h2>
+    <div class="artifacts-section">
+      
+      {% if diagram_artifact %}
+      <div class="card artifact-card">
+        <div class="artifact-card__icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" focusable="false">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </div>
+        <h3 class="artifact-card__title">Topology Diagram</h3>
+        <p class="artifact-card__meta">
+          {{ diagram_artifact.filename }}<br>
+          {{ diagram_artifact.size_bytes | filesizeformat }} &middot;
+          <code>{{ diagram_artifact.sha256_hex[:16] }}...</code>
+        </p>
+        <div class="artifact-card__actions">
+          <a href="{{ intake_base }}/topology/runs/{{ run.id }}/diagram" 
+             class="button button--primary button--sm">
+            Download diagram
+          </a>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if report_artifact %}
+      <div class="card artifact-card">
+        <div class="artifact-card__icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" focusable="false">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10 9 9 9 8 9"/>
+          </svg>
+        </div>
+        <h3 class="artifact-card__title">Gap Report</h3>
+        <p class="artifact-card__meta">
+          {{ report_artifact.filename }}<br>
+          {{ report_artifact.size_bytes | filesizeformat }} &middot;
+          <code>{{ report_artifact.sha256_hex[:16] }}...</code>
+        </p>
+        <div class="artifact-card__actions">
+          <a href="{{ intake_base }}/topology/runs/{{ run.id }}/report" 
+             class="button button--secondary button--sm">
+            Download report
+          </a>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if manifest_artifact %}
+      <div class="card artifact-card">
+        <h3 class="artifact-card__title">Immutable Manifest</h3>
+        <p class="artifact-card__meta">
+          {{ manifest_artifact.filename }}<br>
+          {{ manifest_artifact.size_bytes | filesizeformat }} &middot;
+          <code>{{ manifest_artifact.sha256_hex[:16] }}...</code>
+        </p>
+        <div class="artifact-card__actions">
+          <a href="{{ intake_base }}/topology/runs/{{ run.id }}/manifest"
+             class="button button--secondary button--sm">Download manifest</a>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  {# Approval section                                                     #}
+  {# ------------------------------------------------------------------ #}
+  {% if run.status in ['READY_FOR_REVIEW', 'GENERATED_WITH_GAPS'] %}
+  <div class="card">
+    <h3 class="detail-card__title">Approval</h3>
+    {% if approval_available %}
+    <p class="artifact-card__meta">This official generation run is ready for architect review.</p>
+    <form method="post" action="{{ intake_base }}/topology/runs/{{ run.id }}/approval">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <label class="form-label" for="approval-decision">Decision</label>
+      <select id="approval-decision" name="decision" class="form-control">
+        <option value="APPROVED">Approve</option>
+        <option value="REJECTED">Reject</option>
+      </select>
+      <label class="form-label" for="approval-rationale">Rationale</label>
+      <textarea id="approval-rationale" name="rationale" class="form-control" required></textarea>
+      <button type="submit" class="button button--primary button--sm">Record decision</button>
+    </form>
+    {% else %}
+    <p class="artifact-card__meta">
+      {% if is_preview %}Draft previews are not eligible for approval.{% else %}Approval is disabled pending official activation.{% endif %}
+    </p>
+    {% endif %}
+    <dl class="detail-list" style="margin-top: var(--space-3);">
+      <dt>Approval Status</dt>
+      <dd>
+        <span class="status-pill status-pill--neutral">{{ run.approval_status }}</span>
+      </dd>
+      {% if run.approval_rationale %}
+      <dt>Rationale</dt>
+      <dd>{{ run.approval_rationale }}</dd>
+      {% endif %}
+    </dl>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

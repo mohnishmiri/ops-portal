@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Topology-Diagram Generation Assessment</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#52606d; --line:#d9e2ec; --accent:#0b7285; --soft:#f5f7fa; --warn:#fff4cc; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); font: 16px/1.55 Georgia, serif; background: #fff; }
+    main { max-width: 1180px; margin: 0 auto; padding: 42px 28px 80px; }
+    h1, h2, h3 { font-family: "Segoe UI", sans-serif; line-height: 1.2; color: #102a43; }
+    h1 { font-size: 2.2rem; border-bottom: 4px solid var(--accent); padding-bottom: 14px; }
+    h2 { margin-top: 42px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+    h3 { margin-top: 28px; }
+    a { color: #075985; }
+    code, pre { font-family: Consolas, "Courier New", monospace; }
+    code { background: var(--soft); padding: 2px 4px; }
+    pre { overflow-x: auto; background: #102a43; color: #f0f4f8; padding: 18px; border-radius: 6px; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0 24px; font-size: .94rem; }
+    th, td { border: 1px solid var(--line); padding: 9px 10px; vertical-align: top; text-align: left; }
+    th { background: #eaf4f4; font-family: "Segoe UI", sans-serif; }
+    tr:nth-child(even) td { background: #fbfcfd; }
+    .notice { background: var(--warn); border-left: 5px solid #d59f00; padding: 14px 18px; }
+    .small { color: var(--muted); font-size: .93rem; }
+    .approval { border: 2px solid var(--accent); padding: 18px; background: #f0fbfc; }
+    li { margin: 5px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Topology-Diagram Generation Assessment</h1>
+
+  <h2>1. Executive Summary</h2>
+  <p>The application can upload, populate, store, review, and download draw.io topology artifacts. However, the HTTP workflow currently uses the legacy label-only generator, not the newer governed topology runner.</p>
+  <p>The principal gaps are:</p>
+  <ol>
+    <li>Database interface records are not consumed. <a href="../src/migration_intake/topology/adapter.py#L157">adapter.py</a> explicitly returns <code>"interfaces": []</code>.</li>
+    <li>“Official” generation pins snapshot metadata but still reads live answers; <code>_generate_diagram()</code> ignores its snapshot argument and queries current database state in <a href="../src/migration_intake/application/services/topology_generation.py#L590">topology_generation.py</a>.</li>
+    <li>Interface data is absent from immutable snapshots and governed preview captures.</li>
+    <li>Existing renderers cannot yet create repeated interface nodes and styled edges required by the guide.</li>
+    <li>Migration <code>0020</code> defines governed topology tables and columns that are missing from the corresponding ORM models and repository.</li>
+    <li>Focused topology test collection currently fails with eight import errors, so broad regression protection is not operational.</li>
+  </ol>
+  <p>The recommended solution is to extend the governed immutable-input pipeline with a typed interface projection and a versioned structural rendering profile. Database queries should remain simple SQLAlchemy repository operations; filtering, normalization, grouping, conflict detection, layout, and styling should be pure Python.</p>
+  <p class="small">No handoff documents were reviewed.</p>
+
+  <h2>2. Current Architecture and Pipeline</h2>
+  <pre>sequenceDiagram
+    actor User
+    participant Route as FastAPI topology route
+    participant Service as TopologyGenerationService
+    participant DB as SQLAlchemy repositories
+    participant Adapter as Legacy topology adapter
+    participant Filler as Label-only filler
+    participant Store as FilesystemStore
+
+    User-&gt;&gt;Route: Upload base / Generate
+    Route-&gt;&gt;Route: Scope, CSRF, size validation
+    Route-&gt;&gt;Service: generate_topology()
+    Service-&gt;&gt;DB: Intake, optional snapshot, base metadata
+    Service-&gt;&gt;DB: Create RUNNING run
+    Service-&gt;&gt;Store: Read base XML
+    Service-&gt;&gt;Adapter: Extract live answers and identifiers
+    Note over Adapter: Interface rows are not loaded
+    Adapter-&gt;&gt;Filler: Resolved scalar tokens
+    Filler-&gt;&gt;Filler: Replace matching labels only
+    Service-&gt;&gt;Store: Diagram and HTML gap report
+    Service-&gt;&gt;DB: Artifact metadata and terminal status
+    Route--&gt;&gt;User: Redirect, detail, or download</pre>
+  <ul>
+    <li>Entry points: <a href="../src/migration_intake/web/routes/topology.py#L135">topology.py</a> provides landing, upload, generation, review, and download routes.</li>
+    <li>Validation: application/intake scope, CSRF, non-empty base selection, 10 MB upload limit, UTF-8 uncompressed draw.io XML.</li>
+    <li>Reads: application, identifiers, current answer revisions, optional snapshot metadata, and base diagram metadata.</li>
+    <li>Selection: users select a base artifact; stored <code>environment</code>, <code>site</code>, and <code>variant</code> are not used to enforce automatic compatibility.</li>
+    <li>Processing: <a href="../src/migration_intake/topology/resolution.py">resolution.py</a> normalizes facts, preserves missing placeholders, and rejects ambiguous highest-confidence values.</li>
+    <li>Rendering: <a href="../src/migration_intake/topology/fill.py">fill.py</a> replaces configured labels while verifying geometry and structure remain unchanged.</li>
+    <li>Storage: diagram and HTML report bytes are placed in content-addressed filesystem storage; metadata is stored in <code>gen_artifacts</code>.</li>
+    <li>Errors: failed generation persists a <code>FAILED</code> run. Upload hides unexpected exception details from clients.</li>
+    <li>Audit: run/request/review actor fields exist, but the legacy flow does not emit explicit <code>AuditEvent</code> records.</li>
+    <li>Authorization discrepancy: route tests expect generate/download capabilities and a fail-closed endpoint, while the current route implementation contains neither.</li>
+  </ul>
+
+  <h2>3. Repository Evidence Map</h2>
+  <table><thead><tr><th>Evidence</th><th>Symbol/table/test</th><th>What it proves</th></tr></thead><tbody>
+    <tr><td><a href="../src/migration_intake/web/routes/topology.py">topology.py</a></td><td><code>generate_topology</code>, <code>download_diagram</code></td><td>HTTP uses the legacy service</td></tr>
+    <tr><td><a href="../src/migration_intake/application/services/topology_generation.py#L246">topology_generation.py</a></td><td><code>TopologyGenerationService.generate_topology</code></td><td>Orchestrates runs, storage, and artifacts</td></tr>
+    <tr><td><a href="../src/migration_intake/topology/adapter.py#L157">adapter.py</a></td><td><code>extract_topology_facts</code></td><td>Reads live application identifiers and answers</td></tr>
+    <tr><td><a href="../src/migration_intake/topology/adapter.py#L258">adapter.py</a></td><td><code>"interfaces": []</code></td><td>Interfaces never reach generation</td></tr>
+    <tr><td><a href="../src/migration_intake/persistence/models_interfaces.py#L57">models_interfaces.py</a></td><td><code>InterfaceRecord</code>, <code>interfaces</code></td><td>All 33 workbook fields are persisted</td></tr>
+    <tr><td><a href="../src/migration_intake/persistence/repositories/interfaces.py#L68">interfaces.py</a></td><td><code>InterfaceRepository</code></td><td>Application-scoped retrieval and exact-row deduplication exist</td></tr>
+    <tr><td><a href="../src/migration_intake/application/services/snapshots.py">snapshots.py</a></td><td><code>SnapshotService.freeze_intake</code></td><td>Existing snapshots omit interfaces</td></tr>
+    <tr><td><a href="../src/migration_intake/application/services/topology_runner.py">topology_runner.py</a></td><td><code>GovernedTopologyRunner</code></td><td>Immutable capture/reservation design exists but is not HTTP-wired</td></tr>
+    <tr><td><a href="../src/migration_intake/topology/renderer/core.py#L677">core.py</a></td><td><code>render_label_only</code></td><td>Hash-pinned deterministic marker replacement</td></tr>
+    <tr><td><a href="../src/migration_intake/topology/renderer/core.py#L813">core.py</a></td><td><code>render_structural</code></td><td>Adds predeclared cells only, not repeated nodes/edges</td></tr>
+    <tr><td><a href="../src/migration_intake/persistence/migrations/versions/0020_topology_capture_governance.py">0020_topology_capture_governance.py</a></td><td><code>topo_inputs</code>, <code>topo_captures</code>, <code>topo_compat</code></td><td>Intended governed persistence exists in migration only</td></tr>
+    <tr><td><a href="../src/migration_intake/persistence/models_topology.py">models_topology.py</a></td><td>Three legacy models only</td><td>ORM does not represent migration <code>0020</code></td></tr>
+    <tr><td><a href="../tests/integration/web/test_topology_routes.py#L229">test_topology_routes.py</a></td><td>Capability/fail-closed tests</td><td>Tests and route implementation have diverged</td></tr>
+  </tbody></table>
+
+  <h2>4. Guide and Workbook Findings</h2>
+  <p>The DOCX contained 18 editable rule paragraphs and 11 embedded PNG diagrams. Windows OCR recovered section labels, but some image text was imperfect and the actual arrow colors were not recoverable.</p>
+  <p>Verified guide rules:</p>
+  <ul>
+    <li><strong>AT&amp;T Internal Interfaces:</strong> locations in column G matching Midrange, Hybrid, Private, Conexus, or OnPrem; inbound records; group by columns N and R.</li>
+    <li><strong>AWS Tier 1 / PaaS:</strong> column G matching AWS; inbound records; group by N and R.</li>
+    <li><strong>Azure:</strong> column G matching Azure; inbound records; group by N and R.</li>
+    <li><strong>Data-flow legend:</strong> includes a “Multiple Protocols” category, but its visual color is unreadable.</li>
+    <li><strong>Standard sections:</strong> CI/CD tooling, DNS private hosted zones, AWS Home Region/connectivity, AWS Tier 2/control plane, Conexus/GPN, and Windows-only email.</li>
+    <li><strong>Application-derived box:</strong> appears to include NAS, EC2, network, and storage details, but exact field mappings are image-only and OCR is insufficient.</li>
+    <li>Images suggest interface name/identifier labels and IN/OUT line treatment, which conflicts with the editable text’s inbound-only rule.</li>
+  </ul>
+  <p>Workbook structure:</p>
+  <ul>
+    <li>Visible sheets: <code>App</code>, <code>Interface</code>, <code>iTAP</code>, <code>WaveUtil</code>, <code>Infra</code>, <code>Database</code>, <code>TSS</code>, <code>Provisioning</code>.</li>
+    <li>Authoritative interface table: <code>Table1</code>, range <code>A1:AG69</code>, 33 columns and 68 data rows.</li>
+    <li>No formulas, validation lists, hidden rows/columns, or merged cells occur in the Interface table.</li>
+    <li>Direct guide mappings: G = system location, I = traffic direction, N = target protocol, R = future port.</li>
+    <li>Sanitized quality metrics: 61 rows have an interface ID; 9 repeated-ID groups cover 22 rows; 4 exact-duplicate groups cover 16 rows; 27 rows are inbound, 20 outbound, and 21 blank; 46 future ports are valid integers and 22 are blank.</li>
+    <li>The workbook supplies no explicit null, conflict, sorting, pagination, or fallback policy.</li>
+  </ul>
+
+  <h2>5. Source-to-Target Traceability</h2>
+  <table><thead><tr><th>Diagram element</th><th>Rule/source</th><th>Database/code</th><th>Current support</th><th>Gap</th></tr></thead><tbody>
+    <tr><td>Internal interfaces</td><td>G internal-family; inbound; group N/R</td><td><code>interface_system_location</code>, <code>data_traffic_direction</code>, <code>target_protocol</code>, <code>future_port</code></td><td>Not implemented</td><td>Styling and displayed identity undefined</td></tr>
+    <tr><td>AWS Tier 1/PaaS</td><td>G = AWS; inbound; group N/R</td><td>Same fields</td><td>Not implemented</td><td>Repeated nodes/edges unsupported</td></tr>
+    <tr><td>Azure</td><td>G = Azure; inbound; group N/R</td><td>Same fields</td><td>Not implemented</td><td>Azure placement/profile undefined</td></tr>
+    <tr><td>Interface label</td><td>OCR: name plus identifier</td><td>Likely <code>interface_app_acronym</code> and <code>interface_correlation_id</code></td><td>Ambiguous</td><td>Exact label contract needs approval</td></tr>
+    <tr><td>Arrow styling</td><td>Group by N/R; color legend</td><td>Target protocol and future port</td><td>Not implemented</td><td>Actual color mapping unreadable</td></tr>
+    <tr><td>Multiple protocols</td><td>Image legend</td><td>Multiple N/R groups</td><td>Not implemented</td><td>Aggregation behavior undefined</td></tr>
+    <tr><td>Application identity</td><td>App/database facts</td><td>Application, identifiers, answers</td><td>Implemented</td><td>Reads live state despite snapshot pin</td></tr>
+    <tr><td>CI/CD box</td><td>Standard</td><td>No source required</td><td>Template-only</td><td>Confirm fixed template content</td></tr>
+    <tr><td>DNS/Home Region/Tier 2/Conexus/Email</td><td>Standard</td><td>No source required</td><td>Template-only</td><td>Confirm variant-specific visibility</td></tr>
+    <tr><td>App infrastructure box</td><td>“Picked up from App”</td><td>Answers/resources/WaveUtil</td><td>Partial foundations</td><td>Exact mappings unreadable</td></tr>
+    <tr><td>Gap handling</td><td>No guide policy</td><td>Placeholders and reports</td><td>Partial</td><td>Interface-specific gaps absent</td></tr>
+  </tbody></table>
+
+  <h2>6. SQLite and Oracle Assessment</h2>
+  <p><code>interfaces</code> uses portable UUID/timestamp conventions and ordinary <code>String</code>/<code>Text</code> columns. Queries use SQLAlchemy expressions, so no database-specific topology business logic is necessary.</p>
+  <p>Risks:</p>
+  <ul>
+    <li>Oracle converts empty strings to <code>NULL</code>; normalization must occur before mapping.</li>
+    <li><code>list_records_for_application()</code> has no deterministic ordering.</li>
+    <li>Exact duplicate detection scans active rows in Python.</li>
+    <li>No <code>(application_id, state)</code> index is defined, which may matter for large registers.</li>
+    <li>Interface rows are mutable application-level state and not intake-scoped.</li>
+    <li>Snapshot/capture consistency cannot be proven unless interface rows and row versions are captured atomically.</li>
+    <li>Migration <code>0020</code>, ORM models, and repository APIs are currently inconsistent.</li>
+  </ul>
+  <p>Basic interface retrieval requires no schema change. Authoritative generation requires a versioned canonical contract containing interfaces; an index and capture-fencing migration may also be justified after measurements.</p>
+
+  <h2>7. Gap and Impact Analysis</h2>
+  <table><thead><tr><th>Severity</th><th>Gap</th><th>Impact</th></tr></thead><tbody>
+    <tr><td>Critical</td><td>Snapshot metadata is pinned but live answers are rendered</td><td>Official output is not reproducible</td></tr>
+    <tr><td>Critical</td><td>Migration/ORM/repository governance mismatch</td><td>Governed pipeline cannot run</td></tr>
+    <tr><td>High</td><td>Interfaces absent from snapshots, captures, projections, and rendering</td><td>Guide behavior is unsupported</td></tr>
+    <tr><td>High</td><td>Legacy service always persists <code>READY_FOR_REVIEW</code> after successful rendering</td><td>Gap status can disagree with the report</td></tr>
+    <tr><td>High</td><td>Route security implementation differs from tests</td><td>Generate/download controls may be absent</td></tr>
+    <tr><td>Medium</td><td>No repeated-node/edge layout or style engine</td><td>Interface sections cannot be generated</td></tr>
+    <tr><td>Medium</td><td>Mutable interfaces lack authoritative capture semantics</td><td>Later edits can change equivalent reruns</td></tr>
+    <tr><td>Medium</td><td>Unknown/blank locations and directions lack policy</td><td>Rows may be omitted or misclassified</td></tr>
+    <tr><td>Medium</td><td>Contacts/endpoints are sensitive</td><td>Projection must use a strict field allowlist</td></tr>
+    <tr><td>Low</td><td>Filesystem writes precede transaction completion</td><td>Failed runs can leave orphaned blobs</td></tr>
+  </tbody></table>
+
+  <h2>8. Proposed Target Architecture</h2>
+  <pre>flowchart LR
+    API[Topology API] --&gt; App[Generation application service]
+    App --&gt; Capture[Immutable capture service]
+    Capture --&gt; IR[Interface repository port]
+    Capture --&gt; AR[Answers/resources repositories]
+    Capture --&gt; Model[Canonical topology input]
+    Model --&gt; Rules[Pure interface mapping policy]
+    Rules --&gt; Projection[Normalized topology projection]
+    Projection --&gt; Renderer[Versioned structural renderer]
+    Renderer --&gt; Verify[Structural verification]
+    Verify --&gt; Store[Artifact store]
+    Verify --&gt; Audit[Run, manifest, issues, audit]</pre>
+  <p>Introduce a typed <code>TopologyInterface</code> containing only approved fields, normalized location/direction/protocol/port, source record ID, row version, and provenance. Repository reads should return active rows in deterministic order.</p>
+  <p>A pure mapping policy should:</p>
+  <ol>
+    <li>Normalize case and approved aliases.</li>
+    <li>Preserve unknown values as issues rather than infer classifications.</li>
+    <li>Filter inbound only if that rule is approved.</li>
+    <li>Group by section, normalized target protocol, and normalized future port.</li>
+    <li>Preserve distinct rows sharing an interface ID.</li>
+    <li>Flag conflicting rows instead of selecting one silently.</li>
+    <li>Produce stable ordering and deterministic generated cell IDs.</li>
+  </ol>
+  <p>Extend a versioned structural profile with prototype nodes, edge prototypes, style keys, spacing, capacity, pagination, and a reviewed protocol/port-to-style map. Include interface-set hash, profile hash, base hash, selection hash, and policy hashes in semantic input identity.</p>
+
+  <h2>9. Phased Implementation Plan</h2>
+  <table><thead><tr><th>Phase</th><th>Scope and likely files</th><th>Complexity</th><th>Acceptance / rollback</th></tr></thead><tbody>
+    <tr><td>0</td><td>Reconcile <code>0020</code> models/repository/routes/tests; keep generation fail-closed</td><td>Medium</td><td>Topology tests collect and baseline is recorded; revert code only</td></tr>
+    <tr><td>1</td><td>Approve guide mappings, colors, outbound policy, labels, standard sections</td><td>Small</td><td>Versioned synthetic rule fixtures; no runtime change</td></tr>
+    <tr><td>2</td><td>Add repository port and pure interface normalization/grouping projection</td><td>Medium</td><td>SQLite contract and rule unit tests; feature remains disabled</td></tr>
+    <tr><td>3</td><td>Add interfaces to a new canonical snapshot/capture schema and semantic hash</td><td>Large</td><td>Identical captures hash identically; old snapshots remain readable</td></tr>
+    <tr><td>4</td><td>Extend structural profile/renderer for repeated nodes, edges, styles, overflow</td><td>Large</td><td>Golden XML plus structural assertions; retain label-only renderer</td></tr>
+    <tr><td>5</td><td>Wire governed runner to routes, reports, capabilities, manifests, and audit</td><td>Medium</td><td>End-to-end SQLite flow; legacy path remains rollback option</td></tr>
+    <tr><td>6</td><td>Oracle contract, migration, concurrency, performance, and manual review</td><td>Medium</td><td>Authorized Oracle evidence and release approval</td></tr>
+  </tbody></table>
+  <p>Optional improvements include storage garbage collection, richer visual previews, and automatic template variant selection.</p>
+
+  <h2>10. Regression-Prevention Strategy</h2>
+  <ul>
+    <li>Establish a green baseline before implementation; this is currently blocked by collection errors.</li>
+    <li>Use synthetic fixtures only.</li>
+    <li>Unit-test every normalization, classification, grouping, ordering, duplicate, conflict, and style rule.</li>
+    <li>Run repository contracts on SQLite and an explicitly authorized disposable Oracle schema.</li>
+    <li>Compare generated draw.io XML structurally: cells, edges, parents, styles, geometry, and untouched template content.</li>
+    <li>Retain golden artifacts only for reviewed synthetic profiles.</li>
+    <li>Repeat identical inputs and assert byte-identical diagram, report, manifest, and hashes.</li>
+    <li>Test zero, one, many, duplicate, conflicting, null, invalid-port, unknown-location, inbound/outbound, and overflow cases.</li>
+    <li>Test existing label-only workflows unchanged.</li>
+    <li>Measure representative registers at 10, 100, 1,000, and 5,000 rows.</li>
+    <li>Manually review section placement, legibility, edge direction, legend agreement, page overflow, and sensitive-data exclusion.</li>
+  </ul>
+
+  <h2>11. Test and Evidence Matrix</h2>
+  <table><thead><tr><th>Risk/requirement</th><th>Baseline evidence</th><th>Proposed test</th><th>Expected retained evidence</th></tr></thead><tbody>
+    <tr><td>Interface import shape</td><td><code>test_interface_sheet.py</code> passed</td><td>All 33 headers and aliases</td><td>JUnit result</td></tr>
+    <tr><td>Renderer determinism</td><td>Renderer tests passed</td><td>Repeat structural generation</td><td>XML, hashes, manifest</td></tr>
+    <tr><td>Current topology baseline</td><td>236 collected, 8 import errors</td><td>Restore full collection and execution</td><td>JUnit plus failure-free log</td></tr>
+    <tr><td>SQLite repository</td><td>Existing synthetic interface tests, not executed in broad run</td><td>Repository contract</td><td>JUnit and query plan</td></tr>
+    <tr><td>Oracle parity</td><td>Not executed or connected</td><td>Same contract with authorized schema</td><td>Redacted CI artifact</td></tr>
+    <tr><td>Snapshot integrity</td><td>Existing governed tests cannot collect</td><td>Interface-inclusive capture/hash tests</td><td>Canonical JSON hash</td></tr>
+    <tr><td>Duplicate/conflict safety</td><td>Existing interface tests encode preservation</td><td>Projection conflict matrix</td><td>Issue report fixture</td></tr>
+    <tr><td>API compatibility</td><td>Route tests exist but conflict with code</td><td>Generate/download/security contracts</td><td>HTTP response snapshots</td></tr>
+    <tr><td>Diagram correctness</td><td>Label renderer tests passed</td><td>Structural golden and XML assertions</td><td>Reviewed synthetic <code>.drawio</code></td></tr>
+    <tr><td>Performance</td><td>No baseline found</td><td>Timed representative volumes</td><td>Benchmark report</td></tr>
+  </tbody></table>
+  <p>Executed during this analysis: 60 synthetic interface-parser and renderer tests passed. The broader focused topology command executed no tests because eight collection imports failed.</p>
+
+  <h2>12. Risks, Assumptions, and Open Questions</h2>
+  <ol>
+    <li>What exact colors/styles correspond to each protocol/port group?</li>
+    <li>Are outbound interfaces omitted, rendered elsewhere, or represented with reverse arrows?</li>
+    <li>Which field supplies “Interface Name” and which supplies the displayed “MOTS ID”?</li>
+    <li>Should notes containing “expired” or “not in scope” exclude rows from topology?</li>
+    <li>How should blank location, direction, target protocol, or future port be represented?</li>
+    <li>Are exact duplicates suppressed with a reported warning, or rendered independently?</li>
+    <li>What exact fields populate the application infrastructure box?</li>
+    <li>Which standard boxes vary by operating system, cloud, site, or template variant?</li>
+    <li>Should official interface data be frozen in a new snapshot schema or in a topology-specific immutable capture?</li>
+    <li>What per-page interface capacity and overflow behavior are acceptable?</li>
+  </ol>
+
+  <h2>13. Recommended First Implementation Step</h2>
+  <p>Begin with Phase 0 only: reconcile migration <code>0020</code> with the ORM/repository and restore a green topology test baseline while keeping generation fail-closed. Then implement a pure, synthetic-tested <code>InterfaceTopologyProjection</code> without changing production routes or databases.</p>
+  <p>This isolates the mapping rules from rendering and establishes trustworthy regression evidence before user-visible behavior changes.</p>
+
+  <h2>14. Approval Gate</h2>
+  <div class="approval">
+    <p>Approval is required before code changes. Approval should cover:</p>
+    <ul>
+      <li>Phase 0 baseline reconciliation.</li>
+      <li>The interface inclusion and grouping policy.</li>
+      <li>The arrow style legend.</li>
+      <li>Snapshot/capture schema strategy.</li>
+      <li>Outbound and duplicate handling.</li>
+      <li>Exact label and application-box mappings.</li>
+      <li>Authorization and legacy-workflow compatibility expectations.</li>
+    </ul>
+  </div>
+
+  <p class="notice">No files, databases, configurations, or documents were modified during this analysis. No implementation or state-changing commands were executed. Awaiting approval before beginning implementation.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S08-C01",
+  "validated_at": "2026-09-24T17:06:22.3152917-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/database_mapping/topology_schema.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/persistence/models_topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models_topology.py",
+      "file_type": ".py",
+      "size_bytes": 13445,
+      "modified_utc": "2026-09-22T22:00:32.7135450Z",
+      "sha256": "476950b30276fef44bd4cdd584fa9f6471894cd4a6088ef5267b349cb73eb61e",
+      "chunk_id": "S08-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-281",
+      "relevant_section": "Eight topology ORM tables and table constraints",
+      "evidence_id": "EV-DATA-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/versions/0014_topology_generation.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\versions\\0014_topology_generation.py",
+      "file_type": ".py",
+      "size_bytes": 8575,
+      "modified_utc": "2026-09-24T12:08:58.4553231Z",
+      "sha256": "af9058e9b9598c4e46f20d91119bec9afe7222326bf85fb0d71e8389cdec711e",
+      "chunk_id": "S08-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-207",
+      "relevant_section": "Legacy base/run/artifact tables",
+      "evidence_id": "EV-DATA-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/versions/0015_topology_draft_runs.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\versions\\0015_topology_draft_runs.py",
+      "file_type": ".py",
+      "size_bytes": 877,
+      "modified_utc": "2026-09-24T12:08:58.4590284Z",
+      "sha256": "279934559013894513881048f0250c127e566e3908c96fbed020cc6ea238bec2",
+      "chunk_id": "S08-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-29",
+      "relevant_section": "Nullable legacy draft snapshot pins",
+      "evidence_id": "EV-DATA-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/versions/0020_topology_capture_governance.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\versions\\0020_topology_capture_governance.py",
+      "file_type": ".py",
+      "size_bytes": 12508,
+      "modified_utc": "2026-09-22T18:53:54.0663683Z",
+      "sha256": "053b76750ba78c701ce713f6976d66887085c43db0fa69d13e2b579bb9cad312",
+      "chunk_id": "S08-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-287",
+      "relevant_section": "Governed columns and compatibility/capture/input/reservation/review tables",
+      "evidence_id": "EV-DATA-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/versions/0021_intake_content_epoch.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\versions\\0021_intake_content_epoch.py",
+      "file_type": ".py",
+      "size_bytes": 3198,
+      "modified_utc": "2026-09-22T18:53:54.0690450Z",
+      "sha256": "93676fd122ec696dabf49fe813fd5b5c42e28c81d2b4d5823091abfcd19b0c69",
+      "chunk_id": "S08-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-78",
+      "relevant_section": "Content epoch, compatibility input pins, rerun and attempt uniqueness",
+      "evidence_id": "EV-DATA-001",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Exactly five schema-owning files",
+    "ORM declarations compared with full inspected migration progression",
+    "Legacy nullable pins separated from governed input invariants",
+    "No deployed schema/runtime parity claimed"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

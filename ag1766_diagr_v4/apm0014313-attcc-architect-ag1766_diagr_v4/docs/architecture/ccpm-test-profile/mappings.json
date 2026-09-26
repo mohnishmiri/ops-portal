@@ -1,0 +1,1 @@
+{"tokens":[{"token_id":"APPLICATION_NAME","projection_path":"$.application.name","scope":{"lifecycle":"TARGET"},"cardinality":"SINGLE"},{"token_id":"APPLICATION_ACRONYM","projection_path":"$.application.acronym","scope":{"lifecycle":"TARGET"},"cardinality":"SINGLE"}]}

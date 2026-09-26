@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "migration-intake.fullname" . }}
+  labels:
+    {{- include "migration-intake.labels" . | nindent 4 }}
+data:
+  {{- if not .Values.app.secretManaged.appEnv }}
+  AWS_OUTPOST_APP_ENV: {{ .Values.app.env | quote }}
+  {{- end }}
+  {{- if not .Values.app.secretManaged.databaseUrl }}
+  AWS_OUTPOST_DATABASE_URL: {{ .Values.app.databaseUrl | quote }}
+  {{- end }}
+  {{- if .Values.app.oracleClientLibDir }}
+  AWS_OUTPOST_ORACLE_CLIENT_LIB_DIR: {{ .Values.app.oracleClientLibDir | quote }}
+  {{- end }}
+  {{- if not .Values.app.secretManaged.evidenceRoot }}
+  AWS_OUTPOST_EVIDENCE_ROOT: {{ .Values.persistence.mountPath | quote }}
+  {{- end }}
+  {{- if not .Values.app.secretManaged.actorId }}
+  AWS_OUTPOST_ACTOR_ID: {{ .Values.app.actorId | quote }}
+  {{- end }}
+  {{- if not .Values.app.secretManaged.actorDisplayName }}
+  AWS_OUTPOST_ACTOR_DISPLAY_NAME: {{ .Values.app.actorDisplayName | quote }}
+  {{- end }}
+  LOG_LEVEL: {{ .Values.app.logLevel | quote }}
+  LOG_FORMAT: {{ .Values.app.logFormat | quote }}
+  AWS_OUTPOST_LLM_ENABLED: {{ .Values.llm.enabled | quote }}
+  AWS_OUTPOST_LLM_PROVIDER: {{ .Values.llm.provider | quote }}
+  AWS_OUTPOST_LLM_PROFILE: {{ .Values.llm.profile | quote }}
+  AWS_OUTPOST_LLM_OUTBOUND_ENABLED: {{ .Values.llm.outboundEnabled | quote }}
+  {{- if .Values.llm.baseUrl }}
+  AWS_OUTPOST_LLM_BASE_URL: {{ .Values.llm.baseUrl | quote }}
+  {{- end }}
+  {{- if .Values.llm.model }}
+  AWS_OUTPOST_LLM_MODEL: {{ .Values.llm.model | quote }}
+  {{- end }}
+  AWS_OUTPOST_LLM_AUTH_MODE: {{ .Values.llm.authMode | quote }}
+  AWS_OUTPOST_LLM_ALLOWED_CLASSIFICATIONS: {{ .Values.llm.allowedClassifications | quote }}
+  AWS_OUTPOST_LLM_CONNECT_TIMEOUT_SECONDS: {{ .Values.llm.connectTimeoutSeconds | quote }}
+  AWS_OUTPOST_LLM_READ_TIMEOUT_SECONDS: {{ .Values.llm.readTimeoutSeconds | quote }}
+  AWS_OUTPOST_LLM_MAX_ATTEMPTS: {{ .Values.llm.maxAttempts | quote }}
+  AWS_OUTPOST_LLM_MAX_RESPONSE_BYTES: {{ .Values.llm.maxResponseBytes | quote }}
+  AWS_OUTPOST_LLM_MAX_FRAGMENT_CHARS: {{ .Values.llm.maxFragmentChars | quote }}
+  AWS_OUTPOST_LLM_MAX_REQUESTS_PER_IMPORT: {{ .Values.llm.maxRequestsPerImport | quote }}

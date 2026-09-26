@@ -1,0 +1,12 @@
+{
+	"id":"S06-C12","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 38-39",
+	"inputs":["Guide blocks 38-39 and image10"],
+	"outputs":["evidence/docx/section-011.json","evidence/docx/media/image10.png","evidence/docx/derived/image10-ocr.json","analysis/business_rules/guide_section_11.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 38-39 and image10","symbols":"Standard network box prose and qualified label","further":true}],
+	"checks":["Safe extraction/local OCR succeeded","Hashes unchanged","Network label not treated as verified application connectivity"],
+	"established":["Prose specifies standard network box presentation","OCR recognizes Conexus/GPN wording"],
+	"uncertainties":["Exact punctuation/layout unverified","No circuit/route/reachability facts established"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C12; inspect_guide.ps1 blocks 38-39 section-011; local_ocr.exe image10.png image10-ocr.json","result":"0; one qualified OCR line; sources unchanged","mutation":"Analysis artifacts only","output":"evidence/docx/section-011.json; evidence/docx/derived/image10-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-012","path":"analysis/business_rules/guide_section_11.md","source":"Guide blocks 38-39 and image10 OCR","description":"Reusable network label versus unverified application connection facts","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; operational/visual semantics unverified"}],
+	"next_chunk":"S06-C13","next_action":"Extract only final guide blocks 40-45"
+}

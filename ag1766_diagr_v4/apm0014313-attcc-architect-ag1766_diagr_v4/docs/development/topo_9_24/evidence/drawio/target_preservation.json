@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "captured_at": "2026-09-24T17:16:10.1811103-05:00",
+  "input_sha256": "1975ea8e046760e359a4339e1d259b418ff7eeff0c4f6881555e01b0b2d84acb",
+  "target_sha256": "3df0f756a748277a6cc7d32abffdba8737ee463dcf7dc913cba721e89d0dc8af",
+  "comparison_mode": "APPLICATION_SPECIFIC_EXPECTED_TARGET",
+  "comparisons": [
+    {
+      "input_page": "page-001",
+      "target_page": "page-001",
+      "input_cells": 141,
+      "target_cells": 244,
+      "shared_effective_ids": 0,
+      "exact_shared_cells": 0,
+      "shared_value_unchanged": 0,
+      "shared_style_unchanged": 0,
+      "input_ids_absent_from_target": 141,
+      "target_ids_not_in_input": 244,
+      "target_vertices_without_style": 0,
+      "target_edges_without_style": 0
+    },
+    {
+      "input_page": "page-001",
+      "target_page": "page-002",
+      "input_cells": 141,
+      "target_cells": 262,
+      "shared_effective_ids": 0,
+      "exact_shared_cells": 0,
+      "shared_value_unchanged": 0,
+      "shared_style_unchanged": 0,
+      "input_ids_absent_from_target": 141,
+      "target_ids_not_in_input": 262,
+      "target_vertices_without_style": 0,
+      "target_edges_without_style": 0
+    }
+  ],
+  "cross_page_shared_effective_id_pair_count": 104,
+  "raw_values_or_ids_persisted": false,
+  "source_modified": false,
+  "limitations": [
+    "Shared cell IDs do not by themselves define protected or generated ownership",
+    "Exact signature includes value/style/parent/endpoints/geometry but not wrapper metadata outside mxCell",
+    "Counts are acceptance-baseline evidence, not a renderer pass",
+    "Visual overlap, clipping, icon rendering and color contrast require rendered-page inspection"
+  ]
+}

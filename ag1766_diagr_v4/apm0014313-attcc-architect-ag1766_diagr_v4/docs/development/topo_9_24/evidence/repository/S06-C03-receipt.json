@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S06-C03",
+  "validated_at": "2026-09-24T14:22:01.8692175-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/docx/section-002.json",
+    "evidence/docx/media/image3.png",
+    "evidence/docx/derived/image3-4x.png",
+    "evidence/docx/derived/image3-ocr.json",
+    "analysis/business_rules/guide_section_02.md",
+    "local_ocr.cs",
+    "local_ocr.exe"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "docs/development/topo_9_24/Topology Guide.docx",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\development\\topo_9_24\\Topology Guide.docx",
+      "file_type": ".docx",
+      "size_bytes": 171024,
+      "modified_utc": "2026-09-18T12:20:58.6804466Z",
+      "sha256": "73881e6258b6f12a7dba72f44184f7724fc4494216d70a2e13fdee4957a8955e",
+      "chunk_id": "S06-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Blocks 6-7 and embedded image3, original extraction reused",
+      "relevant_section": "Standard section prose; locally transcribed image labels",
+      "evidence_id": "EV-DOCX-003",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Local extraction/image artifacts exist and hashes are unchanged",
+    "Only interrupted inspection retried",
+    "Final helper compilation and local OCR succeeded using installed Windows components",
+    "OCR JSON is explicit about lack of visual verification",
+    "No external OCR, installation, application execution or excluded-folder inspection"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

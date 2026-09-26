@@ -1,0 +1,8 @@
+.git/
+.github/
+.env*
+*.db
+*.sqlite*
+tests/
+_data/
+evidence/

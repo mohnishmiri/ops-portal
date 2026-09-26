@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interfaces — Mockup (List) — Migration Intake</title>
+
+<!-- Reuses the real design-system stylesheets so this preview matches the
+     shipped app pixel-for-pixel. Open this file directly in a browser
+     (file://) — the relative ../css/ paths resolve to the real files. -->
+<link rel="stylesheet" href="../css/tokens.css">
+<link rel="stylesheet" href="../css/base.css">
+<link rel="stylesheet" href="../css/layout.css">
+<link rel="stylesheet" href="../css/components.css">
+<link rel="stylesheet" href="../css/wave_util.css">
+<link rel="stylesheet" href="../css/hub.css">
+<style>
+  /* Mockup-only banner, not part of the shipped app */
+  .mockup-banner {
+    background: var(--color-warning-bg); color: var(--color-warning);
+    padding: var(--space-2) var(--space-4); font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold); text-align: center;
+  }
+  .proposal-banner {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--space-4); padding: var(--space-4);
+    background: var(--color-info-bg); border: 1px solid var(--color-cyan-300);
+    border-radius: var(--radius-md); margin-bottom: var(--space-4);
+  }
+  .proposal-banner strong { color: var(--color-text-primary); }
+  .list-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--space-3); }
+</style>
+</head>
+<body>
+<div class="mockup-banner">MOCKUP — static preview, not wired to the app (synthetic data)</div>
+
+<div class="app-shell">
+  <header class="global-header" role="banner">
+    <a href="#" class="brand-lockup"><span class="brand-mark"><span></span><span></span><span></span></span><span class="brand-name">Migration Intake</span></a>
+    <nav class="global-nav" aria-label="Primary navigation">
+      <a href="#" class="global-nav-item">Applications</a>
+      <a href="#" class="global-nav-item">CCPM</a>
+      <a href="#" class="global-nav-item active" aria-current="page">Interfaces</a>
+    </nav>
+    <div class="user-tools"></div>
+  </header>
+
+  <section class="command-bar" aria-label="Application context">
+    <div class="command-brand"><span class="eyebrow">AWS Outposts Migration</span><strong>MIGRATION INTAKE</strong></div>
+    <div class="app-identity"><span class="app-monogram">CC</span><strong>CCPM</strong></div>
+    <div class="command-actions">
+      <a href="#" class="button button--ghost">Export →</a>
+      <a href="#" class="button button--primary">+ Add interface</a>
+    </div>
+  </section>
+
+  <div class="workspace-shell">
+    <nav class="side-nav" aria-label="Application navigation">
+      <div class="side-nav-heading" aria-hidden="true">Application</div>
+      <a href="#" class="side-nav-item"><span>Intake overview</span></a>
+      <a href="#" class="side-nav-item"><span>Questionnaire</span></a>
+      <a href="#" class="side-nav-item"><span>Evidence</span></a>
+      <a href="#" class="side-nav-item active" aria-current="page"><span>Interfaces</span><span class="side-count side-count--warning">3</span></a>
+      <a href="#" class="side-nav-item"><span>WaveUtil</span></a>
+      <a href="#" class="side-nav-item"><span>Readiness</span></a>
+      <a href="#" class="side-nav-item"><span>Topology</span></a>
+    </nav>
+
+    <main id="main-content">
+      <div class="wave-util-page">
+        <header class="page-header">
+          <h1 class="page-title">Interfaces</h1>
+          <p class="page-subtitle">Directional interface register — every consumer/provider connection for this application.</p>
+        </header>
+
+        <!-- Pending import proposals banner: shown when candidates from an
+             uploaded App Data Capture (or Interface Tracking) workbook have
+             not yet been reviewed. Mirrors the WaveUtil "pending" pattern. -->
+        <div class="proposal-banner">
+          <div>
+            <strong>3 new interface rows</strong> were found in
+            <code>App Data Capture_ccpm.xlsx</code> (Interface sheet) and are waiting for review.
+            Nothing is added to this register until you accept them.
+          </div>
+          <a href="#" class="button button--secondary">Review proposals →</a>
+        </div>
+
+        <div class="stat-bar">
+          <span class="stat-chip">12 total</span>
+          <span class="stat-chip">7 inbound</span>
+          <span class="stat-chip">5 outbound</span>
+          <span class="stat-chip">Page 1 of 1</span>
+        </div>
+
+        <div class="filter-row">
+          <div class="filter-pills" role="group" aria-label="Filter by direction">
+            <button class="filter-pill filter-pill--active" type="button">ALL</button>
+            <button class="filter-pill" type="button">INBOUND</button>
+            <button class="filter-pill" type="button">OUTBOUND</button>
+          </div>
+          <input type="search" class="form-control" style="max-width:240px" placeholder="Search interface / acronym…">
+        </div>
+
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Interface Correlation ID</th>
+                <th scope="col">Interface Application Acronym</th>
+                <th scope="col">Interface System Location</th>
+                <th scope="col">Data Traffic</th>
+                <th scope="col">Target Protocol</th>
+                <th scope="col">Future Port</th>
+                <th scope="col">Last updated</th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="cell-primary"><a href="interfaces-register-form.html">INT-20401</a></td>
+                <td>ORDR-SVC</td>
+                <td><span class="status-pill">AZURE</span></td>
+                <td><span class="status-pill status-pill--warning"><span class="pill-dot"></span>Outbound</span></td>
+                <td>HTTPS / TLS 1.2</td>
+                <td>8443</td>
+                <td class="cell-meta">2026-09-15</td>
+                <td class="cell-actions"><a href="interfaces-register-form.html" class="button button--ghost button--sm">Edit →</a></td>
+              </tr>
+              <tr>
+                <td class="cell-primary"><a href="#">INT-20402</a></td>
+                <td>BILL-GTW</td>
+                <td><span class="status-pill">MAINFRAME</span></td>
+                <td><span class="status-pill status-pill--success"><span class="pill-dot"></span>Inbound</span></td>
+                <td>MQ / TLS</td>
+                <td>1414</td>
+                <td class="cell-meta">2026-09-12</td>
+                <td class="cell-actions"><a href="#" class="button button--ghost button--sm">Edit →</a></td>
+              </tr>
+              <tr>
+                <td class="cell-primary"><a href="#">INT-20403</a></td>
+                <td>NOTIFY-HUB</td>
+                <td><span class="status-pill">AWS</span></td>
+                <td><span class="status-pill status-pill--warning"><span class="pill-dot"></span>Outbound</span></td>
+                <td>HTTPS / REST</td>
+                <td>443</td>
+                <td class="cell-meta">2026-09-10</td>
+                <td class="cell-actions"><a href="#" class="button button--ghost button--sm">Edit →</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

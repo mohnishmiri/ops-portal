@@ -1,0 +1,29 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_OUTPOST_APP_ENV: ${AWS_OUTPOST_APP_ENV:-local}
+      AWS_OUTPOST_DATABASE_URL: ${AWS_OUTPOST_DATABASE_URL:-sqlite:////app/data/local.db}
+      AWS_OUTPOST_EVIDENCE_ROOT: /app/evidence
+      AWS_OUTPOST_ACTOR_ID: ${AWS_OUTPOST_ACTOR_ID:-550e8400-e29b-41d4-a716-446655440000}
+      AWS_OUTPOST_ACTOR_DISPLAY_NAME: ${AWS_OUTPOST_ACTOR_DISPLAY_NAME:-Local Developer}
+      ACTOR_TYPE: ${ACTOR_TYPE:-CONFIGURED}
+      AWS_OUTPOST_CSRF_SECRET: ${AWS_OUTPOST_CSRF_SECRET:-local-dev-change-me}
+      AI_MODE: ${AI_MODE:-mock}
+    volumes:
+      - app-data:/app/data
+      - app-evidence:/app/evidence
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  app-data:
+  app-evidence:

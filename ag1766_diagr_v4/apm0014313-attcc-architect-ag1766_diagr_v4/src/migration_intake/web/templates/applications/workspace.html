@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}{{ workspace.display_name }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ workspace.id }}/edit" class="button secondary">Edit</a>
+{% endblock %}
+
+{% block content %}
+
+{# ── Application identity card ─────────────────────────────────────── #}
+<div class="card card--elevated">
+  <div class="card-header">
+    <div>
+      <h1 class="card-title">{{ workspace.display_name }}</h1>
+      <p class="form-hint">ID: {{ workspace.id }} &middot; Created: {{ workspace.created_at }}</p>
+    </div>
+    <span class="status-pill status-pill--active">
+      <span class="pill-dot"></span>{{ workspace.state }}
+    </span>
+  </div>
+
+  {% if workspace.identifiers %}
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr><th scope="col">Type</th><th scope="col">Value</th></tr>
+      </thead>
+      <tbody>
+        {% for ident in workspace.identifiers %}
+        <tr><td>{{ ident.type }}</td><td>{{ ident.raw_value }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="form-hint">No identifiers registered.</p>
+  {% endif %}
+</div>
+
+{# ── 2×2 action card grid (open intake path) ────────────────────────── #}
+{% if workspace.open_intake %}
+<div class="app-action-grid">
+
+  {# 1. Intake Hub — primary CTA #}
+  <article class="app-action-card app-action-card--primary">
+    <div>
+      <h2 class="app-action-card__title">Intake Hub</h2>
+      <p class="app-action-card__counter">
+        {{ evidence_count }} file{{ 's' if evidence_count != 1 else '' }}
+        &middot; {{ proposal_count }} proposal{{ 's' if proposal_count != 1 else '' }}
+      </p>
+    </div>
+    <div class="app-action-card__action">
+      <a class="button button--primary" href="{{ hub_href }}">Open hub &rarr;</a>
+    </div>
+  </article>
+
+  {# 2. Evidence sources #}
+  <article class="app-action-card">
+    <div>
+      <h2 class="app-action-card__title">Evidence</h2>
+      <p class="app-action-card__counter">
+        {{ evidence_count }} file{{ 's' if evidence_count != 1 else '' }} imported
+      </p>
+    </div>
+    <div class="app-action-card__action">
+      <a class="button secondary" href="/applications/{{ workspace.id }}/intakes/{{ workspace.open_intake.id }}/sources">Review sources &rarr;</a>
+    </div>
+  </article>
+
+  {# 3. Interfaces — populated by Interface worksheet proposals in Evidence #}
+  <article class="app-action-card">
+    <div>
+      <h2 class="app-action-card__title">Interfaces</h2>
+      <p class="app-action-card__counter">
+        {{ interface_count }} approved
+        &middot; {{ interface_proposal_count }} proposal{{ 's' if interface_proposal_count != 1 else '' }}
+      </p>
+    </div>
+    <div class="app-action-card__action">
+      <a class="button secondary" href="/applications/{{ workspace.id }}/intakes/{{ workspace.open_intake.id }}/interfaces">Review interfaces &rarr;</a>
+    </div>
+  </article>
+
+  {# 4. WaveUtil #}
+  <article class="app-action-card">
+    <div>
+      <h2 class="app-action-card__title">WaveUtil</h2>
+      <p class="app-action-card__counter">Server inventory</p>
+    </div>
+    <div class="app-action-card__action">
+      <a class="button secondary" href="/applications/{{ workspace.id }}/intakes/{{ workspace.open_intake.id }}/wave-util">View servers &rarr;</a>
+    </div>
+  </article>
+
+  {# 5. Readiness #}
+  <article class="app-action-card">
+    <div>
+      <h2 class="app-action-card__title">Readiness</h2>
+      <p class="app-action-card__counter">{{ workspace.open_intake.state }}</p>
+    </div>
+    <div class="app-action-card__action">
+      <a class="button secondary" href="/intakes/{{ workspace.open_intake.id }}/readiness">Check readiness &rarr;</a>
+    </div>
+  </article>
+
+  {# 6. Topology Generation — always its own row, below Readiness #}
+  <article class="app-action-card app-action-card--full-row">
+    <div>
+      <h2 class="app-action-card__title">Topology</h2>
+      <p class="app-action-card__counter">Generate diagram</p>
+    </div>
+    <div class="app-action-card__action">
+      <a class="button secondary" href="/applications/{{ workspace.id }}/intakes/{{ workspace.open_intake.id }}/topology">Generate topology &rarr;</a>
+    </div>
+  </article>
+
+</div>
+
+{% else %}
+
+{# ── No open intake — offer to create one ──────────────────────────── #}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">No open intake</h2>
+  </div>
+  {% if latest_catalog %}
+  <p class="form-hint">Create an intake to start collecting evidence and answers.</p>
+  <form method="POST" action="/applications/{{ workspace.id }}/intakes" class="intake-create-form">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="catalog_id" value="{{ latest_catalog.id }}">
+    <button type="submit" class="button button--primary">
+      Create intake ({{ latest_catalog.semantic_version }}) &rarr;
+    </button>
+  </form>
+  {% else %}
+  <p class="form-hint">No published catalog is available. Please publish a catalog first.</p>
+  {% endif %}
+</div>
+
+{% endif %}
+
+{% endblock %}

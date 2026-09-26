@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{#
+  Readiness report — Screen 12 of the approved mockup (UX-4b).
+
+  Shows readiness dimensions, a status hero card, and the freeze form when
+  the intake is ready. Tailwind-free: all styling in /static/css/readiness.css.
+  No inline on* handlers. No hex literals.
+#}
+
+{% block title %}Readiness{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/intakes/{{ intake_id }}/readiness" class="button button--ghost button--sm">Refresh</a>
+{% endblock %}
+
+{% block content %}
+<div class="readiness-page">
+
+  {# ------------------------------------------------------------------ #}
+  {# Status hero card                                                     #}
+  {# ------------------------------------------------------------------ #}
+  <div class="card readiness-status readiness-status--{{ 'ready' if readiness.is_ready else 'not-ready' }}">
+    <div class="readiness-status__icon" aria-hidden="true">
+      {% if readiness.is_ready %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="9 12 11 14 15 10"/>
+      </svg>
+      {% else %}
+      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {% endif %}
+    </div>
+    <div class="readiness-status__body">
+      <h1 class="readiness-status__heading">
+        {% if readiness.is_ready %}Ready to freeze{% else %}Not ready{% endif %}
+      </h1>
+      <p class="readiness-status__checked">Checked {{ readiness.checked_at }}</p>
+    </div>
+    <span class="status-pill status-pill--{{ 'success' if readiness.is_ready else 'warning' }}">
+      {{ 'READY' if readiness.is_ready else 'NOT READY' }}
+    </span>
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Dimensions list                                                      #}
+  {# ------------------------------------------------------------------ #}
+  <section class="readiness-dimensions" aria-label="Readiness dimensions">
+    <h2 class="readiness-dimensions__heading">Dimensions</h2>
+    {% for dim in readiness.dimensions %}
+    <div class="readiness-dimension{% if not dim.passed %} readiness-dimension--fail{% endif %}">
+      <div class="readiness-dimension__header">
+        <span class="readiness-dimension__name">{{ dim.name }}</span>
+        <span class="status-pill status-pill--{{ 'success' if dim.passed else 'danger' }}">
+          {{ 'PASS' if dim.passed else 'FAIL' }}
+        </span>
+      </div>
+      <p class="readiness-dimension__desc">{{ dim.message }}</p>
+      {% if dim.blockers %}
+      <ul class="readiness-dimension__blockers">
+        {% for blocker in dim.blockers %}
+        <li>{{ blocker }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </section>
+
+  {# ------------------------------------------------------------------ #}
+  {# Freeze form — only when ready                                        #}
+  {# ------------------------------------------------------------------ #}
+  {% if readiness.is_ready %}
+  <div class="card readiness-freeze">
+    <h2 class="readiness-freeze__heading">Freeze this intake</h2>
+    <p class="readiness-freeze__warning">This action is irreversible. Once frozen, answers cannot be edited.</p>
+    <form method="POST" action="/intakes/{{ intake_id }}/freeze">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="button button--primary">Freeze &rarr;</button>
+    </form>
+  </div>
+  {% else %}
+  <div class="card readiness-not-ready">
+    <p>Resolve all failing dimensions before freezing.</p>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

@@ -1,0 +1,67 @@
+{#
+  Measurement context editor - measurement with context/scope.
+
+  Context:
+    question: dict with code, text, help, required_level, units, options (contexts)
+    answer: dict | None with value.context, value.value, value.unit
+    errors: dict | None
+#}
+<div class="measurement-context-editor">
+  <div class="form-grid">
+    <div class="form-group">
+      <label for="q-{{ question.code }}-context" class="form-label">Context</label>
+      <select 
+        name="context"
+        id="q-{{ question.code }}-context"
+        class="form-control{% if errors and errors.context %} form-control--error{% endif %}"
+      >
+        <option value="">-- Select context --</option>
+        {% for option in question.options or [] %}
+        <option value="{{ option.value }}" {% if answer and answer.value and answer.value.context == option.value %}selected{% endif %}>
+          {{ option.label }}
+        </option>
+        {% endfor %}
+      </select>
+      {% if errors and errors.context %}
+      <span class="form-error">{{ errors.context | join(', ') }}</span>
+      {% endif %}
+    </div>
+    
+    <div class="form-group">
+      <label for="q-{{ question.code }}-input" class="form-label">Value</label>
+      <input 
+        type="number"
+        name="value"
+        id="q-{{ question.code }}-input"
+        class="form-control{% if errors and errors.value %} form-control--error{% endif %}"
+        value="{{ answer.value.value if answer and answer.value and answer.value.value is not none else '' }}"
+        {% if question.required_level == 'REQUIRED' %}required{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+        step="any"
+        placeholder="0"
+      >
+      {% if errors and errors.value %}
+      <span class="form-error">{{ errors.value | join(', ') }}</span>
+      {% endif %}
+    </div>
+    
+    <div class="form-group">
+      <label for="q-{{ question.code }}-unit" class="form-label">Unit</label>
+      <select 
+        name="unit"
+        id="q-{{ question.code }}-unit"
+        class="form-control{% if errors and errors.unit %} form-control--error{% endif %}"
+      >
+        <option value="">-- Select unit --</option>
+        {% for unit in question.units or [] %}
+        <option value="{{ unit }}" {% if answer and answer.value and answer.value.unit == unit %}selected{% endif %}>
+          {{ unit }}
+        </option>
+        {% endfor %}
+      </select>
+      {% if errors and errors.unit %}
+      <span class="form-error">{{ errors.unit | join(', ') }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>

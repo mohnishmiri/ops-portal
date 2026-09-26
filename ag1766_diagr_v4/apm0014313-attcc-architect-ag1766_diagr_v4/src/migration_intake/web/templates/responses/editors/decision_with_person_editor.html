@@ -1,0 +1,71 @@
+{#
+  Decision with person editor - decision + responsible person.
+
+  Context:
+    question: dict with code, text, help, required_level, options
+    answer: dict | None with value.decision, value.person (name, role, email)
+    errors: dict | None
+#}
+<div class="decision-with-person-editor">
+  <div class="form-group">
+    <label for="q-{{ question.code }}-decision" class="form-label form-label--required">
+      Decision
+    </label>
+    <select 
+      name="decision"
+      id="q-{{ question.code }}-decision"
+      class="form-control{% if errors and errors.decision %} form-control--error{% endif %}"
+      required
+    >
+      <option value="">-- Select decision --</option>
+      {% for option in question.options or [] %}
+      <option 
+        value="{{ option.value }}"
+        {% if answer and answer.value and answer.value.decision == option.value %}selected{% endif %}
+      >{{ option.label }}</option>
+      {% endfor %}
+    </select>
+    {% if errors and errors.decision %}
+    <span class="form-error">{{ errors.decision | join(', ') }}</span>
+    {% endif %}
+  </div>
+  
+  <fieldset class="person-fields">
+    <legend class="form-label">Responsible Person</legend>
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="q-{{ question.code }}-name" class="form-label">Name</label>
+        <input 
+          type="text"
+          name="person.name"
+          id="q-{{ question.code }}-name"
+          class="form-control"
+          value="{{ answer.value.person.name if answer and answer.value and answer.value.person else '' }}"
+          placeholder="Full name"
+        >
+      </div>
+      <div class="form-group">
+        <label for="q-{{ question.code }}-role" class="form-label">Role</label>
+        <input 
+          type="text"
+          name="person.role"
+          id="q-{{ question.code }}-role"
+          class="form-control"
+          value="{{ answer.value.person.role if answer and answer.value and answer.value.person else '' }}"
+          placeholder="Role/Title"
+        >
+      </div>
+      <div class="form-group">
+        <label for="q-{{ question.code }}-email" class="form-label">Email</label>
+        <input 
+          type="email"
+          name="person.email"
+          id="q-{{ question.code }}-email"
+          class="form-control"
+          value="{{ answer.value.person.email if answer and answer.value and answer.value.person else '' }}"
+          placeholder="email@example.com"
+        >
+      </div>
+    </div>
+  </fieldset>
+</div>

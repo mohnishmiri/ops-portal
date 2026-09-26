@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Applications{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item active" aria-current="page">Applications</a>
+<a href="/admin/catalog" class="global-nav-item">Catalog Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/new" class="button button--primary">New application &rarr;</a>
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Applications</h1>
+</div>
+
+{% if applications %}
+<div class="app-card-grid" role="list">
+  {% for app in applications %}
+  <article class="app-card" role="listitem">
+    <div class="app-card__head">
+      <h3 class="app-card__name">{{ app.display_name }}</h3>
+      <span class="status-pill status-pill--active">
+        <span class="pill-dot"></span>{{ app.state }}
+      </span>
+    </div>
+    {% if app.correlation_id %}
+    <p class="app-card__id">{{ app.correlation_id }}</p>
+    {% else %}
+    <p class="app-card__id app-card__id--muted">No correlation ID</p>
+    {% endif %}
+    <p class="app-card__counts">
+      {{ app.evidence_count | default(0) }} file{{ 's' if app.evidence_count != 1 else '' }}
+      &middot;
+      {{ app.pending_proposal_count | default(0) }} proposal{{ 's' if app.pending_proposal_count != 1 else '' }}
+    </p>
+    <div class="app-card__footer">
+      <a href="/applications/{{ app.id }}" class="button button--primary">Open workspace &rarr;</a>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<div class="app-card-grid" role="list">
+  <div class="app-card app-card--empty">
+    <p class="app-card__empty-text">No applications yet.</p>
+    <a href="/applications/new" class="button button--primary">Register your first &rarr;</a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

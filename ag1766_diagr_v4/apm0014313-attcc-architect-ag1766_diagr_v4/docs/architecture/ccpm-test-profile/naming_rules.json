@@ -1,0 +1,1 @@
+{"naming_rules":[{"rule_id":"CCPM_TEST_DISPLAY","pattern":"{application_name} ({application_acronym})","tokens":{"application_name":"APPLICATION_NAME","application_acronym":"APPLICATION_ACRONYM"},"authority":"PROPOSE"}]}

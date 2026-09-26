@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}Questionnaire - {{ application.display_name }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ application.id }}" class="global-nav-item">{{ application.display_name }}</a>
+<a href="#" class="global-nav-item active" aria-current="page">Questionnaire</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ application.id }}" class="button secondary">Back to workspace</a>
+{% endblock %}
+
+{% block content %}
+<div class="card card--elevated">
+  <div class="card-header">
+    <h1 class="card-title">Questionnaire</h1>
+  </div>
+  
+  <div class="empty-state">
+    <p class="empty-state-message">
+      This intake has no questionnaire sections.
+    </p>
+    <p class="form-hint">
+      The catalog used for this intake ({{ intake.catalog_version }}) does not contain any sections.
+      Please contact your administrator to publish a catalog with questionnaire content.
+    </p>
+    
+    <div class="empty-state-actions">
+      <a href="/applications/{{ application.id }}" class="button button--primary">
+        Return to workspace
+      </a>
+    </div>
+  </div>
+</div>
+{% endblock %}

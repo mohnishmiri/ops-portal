@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{#
+  Intake hub — Screen 1 of the approved mockup.
+
+  Three counters, a section grid and one obvious next action. Every number is
+  computed by IntakeHubService; this template only formats them. No inline
+  event handlers (CSP), no external assets, styling in /static/css/hub.css.
+  The only inline styles are the two dynamic progress geometries, which cannot
+  be expressed in a stylesheet.
+#}
+
+{% block title %}{{ application.display_name }} — intake overview{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ app_id }}" class="button secondary">Back to application</a>
+{% endblock %}
+
+{% block content %}
+<div class="hub">
+
+  {# ---------------------------------------------------------------- #}
+  {# Identity and the primary action.                                  #}
+  {# ---------------------------------------------------------------- #}
+  <header class="hub-head">
+    <div class="hub-identity">
+      <h1 class="hub-title">{{ application.display_name }}</h1>
+      <p class="hub-subtitle">
+        {% if application.correlation_id %}Correlation {{ application.correlation_id }} &middot; {% endif %}
+        {% if intake.catalog_version %}Catalog {{ intake.catalog_version }} &middot; {% endif %}
+        Intake {{ intake.state }}
+      </p>
+    </div>
+    <div class="hub-actions" style="display: flex; gap: var(--space-3); align-items: center;">
+      {% if intake.state == 'FROZEN' %}
+      <a class="button button--secondary" href="{{ intake_base }}/topology">
+        Generate Topology
+      </a>
+      {% endif %}
+      <a class="button button--primary hub-continue" id="hub-continue" href="{{ continue_href }}">
+        {% if continue_section %}Continue where I left off &rarr;{% else %}Open the questionnaire &rarr;{% endif %}
+      </a>
+    </div>
+  </header>
+
+  {# ---------------------------------------------------------------- #}
+  {# The three counters.                                               #}
+  {# ---------------------------------------------------------------- #}
+  <div class="hub-counters">
+
+    <section class="card hub-counter hub-counter--progress" aria-labelledby="hub-progress-heading">
+      <div class="hub-ring" style="--hub-ring-percent: {{ totals.required_percent }}%" aria-hidden="true">
+        <span class="hub-ring-face">{{ totals.required_percent }}%</span>
+      </div>
+      <div>
+        <h2 class="hub-counter-title" id="hub-progress-heading">Required questions</h2>
+        <p class="hub-counter-line">
+          <b id="hub-required-answered">{{ totals.required_answered }}</b>
+          of <span id="hub-required-total">{{ totals.required_total }}</span> answered
+        </p>
+        {% if totals.computed_required %}
+        <p class="hub-legend" id="hub-computed-note">
+          {{ totals.computed_required }} are derived from registers and need no answer
+        </p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="card hub-counter hub-counter--decisions" aria-labelledby="hub-proposals-heading">
+      <h2 class="hub-counter-title" id="hub-proposals-heading">Waiting for your decision</h2>
+      <p class="hub-counter-figure" id="hub-pending-proposals">{{ totals.pending_proposals }}</p>
+      <p class="hub-legend">
+        {% if totals.pending_proposals %}
+        proposals from imported evidence
+        {% else %}
+        nothing imported is waiting on you
+        {% endif %}
+      </p>
+      {% if totals.pending_proposals %}
+      <a class="button button--primary button--sm hub-counter-action" id="hub-review-proposals" href="{{ review_href }}">
+        Review proposals
+      </a>
+      {% endif %}
+    </section>
+
+    <section class="card hub-counter hub-counter--people" aria-labelledby="hub-people-heading">
+      <h2 class="hub-counter-title" id="hub-people-heading">Needs a person</h2>
+      <p class="hub-counter-figure" id="hub-needs-person">{{ totals.needs_person }}</p>
+      <p class="hub-legend">
+        {% if totals.needs_person %}
+        architect / owner decisions &mdash; no source file can answer these
+        {% else %}
+        every required question is derived or has a proposal
+        {% endif %}
+      </p>
+      {% if totals.needs_person %}
+      <a class="button button--sm hub-counter-action" id="hub-needs-person-link" href="{{ needs_person_href }}">
+        See list
+      </a>
+      {% endif %}
+    </section>
+
+  </div>
+
+  {# ---------------------------------------------------------------- #}
+  {# Section grid.                                                     #}
+  {# ---------------------------------------------------------------- #}
+  <h2 class="hub-section-heading">Sections</h2>
+
+  {% if sections %}
+  <div class="hub-sections">
+    {% for section in sections %}
+    {# Section codes contain spaces ("INTAKE CONTROL"), so they are URL-encoded
+       for the href and carried as a data attribute rather than an id, which
+       may not contain whitespace. #}
+    <a
+      class="card hub-section{% if section.all_computed or not section.has_required %} hub-section--derived{% endif %}"
+      data-section-code="{{ section.code }}"
+      href="{{ intake_base }}/questionnaire/{{ section.code | urlencode }}"
+    >
+      <span class="hub-section-head">
+        <b class="hub-section-name">{{ section.title }}</b>
+        {% if section.pending_proposals %}
+        <span class="hub-badge-new">{{ section.pending_proposals }} new</span>
+        {% endif %}
+      </span>
+
+      {% if section.all_computed %}
+      {# "0 of 3" would read as unfinished work nobody can finish. #}
+      <span class="hub-legend hub-section-derived-note">
+        All {{ section.required_total }} derived from registers &mdash; nothing to answer
+      </span>
+      {% elif not section.has_required %}
+      <span class="hub-legend hub-section-derived-note">No required questions</span>
+      {% else %}
+      <span class="hub-bar">
+        <span class="hub-bar-fill" style="width: {{ section.required_percent }}%"></span>
+      </span>
+      <span class="hub-legend">
+        {{ section.required_answered }} of {{ section.required_total }}
+        {%- if section.needs_person %} &middot; {{ section.needs_person }} need a person{% endif %}
+      </span>
+      {% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="hub-empty">This intake's catalog has no sections yet.</p>
+  {% endif %}
+
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{
+  "profile_id": "CCPM_TEST_LABEL_ONLY",
+  "version": "0.1.0",
+  "display_name": "CCPM test-only application labels",
+  "description": "Test only: confirmed CTL-002 name/acronym on a separate controls page; all source topology pages protected. Not a production mapping or official profile.",
+  "variant": "LABEL_ONLY",
+  "target_platform": "DRAWIO",
+  "compatibility": {
+    "min_projection_version": "3.0.0",
+    "max_projection_version": "3.x",
+    "required_resource_kinds": [],
+    "optional_resource_kinds": []
+  },
+  "components": {
+    "slots": {"path": "slots.json", "sha256": "8f35253a881559d0b399b9684eb41548cc357916746ba12b33a9086da4615415"},
+    "mappings": {"path": "mappings.json", "sha256": "9d4506bff7fafafcd418719e9443d5860e27f82848fba5beaabb90b21082c7e1"},
+    "markers": {"path": "markers.json", "sha256": "b48c55f203c4c19b26830fd1294aa03850c88c879aed542066e778504e407a38"},
+    "issue_rules": {"path": "issue_rules.json", "sha256": "49be88fd7976b533209db5314d1d4f9263f002385b935f4a10c81ca9574eafdc"},
+    "naming_rules": {"path": "naming_rules.json", "sha256": "b41b4525f6a89d45a128add4df6e61bb087145be826abd955fd251291f699077"}
+  },
+  "metadata": {"created_at": "2026-09-21T00:00:00Z", "created_by": "test-profile-preparation"},
+  "profile_sha256": "af59e04166b31521b6ea9eadc4315fb5b43836235842a274939727a80563fa64"
+}

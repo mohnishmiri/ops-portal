@@ -1,0 +1,35 @@
+version: uaq-v1
+source_format: UAQ_CSV_V1
+entries:
+  - source:
+      field: INV2-Who is the IT Application Owner
+    target: {kind: QUESTION, key: APP-002}
+    transform: people_list
+    scope: APPLICATION
+    blank_policy: SKIP
+    placeholder_policy: FINDING
+    confidence: 1.0
+  - source:
+      field: INV3-Who are the primary Technical Contact(s) to work with during the migration?
+    target: {kind: QUESTION, key: APP-002}
+    transform: people_list
+    scope: APPLICATION
+    blank_policy: SKIP
+    placeholder_policy: FINDING
+    confidence: 1.0
+  - source:
+      field: INV7-Available Environments (Dev/Test/Stage/Prod) that exist to support this workload?
+    target: {kind: QUESTION, key: APP-005}
+    transform: controlled_set
+    scope: APPLICATION
+    blank_policy: SKIP
+    placeholder_policy: FINDING
+    confidence: 1.0
+  - source:
+      field: INV9-What is the current operational status of the application?
+    target: {kind: QUESTION, key: APP-003}
+    transform: controlled_value
+    scope: APPLICATION
+    blank_policy: SKIP
+    placeholder_policy: FINDING
+    confidence: 1.0

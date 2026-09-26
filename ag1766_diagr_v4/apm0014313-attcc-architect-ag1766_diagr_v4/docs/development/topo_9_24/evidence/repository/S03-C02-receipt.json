@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S03-C02",
+  "validated_at": "2026-09-24T13:53:26.3720864-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/drawio/input_hierarchy.json",
+    "analysis/semantic_diff/input_hierarchy.md",
+    "inspect_drawio_category.ps1"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "docs/development/topo_9_24/AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docs\\development\\topo_9_24\\AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio",
+      "file_type": ".drawio",
+      "size_bytes": 122524,
+      "modified_utc": "2026-09-23T11:46:40.2883528Z",
+      "sha256": "1975ea8e046760e359a4339e1d259b418ff7eeff0c4f6881555e01b0b2d84acb",
+      "chunk_id": "S03-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Hierarchy category only",
+      "relevant_section": "Wrapper IDs; parent references; containment cycle check",
+      "evidence_id": "EV-DRAWIO-002",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Parser syntax passed",
+    "DTD/network disabled",
+    "Source hash unchanged",
+    "Generated JSON valid; raw labels/IDs omitted"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

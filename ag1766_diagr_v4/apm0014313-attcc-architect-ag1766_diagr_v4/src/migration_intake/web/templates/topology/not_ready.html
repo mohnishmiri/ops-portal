@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{#
+  Topology not ready error page — T05.
+
+  Shows when topology generation cannot proceed due to blocking issues.
+  Lists all blockers and warnings from the readiness check.
+
+  Styling uses existing design tokens and components from components.css.
+  No inline event handlers. No hex literals.
+#}
+
+{% block title %}Topology Not Ready{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="{{ intake_base }}/topology" class="global-nav-item active" aria-current="page">Topology</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="{{ intake_base }}/topology" class="button button--ghost button--sm">Back to topology</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.not-ready-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: 700px;
+}
+
+.not-ready-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.not-ready-header__icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+  flex-shrink: 0;
+}
+
+.not-ready-header__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.not-ready-header__subtitle {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.blockers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.blocker-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.blocker-item:last-child {
+  border-bottom: 0;
+}
+
+.blocker-item__icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.blocker-item__icon--blocker {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
+.blocker-item__icon--warning {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.blocker-item__content {
+  flex: 1;
+}
+
+.blocker-item__code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.blocker-item__message {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="not-ready-page">
+
+  {# ------------------------------------------------------------------ #}
+  {# Header                                                              #}
+  {# ------------------------------------------------------------------ #}
+  <header class="not-ready-header">
+    <div class="not-ready-header__icon" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="15" y1="9" x2="9" y2="15"/>
+        <line x1="9" y1="9" x2="15" y2="15"/>
+      </svg>
+    </div>
+    <div>
+      <h1 class="not-ready-header__title">Topology Not Ready</h1>
+      <p class="not-ready-header__subtitle">
+        Generation cannot proceed due to the following issues.
+      </p>
+    </div>
+  </header>
+
+  {# ------------------------------------------------------------------ #}
+  {# Blockers                                                            #}
+  {# ------------------------------------------------------------------ #}
+  {% if readiness.blockers %}
+  <div class="card">
+    <h2 class="detail-card__title" style="margin: 0 0 var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-border);">
+      Blocking Issues ({{ readiness.blockers | length }})
+    </h2>
+    <ul class="blockers-list">
+      {% for blocker in readiness.blockers %}
+      <li class="blocker-item">
+        <div class="blocker-item__icon blocker-item__icon--blocker" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" focusable="false">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </div>
+        <div class="blocker-item__content">
+          <span class="blocker-item__code">{{ blocker.code }}</span>
+          <p class="blocker-item__message">{{ blocker.message }}</p>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  {# Warnings                                                            #}
+  {# ------------------------------------------------------------------ #}
+  {% if readiness.warnings %}
+  <div class="card">
+    <h2 class="detail-card__title" style="margin: 0 0 var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-border);">
+      Warnings ({{ readiness.warnings | length }})
+    </h2>
+    <ul class="blockers-list">
+      {% for warning in readiness.warnings %}
+      <li class="blocker-item">
+        <div class="blocker-item__icon blocker-item__icon--warning" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" focusable="false">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <div class="blocker-item__content">
+          <span class="blocker-item__code">{{ warning.code }}</span>
+          <p class="blocker-item__message">{{ warning.message }}</p>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  {# Actions                                                             #}
+  {# ------------------------------------------------------------------ #}
+  <div class="card">
+    <p style="margin: 0 0 var(--space-3); color: var(--color-text-secondary);">
+      Resolve the blocking issues above before attempting to generate the topology diagram.
+    </p>
+    <a href="{{ intake_base }}/topology" class="button button--primary">
+      Back to topology
+    </a>
+  </div>
+
+</div>
+{% endblock %}

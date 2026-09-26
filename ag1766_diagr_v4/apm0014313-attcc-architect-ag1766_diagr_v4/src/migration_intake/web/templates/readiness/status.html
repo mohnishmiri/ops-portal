@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Readiness Status{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <h1 class="text-2xl font-bold mb-6">Readiness Status</h1>
+
+    <div class="bg-white shadow rounded-lg p-6 mb-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">Intake: {{ intake_id[:8] }}...</h2>
+            {% if readiness.is_ready %}
+            <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
+                Ready to Freeze
+            </span>
+            {% else %}
+            <span class="px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full text-sm font-medium">
+                Not Ready
+            </span>
+            {% endif %}
+        </div>
+
+        <p class="text-sm text-gray-500 mb-4">
+            Checked at: {{ readiness.checked_at }}
+        </p>
+
+        <h3 class="text-md font-semibold mb-3">Dimensions</h3>
+        <div class="space-y-3">
+            {% for dim in readiness.dimensions %}
+            <div class="border rounded p-3 {% if dim.passed %}border-green-200 bg-green-50{% else %}border-red-200 bg-red-50{% endif %}">
+                <div class="flex items-center justify-between">
+                    <span class="font-medium">{{ dim.name }}</span>
+                    {% if dim.passed %}
+                    <span class="text-green-600">✓ Passed</span>
+                    {% else %}
+                    <span class="text-red-600">✗ Failed</span>
+                    {% endif %}
+                </div>
+                <p class="text-sm text-gray-600 mt-1">{{ dim.message }}</p>
+                {% if dim.blockers %}
+                <ul class="mt-2 text-sm text-red-700">
+                    {% for blocker in dim.blockers %}
+                    <li>• {{ blocker }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    {% if readiness.is_ready %}
+    <form action="/intakes/{{ intake_id }}/freeze" method="POST">
+        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+            Freeze Intake
+        </button>
+    </form>
+    {% endif %}
+
+    <div class="mt-4">
+        <a href="/intakes/{{ intake_id }}" class="text-blue-600 hover:underline">
+            ← Back to Intake
+        </a>
+    </div>
+</div>
+{% endblock %}

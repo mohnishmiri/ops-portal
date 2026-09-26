@@ -1,0 +1,37 @@
+{#
+  Approval register display - shows computed approval register.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.approvals (list), value.pending_count, value.approved_count, value.rejected_count
+#}
+<div class="approval-register-display computed-display">
+  {% if answer and answer.value %}
+  <div class="register-summary">
+    <span class="count-badge count-badge--warning">{{ answer.value.pending_count or 0 }} pending</span>
+    <span class="count-badge count-badge--success">{{ answer.value.approved_count or 0 }} approved</span>
+    <span class="count-badge count-badge--danger">{{ answer.value.rejected_count or 0 }} rejected</span>
+  </div>
+  
+  {% if answer.value.approvals %}
+  <div class="approval-list">
+    {% for approval in answer.value.approvals[:5] %}
+    <div class="approval-item">
+      <span class="status-pill status-pill--{{ approval.status | lower if approval.status else 'neutral' }} status-pill--sm">
+        {{ approval.status or 'PENDING' }}
+      </span>
+      <span class="approval-title">{{ approval.title or 'Untitled approval' }}</span>
+      {% if approval.approver %}
+      <span class="meta-item">{{ approval.approver }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% if answer.value.approvals | length > 5 %}
+    <p class="form-hint">... and {{ answer.value.approvals | length - 5 }} more</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="form-hint">No approvals registered.</p>
+  {% endif %}
+</div>

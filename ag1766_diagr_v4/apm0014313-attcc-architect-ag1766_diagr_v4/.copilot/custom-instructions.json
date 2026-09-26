@@ -1,0 +1,10 @@
+{
+  "codeQuality": {
+    "standards": "Follow Java best practices and project conventions.",
+    "testing": "Ensure all code changes pass existing tests."
+  },
+  "security": {
+    "secrets": "Do not commit secrets or sensitive data.",
+    "inputValidation": "Validate all inputs."
+  }
+}

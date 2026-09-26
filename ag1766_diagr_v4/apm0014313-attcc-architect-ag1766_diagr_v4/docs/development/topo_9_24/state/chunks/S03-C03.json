@@ -1,0 +1,13 @@
+{
+  "id":"S03-C03","stage":"03","result":"COMPLETED","completed_stage":"03",
+  "objective":"Inspect input edge references and geometry/arrow categories without inferring business direction",
+  "inputs":["Supplied input Draw.io; validated hierarchy locators"],
+  "outputs":["evidence/drawio/input_connections.json","analysis/semantic_diff/input_connections.md"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio","lines":"Connection semantic category only","symbols":"Edge endpoint references; geometry point flags; arrow categories","further":true}],
+  "checks":["Safe XML parser; source hash unchanged","JSON valid and raw labels/IDs omitted","Business direction not inferred"],
+  "established":["41 edges; 18 missing source and 18 missing target attributes","No dangling named endpoint references after wrapper resolution","22 explicit source points and 24 explicit target points","Stage 03 structural inspection complete"],
+  "uncertainties":["Manual/decorative versus business relationship meaning requires guide and visual evidence","Cross-document applicability and expected-output approval not yet verified"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/inspect_drawio_category.ps1 -Source Input -Category Connections","result":"0; INSPECTED; source unchanged","mutation":"Redacted JSON artifact only","output":"evidence/drawio/input_connections.json"}],
+  "evidence":[{"id":"EV-DRAWIO-003","path":"evidence/drawio/input_connections.json","source":"Supplied input Draw.io edges","description":"Opaque endpoint/point/arrow inventory; no business direction inferred","kind":"Normalized structural evidence","reliability":"VERIFIED structural checks; relationship semantics unverified"}],
+  "next_chunk":"S04-C01","next_action":"Inventory the supplied candidate expected-output Draw.io; do not treat it as approved requirements yet"
+}

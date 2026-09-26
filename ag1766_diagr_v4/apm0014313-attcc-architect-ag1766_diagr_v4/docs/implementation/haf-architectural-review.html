@@ -1,0 +1,999 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>HAF Topology Pipeline: Architectural Review and TDD Implementation Plan</title>
+  <style>
+    :root { --ink: #202b30; --muted: #566267; --line: #cdd8db; --accent: #086b76; --paper: #ffffff; --soft: #f1f6f6; --warn: #b35900; --crit: #c62828; --ok: #2e7d32; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font: 17px/1.65 Georgia, "Times New Roman", serif; letter-spacing: 0; }
+    a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+    a:focus-visible, summary:focus-visible, .table-scroll:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .document-bar { padding: 16px max(20px, calc((100% - 1240px) / 2)); background: var(--soft); border-bottom: 1px solid var(--line); font: 15px/1.5 "Segoe UI", sans-serif; display: flex; gap: 12px 24px; flex-wrap: wrap; }
+    main { max-width: 1288px; padding: 32px 24px 72px; margin: auto; min-width: 0; }
+    h1, h2, h3, h4, summary, th { font-family: "Segoe UI", sans-serif; line-height: 1.3; }
+    h1 { font-size: 32px; margin: 0 0 24px; padding-bottom: 16px; border-bottom: 4px solid var(--accent); }
+    h2 { font-size: 25px; margin: 44px 0 18px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+    h3 { font-size: 21px; margin: 30px 0 14px; }
+    h4 { font-size: 18px; margin: 24px 0 10px; }
+    h1, h2, h3, h4 { overflow-wrap: anywhere; scroll-margin-top: 20px; }
+    p, li { overflow-wrap: anywhere; }
+    li { margin: 6px 0; }
+    code, pre { font-family: Consolas, "Courier New", monospace; }
+    code { font-size: 0.88em; background: var(--soft); padding: 2px 4px; overflow-wrap: anywhere; }
+    pre { padding: 18px; background: var(--soft); border-left: 3px solid var(--line); overflow: auto; font-size: 14px; line-height: 1.6; max-width: 100%; }
+    pre code { padding: 0; background: transparent; overflow-wrap: normal; }
+    .table-scroll { overflow-x: auto; margin: 20px 0; max-width: 100%; }
+    table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 15px; line-height: 1.5; }
+    th, td { border: 1px solid var(--line); padding: 11px 12px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    th { background: #e6f0f1; font-weight: 600; }
+    tbody tr:nth-child(even) { background: #f8fafb; }
+    td:first-child { min-width: 72px; }
+    nav { margin: 0 0 28px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+    details { margin: 10px 0; }
+    summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+    details[open] > summary { margin-bottom: 12px; }
+    .contents { columns: 2; column-gap: 32px; padding-left: 24px; font: 15px/1.65 "Segoe UI", sans-serif; }
+    .contents li { break-inside: avoid; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: 600; font-family: "Segoe UI", sans-serif; vertical-align: middle; }
+    .badge-crit { background: #ffcdd2; color: var(--crit); }
+    .badge-warn { background: #ffe0b2; color: var(--warn); }
+    .badge-ok { background: #c8e6c9; color: var(--ok); }
+    .badge-info { background: #bbdefb; color: #1565c0; }
+    .phase-header { background: var(--accent); color: white; padding: 8px 14px; border-radius: 4px 4px 0 0; font-family: "Segoe UI", sans-serif; font-weight: 600; font-size: 18px; margin-top: 28px; }
+    .phase-body { border: 1px solid var(--line); border-top: none; padding: 16px; border-radius: 0 0 4px 4px; }
+    .slice-card { border: 1px solid var(--line); border-radius: 4px; margin: 16px 0; }
+    .slice-card-header { background: var(--soft); padding: 10px 14px; border-bottom: 1px solid var(--line); font-family: "Segoe UI", sans-serif; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .slice-card-body { padding: 14px; }
+    .star { color: #f9a825; }
+    .no-star { color: #ddd; }
+    footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); font: 14px/1.5 "Segoe UI", sans-serif; }
+    @media (max-width: 640px) { body { font-size: 16px; } main { padding: 24px 16px 48px; } h1 { font-size: 28px; } h2 { font-size: 23px; } .contents { columns: 1; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print { .document-bar, nav, footer { display: none; } main { max-width: none; padding: 0; } body { font-size: 10pt; } h1 { font-size: 21pt; } h2 { font-size: 16pt; } h3 { font-size: 13pt; } h1, h2, h3, h4 { break-after: avoid; } .table-scroll { overflow: visible; } table { min-width: 0; font-size: 8pt; } th, td { padding: 5px; } tr { break-inside: avoid; } pre { white-space: pre-wrap; font-size: 8pt; } a { color: inherit; } details { display: block; } details > summary { display: none; } }
+  </style>
+</head>
+<body>
+  <header class="document-bar">
+    <strong>HAF Architectural Review &amp; TDD Implementation Plan</strong>
+    <span>2026-09-25</span>
+    <a href="haf-architectural-review.md">Markdown source</a>
+  </header>
+  <main>
+
+<h1 id="title">HAF Topology Pipeline: Architectural Review and TDD Implementation Plan</h1>
+
+<p>Comprehensive design and implementation plan for enhancing the HAF topology pipeline with diagram quality improvements (cloud icons, sub-cell generation, edge routing, auto-layout) using reusable code from <strong>drawpyo-main</strong> (MIT) and <strong>multicloud-diagrams-main</strong> (MIT), structured as testable TDD slices verifiable with the real CCPM/Outpost v1.7 input diagram.</p>
+
+<nav>
+  <details open>
+    <summary>Table of Contents</summary>
+    <ol class="contents">
+      <li><a href="#s1">Executive Summary</a></li>
+      <li><a href="#s2">Current-State Architecture</a></li>
+      <li><a href="#s3">Evidence Inventory</a></li>
+      <li><a href="#s4">Comparative Decision Matrix</a></li>
+      <li><a href="#s5">HAF Strengths to Preserve</a></li>
+      <li><a href="#s6">Gaps and Risks</a></li>
+      <li><a href="#s7">Improvement Opportunities</a></li>
+      <li><a href="#s8">TDD Implementation Slices</a></li>
+      <li><a href="#s9">Prioritized Roadmap</a></li>
+      <li><a href="#s10">Recommended First Slice</a></li>
+      <li><a href="#s11">Open Questions</a></li>
+      <li><a href="#s12">Key Architectural Answers</a></li>
+    </ol>
+  </details>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="s1">1. Executive Summary</h2>
+<!-- ============================================================ -->
+
+<h3>What This Plan Covers</h3>
+<p>This is a production-grade design and implementation plan for enhancing the HAF topology pipeline to generate visually rich draw.io topology diagrams &mdash; with cloud provider icons, individual interface sub-cells, directional edges, and auto-layout &mdash; while preserving the existing template-filling model, deterministic output, and structural safety.</p>
+
+<h3>Key Design Decisions</h3>
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr></thead>
+  <tbody>
+    <tr><td>Generation model</td><td><strong>Keep template-filling</strong></td><td>Architect controls layout in draw.io; pipeline fills data</td></tr>
+    <tr><td>Code reuse</td><td><strong>Export functions from drawpyo + multicloud-diagrams</strong></td><td>Both MIT-licensed; copy utility functions rather than add runtime dependencies</td></tr>
+    <tr><td>Testing model</td><td><strong>TDD with real v1.7 template</strong></td><td>Each slice verified against <code>AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio</code></td></tr>
+    <tr><td>Feature toggle</td><td><strong>Profile-driven <code>rendering</code> field</strong></td><td><code>MULTILINE_TEXT</code> (current) vs <code>GENERATE_CELLS</code> &mdash; zero-risk rollback</td></tr>
+    <tr><td>HAF replaces governed renderer</td><td><strong>Confirmed</strong></td><td>Backport governance features (hashing, manifest) to HAF</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>What Gets Reused from Each Repo</h3>
+
+<details open>
+  <summary>From multicloud-diagrams-main (MIT)</summary>
+  <ul>
+    <li><code>providers/aws2024.json</code> &mdash; 50+ AWS icon style strings (including <code>outpost</code>, <code>direct_connect</code>, <code>route_53</code>, <code>vpc</code>, <code>subnet</code>, <code>security_group</code>, <code>ec2</code>, <code>s3</code>)</li>
+    <li><code>providers/azure.json</code> &mdash; Azure service icon styles</li>
+    <li><code>providers/core.json</code> &mdash; Edge, label, list, and row style templates</li>
+    <li><code>add_vertex()</code> pattern &mdash; deterministic <code>vertex:{type}:{id}</code> ID scheme</li>
+    <li><code>add_connection()</code> pattern &mdash; edge creation with label support</li>
+    <li><code>Distribution.Table</code> algorithm &mdash; grid layout calculation</li>
+    <li><code>stringify_dict()</code> / <code>stringify_labels()</code> &mdash; HTML metadata formatting</li>
+    <li><code>update_style_by_key()</code> &mdash; style string manipulation</li>
+    <li><code>read_coords_from_file()</code> &mdash; coordinate persistence concept</li>
+  </ul>
+</details>
+
+<details open>
+  <summary>From drawpyo-main (MIT)</summary>
+  <ul>
+    <li><code>style_str_from_dict()</code> &mdash; style string assembly from dict</li>
+    <li><code>import_shape_database()</code> &mdash; TOML/JSON shape library loading pattern</li>
+    <li><code>xml_base.py</code> <code>xmlize</code> dict + <code>xml_ify()</code> &mdash; XML character escaping</li>
+    <li><code>Group</code> class geometry calculations &mdash; <code>left</code>, <code>right</code>, <code>top</code>, <code>bottom</code>, <code>width</code>, <code>height</code>, <code>center_position</code></li>
+    <li><code>TreeDiagram.auto_position()</code> &mdash; hierarchical layout algorithm pattern</li>
+    <li><code>Object.create_from_template_object()</code> &mdash; template-based cell creation pattern</li>
+    <li><code>Edge.attributes</code> structure &mdash; source/target/style edge serialization</li>
+  </ul>
+</details>
+
+<details>
+  <summary>What Does NOT Get Reused (and Why)</summary>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Library Feature</th><th>Why Not</th></tr></thead>
+    <tbody>
+      <tr><td>drawpyo <code>id(self)</code> for IDs</td><td>Non-deterministic across Python runs</td></tr>
+      <tr><td>drawpyo string-based XML serialization</td><td>HAF uses ElementTree (safer, standard)</td></tr>
+      <tr><td>drawpyo full File/Page/Object model</td><td>Over-engineered for template mutation &mdash; HAF doesn't create files from scratch</td></tr>
+      <tr><td>multicloud-diagrams <code>requests</code> dependency</td><td>Not needed; HAF extracts data from local DB</td></tr>
+      <tr><td>multicloud-diagrams <code>yaml</code> dependency</td><td>Not needed; HAF uses JSON profiles</td></tr>
+      <tr><td>multicloud-diagrams <code>minidom.toprettyxml()</code></td><td>HAF uses <code>ET.tostring()</code> for consistency</td></tr>
+    </tbody>
+  </table>
+  </div>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="s2">2. Current-State Architecture</h2>
+<!-- ============================================================ -->
+
+<h3>2.1 drawpyo-main Data Flow</h3>
+<pre><code>User Python code
+  -&gt; File(file_name, file_path)                    [file.py:16]
+    -&gt; Page(name, grid, dimensions)                 [page.py:21]
+      -&gt; Object(value, position, style, parent)     [objects.py:68]
+        -&gt; DiagramBase.style -&gt; style_str_from_dict  [base_diagram.py:94]
+        -&gt; DiagramBase.xml_parent -&gt; parent.id       [xml_base.py:58]
+      -&gt; Edge(source, target, waypoints, label)     [edges.py:42]
+        -&gt; connection_db, pattern_db, waypoints_db  [edges.py:22-29, TOML]
+      -&gt; Group(objects)                             [objects.py:764]
+        -&gt; left/right/top/bottom geometry           [objects.py:799-850]
+      -&gt; TreeDiagram(direction, spacing)            [tree.py:181]
+        -&gt; auto_position() -&gt; recursive layout       [tree.py:~250]
+    -&gt; file.write() -&gt; string XML concatenation      [file.py:105]</code></pre>
+
+<p><strong>Reusable code locations:</strong></p>
+<ul>
+  <li><code>src/drawpyo/diagram/base_diagram.py:94-118</code> &mdash; <code>style_str_from_dict()</code> function (26 lines)</li>
+  <li><code>src/drawpyo/diagram/objects.py:764-910</code> &mdash; <code>Group</code> class geometry helpers (146 lines)</li>
+  <li><code>src/drawpyo/xml_base.py:3-13</code> &mdash; <code>xmlize</code> escape table + <code>xml_ify()</code> method (11 lines)</li>
+  <li><code>src/drawpyo/diagram/base_diagram.py:43-91</code> &mdash; <code>import_shape_database()</code> for TOML loading (48 lines)</li>
+</ul>
+
+<h3>2.2 multicloud-diagrams-main Data Flow</h3>
+<pre><code>User Python code
+  -&gt; MultiCloudDiagrams()                          [__init__.py:164]
+    -&gt; Et.Element('mxfile')                         [__init__.py:175]
+    -&gt; Et.SubElement('diagram')                     [__init__.py:180]
+    -&gt; Et.SubElement('mxGraphModel')                [__init__.py:183]
+    -&gt; Et.SubElement('root')                        [__init__.py:191]
+    -&gt; add_vertex(node_id, node_name, node_type)    [__init__.py:383]
+      -&gt; get_node_template(node_type)               [__init__.py:285]
+        -&gt; providers/{provider}.json lookup          [__init__.py:278-283]
+      -&gt; customize(node_template, style)            [__init__.py:31]
+      -&gt; Et.SubElement(root, 'mxCell', ...)          [__init__.py:409]
+      -&gt; Et.SubElement(cell, 'mxGeometry', ...)     [__init__.py:418]
+    -&gt; add_connection(src, dst, style, labels)      [__init__.py:472]
+      -&gt; Et.SubElement(root, 'mxCell', edge=...)    [__init__.py:525]
+    -&gt; add_vertex_list(vertexes, Distribution)      [__init__.py:447]
+      -&gt; Table algorithm: grid positioning           [__init__.py:449-467]
+    -&gt; export_to_file(path)                         [__init__.py:712]</code></pre>
+
+<p><strong>Reusable code locations:</strong></p>
+<ul>
+  <li><code>providers/aws2024.json</code> &mdash; 50+ service style templates (entire file, ~3000 lines)</li>
+  <li><code>providers/azure.json</code> &mdash; Azure styles (entire file)</li>
+  <li><code>providers/core.json</code> &mdash; Edge/label/list base styles</li>
+  <li><code>__init__.py:23-28</code> &mdash; <code>update_style_by_key()</code> function (6 lines)</li>
+  <li><code>__init__.py:31-33</code> &mdash; <code>customize()</code> function (3 lines)</li>
+  <li><code>__init__.py:36-41</code> &mdash; <code>stringify_dict()</code> HTML metadata formatter (6 lines)</li>
+  <li><code>__init__.py:447-467</code> &mdash; <code>Distribution.Table</code> grid layout algorithm (20 lines)</li>
+  <li><code>__init__.py:82-85</code> &mdash; <code>generate_hash()</code> deterministic hash (4 lines)</li>
+  <li><code>__init__.py:670-697</code> &mdash; <code>read_coords_from_file()</code> coordinate persistence (27 lines)</li>
+</ul>
+
+<h3>2.3 HAF Topology Pipeline Data Flow</h3>
+<pre><code>Web route / CLI
+  -&gt; haf_service.generate_haf_topology()            [haf_service.py:42]
+    -&gt; haf_extractor.extract_haf_data()              [haf_extractor.py:66]
+      -&gt; SQL: intakes JOIN applications              [haf_extractor.py:85-92]
+      -&gt; SQL: app_identifiers -&gt; tokens              [haf_extractor.py:102-114]
+      -&gt; SQL: ans_instances JOIN ans_revisions       [haf_extractor.py:117-133]
+      -&gt; SQL: interfaces -&gt; grouped by cat:dir        [haf_extractor.py:146-174]
+      -&gt; HafExtractionResult(tokens, interfaces, details, issues)
+    -&gt; haf_pipeline.fill_haf_template()              [haf_pipeline.py:498]
+      -&gt; parse_haf_template(bytes) -&gt; HafIndex        [haf_pipeline.py:74]
+      -&gt; load_haf_profile(id) -&gt; HafProfile           [haf_pipeline.py:200]
+      -&gt; resolve_placeholders(index, profile, tokens) [haf_pipeline.py:295]
+      -&gt; fill_interface_regions(index, profile, ifs)  [haf_pipeline.py:374]
+      -&gt; fill_detail_blocks(index, profile, details)  [haf_pipeline.py:440]
+      -&gt; ET.tostring(tree) -&gt; filled_bytes             [haf_pipeline.py:548]
+    -&gt; HafTopologyResult(filled_xml, mutations, gaps, issues, success)</code></pre>
+
+<p><strong>Current test baseline:</strong> 397 tests passing (<code>python -m pytest tests/unit/topology/ -v</code>)</p>
+
+<!-- ============================================================ -->
+<h2 id="s3">3. Evidence Inventory</h2>
+<!-- ============================================================ -->
+
+<details open>
+  <summary>3.1 Files Reviewed &mdash; drawpyo-main</summary>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>File</th><th>Lines</th><th>Architectural Role</th><th>Reusable?</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/drawpyo/xml_base.py</code></td><td>144</td><td>Base XML serialization, ID gen, XML escaping</td><td><span class="badge badge-ok">YES</span> <code>xmlize</code> dict, <code>xml_ify()</code></td></tr>
+      <tr><td><code>src/drawpyo/file.py</code></td><td>161</td><td>File wrapper, mxfile tag, disk write</td><td><span class="badge badge-warn">NO</span> HAF uses ElementTree</td></tr>
+      <tr><td><code>src/drawpyo/page.py</code></td><td>213</td><td>Page/Diagram/mxGraph/Root nesting</td><td><span class="badge badge-warn">NO</span> HAF uses templates</td></tr>
+      <tr><td><code>src/drawpyo/diagram/base_diagram.py</code></td><td>~300</td><td>DiagramBase, Geometry, style_str_from_dict, TOML import</td><td><span class="badge badge-ok">YES</span> <code>style_str_from_dict()</code>, <code>import_shape_database()</code></td></tr>
+      <tr><td><code>src/drawpyo/diagram/objects.py</code></td><td>910</td><td>Object (mxCell vertex), Group, shape libraries</td><td><span class="badge badge-ok">YES</span> <code>Group</code> geometry, <code>create_from_template_object()</code></td></tr>
+      <tr><td><code>src/drawpyo/diagram/edges.py</code></td><td>~500</td><td>Edge (mxCell edge), waypoints/connections/patterns</td><td><span class="badge badge-ok">YES</span> Edge <code>attributes</code> structure, style DBs</td></tr>
+      <tr><td><code>src/drawpyo/diagram/extended_objects.py</code></td><td>~200</td><td>List (container + child items), PieSlice</td><td><span class="badge badge-ok">YES</span> <code>List.autosize()</code> pattern</td></tr>
+      <tr><td><code>src/drawpyo/diagram_types/tree.py</code></td><td>~400</td><td>TreeDiagram auto-layout algorithm</td><td><span class="badge badge-ok">YES</span> Layout pattern (conceptual)</td></tr>
+      <tr><td><code>src/drawpyo/drawio_import/drawio_parser.py</code></td><td>~300</td><td>ParsedDiagram, round-trip import</td><td><span class="badge badge-info">FUTURE</span> Round-trip concept</td></tr>
+      <tr><td><code>LICENSE</code></td><td>21</td><td>MIT License</td><td><span class="badge badge-ok">MIT</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+</details>
+
+<details open>
+  <summary>3.2 Files Reviewed &mdash; multicloud-diagrams-main</summary>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>File</th><th>Lines</th><th>Architectural Role</th><th>Reusable?</th></tr></thead>
+    <tbody>
+      <tr><td><code>multicloud_diagrams/__init__.py</code></td><td>872</td><td>Complete API: vertex, edge, table, YAML, export</td><td><span class="badge badge-ok">YES</span> Multiple functions (see 2.2)</td></tr>
+      <tr><td><code>providers/aws2024.json</code></td><td>~3000</td><td>50+ AWS 2024 icon styles + dimensions</td><td><span class="badge badge-ok">YES</span> Copy relevant entries</td></tr>
+      <tr><td><code>providers/azure.json</code></td><td>~2000</td><td>Azure service icon styles</td><td><span class="badge badge-ok">YES</span> Copy relevant entries</td></tr>
+      <tr><td><code>providers/core.json</code></td><td>~100</td><td>Edge, label, list, row base styles</td><td><span class="badge badge-ok">YES</span> Edge and label styles</td></tr>
+      <tr><td><code>tests/aws2024/test_outpost.py</code></td><td>46</td><td>Test pattern: verify exact mxCell attributes</td><td><span class="badge badge-ok">YES</span> Test pattern for HAF sub-cell tests</td></tr>
+      <tr><td><code>LICENSE</code></td><td>&mdash;</td><td>MIT License</td><td><span class="badge badge-ok">MIT</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+</details>
+
+<details open>
+  <summary>3.3 Files Reviewed &mdash; HAF Pipeline</summary>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>File</th><th>Lines</th><th>Architectural Role</th><th>Modified?</th></tr></thead>
+    <tbody>
+      <tr><td><code>topology/haf_pipeline.py</code></td><td>556</td><td>Pure pipeline: parser, profile, resolver, fillers, orchestrator</td><td><span class="badge badge-ok">YES</span> (enhanced)</td></tr>
+      <tr><td><code>topology/haf_extractor.py</code></td><td>206</td><td>DB extraction (tokens, interfaces, details)</td><td><span class="badge badge-info">MINOR</span></td></tr>
+      <tr><td><code>topology/haf_service.py</code></td><td>85</td><td>Service entry point</td><td><span class="badge badge-info">MINOR</span></td></tr>
+      <tr><td><code>topology/config/haf_profiles/outpost_v1.json</code></td><td>135</td><td>OUTPOST_V1 profile config</td><td><span class="badge badge-ok">YES</span> (new fields)</td></tr>
+      <tr><td><code>topology/renderer/core.py</code></td><td>1319</td><td>Governed renderer (for backporting)</td><td><span class="badge badge-warn">READ-ONLY</span></td></tr>
+      <tr><td><code>topology/guide_policy.py</code></td><td>~100</td><td>LOCATION_ALIASES, ApprovedFlow</td><td><span class="badge badge-ok">YES</span> (add MIDRANGE)</td></tr>
+      <tr><td><code>topology/contracts.py</code></td><td>~200</td><td>Canonical topology contracts, hashing</td><td><span class="badge badge-warn">READ-ONLY</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="s4">4. Comparative Decision Matrix</h2>
+<!-- ============================================================ -->
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>#</th><th>Dimension</th><th>drawpyo</th><th>multicloud</th><th>HAF</th><th>Winner</th><th>Reuse path for HAF</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Architecture / SoC</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td>drawpyo = HAF</td><td>Preserve HAF 3-layer design</td></tr>
+    <tr><td>2</td><td>Input normalization</td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td>Tie</td><td>Copy multicloud JSON provider pattern</td></tr>
+    <tr><td>3</td><td>Canonical topology model</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td>drawpyo</td><td>Add intermediate InterfaceNode model</td></tr>
+    <tr><td>4</td><td>Layout quality</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;&#9733;</span></td><td>drawpyo</td><td>Copy Distribution.Table + Group geometry</td></tr>
+    <tr><td>5</td><td>Draw.io fidelity</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td>drawpyo = HAF</td><td>Template preserves all</td></tr>
+    <tr><td>6</td><td>Styling flexibility</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td>Tie</td><td>Copy multicloud provider JSON + drawpyo TOML pattern</td></tr>
+    <tr><td>7</td><td>Cloud icons</td><td><span class="star">&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;&#9733;</span></td><td><strong>multicloud</strong></td><td>Copy aws2024.json + azure.json entries</td></tr>
+    <tr><td>8</td><td>Edge routing</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;&#9733;</span></td><td>drawpyo</td><td>Copy edge serialization pattern</td></tr>
+    <tr><td>9</td><td>Container nesting</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td>drawpyo</td><td>Copy parent/child pattern for sub-cells</td></tr>
+    <tr><td>10</td><td>Deterministic generation</td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td>multicloud = HAF</td><td>Copy <code>vertex:{type}:{id}</code> ID scheme</td></tr>
+    <tr><td>11</td><td>Extensibility</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td>drawpyo = HAF</td><td>Profile JSON already extensible</td></tr>
+    <tr><td>12</td><td>Validation</td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><strong>HAF</strong></td><td>Backport renderer limits to HAF parser</td></tr>
+    <tr><td>13</td><td>Error handling</td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><strong>HAF</strong></td><td>Preserve typed gap reports</td></tr>
+    <tr><td>14</td><td>Testability</td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;&#9733;</span></td><td><strong>HAF</strong></td><td>Copy multicloud test_outpost.py pattern</td></tr>
+    <tr><td>15</td><td>Maintainability</td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td><span class="star">&#9733;&#9733;</span><span class="no-star">&#9733;&#9733;&#9733;</span></td><td><span class="star">&#9733;&#9733;&#9733;&#9733;</span><span class="no-star">&#9733;</span></td><td>drawpyo = HAF</td><td>Keep small focused modules</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s5">5. HAF Strengths to Preserve</h2>
+<!-- ============================================================ -->
+
+<ol>
+  <li><strong>Template mutation model</strong> &mdash; Architect controls layout; pipeline fills data. <code>haf_pipeline.py</code> only mutates <code>value</code> attributes on cells tagged with <code>haf-role</code>.</li>
+  <li><strong>Structural safety</strong> &mdash; <code>parse_haf_template()</code> validates no duplicate IDs; <code>fill_*</code> functions only change <code>value</code>; structural assertions in tests.</li>
+  <li><strong>Determinism</strong> &mdash; <code>ET.tostring()</code> with consistent attribute ordering produces identical bytes for identical inputs.</li>
+  <li><strong>Profile-driven config</strong> &mdash; <code>outpost_v1.json</code> drives all behavior; adding a new template type requires only a new JSON profile.</li>
+  <li><strong>Clean 3-layer separation</strong> &mdash; Extractor (DB only) &rarr; Pipeline (pure functions) &rarr; Service (integration).</li>
+  <li><strong>Gap reporting</strong> &mdash; <code>HafGap</code> and <code>HafMutation</code> track every unresolved token and every mutation.</li>
+  <li><strong>Test suite</strong> &mdash; 53 dedicated tests + 397 full topology suite, including E2E with real v1.7 template.</li>
+  <li><strong>LOCATION_ALIASES versioned policy</strong> &mdash; Shared between HAF and governed renderer.</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2 id="s6">6. Gaps and Risks</h2>
+<!-- ============================================================ -->
+
+<h3>GAP-1: Interface Slots Are Plain Text <span class="badge badge-crit">CRITICAL</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> <code>haf_pipeline.py:410-418</code> &mdash; <code>fill_interface_regions()</code> joins entries with <code>\n</code> into a single cell <code>value</code></li>
+  <li><strong>Impact:</strong> HIGH &mdash; diagrams look like text dumps, not topology diagrams</li>
+  <li><strong>Severity:</strong> HIGH &mdash; directly degrades diagram usability</li>
+  <li><strong>Affected:</strong> <code>haf_pipeline.py</code>, <code>outpost_v1.json</code></li>
+  <li><strong>Mitigation:</strong> OP-2: Generate individual child mxCells per interface (see Slice 4)</li>
+</ul>
+
+<h3>GAP-2: No Cloud Provider Icons <span class="badge badge-warn">MEDIUM</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> HAF sets text-only <code>value</code> on cells. No <code>shape=mxgraph.aws4.*</code> styles.</li>
+  <li><strong>Impact:</strong> MEDIUM &mdash; architects expect visual icons for AWS/Azure services</li>
+  <li><strong>Precedent:</strong> multicloud <code>providers/aws2024.json</code> has <code>outpost</code> style: <code>shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.outposts</code></li>
+  <li><strong>Mitigation:</strong> OP-1: Create style registry JSON copied from multicloud providers (see Slice 3)</li>
+</ul>
+
+<h3>GAP-3: No Edge Generation <span class="badge badge-warn">MEDIUM</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> HAF only mutates cell values; no mxCell edges created</li>
+  <li><strong>Precedent:</strong> Governed renderer <code>core.py:933-978</code> generates edges; multicloud <code>add_connection()</code> generates edges</li>
+  <li><strong>Mitigation:</strong> OP-3: Add edge generation step (see Slice 6)</li>
+</ul>
+
+<h3>GAP-4: No Auto-Layout Within Slots <span class="badge badge-warn">MEDIUM</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> <code>fill_interface_regions()</code> puts all entries in a single string, no geometry</li>
+  <li><strong>Precedent:</strong> multicloud <code>Distribution.Table</code> (<code>__init__.py:449-467</code>) calculates grid positions</li>
+  <li><strong>Mitigation:</strong> OP-4: Grid layout for sub-cells (see Slice 5)</li>
+</ul>
+
+<h3>GAP-5: Midrange Location Missing <span class="badge badge-info">LOW</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> <code>guide_policy.py:10-19</code> &mdash; LOCATION_ALIASES lacks <code>MIDRANGE</code>. CCPM has 24+ Midrange interfaces mapped to UNKNOWN</li>
+  <li><strong>Mitigation:</strong> Add <code>"MIDRANGE": "INTERNAL"</code> after policy review (see Slice 1)</li>
+</ul>
+
+<h3>GAP-6: No Manifest or Hash Verification <span class="badge badge-info">LOW</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> <code>haf_pipeline.py</code> has no <code>_compute_hash()</code> or manifest generation</li>
+  <li><strong>Precedent:</strong> <code>renderer/core.py:267-299</code> <code>RenderManifest</code> with input/output hashes</li>
+  <li><strong>Mitigation:</strong> OP-6: Backport from governed renderer (see Slice 8)</li>
+</ul>
+
+<h3>GAP-7: No XML Security Limits <span class="badge badge-warn">MEDIUM</span></h3>
+<ul>
+  <li><strong>Evidence:</strong> <code>haf_pipeline.py:94</code> uses bare <code>ET.fromstring()</code> without DTD/entity/size checks</li>
+  <li><strong>Precedent:</strong> <code>renderer/core.py:384-441</code> <code>_validate_structure_limits()</code> with <code>XmlParserLimits</code></li>
+  <li><strong>Mitigation:</strong> OP-7: Import existing <code>parse_diagram_safely()</code> (see Slice 2)</li>
+</ul>
+
+<h3>RISK-1: Template Coupling <span class="badge badge-info">LOW</span></h3>
+<ul>
+  <li><code>outpost_v1.json</code> references specific <code>haf-role</code> names; template changes require profile update</li>
+  <li><strong>Mitigated by:</strong> <code>validate_against_index()</code> already warns on role mismatches</li>
+</ul>
+
+<h3>RISK-2: Governed Renderer Retirement <span class="badge badge-warn">MEDIUM</span></h3>
+<ul>
+  <li>HAF replaces the 1319-line governed renderer; losing audit trail capabilities</li>
+  <li><strong>Mitigated by:</strong> Backport manifest/hash generation before decommissioning</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="s7">7. Improvement Opportunities with Specific Reusable Code</h2>
+<!-- ============================================================ -->
+
+<details open>
+  <summary>OP-1: Cloud Provider Style Registry</summary>
+  <ul>
+    <li><strong>What:</strong> JSON file mapping <code>(category, direction)</code> to draw.io style string + dimensions</li>
+    <li><strong>Reuse from:</strong> <code>multicloud-diagrams/providers/aws2024.json</code> entries: <code>outpost</code>, <code>ec2</code>, <code>vpc</code>, <code>subnet</code>, <code>security_group</code>, <code>direct_connect</code>, <code>route_53</code>, <code>s3</code>, <code>rds</code>; <code>azure.json</code> entries for Azure interfaces; <code>core.json</code> for edge/label styles</li>
+    <li><strong>How:</strong> Copy the <code>{style, width, height}</code> dict entries for relevant services into a new <code>config/haf_styles/interface_styles.json</code>. Also copy <code>update_style_by_key()</code> (6 lines) and <code>customize()</code> (3 lines) as utility functions.</li>
+    <li><strong>Effort:</strong> <span class="badge badge-ok">SMALL</span> (JSON creation + 30 lines of Python)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-ok">LOW</span></li>
+  </ul>
+</details>
+
+<details open>
+  <summary>OP-2: Generated Sub-Cells in Interface Slots</summary>
+  <ul>
+    <li><strong>What:</strong> Replace text-only slot values with individual mxCells inside region containers</li>
+    <li><strong>Reuse from:</strong> multicloud <code>add_vertex()</code> pattern for mxCell+mxGeometry creation (<code>__init__.py:409-429</code>); drawpyo <code>Object(parent=container)</code> parent/child nesting; governed renderer <code>core.py:892-920</code> for grid-positioned cell generation</li>
+    <li><strong>How:</strong> New function <code>_generate_subcells()</code> that creates <code>Et.SubElement(graph_root, 'mxCell', id=..., value=..., style=..., parent=container_id, vertex="1")</code> with <code>Et.SubElement(cell, 'mxGeometry', x=..., y=..., width=..., height=...)</code></li>
+    <li><strong>Effort:</strong> <span class="badge badge-warn">MEDIUM</span> (~100 lines)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-warn">MEDIUM</span> (needs draw.io visual verification)</li>
+  </ul>
+</details>
+
+<details open>
+  <summary>OP-3: Edge Generation Between Regions</summary>
+  <ul>
+    <li><strong>What:</strong> Generate mxCell edges connecting interface sub-cells to application core anchors</li>
+    <li><strong>Reuse from:</strong> multicloud <code>add_connection()</code> (<code>__init__.py:472-563</code>) for edge mxCell creation with labels; drawpyo <code>Edge.attributes</code> for source/target/style serialization; governed renderer <code>core.py:933-978</code> for edge + label generation</li>
+    <li><strong>How:</strong> New function <code>_generate_edges()</code> following multicloud's <code>Et.SubElement(root, 'mxCell', id=edge_id, edge="2", source=src, target=dst, style=...)</code> pattern</li>
+    <li><strong>Effort:</strong> <span class="badge badge-warn">MEDIUM</span> (~80 lines)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-warn">MEDIUM</span> (edge routing visual quality)</li>
+  </ul>
+</details>
+
+<details open>
+  <summary>OP-4: Grid Auto-Layout</summary>
+  <ul>
+    <li><strong>What:</strong> Position generated sub-cells in grid within region container bounds</li>
+    <li><strong>Reuse from:</strong> multicloud <code>Distribution.Table</code> algorithm (<code>__init__.py:449-467</code>) &mdash; exact 20-line grid calculation; drawpyo <code>Group</code> class (<code>objects.py:787-850</code>) for bounding-box geometry helpers</li>
+    <li><strong>How:</strong> Port the Distribution.Table algorithm: <code>r = (count + columns - 1) // columns; x = col * width + start_x; y = row * height + start_y</code></li>
+    <li><strong>Effort:</strong> <span class="badge badge-ok">SMALL</span> (~40 lines)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-ok">LOW</span></li>
+  </ul>
+</details>
+
+<details open>
+  <summary>OP-5: Deterministic Semantic ID Scheme</summary>
+  <ul>
+    <li><strong>What:</strong> Stable composite IDs for generated cells</li>
+    <li><strong>Reuse from:</strong> multicloud <code>vertex:{type}:{id}</code> pattern (<code>__init__.py:411</code>); multicloud <code>generate_hash()</code> (<code>__init__.py:82-85</code>) for short deterministic hashes</li>
+    <li><strong>How:</strong> <code>haf:{profile_id}:{region_role}:{correlation_id}</code> for vertices; <code>haf:edge:{src_corr}:to:{dst_corr}</code> for edges</li>
+    <li><strong>Effort:</strong> <span class="badge badge-ok">SMALL</span> (~15 lines)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-ok">LOW</span></li>
+  </ul>
+</details>
+
+<details open>
+  <summary>OP-6: Manifest and Hash Verification</summary>
+  <ul>
+    <li><strong>What:</strong> Content hashing and machine-readable manifest</li>
+    <li><strong>Reuse from:</strong> governed renderer <code>core.py:267-299</code> <code>RenderManifest</code> dataclass; <code>core.py:594-596</code> <code>_compute_hash()</code></li>
+    <li><strong>How:</strong> Add <code>HafManifest</code> dataclass + <code>_compute_hash()</code> function</li>
+    <li><strong>Effort:</strong> <span class="badge badge-ok">SMALL</span> (~50 lines)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-ok">LOW</span></li>
+  </ul>
+</details>
+
+<details open>
+  <summary>OP-7: XML Security Limits</summary>
+  <ul>
+    <li><strong>What:</strong> DTD/entity/size/depth validation on template input</li>
+    <li><strong>Reuse from:</strong> governed renderer <code>core.py:91-502</code> &mdash; <code>XmlParserLimits</code>, <code>parse_diagram_safely()</code>, <code>_validate_structure_limits()</code></li>
+    <li><strong>How:</strong> Import and call existing <code>parse_diagram_safely()</code> from <code>renderer.core</code></li>
+    <li><strong>Effort:</strong> <span class="badge badge-ok">SMALL</span> (import + 5 lines)</li>
+    <li><strong>Risk:</strong> <span class="badge badge-ok">LOW</span></li>
+  </ul>
+</details>
+
+<!-- ============================================================ -->
+<h2 id="s8">8. TDD Implementation Slices</h2>
+<!-- ============================================================ -->
+
+<p>Each slice follows <strong>RED-GREEN-REFACTOR</strong>: write failing test first, implement to make it pass, verify no regression.</p>
+
+<!-- Slice 0 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 0: Baseline Snapshot</span>
+    <span class="badge badge-ok">SMALL / NONE RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Record current test baseline before any changes.</p>
+    <p><strong>Steps:</strong></p>
+    <ol>
+      <li>Run <code>python -m pytest tests/unit/topology/ -v</code> &mdash; record count (expect 397)</li>
+      <li>Run full pipeline against real v1.7 template &mdash; save output as golden reference</li>
+      <li>Verify <code>MULTILINE_TEXT</code> mode produces exact text output for CCPM interfaces</li>
+    </ol>
+    <p><strong>Test to write:</strong></p>
+<pre><code>def test_baseline_multiline_text_azure_slot():
+    """Characterization test: azure_apps_slot currently produces \\n-separated text."""
+    result = fill_haf_template(
+        template_bytes=REAL_V17_TEMPLATE,
+        tokens=CCPM_TOKENS,
+        interfaces=CCPM_INTERFACES,
+        details={},
+        profile_id="OUTPOST_V1",
+    )
+    tree = ET.fromstring(result.filled_xml)
+    azure_cell = [c for c in tree.iter("mxCell")
+                  if c.get("haf-role") == "azure_apps_slot"][0]
+    assert "\n" in azure_cell.get("value")   # Current behavior: newline-separated
+    assert "ATTCC" in azure_cell.get("value") # Known CCPM interface</code></pre>
+    <p><strong>Exit criteria:</strong> Test passes, baseline count recorded.</p>
+  </div>
+</div>
+
+<!-- Slice 1 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 1: MIDRANGE Location Alias + Extractor Fix</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Fix GAP-5 so Midrange interfaces are correctly categorized.</p>
+    <p><strong>Files modified:</strong> <code>topology/guide_policy.py</code> &mdash; add <code>"MIDRANGE": "INTERNAL"</code></p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_midrange_maps_to_internal():
+    """MIDRANGE locations should map to INTERNAL, not UNKNOWN."""
+    assert LOCATION_ALIASES.get("MIDRANGE") == "INTERNAL"</code></pre>
+    <p><strong>GREEN:</strong> Add <code>"MIDRANGE": "INTERNAL"</code> to <code>LOCATION_ALIASES</code> dict.</p>
+    <p><strong>Verify with real data:</strong> Re-run extractor against CCPM SQLite DB &mdash; Midrange interfaces should now appear under <code>INTERNAL:INBOUND</code> instead of <code>UNKNOWN:*</code>.</p>
+    <p><strong>Exit criteria:</strong> Existing 397 tests + new test = 398 pass.</p>
+  </div>
+</div>
+
+<!-- Slice 2 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 2: XML Security Limits for HAF Parser</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Fix GAP-7 by importing existing security validation.</p>
+    <p><strong>Files modified:</strong> <code>topology/haf_pipeline.py</code> &mdash; replace <code>ET.fromstring()</code> with <code>parse_diagram_safely()</code></p>
+    <p><strong>Reused code:</strong> <code>renderer/core.py:461-502</code> &mdash; <code>parse_diagram_safely()</code> (import, not copy)</p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_haf_parser_rejects_oversized_template():
+    """HAF parser should reject templates exceeding size limits."""
+    huge = b"&lt;mxfile&gt;" + b"&lt;mxCell id='x'/&gt;" * 100000 + b"&lt;/mxfile&gt;"
+    with pytest.raises(XmlLimitExceededError):
+        parse_haf_template(huge)
+
+def test_haf_parser_rejects_dtd():
+    """HAF parser should reject templates with DTD declarations."""
+    dtd = b'&lt;!DOCTYPE foo [&lt;!ENTITY xxe "bar"&gt;]&gt;&lt;mxfile/&gt;'
+    with pytest.raises(XmlLimitExceededError):
+        parse_haf_template(dtd)</code></pre>
+    <p><strong>Exit criteria:</strong> 2 new security tests + 397 existing = 399 pass.</p>
+  </div>
+</div>
+
+<!-- Slice 3 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 3: Cloud Provider Style Registry</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Create reusable style registry for interface categories (OP-1).</p>
+    <p><strong>Files created:</strong></p>
+    <ul>
+      <li><code>topology/config/haf_styles/interface_styles.json</code> &mdash; styles copied from multicloud providers</li>
+      <li><code>topology/haf_styles.py</code> &mdash; style lookup module (~40 lines)</li>
+    </ul>
+    <p><strong>Reused code from multicloud-diagrams:</strong> Copy <code>outpost</code>, <code>ec2</code>, <code>vpc</code>, <code>subnet</code>, <code>security_group</code>, <code>direct_connect</code>, <code>route_53</code> entries from <code>providers/aws2024.json</code>; Azure entries from <code>providers/azure.json</code>; <code>edge</code>, <code>label</code> from <code>providers/core.json</code>; port <code>update_style_by_key()</code> (6 lines) and <code>customize()</code> (3 lines).</p>
+    <p><strong>Reused code from drawpyo:</strong> Port <code>style_str_from_dict()</code> (26 lines).</p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_style_registry_loads():
+    """Style registry should load and contain AWS/Azure/INTERNAL categories."""
+    from migration_intake.topology.haf_styles import load_interface_styles
+    styles = load_interface_styles()
+    assert "AWS" in styles
+    assert "AZURE" in styles
+    assert "INTERNAL" in styles
+    assert "mxgraph.aws4" in styles["AWS"]["style"]
+
+def test_style_registry_has_outpost():
+    """AWS style should include the Outpost icon."""
+    styles = load_interface_styles()
+    assert "outposts" in styles["AWS"]["style"]
+
+def test_update_style_by_key():
+    """Port of multicloud update_style_by_key."""
+    from migration_intake.topology.haf_styles import update_style_by_key
+    result = update_style_by_key("rounded=1;fillColor=#E6E6E6;", "fillColor", "#FF0000")
+    assert "fillColor=#FF0000" in result
+    assert "fillColor=#E6E6E6" not in result</code></pre>
+    <p><strong>Exit criteria:</strong> Style registry loads, tests pass, no behavior change.</p>
+  </div>
+</div>
+
+<!-- Slice 4 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 4: Sub-Cell Generation Function (OP-2, Core)</span>
+    <span class="badge badge-warn">MEDIUM / MEDIUM RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Implement <code>_generate_subcells()</code> &mdash; the core of GENERATE_CELLS mode.</p>
+    <p><strong>Files modified:</strong> <code>topology/haf_pipeline.py</code> &mdash; new <code>_generate_subcells()</code> function</p>
+    <p><strong>Reused patterns:</strong></p>
+    <ul>
+      <li>multicloud <code>add_vertex()</code> (<code>__init__.py:409-429</code>) &mdash; mxCell + mxGeometry creation</li>
+      <li>multicloud deterministic ID: <code>vertex:{type}:{id}</code> &rarr; <code>haf:{profile}:{region}:{corr_id}</code></li>
+      <li>multicloud <code>generate_hash()</code> for short hashes</li>
+      <li>Governed renderer <code>core.py:892-920</code> &mdash; grid positioning inside containers</li>
+    </ul>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_generate_subcells_creates_correct_count():
+    """Should generate one mxCell per interface entry."""
+    template = b'''&lt;mxfile&gt;&lt;diagram&gt;&lt;mxGraphModel&gt;&lt;root&gt;
+        &lt;mxCell id="0"/&gt;&lt;mxCell id="1" parent="0"/&gt;
+        &lt;mxCell id="region1" parent="1" vertex="1" haf-role="azure_apps_slot"
+                style="rounded=1;" value="placeholder"&gt;
+            &lt;mxGeometry x="100" y="200" width="300" height="400" as="geometry"/&gt;
+        &lt;/mxCell&gt;
+    &lt;/root&gt;&lt;/mxGraphModel&gt;&lt;/diagram&gt;&lt;/mxfile&gt;'''
+    entries = [
+        {"app_name": "ATTCC", "correlation_id": "12345"},
+        {"app_name": "BOOST", "correlation_id": "12346"},
+        {"app_name": "CCAP", "correlation_id": "12347"},
+    ]
+    # parse, generate, verify 3 new mxCells with correct parent
+
+def test_generate_subcells_deterministic_ids():
+    """Same inputs should produce same cell IDs across runs."""
+
+def test_generate_subcells_within_container_bounds():
+    """All sub-cells should have geometry within the parent container."""
+
+def test_generate_subcells_have_cloud_style():
+    """Sub-cells should use styles from the interface_styles registry."""</code></pre>
+    <p><strong>GREEN implementation (~100 lines):</strong></p>
+<pre><code>def _generate_subcells(
+    parent_cell: ET.Element,
+    entries: list[dict[str, str]],
+    region: InterfaceRegion,
+    profile: HafProfile,
+    graph_root: ET.Element,
+    styles: dict[str, dict],
+) -&gt; list[HafMutation]:
+    """Generate child mxCells inside a region container.
+
+    Reuses patterns from:
+    - multicloud-diagrams add_vertex() for mxCell creation
+    - multicloud-diagrams Distribution.Table for grid layout
+    - governed renderer core.py:892-920 for container positioning
+    """
+    # Read parent geometry
+    parent_geom = parent_cell.find("mxGeometry")
+    container_w = float(parent_geom.get("width", "300"))
+    container_h = float(parent_geom.get("height", "400"))
+
+    # Grid layout (ported from multicloud Distribution.Table)
+    columns = 2
+    cell_w = container_w / columns
+    cell_h = 30
+    rows = (len(entries) + columns - 1) // columns
+
+    # Style lookup
+    category_style = styles.get(region.category, styles.get("UNKNOWN", {}))
+
+    mutations = []
+    for index, entry in enumerate(sorted(entries,
+            key=lambda e: e.get("correlation_id", ""))):
+        row, col = divmod(index, columns)
+
+        # Deterministic ID (from multicloud vertex:{type}:{id} pattern)
+        cell_id = f"haf:{profile.profile_id}:{region.haf_role}:" \
+                  f"{entry['correlation_id']}"
+
+        # Create mxCell (from multicloud add_vertex())
+        label = region.format.format(**entry)
+        cell = ET.SubElement(graph_root, "mxCell", {
+            "id": cell_id,
+            "value": label,
+            "style": category_style.get("style", "rounded=1;"),
+            "vertex": "1",
+            "parent": parent_cell.get("id"),
+        })
+        ET.SubElement(cell, "mxGeometry", {
+            "x": str(col * cell_w),
+            "y": str(row * cell_h),
+            "width": str(cell_w),
+            "height": str(cell_h),
+            "as": "geometry",
+        })
+        mutations.append(HafMutation(...))
+
+    return mutations</code></pre>
+    <p><strong>Exit criteria:</strong> 4+ new tests pass, existing tests unchanged.</p>
+  </div>
+</div>
+
+<!-- Slice 5 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 5: Grid Layout Refinement (OP-4)</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Ensure sub-cells fit within container bounds, handle overflow.</p>
+    <p><strong>Reused code:</strong> multicloud <code>Distribution.Table</code> exact algorithm (<code>__init__.py:449-467</code>); drawpyo <code>Group</code> bounding-box helpers (<code>objects.py:787-850</code>) &mdash; conceptual.</p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_grid_layout_32_entries_fit_in_container():
+    """32 UNKNOWN interfaces should fit in the container without overflow."""
+
+def test_grid_layout_auto_adjusts_columns():
+    """Large counts should increase columns to prevent vertical overflow."""
+
+def test_grid_layout_single_entry_centered():
+    """Single entry should be centered in the container."""</code></pre>
+    <p><strong>Exit criteria:</strong> Layout tests pass, visual verification in draw.io.</p>
+  </div>
+</div>
+
+<!-- Slice 6 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 6: Edge Generation (OP-3)</span>
+    <span class="badge badge-warn">MEDIUM / MEDIUM RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Generate directional edges between interface sub-cells and app core anchor.</p>
+    <p><strong>Files modified:</strong> <code>topology/haf_pipeline.py</code> &mdash; new <code>_generate_edges()</code> function; <code>outpost_v1.json</code> &mdash; add <code>edge_targets</code> and <code>generate_edges</code> fields.</p>
+    <p><strong>Reused code:</strong></p>
+    <ul>
+      <li>multicloud <code>add_connection()</code> (<code>__init__.py:472-563</code>) &mdash; edge mxCell creation pattern</li>
+      <li>multicloud edge ID: <code>edge:{src}:to:{dst}</code> &rarr; <code>haf:edge:{src_corr}:to:{dst_corr}</code></li>
+      <li>multicloud label attachment as child of edge (<code>__init__.py:542-561</code>)</li>
+      <li>drawpyo <code>Edge.attributes</code> (<code>edges.py:213-235</code>) &mdash; source/target/style structure</li>
+      <li>Governed renderer <code>core.py:933-978</code> &mdash; edge generation with protocol/port labels</li>
+    </ul>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_generate_edges_connects_subcells_to_anchor():
+    """Each interface sub-cell should get an edge to the app core anchor."""
+
+def test_edge_has_protocol_label():
+    """Edge should show protocol/port when available."""
+
+def test_edge_deterministic_id():
+    """Same inputs should produce same edge IDs."""</code></pre>
+    <p><strong>Exit criteria:</strong> Edge tests pass, edges visible in draw.io.</p>
+  </div>
+</div>
+
+<!-- Slice 7 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 7: Wire GENERATE_CELLS Mode Into Pipeline</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Connect sub-cells + edges into the main fill pipeline with feature toggle.</p>
+    <p><strong>Files modified:</strong> <code>topology/haf_pipeline.py</code> &mdash; modify <code>fill_interface_regions()</code> to branch on <code>region.rendering</code>; <code>outpost_v1.json</code> &mdash; set <code>azure_apps_slot.rendering = "GENERATE_CELLS"</code>.</p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_pipeline_multiline_text_unchanged():
+    """MULTILINE_TEXT regions should produce identical output to baseline."""
+
+def test_pipeline_generate_cells_for_azure():
+    """azure_apps_slot in GENERATE_CELLS mode should produce sub-cells."""
+    result = fill_haf_template(
+        template_bytes=REAL_V17_TEMPLATE,
+        tokens=CCPM_TOKENS,
+        interfaces=CCPM_INTERFACES,
+        details={},
+        profile_id="OUTPOST_V1",
+    )
+    tree = ET.fromstring(result.filled_xml)
+    subcells = [c for c in tree.iter("mxCell")
+                if c.get("id", "").startswith("haf:OUTPOST_V1:azure_apps_slot:")]
+    assert len(subcells) &gt; 0
+
+def test_pipeline_mixed_modes():
+    """Some regions MULTILINE_TEXT, some GENERATE_CELLS - both work."""</code></pre>
+    <p><strong>Exit criteria:</strong> Both rendering modes work, existing tests pass, real template verified.</p>
+  </div>
+</div>
+
+<!-- Slice 8 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 8: Manifest and Hash Verification (OP-6)</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Add audit trail capabilities from the governed renderer.</p>
+    <p><strong>Reused code:</strong> <code>renderer/core.py:267-299</code> <code>RenderManifest</code> dataclass; <code>core.py:594-596</code> <code>_compute_hash()</code>.</p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_manifest_includes_input_output_hashes():
+    """Result should include SHA-256 hashes of template, profile, and output."""
+    result = fill_haf_template(...)
+    assert result.manifest.template_hash
+    assert result.manifest.output_hash
+    assert result.manifest.profile_hash
+
+def test_manifest_deterministic():
+    """Same inputs should produce same manifest."""
+    r1 = fill_haf_template(...)
+    r2 = fill_haf_template(...)
+    assert r1.manifest == r2.manifest</code></pre>
+    <p><strong>Exit criteria:</strong> Manifest tests pass, hashes stable.</p>
+  </div>
+</div>
+
+<!-- Slice 9 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 9: Tooltip Metadata on Sub-Cells</span>
+    <span class="badge badge-ok">SMALL / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Add hover metadata to generated sub-cells.</p>
+    <p><strong>Reused code:</strong> multicloud <code>stringify_dict()</code> (<code>__init__.py:36-41</code>) &mdash; HTML metadata formatting; drawpyo <code>tooltip</code> attribute (<code>xml_base.py:38,85-86</code>) &mdash; UserObject tooltip pattern.</p>
+    <p><strong>RED test:</strong></p>
+<pre><code>def test_subcell_has_tooltip_metadata():
+    """Sub-cells should have tooltip with correlation ID, location, direction."""
+    # Generate subcells, verify tooltip attribute</code></pre>
+    <p><strong>Exit criteria:</strong> Tooltips visible in draw.io on hover.</p>
+  </div>
+</div>
+
+<!-- Slice 10 -->
+<div class="slice-card">
+  <div class="slice-card-header">
+    <span>Slice 10: End-to-End Integration Test</span>
+    <span class="badge badge-warn">MEDIUM / LOW RISK</span>
+  </div>
+  <div class="slice-card-body">
+    <p><strong>Purpose:</strong> Full pipeline E2E with real v1.7 template and CCPM SQLite data.</p>
+    <p><strong>Test:</strong></p>
+<pre><code>def test_e2e_ccpm_generate_cells_opens_in_drawio():
+    """Full pipeline with GENERATE_CELLS should produce a valid .drawio file."""
+    # 1. Connect to local SQLite
+    # 2. Extract CCPM data
+    # 3. Run pipeline with GENERATE_CELLS for azure_apps_slot
+    # 4. Write output to temp .drawio file
+    # 5. Verify: valid XML, no duplicate IDs, sub-cells present
+    # 6. Verify: all existing template cells preserved (structural safety)
+    # 7. Verify: mutations + gaps report complete</code></pre>
+    <p><strong>Exit criteria:</strong> Output opens in draw.io, all verification checks pass.</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s9">9. Prioritized Roadmap</h2>
+<!-- ============================================================ -->
+
+<div class="phase-header">Phase 0: Baseline (Slice 0)</div>
+<div class="phase-body">
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Step</th><th>Slice</th><th>Effort</th><th>Risk</th><th>New Tests</th></tr></thead>
+  <tbody>
+    <tr><td>P0.1</td><td>Slice 0: Baseline snapshot</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">NONE</span></td><td>1 characterization test</td></tr>
+    <tr><td colspan="5"><strong>Gate:</strong> 397 + 1 = 398 tests pass</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<div class="phase-header">Phase 1: Quick Wins (Slices 1-3)</div>
+<div class="phase-body">
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Step</th><th>Slice</th><th>Effort</th><th>Risk</th><th>New Tests</th><th>Reuse Source</th></tr></thead>
+  <tbody>
+    <tr><td>P1.1</td><td>Slice 1: MIDRANGE alias</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>1</td><td>&mdash;</td></tr>
+    <tr><td>P1.2</td><td>Slice 2: XML security limits</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>2</td><td>renderer/core.py</td></tr>
+    <tr><td>P1.3</td><td>Slice 3: Style registry</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>3</td><td>multicloud providers/*.json, drawpyo style_str_from_dict</td></tr>
+    <tr><td colspan="6"><strong>Gate:</strong> 398 + 6 = 404 tests, no behavior change in MULTILINE_TEXT</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<div class="phase-header">Phase 2: Sub-Cell Generation (Slices 4-7)</div>
+<div class="phase-body">
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Step</th><th>Slice</th><th>Effort</th><th>Risk</th><th>New Tests</th><th>Reuse Source</th></tr></thead>
+  <tbody>
+    <tr><td>P2.1</td><td>Slice 4: Sub-cell function</td><td><span class="badge badge-warn">MEDIUM</span></td><td><span class="badge badge-warn">MEDIUM</span></td><td>4</td><td>multicloud add_vertex, Distribution.Table</td></tr>
+    <tr><td>P2.2</td><td>Slice 5: Grid layout</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>3</td><td>multicloud Distribution.Table, drawpyo Group</td></tr>
+    <tr><td>P2.3</td><td>Slice 6: Edge generation</td><td><span class="badge badge-warn">MEDIUM</span></td><td><span class="badge badge-warn">MEDIUM</span></td><td>3</td><td>multicloud add_connection, drawpyo Edge</td></tr>
+    <tr><td>P2.4</td><td>Slice 7: Wire into pipeline</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>3</td><td>&mdash;</td></tr>
+    <tr><td colspan="6"><strong>Gate:</strong> 404 + 13 = 417 tests, both modes pass, visual verification</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<div class="phase-header">Phase 3: Governance and Polish (Slices 8-10)</div>
+<div class="phase-body">
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Step</th><th>Slice</th><th>Effort</th><th>Risk</th><th>New Tests</th><th>Reuse Source</th></tr></thead>
+  <tbody>
+    <tr><td>P3.1</td><td>Slice 8: Manifest/hashing</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>2</td><td>renderer/core.py RenderManifest</td></tr>
+    <tr><td>P3.2</td><td>Slice 9: Tooltip metadata</td><td><span class="badge badge-ok">SMALL</span></td><td><span class="badge badge-ok">LOW</span></td><td>1</td><td>multicloud stringify_dict, drawpyo tooltip</td></tr>
+    <tr><td>P3.3</td><td>Slice 10: E2E integration</td><td><span class="badge badge-warn">MEDIUM</span></td><td><span class="badge badge-ok">LOW</span></td><td>1</td><td>&mdash;</td></tr>
+    <tr><td colspan="6"><strong>Gate:</strong> 417 + 4 = 421+ tests, CCPM output approved, full regression green</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s10">10. Recommended First Slice (Proof of Concept)</h2>
+<!-- ============================================================ -->
+
+<p><strong>Scope:</strong> Slice 4 only &mdash; <code>_generate_subcells()</code> for <code>azure_apps_slot</code> with 3 test interfaces.</p>
+<p><strong>Non-goals:</strong> No edges, no tooltips, no manifest, no style registry (use hardcoded style for POC).</p>
+<p><strong>Components:</strong> <code>haf_pipeline.py</code> only &mdash; one new function.</p>
+<p><strong>Success metric:</strong> Generated <code>.drawio</code> opens in draw.io with 3 individual cells visible inside the Azure Apps region container.</p>
+<p><strong>Rollback:</strong> Set <code>azure_apps_slot.rendering = "MULTILINE_TEXT"</code> in profile JSON.</p>
+
+<!-- ============================================================ -->
+<h2 id="s11">11. Open Questions</h2>
+<!-- ============================================================ -->
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>#</th><th>Question</th><th>Evidence Needed</th><th>Blocking Slice</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Should MIDRANGE map to INTERNAL or its own region?</td><td>Architecture team decision</td><td>Slice 1</td></tr>
+    <tr><td>2</td><td>What draw.io version do users have? (mxgraph.aws4 compatibility)</td><td>User survey</td><td>Slice 3</td></tr>
+    <tr><td>3</td><td>Should sub-cells be editable or locked in draw.io?</td><td>UX requirements</td><td>Slice 4</td></tr>
+    <tr><td>4</td><td>Max expected interface count per app? (CCPM=55, others?)</td><td>Production DB sample</td><td>Slice 5</td></tr>
+    <tr><td>5</td><td>Should edges use orthogonal or curved routing?</td><td>Architect preference</td><td>Slice 6</td></tr>
+    <tr><td>6</td><td>Should HAF use <code>RenderManifest</code> contract or define its own?</td><td>Governance decision</td><td>Slice 8</td></tr>
+    <tr><td>7</td><td>Multi-page support (NonProd + Prod duplication)?</td><td>Business requirements</td><td>Future</td></tr>
+    <tr><td>8</td><td>Compressed draw.io format support?</td><td>Template audit</td><td>Future</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s12">12. Key Architectural Answers</h2>
+<!-- ============================================================ -->
+
+<h4>Q1: Which ideas from drawpyo/multicloud are applicable?</h4>
+<ul>
+  <li><strong>multicloud:</strong> deterministic composite IDs, provider JSON icon registry, Distribution.Table layout, add_vertex/add_connection patterns, coordinate persistence, stringify_dict metadata</li>
+  <li><strong>drawpyo:</strong> style_str_from_dict, Group bounding-box geometry, Object parent/child nesting, tooltip support, TOML shape database pattern</li>
+</ul>
+
+<h4>Q2: Which approaches should HAF avoid?</h4>
+<ul>
+  <li>drawpyo <code>id(self)</code> (non-deterministic)</li>
+  <li>drawpyo string XML serialization (use ElementTree)</li>
+  <li>multicloud single-file architecture</li>
+  <li>Both: lack of XML validation</li>
+</ul>
+
+<h4>Q3: Canonical topology model?</h4>
+<ul>
+  <li>Current <code>HafIndex</code> is insufficient for sub-cell generation</li>
+  <li>Should add lightweight intermediate model between extractor output and cell generation</li>
+  <li>But keep it minimal &mdash; avoid over-engineering</li>
+</ul>
+
+<h4>Q4: Topology semantics coupled to draw.io XML?</h4>
+<ul>
+  <li>Somewhat &mdash; <code>fill_interface_regions()</code> directly manipulates mxCell attributes</li>
+  <li>Extractor layer is clean and draw.io-agnostic (good)</li>
+  <li>Sub-cell generation will increase coupling, but profile-driven configuration contains it</li>
+</ul>
+
+<h4>Q5&ndash;Q12</h4>
+<p>Answered in the Improvement Opportunities and Roadmap sections above.</p>
+
+<footer>
+  <p>Generated from architectural review of <code>drawpyo-main</code>, <code>multicloud-diagrams-main</code>, and the HAF topology pipeline. Both reference libraries are MIT-licensed. See <a href="haf-architectural-review.md">Markdown source</a> for the authoritative copy.</p>
+</footer>
+
+  </main>
+</body>
+</html>

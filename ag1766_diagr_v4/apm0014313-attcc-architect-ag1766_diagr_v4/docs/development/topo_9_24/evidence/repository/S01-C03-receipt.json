@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S01-C03",
+  "validated_at": "2026-09-24T13:41:56.7541103-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "inventory/verification_boundaries.md",
+    "evidence/repository/health-diagnostics.json"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/config.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\config.py",
+      "file_type": ".py",
+      "size_bytes": 16266,
+      "modified_utc": "2026-09-23T22:07:52.7049352Z",
+      "sha256": "8ea548045751cd58c97b1d5310e6dd3078c11c61ceeadf87668dc6968e4d2093",
+      "chunk_id": "S01-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "48-180;310-440",
+      "relevant_section": "Settings; validators; effective_database_url",
+      "evidence_id": "EV-REPO-006",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/main.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\main.py",
+      "file_type": ".py",
+      "size_bytes": 10421,
+      "modified_utc": "2026-09-24T12:08:58.3820488Z",
+      "sha256": "dac6ccfd5ce35b6f3cb909844ae458990bb7e069029be1699e8bfb57e6d66f2a",
+      "chunk_id": "S01-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "87-291",
+      "relevant_section": "create_app; lifespan; get_app; run",
+      "evidence_id": "EV-REPO-006",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/observability/logging.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\observability\\logging.py",
+      "file_type": ".py",
+      "size_bytes": 13368,
+      "modified_utc": "2026-09-24T12:08:58.3856128Z",
+      "sha256": "93f7d9c74326f7c9a76da3ae14fcefec9aedeb6905613cbc10da3be053379e90",
+      "chunk_id": "S01-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-210",
+      "relevant_section": "Correlation/redaction; EventCode; StructuredLogger",
+      "evidence_id": "EV-REPO-006",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/database.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\database.py",
+      "file_type": ".py",
+      "size_bytes": 8393,
+      "modified_utc": "2026-09-24T12:08:58.3947870Z",
+      "sha256": "f499dfa94fe49586aab421c195a6377f87432e4382e08e4c07ded1c4ad555253",
+      "chunk_id": "S01-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-226",
+      "relevant_section": "Engine/session factories; pragmas; schema check",
+      "evidence_id": "EV-REPO-006",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/web/health.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\web\\health.py",
+      "file_type": ".py",
+      "size_bytes": 6395,
+      "modified_utc": "2026-09-24T18:32:42.9746455Z",
+      "sha256": "11bc99ae0a01dc75c7597bdf93d6f05e052aa0d87f5fcace2e32ec08a5020d90",
+      "chunk_id": "S01-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-170",
+      "relevant_section": "liveness; readiness; diagnostic line 91",
+      "evidence_id": "EV-REPO-006",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Five source files only",
+    "File-specific Pylance diagnostic confirms undefined literal",
+    "Startup/readiness side effects documented without execution"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

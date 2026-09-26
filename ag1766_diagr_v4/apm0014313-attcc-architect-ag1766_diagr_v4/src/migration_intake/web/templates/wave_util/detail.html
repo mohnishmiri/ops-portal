@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}{{ row.server_name }} — WaveUtil{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% if app_name %}
+<a href="/applications/{{ app_id }}" class="global-nav-item">{{ app_name }}</a>
+{% endif %}
+<a href="{{ list_href }}" class="global-nav-item">WaveUtil</a>
+<a href="#" class="global-nav-item active" aria-current="page">{{ row.server_name }}</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="{{ list_href }}" class="button button--ghost">← Back to list</a>
+{% endblock %}
+
+{% block content %}
+<div class="wave-util-detail-page">
+
+  <header class="page-header">
+    <h1 class="page-title">{{ row.server_name }}</h1>
+    <div class="page-meta">
+      {% if row.state == 'ACTIVE' %}
+      <span class="status-pill status-pill--success">
+        <span class="pill-dot"></span>Active
+      </span>
+      {% elif row.state == 'RETIRED' %}
+      <span class="status-pill status-pill--muted">
+        <span class="pill-dot"></span>Retired
+      </span>
+      {% endif %}
+      <span class="meta-item">Version {{ row.row_version }}</span>
+    </div>
+  </header>
+
+  {# Server identity card #}
+  <section class="card card--elevated">
+    <h2 class="card-title">Server details</h2>
+    <dl class="detail-grid">
+      <div class="detail-grid__item">
+        <dt>Hostname</dt>
+        <dd>{{ row.server_name }}</dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>Normalized name</dt>
+        <dd><code>{{ row.normalized_server_name }}</code></dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>Environment</dt>
+        <dd>
+          {% if row.environment %}
+          <span class="status-pill">{{ row.environment }}</span>
+          {% else %}
+          <span class="text-muted">Not specified</span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>State</dt>
+        <dd>
+          {% if row.state == 'ACTIVE' %}
+          <span class="status-pill status-pill--success">Active</span>
+          {% elif row.state == 'RETIRED' %}
+          <span class="status-pill status-pill--muted">Retired</span>
+          {% else %}
+          <span class="status-pill">{{ row.state }}</span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>Scope</dt>
+        <dd>{{ row.scope or '—' }}</dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>Wave assignment</dt>
+        <dd>
+          {% if current_revision and current_revision.field_values_json and current_revision.field_values_json.get('wave') %}
+          {{ current_revision.field_values_json.get('wave') }}
+          {% else %}
+          <span class="text-muted">—</span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>Last seen</dt>
+        <dd>
+          {% if row.updated_at %}
+          {{ row.updated_at.strftime('%Y-%m-%d %H:%M') if row.updated_at.strftime is defined else row.updated_at }}
+          {% else %}—{% endif %}
+        </dd>
+      </div>
+      {% if current_revision %}
+      <div class="detail-grid__item">
+        <dt>Revision</dt>
+        <dd>#{{ current_revision.revision_number }}</dd>
+      </div>
+      {% endif %}
+    </dl>
+  </section>
+
+  {# Current field values #}
+  {% if current_revision and current_revision.field_values_json %}
+  <section class="card">
+    <h2 class="card-title">Field values</h2>
+    <dl class="detail-grid">
+      {% for key, value in current_revision.field_values_json.items() %}
+      <div class="detail-grid__item">
+        <dt>{{ key }}</dt>
+        <dd>{{ value if value else '—' }}</dd>
+      </div>
+      {% endfor %}
+    </dl>
+  </section>
+  {% endif %}
+
+  {# Pending candidates — use questionnaire card style #}
+  {% if pending_candidates %}
+  <section class="card">
+    <h2 class="card-title">Pending proposals</h2>
+    <p class="section-description">These proposals are awaiting review.</p>
+    {% for candidate in pending_candidates %}
+    <div class="qx-proposal">
+      <div class="qx-proposal-meta">
+        <span class="tag">{{ candidate.origin }}</span>
+        {% if candidate.confidence %}
+        <span class="qx-proposal-confidence">
+          {{ (candidate.confidence * 100) | round | int }}% confidence
+        </span>
+        {% endif %}
+      </div>
+      {% if candidate.raw_value_json %}
+      <dl class="detail-grid detail-grid--compact">
+        {% for key, value in candidate.raw_value_json.items() if key not in ['match_outcome', 'matched_row_id'] %}
+        <div class="detail-grid__item">
+          <dt>{{ key }}</dt>
+          <dd>{{ value if value else '—' }}</dd>
+        </div>
+        {% endfor %}
+      </dl>
+      {% endif %}
+      <div class="qx-proposal-actions">
+        <form
+          method="POST"
+          action="/applications/{{ app_id }}/intakes/{{ intake_id }}/wave-util/accept"
+          class="inline-form"
+          data-proposal-decision
+        >
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="candidate_ids" value="{{ candidate.id }}">
+          <input type="hidden" name="expected_versions" value="{{ candidate.row_version }}">
+          <button type="submit" class="button button--primary button--sm">Accept</button>
+        </form>
+        <form
+          method="POST"
+          action="/applications/{{ app_id }}/intakes/{{ intake_id }}/wave-util/reject"
+          class="inline-form"
+          data-proposal-decision
+        >
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="candidate_ids" value="{{ candidate.id }}">
+          <input type="hidden" name="reason" value="Rejected from detail page">
+          <button type="submit" class="button button--ghost button--sm">Reject</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {# Retire action #}
+  {% if row.state == 'ACTIVE' %}
+  <section class="card">
+    <h2 class="card-title">Retire server</h2>
+    <p class="section-description">Mark this server as retired. This action requires a rationale.</p>
+
+    <form
+      method="POST"
+      action="/applications/{{ app_id }}/intakes/{{ intake_id }}/wave-util/{{ row.id }}/retire"
+      class="retire-form"
+    >
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="expected_version" value="{{ row.row_version }}">
+
+      <div class="form-group">
+        <label for="rationale" class="form-label">Rationale</label>
+        <textarea
+          id="rationale"
+          name="rationale"
+          class="form-input"
+          rows="3"
+          required
+          placeholder="Explain why this server is being retired…"
+        ></textarea>
+      </div>
+
+      <div class="form-group">
+        <label for="evidence_reference" class="form-label">Evidence reference <span class="form-hint">(optional)</span></label>
+        <input
+          type="text"
+          id="evidence_reference"
+          name="evidence_reference"
+          class="form-input"
+          placeholder="e.g., Ticket number, document reference"
+        >
+      </div>
+
+      <button type="submit" class="button button--danger">Retire server</button>
+    </form>
+  </section>
+  {% endif %}
+
+  {# Metadata #}
+  <section class="card">
+    <h2 class="card-title">Metadata</h2>
+    <dl class="detail-grid">
+      <div class="detail-grid__item">
+        <dt>Row ID</dt>
+        <dd><code>{{ row.id }}</code></dd>
+      </div>
+      <div class="detail-grid__item">
+        <dt>Created</dt>
+        <dd>
+          {% if row.created_at %}
+          {{ row.created_at.strftime('%Y-%m-%d %H:%M') if row.created_at.strftime is defined else row.created_at }}
+          {% else %}—{% endif %}
+        </dd>
+      </div>
+    </dl>
+  </section>
+
+</div>
+{% endblock %}

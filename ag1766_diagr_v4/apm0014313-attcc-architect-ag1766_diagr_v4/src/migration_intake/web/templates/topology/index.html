@@ -1,0 +1,391 @@
+{% extends "base.html" %}
+{#
+  Topology generation landing page — T05.
+
+  Shows:
+  - Snapshot status (required for generation)
+  - Base diagram upload form
+  - List of uploaded base diagrams
+  - Generate button
+  - Previous generation runs
+
+  Styling uses existing design tokens and components from components.css.
+  No inline event handlers. No hex literals.
+#}
+
+{% block title %}Generate Topology{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="{{ intake_base }}/topology" class="global-nav-item active" aria-current="page">Topology</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="{{ intake_base }}" class="button button--ghost button--sm">Back to intake</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.topology-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.topology-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.topology-header__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.topology-header__subtitle {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.snapshot-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.snapshot-card__icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  flex-shrink: 0;
+}
+
+.snapshot-card__icon--ready {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.snapshot-card__icon--not-ready {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.snapshot-card__body {
+  flex: 1;
+}
+
+.snapshot-card__title {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+}
+
+.snapshot-card__meta {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.snapshot-card__meta code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-muted);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.upload-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 768px) {
+  .upload-section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.upload-card__title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.upload-card__hint {
+  margin: var(--space-2) 0 var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.base-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.base-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.base-list__item:last-child {
+  border-bottom: 0;
+}
+
+.base-list__name {
+  font-weight: var(--font-weight-medium);
+}
+
+.base-list__meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.generate-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.generate-form .form-group {
+  flex: 1;
+  min-width: 200px;
+  margin-bottom: 0;
+}
+
+.runs-table {
+  margin-top: var(--space-4);
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="topology-page">
+
+  {# ------------------------------------------------------------------ #}
+  {# Header                                                              #}
+  {# ------------------------------------------------------------------ #}
+  <header class="topology-header">
+    <div>
+      <h1 class="topology-header__title">Generate Topology Diagram</h1>
+      <p class="topology-header__subtitle">
+        Upload a validated draw.io base and generate a non-authoritative test diagram from the current intake data.
+      </p>
+    </div>
+  </header>
+
+  {# ------------------------------------------------------------------ #}
+  {# Snapshot status                                                     #}
+  {# ------------------------------------------------------------------ #}
+  {% if intake_state != "FROZEN" %}
+  <div class="card snapshot-card">
+    <div class="snapshot-card__icon snapshot-card__icon--not-ready" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+    </div>
+    <div class="snapshot-card__body">
+      <h2 class="snapshot-card__title">Intake not ready</h2>
+      <p class="snapshot-card__meta">
+        Intake is in state <strong>{{ intake_state }}</strong>. 
+        Topology generation uses the data currently available in this intake.
+      </p>
+    </div>
+    <span class="status-pill status-pill--error">NOT READY</span>
+  </div>
+  {% endif %}
+
+  {% if snapshot %}
+  <div class="card snapshot-card">
+    <div class="snapshot-card__icon snapshot-card__icon--ready" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="9 12 11 14 15 10"/>
+      </svg>
+    </div>
+    <div class="snapshot-card__body">
+      <h2 class="snapshot-card__title">Snapshot ready</h2>
+      <p class="snapshot-card__meta">
+        ID: <code>{{ snapshot.id[:8] }}...</code> &middot;
+        SHA-256: <code>{{ snapshot.sha256_hex[:16] }}...</code> &middot;
+        Frozen: {{ snapshot.created_at }}
+      </p>
+    </div>
+    <span class="status-pill status-pill--success">READY</span>
+  </div>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  {# Upload and generate section                                         #}
+  {# ------------------------------------------------------------------ #}
+  <div class="upload-section">
+    
+    {# Upload base diagram #}
+    <div class="card">
+      <h2 class="upload-card__title">1. Upload Base Diagram</h2>
+      <p class="upload-card__hint">
+        Upload an AMP-generated AWS Outposts draw.io diagram. 
+        The file must be uncompressed XML format.
+      </p>
+      <form method="post" action="{{ intake_base }}/topology/upload-base" enctype="multipart/form-data">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        
+        <div class="form-group">
+          <label for="base_diagram" class="form-label form-label--required">
+            Base Diagram (.drawio)
+          </label>
+          <input type="file" id="base_diagram" name="base_diagram" 
+                 class="form-control" accept=".drawio,.xml" required>
+        </div>
+
+        <div class="form-group">
+          <label for="variant" class="form-label">Variant</label>
+          <select id="variant" name="variant" class="form-control">
+            <option value="default">Default (legacy)</option>
+            <option value="basic">Without LBs</option>
+            <option value="tlgw">tLGW Load Balancer</option>
+            <option value="f5">F5 Load Balancer</option>
+            <option value="hadr">HA/DR with Global LB</option>
+          </select>
+        </div>
+
+        <button type="submit" class="button button--secondary">Upload diagram</button>
+      </form>
+    </div>
+
+    {# Temporary draft generation path; official approval remains disabled. #}
+    <div class="card">
+      <h2 class="upload-card__title">2. Generate test topology</h2>
+      <p class="upload-card__hint">
+        Test generation accepts any validated upload and remains ineligible for official approval.
+        HAF role-based templates are auto-detected and filled with the HAF pipeline.
+      </p>
+      {% if base_artifacts %}
+      <form method="post" action="{{ intake_base }}/topology/generate">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <label for="base_artifact_id" class="form-label">Uploaded base</label>
+        <select id="base_artifact_id" name="base_artifact_id" class="form-control" required>
+          {% for artifact in base_artifacts %}
+            <option value="{{ artifact.id }}">{{ artifact.filename }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="button button--primary">Generate topology</button>
+      </form>
+      {% else %}
+      <p class="form-hint">Upload a base diagram to generate a test topology.</p>
+      {% endif %}
+      <p class="form-hint">Official generation and approval remain disabled.</p>
+    </div>
+
+    <div class="card">
+      <h2 class="upload-card__title">3. Generate from Standard Template</h2>
+      <p class="upload-card__hint">
+        Uses the bundled multi-tab master template (v1.7). Select a variant
+        to choose the appropriate template tab. No upload required.
+      </p>
+      <form method="post" action="{{ intake_base }}/topology/generate-standard">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <div class="form-group">
+          <label for="standard_variant" class="form-label">Template variant</label>
+          <select id="standard_variant" name="variant" class="form-control" required>
+            <option value="basic">Without LBs</option>
+            <option value="tlgw">tLGW Load Balancer</option>
+            <option value="f5">F5 Load Balancer</option>
+            <option value="hadr">HA/DR with Global LB</option>
+          </select>
+        </div>
+        <button type="submit" class="button button--primary">Generate from template</button>
+      </form>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Uploaded base diagrams                                              #}
+  {# ------------------------------------------------------------------ #}
+  {% if base_artifacts %}
+  <section class="card">
+    <h2 class="upload-card__title">Uploaded Base Diagrams</h2>
+    <ul class="base-list">
+      {% for artifact in base_artifacts %}
+      <li class="base-list__item">
+        <div>
+          <span class="base-list__name">{{ artifact.filename }}</span>
+          <span class="base-list__meta">
+            {{ artifact.variant or 'default' }} &middot;
+            {{ artifact.size_bytes | filesizeformat }} &middot;
+            {{ artifact.uploaded_at }}
+          </span>
+        </div>
+        <span class="status-pill status-pill--{{ 'success' if artifact.review_state == 'APPROVED' else 'neutral' }}">
+          {{ artifact.review_state }}
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {# ------------------------------------------------------------------ #}
+  {# Previous generation runs                                            #}
+  {# ------------------------------------------------------------------ #}
+  {% if runs %}
+  <section class="card">
+    <h2 class="upload-card__title">Generation Runs</h2>
+    <div class="table-wrapper runs-table">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Run ID</th>
+            <th scope="col">Status</th>
+            <th scope="col">Created</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+          <tr>
+            <td><code>{{ run.id[:8] }}...</code></td>
+            <td>
+              <span class="status-pill status-pill--{{ run.status_tone }}">
+                {{ run.status }}
+              </span>
+              <span class="base-list__meta">{{ run.authority or 'LEGACY_UNPINNED' }}</span>
+            </td>
+            <td>{{ run.created_at }}</td>
+            <td>
+              <a href="{{ intake_base }}/topology/runs/{{ run.id }}" class="button button--ghost button--sm">
+                View
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+</div>
+{% endblock %}

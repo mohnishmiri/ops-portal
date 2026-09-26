@@ -1,0 +1,13 @@
+{
+  "id":"S03-C02","stage":"03","result":"COMPLETED",
+  "objective":"Resolve input wrapper identity and inspect parent-child hierarchy with opaque locators",
+  "inputs":["Supplied input Draw.io; persisted input inventory"],
+  "outputs":["evidence/drawio/input_hierarchy.json","analysis/semantic_diff/input_hierarchy.md","inspect_drawio_category.ps1"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio","lines":"Hierarchy category only","symbols":"Wrapper IDs; parent references; containment cycle check","further":true}],
+  "checks":["Parser syntax passed","DTD/network disabled","Source hash unchanged","Generated JSON valid; raw labels/IDs omitted"],
+  "established":["Three anonymous mxCells resolve via wrapper IDs","No missing effective identities or dangling parents","No containment cycles; eight cells have children"],
+  "uncertainties":["Protected/generated-region authority not inferred from appearance","Application/scope applicability remains unknown","Label/style digest equality is not semantic equivalence"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/inspect_drawio_category.ps1 -Source Input -Category Hierarchy","result":"0; INSPECTED; source unchanged","mutation":"Generated redacted JSON only","output":"evidence/drawio/input_hierarchy.json"}],
+  "evidence":[{"id":"EV-DRAWIO-002","path":"evidence/drawio/input_hierarchy.json","source":"Supplied input Draw.io hierarchy","description":"Opaque cell hierarchy with wrapper identity resolution; analysis in input_hierarchy.md","kind":"Normalized structural evidence","reliability":"VERIFIED structural checks; semantics/authority unverified"}],
+  "next_chunk":"S03-C03","next_action":"Inspect input edge endpoints and arrow/geometry categories without inferring business direction"
+}

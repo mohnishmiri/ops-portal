@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S08-C02",
+  "validated_at": "2026-09-24T17:08:29.7271067-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/data_lineage/canonical_snapshot.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/persistence/models.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models.py",
+      "file_type": ".py",
+      "size_bytes": 24136,
+      "modified_utc": "2026-09-24T12:08:58.4753819Z",
+      "sha256": "9e0926c254876f4b129992058c5fa8c1023009f17447871fb289e1a0cce4d73c",
+      "chunk_id": "S08-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "90-410, relevant Application/Intake epoch classes",
+      "relevant_section": "Application.interface_epoch; Intake.content_epoch",
+      "evidence_id": "EV-DATA-002",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/models_snapshots.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models_snapshots.py",
+      "file_type": ".py",
+      "size_bytes": 3524,
+      "modified_utc": "2026-09-24T12:08:58.4867590Z",
+      "sha256": "f5eec49c8e1b916b6497d014ce5ac6e020e26939b594c575b66f78daa42dcf2c",
+      "chunk_id": "S08-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-116",
+      "relevant_section": "IntakeSnapshot constraints/authority fields",
+      "evidence_id": "EV-DATA-002",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/repositories/snapshots.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\repositories\\snapshots.py",
+      "file_type": ".py",
+      "size_bytes": 4917,
+      "modified_utc": "2026-09-21T19:20:17.4989879Z",
+      "sha256": "6d9e79ae44d79619d61e7df2d0aefc49636cf8605b551e8c3cfd6102664a6331",
+      "chunk_id": "S08-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-126",
+      "relevant_section": "Create-only SnapshotRepository",
+      "evidence_id": "EV-DATA-002",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/models_interfaces.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\models_interfaces.py",
+      "file_type": ".py",
+      "size_bytes": 6257,
+      "modified_utc": "2026-09-22T22:00:32.7119577Z",
+      "sha256": "199eb9579b5826059daa5378a284b88773b53525d9ff09f5573f0c4228515f62",
+      "chunk_id": "S08-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-143",
+      "relevant_section": "InterfaceRecord current-state fields/constraints",
+      "evidence_id": "EV-DATA-002",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/repositories/interfaces.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\repositories\\interfaces.py",
+      "file_type": ".py",
+      "size_bytes": 10290,
+      "modified_utc": "2026-09-22T22:38:24.4091543Z",
+      "sha256": "d561f82765477e34c391af6df510c45d4bbb57ceb8d38d131a0eb7dc9cd67256",
+      "chunk_id": "S08-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-281",
+      "relevant_section": "Create/update/retire/duplicate/ordered capture/epoch methods",
+      "evidence_id": "EV-DATA-002",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Exactly five production files",
+    "Snapshot unique/cardinality checked against repository scalar reads",
+    "Every interface write path compared with epoch update",
+    "Row-version predicate examined rather than inferred from model comments",
+    "No dialect/runtime lock claim"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

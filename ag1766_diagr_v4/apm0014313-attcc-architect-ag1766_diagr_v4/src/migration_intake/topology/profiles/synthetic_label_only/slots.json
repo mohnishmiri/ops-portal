@@ -1,0 +1,1 @@
+{"slots":[{"slot_id":"APPLICATION_NAME","slot_type":"MANDATORY","page_selector":{"page_name_pattern":"^Overview$"},"cell_matcher":{"match_type":"MARKER","marker_pattern":"{{APPLICATION_NAME}}"},"tokens":["APPLICATION_NAME"]}]}

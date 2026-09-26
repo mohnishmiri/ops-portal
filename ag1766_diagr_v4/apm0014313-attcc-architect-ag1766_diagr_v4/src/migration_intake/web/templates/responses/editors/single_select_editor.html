@@ -1,0 +1,33 @@
+{#
+  Single select editor - dropdown or radio buttons.
+
+  Context:
+    question: dict with code, text, help, required_level, options
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The field name must match the canonical SINGLE_SELECT payload key
+  (`{value, other_text?}`), because the save route builds the response
+  directly from the submitted form field names.
+#}
+<div class="single-select-editor">
+  <select
+    name="value"
+    id="q-{{ question.code }}-input"
+    class="form-control{% if errors and errors.selected %} form-control--error{% endif %}"
+    {% if question.required_level == 'REQUIRED' %}required{% endif %}
+    {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+  >
+    <option value="">-- Select an option --</option>
+    {% for option in question.options or [] %}
+    <option 
+      value="{{ option.value }}"
+      {% if answer and answer.value and answer.value.value == option.value %}selected{% endif %}
+    >{{ option.label }}</option>
+    {% endfor %}
+  </select>
+  
+  {% if errors and errors.selected %}
+  <span class="form-error">{{ errors.selected | join(', ') }}</span>
+  {% endif %}
+</div>

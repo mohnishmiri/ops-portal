@@ -1,0 +1,12 @@
+{
+	"id":"S06-C08","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 23-24",
+	"inputs":["Guide blocks 23-24 and image7"],
+	"outputs":["evidence/docx/section-007.json","evidence/docx/media/image7.png","evidence/docx/derived/image7-ocr.json","analysis/business_rules/guide_section_07.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 23-24 and image7","symbols":"Standard content; qualified home-region labels/placeholders","further":true}],
+	"checks":["Bounded extraction/OCR succeeded","Hashes unchanged","Standard structure separated from variable identifiers"],
+	"established":["Prose specifies a standard box","OCR suggests home-region monitoring/connectivity content with variable placeholders"],
+	"uncertainties":["Exact connectors and label transcription unverified","Approved slot/region bindings not yet correlated","No actual region or gateway identity inferred"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C08; inspect_guide.ps1 blocks 23-24 section-007; local_ocr.exe image7.png image7-ocr.json","result":"0; seven qualified OCR lines; sources unchanged","mutation":"Analysis artifacts only","output":"evidence/docx/section-007.json; evidence/docx/derived/image7-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-008","path":"analysis/business_rules/guide_section_07.md","source":"Guide blocks 23-24 and image7 OCR","description":"Standard-region presentation with variable identifier boundaries","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; visual/binding details unverified"}],
+	"next_chunk":"S06-C09","next_action":"Extract only guide blocks 25-27"
+}

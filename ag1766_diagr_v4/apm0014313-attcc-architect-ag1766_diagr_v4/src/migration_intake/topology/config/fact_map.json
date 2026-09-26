@@ -1,0 +1,114 @@
+{
+  "_description": "Versioned issue rules for topology fact resolution, in the POC's fact-map.yaml `issues:` shape. Each rule is evaluated by the same condition engine as the POC (missing_path, conflicting_candidates, all_paths_present, truthy_with_missing_or_false, unit_missing, declared_ports_not_curated). Only rules for facts the production catalog can actually supply are included; do not add a rule for a fact path with no real source, since that would fabricate a gap that can never be resolved.",
+  "version": 1,
+  "issues": [
+    {
+      "id": "GAP-APP-ACRONYM",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["app.acronym"],
+      "owner": "Application Owner",
+      "explanation": "Application acronym is missing from intake data.",
+      "requested_action": "Provide the application acronym identifier.",
+      "diagram_action": "Render <app_acronym?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-CORRELATION-ID",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["app.correlation_id"],
+      "owner": "Application Owner",
+      "explanation": "Correlation ID is missing from intake data.",
+      "requested_action": "Provide the application correlation identifier.",
+      "diagram_action": "Render <correlation_id?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-ENVIRONMENT",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["env.name"],
+      "owner": "Application Owner",
+      "explanation": "Target environment is missing from intake data.",
+      "requested_action": "Provide a value for the target environment question.",
+      "diagram_action": "Render <environment?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-REGION",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["env.region"],
+      "owner": "Cloud Architect",
+      "explanation": "Target AWS region is missing from intake data.",
+      "requested_action": "Provide a value for the target region question.",
+      "diagram_action": "Render <region?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-VPC-CIDR",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["network.vpc_cidr"],
+      "owner": "Network Architect",
+      "explanation": "VPC CIDR is missing from intake data.",
+      "requested_action": "Provide a value for the VPC CIDR question.",
+      "diagram_action": "Render <vpc_cidr?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-SUBNET-CIDR",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["network.subnet_cidr"],
+      "owner": "Network Architect",
+      "explanation": "Subnet CIDR is missing from intake data.",
+      "requested_action": "Provide a value for the subnet CIDR question.",
+      "diagram_action": "Render <subnet_cidr?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-DB-ENGINE",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["db.engine"],
+      "owner": "DBA",
+      "explanation": "Database engine is missing from intake data.",
+      "requested_action": "Provide a value for the database engine question.",
+      "diagram_action": "Render <db_engine?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-DB-VERSION",
+      "type": "MISSING",
+      "severity": "MEDIUM",
+      "condition": "missing_path",
+      "paths": ["db.engine.version"],
+      "owner": "DBA",
+      "explanation": "Database engine version is missing from intake data.",
+      "requested_action": "Provide a value for the database version question.",
+      "diagram_action": "Render <db_version?> in the affected label.",
+      "blocking": false
+    },
+    {
+      "id": "GAP-DB-VERSION-CONFLICT",
+      "type": "CONFLICT",
+      "severity": "HIGH",
+      "condition": "conflicting_candidates",
+      "paths": ["db.engine.version"],
+      "owner": "DBA",
+      "explanation": "Sources disagree on the database engine version for the same scope.",
+      "requested_action": "Confirm the running database version and evidence date.",
+      "diagram_action": "Mark the database details for review.",
+      "blocking": true
+    }
+  ]
+}

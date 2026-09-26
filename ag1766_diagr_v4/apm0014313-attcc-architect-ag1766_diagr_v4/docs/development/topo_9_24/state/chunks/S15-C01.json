@@ -1,0 +1,13 @@
+{
+  "id":"S15-C01","stage":"15","result":"COMPLETED",
+  "objective":"Compare remediation architecture options, trade-offs, reversibility and target fit",
+  "inputs":["EV-ROOT-001","Application-specific target/guide evidence","Current stack and invariants"],
+  "outputs":["analysis/remediation_options/options.md"],
+  "inspected_files":[],
+  "checks":["Five options compared against explicit criteria","No infrastructure proposed without measured need","Interim containment distinguished from target completion","Implementation remains unapproved","Target-specific evidence not universalized"],
+  "established":["Evolutionary governed vertical repair is recommended","Containment remains required until repair/certification","Hardcoding, parallel graph service and UI replacement are rejected","Ownership-first sequence and ADR needs defined"],
+  "uncertainties":["Exact production profile decisions require user/architect review","Runtime evidence remains permission-blocked","Migration feasibility requires data preflight","Authentication/operations choices remain later decisions"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Compare remediation alternatives against EV-ROOT-001 and persisted target/project invariants","result":"Recommended evolutionary modular-monolith repair; alternatives dispositioned","mutation":"Analysis artifact only","output":"analysis/remediation_options/options.md"}],
+  "evidence":[{"id":"EV-OPTION-001","path":"analysis/remediation_options/options.md","source":"Root-cause model and project/target constraints","description":"Five-option trade-off analysis and recommended evolutionary direction","kind":"Architecture decision proposal","reliability":"PROPOSED; implementation not approved"}],
+  "next_chunk":"S15-C02","next_action":"Define the recommended target boundaries, state machine and architecture decisions"
+}

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "drawpyo"
+authors = [{name = "Xander Cesari", email = "xander@merriman.industries"}]
+description = "A Python library for programmatically generating Draw.io charts."
+keywords = ["draw.io", "diagrams.net", "diagrams"]
+readme = "README.md"
+license = {text = "MIT License"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "toml >= 0.10.2; python_version < '3.11'"
+    ]   
+
+[project.urls]
+Homepage = "https://github.com/MerrimanInd/drawpyo"
+Issues = "https://github.com/MerrimanInd/drawpyo/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest >= 7.0"
+]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--import-mode=importlib",
+]
+
+[dependency-groups]
+dev = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.0",
+    "mkdocstrings-python>=2.0.0",
+    "tox>=4.32.0",
+    "twine>=6.2.0",
+]

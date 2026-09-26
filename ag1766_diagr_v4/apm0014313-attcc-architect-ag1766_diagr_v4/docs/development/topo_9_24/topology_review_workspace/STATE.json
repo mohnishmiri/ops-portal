@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "status": "REPORT_READY",
+  "canonical_workspace": "..",
+  "report": "../report/topology-review-report.html",
+  "analysis_complete_for_reporting": true,
+  "runtime_certification_complete": false,
+  "production_implementation_authorized": false,
+  "official_generation_enabled": false,
+  "official_approval_enabled": false,
+  "next_action": "User review of report and separate authorization of remediation slice"
+}

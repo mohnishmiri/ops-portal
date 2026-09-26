@@ -1,0 +1,25 @@
+{#
+  Register status display - shows computed register status.
+
+  Context:
+    question: dict with code, text, help
+    answer: dict | None with value.status, value.count, value.last_updated
+#}
+<div class="register-status-display computed-display">
+  {% if answer and answer.value %}
+  <div class="status-summary">
+    <span class="status-pill status-pill--{{ answer.value.status | lower if answer.value.status else 'neutral' }}">
+      <span class="pill-dot"></span>
+      {{ answer.value.status or 'UNKNOWN' }}
+    </span>
+    {% if answer.value.count is not none %}
+    <span class="count-badge">{{ answer.value.count }} items</span>
+    {% endif %}
+  </div>
+  {% if answer.value.last_updated %}
+  <p class="meta-item">Last updated: {{ answer.value.last_updated }}</p>
+  {% endif %}
+  {% else %}
+  <p class="form-hint">No register status computed yet.</p>
+  {% endif %}
+</div>

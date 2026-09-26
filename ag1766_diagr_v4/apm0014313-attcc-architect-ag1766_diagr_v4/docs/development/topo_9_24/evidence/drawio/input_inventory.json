@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "captured_at": "2026-09-24T13:49:48.9489392-05:00",
+  "source_path": "AWS__input_Outpost_Topology_UNRESOLVED_UNRESOLVED-v1.7.drawio",
+  "source_sha256": "1975ea8e046760e359a4339e1d259b418ff7eeff0c4f6881555e01b0b2d84acb",
+  "parser": {
+    "dtd": "PROHIBITED",
+    "external_resolution": "DISABLED",
+    "max_characters": 16777216
+  },
+  "source_modified": false,
+  "page_count": 1,
+  "pages": [
+    {
+      "page_ref": "page-001",
+      "encoding": "UNCOMPRESSED_XML",
+      "inspected": true,
+      "cell_count": 141,
+      "vertex_count": 98,
+      "edge_count": 41,
+      "other_cell_count": 2,
+      "anonymous_cell_count": 3,
+      "duplicate_id_count": 0,
+      "wrapper_object_count": 3,
+      "unresolved_marker_candidate_cells": 6,
+      "edges_with_missing_endpoint_attributes": 20
+    }
+  ],
+  "redaction": "No raw labels, account/resource identifiers, page names, XML content or images copied into this inventory",
+  "limitations": [
+    "Counts are structural, not semantic correctness",
+    "Unresolved marker detection is a heuristic only",
+    "Missing endpoint attributes may represent manual connectors; not automatically a defect",
+    "Compressed pages are marked uninspected rather than silently decoded",
+    "Wrapper IDs and cross-page identity need separate hierarchy/connection inspection"
+  ]
+}

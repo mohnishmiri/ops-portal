@@ -1,0 +1,12 @@
+{
+	"id":"S06-C09","stage":"06","result":"COMPLETED","objective":"Extract and analyze guide blocks 25-27",
+	"inputs":["Guide blocks 25-27 and image8"],
+	"outputs":["evidence/docx/section-008.json","evidence/docx/media/image8.png","evidence/docx/derived/image8-ocr.json","analysis/business_rules/guide_section_08.md"],
+	"inspected_files":[{"path":"docs/development/topo_9_24/Topology Guide.docx","lines":"Blocks 25-27 and image8","symbols":"Standard content prose; service/API OCR candidates","further":true}],
+	"checks":["Safe extraction/local OCR succeeded","Source hashes unchanged","No API access or deployed-instance facts inferred"],
+	"established":["Guide declares a standard box","OCR suggests service/control-plane labels, including EC2"],
+	"uncertainties":["Exact heading/labels/connectors unverified","Standard profile binding not yet correlated"],"unblock_chunks":[],"resolve_questions":[],
+	"commands":[{"command":"Start S06-C09; inspect_guide.ps1 blocks 25-27 section-008; local_ocr.exe image8.png image8-ocr.json","result":"0; five qualified OCR lines; sources unchanged","mutation":"Analysis artifacts only","output":"evidence/docx/section-008.json; evidence/docx/derived/image8-ocr.json"}],
+	"evidence":[{"id":"EV-DOCX-009","path":"analysis/business_rules/guide_section_08.md","source":"Guide blocks 25-27 and image8 OCR","description":"Standard service/API illustration with no inferred access or deployment facts","kind":"Verified prose and qualified OCR","reliability":"Prose VERIFIED; visual/resource semantics unverified"}],
+	"next_chunk":"S06-C10","next_action":"Extract only guide blocks 28-32"
+}

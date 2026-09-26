@@ -1,0 +1,69 @@
+{
+  "list": {
+    "style": "swimlane;fontStyle=0;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;whiteSpace=wrap;html=1;",
+    "version": "0.2.0",
+    "desc": "List of Records",
+    "details": "Record are rows of text."
+  },
+  "map": {
+    "style": "swimlane;fontStyle=0;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;whiteSpace=wrap;html=1;",
+    "version": "0.3.12",
+    "desc": "Map of Records",
+    "details": "Record is divided with ':' into key/value pairs. Each KEY is highlighted with bold font syntax."
+  },
+  "snapshot": {
+    "version": "0.3.8",
+    "desc": "Single Snapshot",
+    "details": "Single row table with a snapshot representation of XML, JSON or text/plain."
+  },
+  "row": {
+    "style": "text;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;spacingLeft=4;spacingRight=4;overflow=hidden;portConstraint=eastwest;rotatable=0;whiteSpace=wrap;html=1;",
+    "version": "0.2.0",
+    "desc": "Internal ROW used in Table and Snapshot"
+  },
+  "edge": {
+    "style": "jettySize=auto;html=1;",
+    "version": "0.3.13",
+    "desc": "Edge Default connector"
+  },
+  "label": {
+    "style": "edgeLabel;html=1;align=left;verticalAlign=middle;resizable=0;points=[];labelBackgroundColor=none;",
+    "version": "0.3.13",
+    "desc": "Label on Edge"
+  },
+  "actor": {
+    "style": "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;",
+    "version": "0.3.15",
+    "desc": "Actor",
+    "width": "30",
+    "height": "60"
+  },
+  "rectangle": {
+    "style": "rounded=0;whiteSpace=wrap;html=1;labelBackgroundColor=none;",
+    "width": "120",
+    "height": "60",
+    "version": "0.3.20",
+    "desc": "Block Rectangle"
+  },
+  "mobile_client": {
+    "style": "sketch=0;outlineConnect=0;gradientColor=none;strokeColor=#232F3E;fillColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=left;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.mobile_client;labelBackgroundColor=none;",
+    "width": "60",
+    "height": "60",
+    "version": "0.3.20",
+    "desc": "Mobile Client"
+  },
+  "web_client": {
+    "style": "sketch=0;outlineConnect=0;gradientColor=none;fillColor=#232F3D;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=left;html=1;fontSize=12;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.client;labelBackgroundColor=none;",
+    "width": "78",
+    "height": "76",
+    "version": "0.3.20",
+    "desc": "WEB Client"
+  },
+  "ruby_client": {
+    "style": "outlineConnect=0;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;shape=mxgraph.aws3.android;fillColor=#AE1F23;gradientColor=none;",
+    "width": "73.5",
+    "height": "84",
+    "version": "0.3.117",
+    "desc": "Ruby"
+  }
+}

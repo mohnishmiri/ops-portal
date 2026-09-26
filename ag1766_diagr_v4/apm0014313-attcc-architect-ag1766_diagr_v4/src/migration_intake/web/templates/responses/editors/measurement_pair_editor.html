@@ -1,0 +1,71 @@
+{#
+  Measurement pair editor - two measurements (e.g., min/max, current/target).
+
+  Context:
+    question: dict with code, text, help, required_level, units, field_names
+    answer: dict | None with value.first, value.second (each has value, unit)
+    errors: dict | None
+#}
+<div class="measurement-pair-editor">
+  <div class="form-grid">
+    <div class="measurement-group">
+      <h4 class="form-label">{{ (question.field_names or ['First', 'Second'])[0] }}</h4>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">Value</label>
+          <input 
+            type="number"
+            name="first.value"
+            class="form-control"
+            value="{{ answer.value.first.value if answer and answer.value and answer.value.first else '' }}"
+            step="any"
+            placeholder="0"
+          >
+        </div>
+        <div class="form-group">
+          <label class="form-label">Unit</label>
+          <select name="first.unit" class="form-control">
+            <option value="">-- Unit --</option>
+            {% for unit in question.units or [] %}
+            <option value="{{ unit }}" {% if answer and answer.value and answer.value.first and answer.value.first.unit == unit %}selected{% endif %}>
+              {{ unit }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
+    
+    <div class="measurement-group">
+      <h4 class="form-label">{{ (question.field_names or ['First', 'Second'])[1] }}</h4>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">Value</label>
+          <input 
+            type="number"
+            name="second.value"
+            class="form-control"
+            value="{{ answer.value.second.value if answer and answer.value and answer.value.second else '' }}"
+            step="any"
+            placeholder="0"
+          >
+        </div>
+        <div class="form-group">
+          <label class="form-label">Unit</label>
+          <select name="second.unit" class="form-control">
+            <option value="">-- Unit --</option>
+            {% for unit in question.units or [] %}
+            <option value="{{ unit }}" {% if answer and answer.value and answer.value.second and answer.value.second.unit == unit %}selected{% endif %}>
+              {{ unit }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  {% if errors %}
+  <span class="form-error">{{ errors.values() | list | join(', ') }}</span>
+  {% endif %}
+</div>

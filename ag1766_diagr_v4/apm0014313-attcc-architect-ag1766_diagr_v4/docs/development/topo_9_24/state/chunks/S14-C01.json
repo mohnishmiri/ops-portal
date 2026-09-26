@@ -1,0 +1,13 @@
+{
+  "id":"S14-C01","stage":"14","result":"COMPLETED","completed_stage":"14","stage_result":"COMPLETE_WITH_LIMITATIONS",
+  "objective":"Synthesize causal architecture failures from validated findings and evidence",
+  "inputs":["state/findings.json","EV-FLOW/DATA/PROJ/PROFILE/RENDER/STATUS/RULES/DOC evidence"],
+  "outputs":["analysis/architecture/root_causes.md"],
+  "inspected_files":[],
+  "checks":["All 40 persisted findings normalized by severity/kind","Every root cause cites existing findings/evidence","Hypothesis H-PIPE-001 remains labeled","No new source/runtime claim introduced","Out-of-scope intake/tests/archive respected"],
+  "established":["Seven shared root causes explain the finding set","Semantic contract loss is the primary target-fidelity cause","Legacy/governed parallel paths create activation bypass","Concurrency and audit invariants are inconsistently enforced","UI/document completion truth derives from weaker evidence than domain state","Remediation ownership order established"],
+  "uncertainties":["Runtime counterexamples remain permission-blocked","Current authentication provider/production operations not fully reviewed","Exact guide direction/conditional visual details remain limited","Final target architecture/options/slices not yet written"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Normalize state/findings.json by severity/kind; synthesize only persisted EV evidence","result":"40 findings grouped into seven causal architecture failures","mutation":"Analysis artifact only","output":"analysis/architecture/root_causes.md"}],
+  "evidence":[{"id":"EV-ROOT-001","path":"analysis/architecture/root_causes.md","source":"Validated findings and evidence EV-FLOW through EV-DOC","description":"Seven root causes, causal chains and remediation ownership order","kind":"Evidence synthesis","reliability":"Source-grounded; runtime-dependent hypotheses retained"}],
+  "next_chunk":"S15-C01","next_action":"Compare evolutionary remediation options and trade-offs from the root-cause model"
+}

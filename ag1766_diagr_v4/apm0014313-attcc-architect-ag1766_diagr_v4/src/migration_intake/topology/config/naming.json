@@ -1,0 +1,10 @@
+{
+  "_description": "Versioned naming/abbreviation config for topology name composition, in the POC's naming.yaml shape (abbrev + formats). Empty by default: production does not yet have an approved CLLI/data-center abbreviation register, and inventing one would fabricate values. Populate `abbrev`/`formats` only from an approved, versioned source; until then, composed names remain unavailable and only direct fact tokens render.",
+  "version": 1,
+  "abbrev": {
+    "region": {},
+    "dc": {},
+    "dc_name": {}
+  },
+  "formats": {}
+}

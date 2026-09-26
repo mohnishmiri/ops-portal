@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S01-C02",
+  "validated_at": "2026-09-24T13:39:41.0217727-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "inventory/symbols_and_entry_points.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/web/routes/topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\web\\routes\\topology.py",
+      "file_type": ".py",
+      "size_bytes": 30219,
+      "modified_utc": "2026-09-23T13:43:23.8539132Z",
+      "sha256": "6dd5f8c28d6fdd0fc55d9a58effcd5111a5acbebdcce09f93d9bee9a36805212",
+      "chunk_id": "S01-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Declaration/import matches through 712 only",
+      "relevant_section": "Routes and dependency functions",
+      "evidence_id": "EV-REPO-005",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/application/services/topology_runner.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\application\\services\\topology_runner.py",
+      "file_type": ".py",
+      "size_bytes": 36669,
+      "modified_utc": "2026-09-22T22:38:24.4075376Z",
+      "sha256": "94c0a7a5abc547d98d36faac6d375e2517b562d165c2f114053aeddf5046dfa9",
+      "chunk_id": "S01-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Declaration/import matches through 780 only",
+      "relevant_section": "GovernedTopologyRunner; PersistedLabelRenderer",
+      "evidence_id": "EV-REPO-005",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/topology/strict_projection.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\strict_projection.py",
+      "file_type": ".py",
+      "size_bytes": 27891,
+      "modified_utc": "2026-09-22T22:55:27.8103956Z",
+      "sha256": "eab531e25699583c86266f6e6609a67a4818c81c04d54b39c27e0f7059e503bc",
+      "chunk_id": "S01-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Declaration/import matches through 681 only",
+      "relevant_section": "Projection records and projector/loader",
+      "evidence_id": "EV-REPO-005",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/topology/renderer/core.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\renderer\\core.py",
+      "file_type": ".py",
+      "size_bytes": 50750,
+      "modified_utc": "2026-09-23T11:09:28.4330244Z",
+      "sha256": "2c14cecdd6c11bafb626191e0a0a2d213175e793d21a55097599178424b3fe37",
+      "chunk_id": "S01-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Declaration matches through 1224 only",
+      "relevant_section": "Parser; label-only/structural/legacy renderers",
+      "evidence_id": "EV-REPO-005",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/repositories/topology.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\repositories\\topology.py",
+      "file_type": ".py",
+      "size_bytes": 30248,
+      "modified_utc": "2026-09-23T17:56:57.7369977Z",
+      "sha256": "c30f94bf7d294cd8a6ae81d4634d9a438257d16e3a8fa0ddc5b78ff2719b5bea",
+      "chunk_id": "S01-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "Declaration/import matches through 802 only",
+      "relevant_section": "TopologyRepository reservation/lease/finalization/review methods",
+      "evidence_id": "EV-REPO-005",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Search restricted to exactly five src files",
+    "No claims of body behavior based on names",
+    "174 declaration/import matches inventoried"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

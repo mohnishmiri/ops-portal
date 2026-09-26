@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block title %}Interfaces — {{ app_name or "Application" }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% if app_name %}
+<a href="/applications/{{ app_id }}" class="global-nav-item">{{ app_name }}</a>
+{% endif %}
+<a href="#" class="global-nav-item active" aria-current="page">Interfaces</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="{{ list_href }}/new" class="button button--primary">+ Add interface</a>
+{% endblock %}
+
+{% block content %}
+<div class="wave-util-page">
+
+  <header class="page-header">
+    <h1 class="page-title">Interfaces</h1>
+    <p class="page-subtitle">Directional interface register — every consumer/provider connection for this application.</p>
+  </header>
+
+  <section class="card" id="interface-upload" aria-labelledby="interface-upload-heading">
+    <h2 class="card-title" id="interface-upload-heading">Upload Excel workbook</h2>
+    <p class="section-description">Import interface records from an Excel workbook into this application register.</p>
+    <form method="post" action="{{ list_href }}/upload" enctype="multipart/form-data" class="inline-form">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <label class="form-label" for="interface-workbook">Excel workbook</label>
+      <input id="interface-workbook" name="file" type="file" accept=".xlsx" required>
+      <button type="submit" class="button button--primary">Upload Excel workbook</button>
+    </form>
+  </section>
+
+  {% if upload_message %}<p class="notice notice--{{ upload_message_type }}" role="status">{{ upload_message }}</p>{% endif %}
+
+  {% if pending_candidates %}
+  <section class="card" style="margin-bottom: var(--space-4);">
+    <h2 class="card-title">Pending proposals ({{ pending_candidates | length }})</h2>
+    <p class="section-description">
+      Found during workbook import. Nothing is added to the register until you accept them.
+    </p>
+    <form method="POST" action="{{ list_href }}/accept" class="inline-form" style="margin-bottom: var(--space-3);">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      {% for candidate in pending_candidates %}
+      <input type="hidden" name="candidate_ids" value="{{ candidate.id }}">
+      <input type="hidden" name="expected_versions" value="{{ candidate.row_version }}">
+      {% endfor %}
+      <button type="submit" class="button button--primary">Accept all {{ pending_candidates | length }} proposals</button>
+    </form>
+    <div class="table-container" style="overflow-x:auto;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Interface Correlation ID</th>
+            <th scope="col">App Acronym</th>
+            <th scope="col">Consumer/Provider</th>
+            <th scope="col">Migration Wave</th>
+            <th scope="col">System Location</th>
+            <th scope="col">End Point</th>
+            <th scope="col">Data Traffic</th>
+            <th scope="col">Connection Owner</th>
+            <th scope="col">Sync/Async</th>
+            <th scope="col">Current Protocol</th>
+            <th scope="col">Current Interface Type</th>
+            <th scope="col">Target Protocol</th>
+            <th scope="col">Target Interface Type</th>
+            <th scope="col">Impact Change Type</th>
+            <th scope="col">Current Port</th>
+            <th scope="col">Future Port</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for candidate in pending_candidates %}
+          <tr>
+            <td class="cell-primary">{{ candidate.fields.get('interface_correlation_id') or '—' }}</td>
+            <td>{{ candidate.fields.get('interface_app_acronym') or '—' }}</td>
+            <td>{{ candidate.fields.get('consumer_or_provider') or '—' }}</td>
+            <td>{{ candidate.fields.get('interface_migration_wave') or '—' }}</td>
+            <td>{{ candidate.fields.get('interface_system_location') or '—' }}</td>
+            <td>{{ candidate.fields.get('end_point_name') or '—' }}</td>
+            <td>{{ candidate.fields.get('data_traffic_direction') or '—' }}</td>
+            <td>{{ candidate.fields.get('connection_owner') or '—' }}</td>
+            <td>{{ candidate.fields.get('sync_async') or '—' }}</td>
+            <td>{{ candidate.fields.get('current_protocol') or '—' }}</td>
+            <td>{{ candidate.fields.get('current_interface_type') or '—' }}</td>
+            <td>{{ candidate.fields.get('target_protocol') or '—' }}</td>
+            <td>{{ candidate.fields.get('target_interface_type') or '—' }}</td>
+            <td>{{ candidate.fields.get('interface_impact_change_type') or '—' }}</td>
+            <td>{{ candidate.fields.get('current_port') or '—' }}</td>
+            <td>{{ candidate.fields.get('future_port') or '—' }}</td>
+            <td class="cell-actions">
+              <form method="POST" action="{{ list_href }}/accept" class="inline-form">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="candidate_ids" value="{{ candidate.id }}">
+                <input type="hidden" name="expected_versions" value="{{ candidate.row_version }}">
+                <button type="submit" class="button button--primary button--sm">Accept</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  <div class="stat-bar">
+    <span class="stat-chip">{{ total_records }} total</span>
+  </div>
+
+  {% if records %}
+  <div class="table-container" style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th scope="col">Interface Correlation ID</th>
+          <th scope="col">App Acronym</th>
+          <th scope="col">Consumer/Provider</th>
+          <th scope="col">Migration Wave</th>
+          <th scope="col">System Location</th>
+          <th scope="col">End Point</th>
+          <th scope="col">Data Traffic</th>
+          <th scope="col">Connection Owner</th>
+          <th scope="col">Sync/Async</th>
+          <th scope="col">Current Protocol</th>
+          <th scope="col">Current Interface Type</th>
+          <th scope="col">Target Protocol</th>
+          <th scope="col">Target Interface Type</th>
+          <th scope="col">Impact Change Type</th>
+          <th scope="col">Current Port</th>
+          <th scope="col">Future Port</th>
+          <th scope="col">Last updated</th>
+          <th scope="col"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for record in records %}
+        <tr>
+          <td class="cell-primary">
+            <a href="{{ list_href }}/{{ record.id }}">{{ record.interface_correlation_id }}</a>
+          </td>
+          <td>{{ record.interface_app_acronym or '—' }}</td>
+          <td>{{ record.consumer_or_provider or '—' }}</td>
+          <td>{{ record.interface_migration_wave or '—' }}</td>
+          <td>
+            {% if record.interface_system_location %}
+            <span class="status-pill">{{ record.interface_system_location }}</span>
+            {% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td>{{ record.end_point_name or '—' }}</td>
+          <td>
+            {% if record.data_traffic_direction %}
+            <span class="status-pill{% if record.data_traffic_direction | upper == 'INBOUND' %} status-pill--success{% else %} status-pill--warning{% endif %}">
+              <span class="pill-dot"></span>{{ record.data_traffic_direction }}
+            </span>
+            {% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td>{{ record.connection_owner or '—' }}</td>
+          <td>{{ record.sync_async or '—' }}</td>
+          <td>{{ record.current_protocol or '—' }}</td>
+          <td>{{ record.current_interface_type or '—' }}</td>
+          <td>{{ record.target_protocol or '—' }}</td>
+          <td>{{ record.target_interface_type or '—' }}</td>
+          <td>{{ record.interface_impact_change_type or '—' }}</td>
+          <td>{{ record.current_port or '—' }}</td>
+          <td>{{ record.future_port or '—' }}</td>
+          <td class="cell-meta">
+            {{ record.updated_at.strftime('%Y-%m-%d') if record.updated_at.strftime is defined else record.updated_at }}
+          </td>
+          <td class="cell-actions">
+            <a href="{{ list_href }}/{{ record.id }}" class="button button--ghost button--sm">Edit →</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-message">No interfaces recorded yet.</p>
+    <p class="form-hint">Upload an Excel workbook above or add an interface manually.</p>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

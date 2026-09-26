@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Topology Template{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/admin/catalog" class="global-nav-item">Catalog Admin</a>
+<a href="/admin/templates" class="global-nav-item active" aria-current="page">Template Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/admin/templates" class="button button--ghost">Cancel</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.upload-actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  grid-column: 1 / -1;
+}
+.upload-result {
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  display: none;
+}
+.upload-result--success {
+  background: var(--color-success-bg, #d4edda);
+  border: 1px solid var(--color-success-border, #c3e6cb);
+  color: var(--color-success-text, #155724);
+}
+.upload-result--error {
+  background: var(--color-danger-bg, #f8d7da);
+  border: 1px solid var(--color-danger-border, #f5c6cb);
+  color: var(--color-danger-text, #721c24);
+}
+.upload-result--info {
+  background: var(--color-info-bg, #d1ecf1);
+  border: 1px solid var(--color-info-border, #bee5eb);
+  color: var(--color-info-text, #0c5460);
+}
+.preview-details {
+  margin-top: var(--space-2);
+  font-size: 0.9em;
+}
+.preview-details dt { font-weight: 600; }
+.preview-details dd { margin-left: var(--space-3); margin-bottom: var(--space-1); }
+.diagnostics-list {
+  margin-top: var(--space-2);
+  padding-left: var(--space-4);
+  font-size: 0.85em;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Template Admin &rarr; Upload</h2>
+  </div>
+
+  <p class="form-hint">
+    Upload a multi-tab Draw.io template file. The system will validate that
+    all tabs contain proper haf-role annotations and match known HAF profiles.
+    If validation passes, the template is published and available for topology generation.
+  </p>
+
+  <form id="uploadForm" method="POST" enctype="multipart/form-data" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <div class="form-group">
+      <label for="template_version" class="form-label form-label--required">
+        Template Version
+      </label>
+      <input
+        type="text"
+        id="template_version"
+        name="template_version"
+        class="form-control"
+        required
+        placeholder="e.g. 1.8"
+      >
+      <span class="form-hint">Must not already be published with different content.</span>
+    </div>
+
+    <div class="form-group">
+      <label for="file" class="form-label form-label--required">
+        Template Draw.io File
+      </label>
+      <input
+        type="file"
+        id="file"
+        name="file"
+        class="form-control"
+        accept=".drawio,application/xml,text/xml"
+        required
+      >
+      <span class="form-hint">A multi-tab .drawio file with haf-role annotated cells.</span>
+    </div>
+
+    <div class="upload-actions">
+      <a href="/admin/templates" class="button button--ghost">Cancel</a>
+      <button type="button" id="btnPreview" class="button button--secondary">Preview</button>
+      <button type="submit" id="btnPublish" class="button button--primary">Validate &amp; Publish</button>
+    </div>
+  </form>
+
+  <div id="resultBox" class="upload-result"></div>
+</div>
+
+<script>
+(function() {
+  var form = document.getElementById('uploadForm');
+  var resultBox = document.getElementById('resultBox');
+  var btnPreview = document.getElementById('btnPreview');
+  var btnPublish = document.getElementById('btnPublish');
+
+  function showResult(cls, html) {
+    resultBox.className = 'upload-result upload-result--' + cls;
+    resultBox.innerHTML = html;
+    resultBox.style.display = 'block';
+    resultBox.scrollIntoView({behavior: 'smooth'});
+  }
+
+  function disableButtons() {
+    btnPreview.disabled = true;
+    btnPublish.disabled = true;
+  }
+
+  function enableButtons() {
+    btnPreview.disabled = false;
+    btnPublish.disabled = false;
+  }
+
+  // Preview handler
+  btnPreview.addEventListener('click', function() {
+    var formData = new FormData(form);
+    disableButtons();
+    showResult('info', '<strong>Validating...</strong> Please wait.');
+
+    fetch('/admin/templates/preview', {method: 'POST', body: formData})
+      .then(function(resp) { return resp.json().then(function(data) { return {status: resp.status, data: data}; }); })
+      .then(function(result) {
+        enableButtons();
+        var data = result.data;
+        if (data.is_valid) {
+          var html = '<strong>Validation passed.</strong>';
+          html += '<dl class="preview-details">';
+          html += '<dt>Tabs found:</dt><dd>' + data.tab_count + '</dd>';
+          if (data.variant_manifest && data.variant_manifest.length) {
+            html += '<dt>Variants:</dt><dd>';
+            data.variant_manifest.forEach(function(v) {
+              html += v.variant + ' (' + v.tab_name + ', ' + v.role_count + ' roles)<br>';
+            });
+            html += '</dd>';
+          }
+          html += '</dl>';
+          if (data.diagnostics && data.diagnostics.length) {
+            html += '<p><strong>Warnings:</strong></p><ul class="diagnostics-list">';
+            data.diagnostics.forEach(function(d) { html += '<li>' + d + '</li>'; });
+            html += '</ul>';
+          }
+          html += '<p style="margin-top:var(--space-2)">Click <strong>Validate &amp; Publish</strong> to publish this template.</p>';
+          showResult('success', html);
+        } else {
+          var html = '<strong>Validation failed.</strong>';
+          if (data.diagnostics && data.diagnostics.length) {
+            html += '<ul class="diagnostics-list">';
+            data.diagnostics.forEach(function(d) { html += '<li>' + d + '</li>'; });
+            html += '</ul>';
+          }
+          showResult('error', html);
+        }
+      })
+      .catch(function(err) {
+        enableButtons();
+        showResult('error', '<strong>Error:</strong> ' + err.message);
+      });
+  });
+
+  // Publish handler — intercept form submit
+  form.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var formData = new FormData(form);
+    disableButtons();
+    showResult('info', '<strong>Publishing...</strong> Please wait.');
+
+    fetch('/admin/templates/publish', {method: 'POST', body: formData})
+      .then(function(resp) { return resp.json().then(function(data) { return {status: resp.status, data: data}; }); })
+      .then(function(result) {
+        if (result.status === 201) {
+          var data = result.data;
+          showResult('success',
+            '<strong>Published successfully!</strong> ' +
+            'Version <strong>' + data.template_version + '</strong> ' +
+            '(state: ' + data.pub_state + '). ' +
+            'Redirecting to detail page...'
+          );
+          setTimeout(function() {
+            window.location.href = '/admin/templates/' + data.id;
+          }, 1500);
+        } else if (result.status === 409) {
+          enableButtons();
+          showResult('error', '<strong>Version conflict:</strong> ' + (result.data.detail || JSON.stringify(result.data)));
+        } else if (result.status === 400) {
+          enableButtons();
+          var detail = result.data.detail || {};
+          var html = '<strong>Validation failed:</strong> ' + (detail.message || 'Unknown error');
+          if (detail.diagnostics && detail.diagnostics.length) {
+            html += '<ul class="diagnostics-list">';
+            detail.diagnostics.forEach(function(d) { html += '<li>' + d + '</li>'; });
+            html += '</ul>';
+          }
+          showResult('error', html);
+        } else {
+          enableButtons();
+          showResult('error', '<strong>Error (' + result.status + '):</strong> ' + JSON.stringify(result.data));
+        }
+      })
+      .catch(function(err) {
+        enableButtons();
+        showResult('error', '<strong>Network error:</strong> ' + err.message);
+      });
+  });
+})();
+</script>
+{% endblock %}

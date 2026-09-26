@@ -1,0 +1,68 @@
+image:
+  fullName: artifact.it.att.com:22609/apm0014313-dkr-attcc-stage/com.att.attcc/migration-intake:1.0.0
+  pullPolicy: Always
+
+replicaCount: 1
+
+app:
+  env: shared_test
+  secretName: ""
+  databaseUrl: ""
+  secretManaged:
+    appEnv: true
+    databaseUrl: true
+    evidenceRoot: true
+    actorId: true
+    actorDisplayName: true
+
+ingress:
+  enabled: true
+  className: nginx
+  host: aws-outpost.test.att.com
+  tlsSecretName: aws-outpost-test-tls
+  azureKeyVaultCertificates:
+    enabled: true
+    vaultName: attcc-eastus2-perf-kv
+    items:
+      - akvCertificateName: aws-outpost-test-att-com
+        kubernetesSecretName: aws-outpost-test-tls
+
+azureKeyVaultSecrets:
+  enabled: true
+  vaultName: attcc-eastus2-perf-kv
+  items:
+    - akvSecretName: aws-outpost-database-url
+      kubernetesSecretName: migration-intake-database-url
+      envName: AWS_OUTPOST_DATABASE_URL
+    - akvSecretName: aws-outpost-csrf-secret
+      kubernetesSecretName: migration-intake-csrf-secret
+      envName: AWS_OUTPOST_CSRF_SECRET
+    - akvSecretName: aws-outpost-actor-id
+      kubernetesSecretName: migration-intake-actor-id
+      envName: AWS_OUTPOST_ACTOR_ID
+    - akvSecretName: aws-outpost-actor-display-name
+      kubernetesSecretName: migration-intake-actor-display-name
+      envName: AWS_OUTPOST_ACTOR_DISPLAY_NAME
+    - akvSecretName: aws-outpost-app-env
+      kubernetesSecretName: migration-intake-app-env
+      envName: AWS_OUTPOST_APP_ENV
+    - akvSecretName: aws-outpost-evidence-root
+      kubernetesSecretName: migration-intake-evidence-root
+      envName: AWS_OUTPOST_EVIDENCE_ROOT
+
+extraEnvFrom:
+  - secretRef:
+      name: migration-intake-database-url
+  - secretRef:
+      name: migration-intake-csrf-secret
+  - secretRef:
+      name: migration-intake-actor-id
+  - secretRef:
+      name: migration-intake-actor-display-name
+  - secretRef:
+      name: migration-intake-app-env
+  - secretRef:
+      name: migration-intake-evidence-root
+
+persistence:
+  enabled: false

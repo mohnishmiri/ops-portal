@@ -1,0 +1,1 @@
+{{/* Database migrations run in the Deployment init container. */}}

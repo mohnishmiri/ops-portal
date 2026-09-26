@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}Legacy Intake Identity Result{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources" class="global-nav-item">Evidence</a>
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/legacy-intake/{{ run_id }}/identity" class="global-nav-item active" aria-current="page">Identity Result</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources" class="button secondary">Back to sources</a>
+{% endblock %}
+
+{% block content %}
+<section class="identity-result-page">
+  <header class="page-header">
+    <h1 class="page-title">Legacy Intake Identity Result</h1>
+    <p class="page-description">
+      The workbook could not be matched to this application. Review the identity
+      information below and take corrective action.
+    </p>
+  </header>
+
+  <div class="card">
+    <h2>Identity Decision</h2>
+    <p class="status-pill status-pill--danger">{{ identity_decision }}</p>
+
+    {% if conflict_detail %}
+    <div class="notice notice--error" role="alert">
+      <strong>Conflict:</strong> {{ conflict_detail }}
+    </div>
+    {% endif %}
+
+    <h3>Extracted Identifiers</h3>
+    {% if extracted_identifiers %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Value</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ident in extracted_identifiers %}
+        <tr>
+          <td><strong>{{ ident.type }}</strong></td>
+          <td><code>{{ ident.raw_value }}</code></td>
+          <td>{{ ident.source_sheet }} row {{ ident.source_row }}, column {{ ident.source_column }}<br><small>{{ ident.source_label }}</small></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No identifiers were found in the workbook.</p>
+    {% endif %}
+
+    <h3>Application Identifiers</h3>
+    {% if app_identifiers %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ident in app_identifiers %}
+        <tr>
+          <td><strong>{{ ident.identifier_type }}</strong></td>
+          <td><code>{{ ident.raw_value }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No identifiers are registered for this application.</p>
+    {% endif %}
+
+    {% if identity_decision == "APPLICATION_MISMATCH" and matched_applications %}
+    <div class="notice notice--error" role="alert">
+      <strong>This workbook belongs to another application.</strong>
+      {% for application in matched_applications %}
+      <p>
+        The uploaded identifier matches <strong>{{ application.display_name }}</strong>.
+        <a href="/applications/{{ application.id }}">Open that application</a>
+        and upload the workbook from its intake workspace.
+      </p>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <h3>How to Fix</h3>
+    <ol>
+      {% if identity_decision == "MISSING" %}
+      <li>Check that the workbook contains a Correlation ID, MOTS ID, or iTAP ID in the App or iTAP sheets.</li>
+      <li>If the workbook is missing identifiers, obtain a corrected version with identifiers present.</li>
+      <li>Upload the corrected workbook again.</li>
+      {% elif identity_decision in ("MISMATCH", "APPLICATION_MISMATCH") %}
+      <li>Check the identifiers in the workbook match the application identifiers shown above.</li>
+      <li>If the workbook is for a different application, upload it under that application instead.</li>
+      <li>If the application identifiers are wrong, correct them on the application record.</li>
+      <li>Upload the workbook again.</li>
+      {% elif identity_decision == "AMBIGUOUS" %}
+      <li>The identifier in the workbook matches multiple applications.</li>
+      <li>Resolve the duplicate identifiers on the application records.</li>
+      <li>Upload the workbook again once exactly one application owns the identifier.</li>
+      {% elif identity_decision == "SOURCE_CONFLICT" %}
+      <li>The workbook contains conflicting identifiers (e.g., different Correlation IDs in different sheets).</li>
+      <li>Obtain a corrected version of the workbook with consistent identifiers.</li>
+      <li>Upload the corrected workbook again.</li>
+      {% endif %}
+    </ol>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,13 @@
+{
+  "id":"S13-C01","stage":"13","result":"COMPLETED",
+  "objective":"Compare assessment HTML section 7 gap claims with current persisted source evidence",
+  "inputs":["docs/TOPOLOGY_GENERATION_ASSESSMENT.html section 7","Validated findings/evidence index"],
+  "outputs":["analysis/implementation_plan_gap/assessment_claims.md"],
+  "inspected_files":[{"path":"docs/TOPOLOGY_GENERATION_ASSESSMENT.html","lines":"152-165, section 7 only","symbols":"Ten historical gap/impact rows","further":true}],
+  "checks":["One assessment section only","Every historical row classified against current persisted evidence","Historical test claims excluded","No source document edit"],
+  "established":["Section 7 is a dated baseline rather than current status","Containment/schema/capture/allowlist are partly or substantially remediated","Repeated rendering/UNKNOWN remain incomplete with changed root causes","New critical blockers are absent from original matrix"],
+  "uncertainties":["Legacy READY status body not reopened in this chunk","Historical route-vs-test claim out of scope","Runtime/deployed outcomes remain unverified"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Read assessment HTML section 7 lines 152-165; compare with persisted EV-FLOW/DATA/PROJ/RENDER/STATUS evidence","result":"Ten historical claims reconciled","mutation":"None outside analysis artifacts","output":"analysis/implementation_plan_gap/assessment_claims.md"}],
+  "evidence":[{"id":"EV-DOC-001","path":"analysis/implementation_plan_gap/assessment_claims.md","source":"Assessment HTML section 7 and current evidence index","description":"Historical-to-current gap disposition without reusing old test claims","kind":"Evidence reconciliation","reliability":"Current source classifications verified; runtime qualifiers retained"}],
+  "next_chunk":"S13-C02","next_action":"Reconcile current Markdown/HTML TP completion claims with verified current-worktree evidence"
+}

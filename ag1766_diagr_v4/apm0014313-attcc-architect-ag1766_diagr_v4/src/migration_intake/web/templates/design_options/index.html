@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en" data-lab-option="a">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Application-wide design options · Migration Intake</title>
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <link rel="stylesheet" href="/static/css/design-lab.css">
+</head>
+<body>
+<a class="lab-skip" href="#lab-comparison">Skip to comparison</a>
+<header class="lab-comparison-header">
+  <a class="lab-brand" href="/design-options" aria-label="Migration Intake design options">
+    <span class="lab-brand__mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span><strong>Migration Intake</strong><small>Application-wide design lab</small></span>
+  </a>
+  <a class="lab-button lab-button--secondary" href="/applications/">Return to production UI</a>
+</header>
+<main class="lab-comparison" id="lab-comparison">
+  <header class="lab-comparison-intro">
+    <p class="lab-eyebrow">Non-production concepts</p>
+    <h1>Choose a complete application direction</h1>
+    <p>Each option covers the same portfolio, intake, review, register, delivery, and administration workflows. Switching options preserves the equivalent screen.</p>
+  </header>
+  <div class="lab-option-cards">
+    {% for key, name, fit, strength, risk, effort in [
+      ("a", "Balanced SaaS workspace", "Broad teams and moderate portfolios", "Balanced hierarchy and discoverability", "Medium density may slow expert workflows", "Medium"),
+      ("b", "Compact operational experience", "Frequent operators and larger datasets", "Fast scanning and efficient laptop use", "Requires disciplined metadata priority", "Low"),
+      ("c", "Curated premium workspace", "Occasional users and guided reviews", "Strong grouping and progressive disclosure", "Lower density and higher implementation effort", "High")
+    ] %}
+    <article class="lab-option-card lab-option-card--{{ key }}">
+      <div class="lab-option-card__preview" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="lab-eyebrow">Option {{ key | upper }}</p><h2>{{ name }}</h2><p>{{ fit }}</p>
+      <dl><div><dt>Strength</dt><dd>{{ strength }}</dd></div><div><dt>Risk</dt><dd>{{ risk }}</dd></div><div><dt>Effort</dt><dd>{{ effort }}</dd></div></dl>
+      <a class="lab-button lab-button--primary" href="/design-options/{{ key }}/applications">Explore option {{ key | upper }}</a>
+    </article>
+    {% endfor %}
+  </div>
+  <section class="lab-comparison-section"><h2>Route and screen coverage</h2><p>All listed patterns have equivalent A, B, and C previews.</p><div class="lab-table-wrap"><table class="lab-table"><thead><tr><th>Area</th><th>Screen</th><th>A</th><th>B</th><th>C</th></tr></thead><tbody>{% for group, screens in screen_groups %}{% for key, label in screens %}<tr><td>{{ group }}</td><td>{{ label }}</td><td><a href="/design-options/a/{{ key }}">Covered</a></td><td><a href="/design-options/b/{{ key }}">Covered</a></td><td><a href="/design-options/c/{{ key }}">Covered</a></td></tr>{% endfor %}{% endfor %}</tbody></table></div></section>
+  <section class="lab-comparison-section"><h2>Application-wide comparison</h2><div class="lab-table-wrap"><table class="lab-table"><thead><tr><th>Criterion</th><th>A</th><th>B</th><th>C</th></tr></thead><tbody>{% for criterion, a, b, c in [("Application consistency",5,5,5),("Navigation clarity",5,5,4),("Workflow simplicity",4,5,4),("Visual clarity",5,4,5),("Ease of scanning",4,5,4),("Information density",4,5,3),("Form usability",5,5,5),("Accessibility",5,5,5),("Desktop efficiency",4,5,3),("Cross-browser robustness",5,5,4),("Component reuse",5,5,5),("Maintainability",5,5,4),("Implementation effort",4,5,3),("Modern SaaS appearance",5,4,5)] %}<tr><td>{{ criterion }}</td><td>{{ a }}/5</td><td><strong>{{ b }}/5</strong></td><td>{{ c }}/5</td></tr>{% endfor %}</tbody></table></div><div class="lab-recommendation"><p class="lab-eyebrow">Recommendation</p><h2>Option B · Compact operational experience</h2><p>The application is a repeated operational workflow with dense registers, proposal review, and long questionnaires. Option B gives frequent users the best scanning efficiency and laptop utilization while retaining the same accessible component architecture.</p><a class="lab-button lab-button--primary" href="/design-options/b/applications">Review recommended option</a></div></section>
+</main>
+</body>
+</html>

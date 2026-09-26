@@ -1,0 +1,40 @@
+{#
+  Multi-select editor - checkbox group.
+
+  Context:
+    question: dict with code, text, help, required_level, options
+    answer: dict | None whose `value` is the stored response payload
+    errors: dict | None
+
+  The field name must match the canonical MULTI_SELECT payload key
+  (`{values: [code], other_text?}`), because the save route parses the
+  submitted form field names through the response type. Every checkbox
+  shares the `values` name so a checked group submits repeated `values`
+  fields, which the type parses into the canonical list.
+
+  Read the payload with `.get('values')`, never `answer.value.values`:
+  Jinja resolves attribute access before subscripting, so `.values` on a
+  dict returns the built-in `dict.values` method instead of the stored list.
+#}
+<fieldset class="multi-select-editor">
+  <legend class="sr-only">{{ question.text }}</legend>
+
+  {% set selected_values = (answer.value.get('values') if answer and answer.value else None) or [] %}
+  <div class="checkbox-group">
+    {% for option in question.options or [] %}
+    <label class="checkbox-option">
+      <input
+        type="checkbox"
+        name="values"
+        value="{{ option.value }}"
+        {% if option.value in selected_values %}checked{% endif %}
+      >
+      <span class="checkbox-label">{{ option.label }}</span>
+    </label>
+    {% endfor %}
+  </div>
+
+  {% if errors and errors.get('values') %}
+  <span class="form-error">{{ errors.get('values') | join(', ') }}</span>
+  {% endif %}
+</fieldset>

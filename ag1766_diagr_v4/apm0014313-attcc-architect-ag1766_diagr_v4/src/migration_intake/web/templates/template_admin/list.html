@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Template Releases{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/admin/catalog" class="global-nav-item">Catalog Admin</a>
+<a href="/admin/templates" class="global-nav-item active" aria-current="page">Template Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/admin/templates/upload" class="button button--primary">Upload new template</a>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.state-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.state-badge--published { background: #d4edda; color: #155724; }
+.state-badge--draft { background: #fff3cd; color: #856404; }
+.state-badge--retired { background: #e2e3e5; color: #383d41; }
+.active-indicator { color: #155724; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card card--elevated">
+  <div class="card-header">
+    <h1 class="card-title">Topology Template Releases</h1>
+  </div>
+
+  <p class="form-hint">
+    Manage topology diagram templates. Upload a new multi-tab Draw.io file to
+    create a new version. Published templates are available for standard
+    topology generation (Card 3).
+  </p>
+
+  {% if releases %}
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th scope="col">Version</th>
+          <th scope="col">State</th>
+          <th scope="col">Published</th>
+          <th scope="col">Tabs</th>
+          <th scope="col">Active</th>
+          <th scope="col">Source File</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for release in releases %}
+        <tr>
+          <td><strong>{{ release.template_version }}</strong></td>
+          <td>
+            {% set state_cls = 'published' if release.pub_state == 'PUBLISHED' else ('retired' if release.pub_state == 'RETIRED' else 'draft') %}
+            <span class="state-badge state-badge--{{ state_cls }}">{{ release.pub_state }}</span>
+          </td>
+          <td>{{ release.published_at if release.published_at else "&mdash;" }}</td>
+          <td>{{ release.tab_count }}</td>
+          <td>
+            {% if release.is_active %}
+            <span class="active-indicator">Active</span>
+            {% else %}
+            &mdash;
+            {% endif %}
+          </td>
+          <td>{{ release.source_filename }}</td>
+          <td><a href="/admin/templates/{{ release.id }}" class="button button--ghost button--sm">View detail</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p>No template releases have been published yet. Click <strong>Upload new template</strong> to get started.</p>
+  {% endif %}
+</div>
+{% endblock %}

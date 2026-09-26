@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}Evidence Sources{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/applications/{{ app_id }}" class="global-nav-item">Application</a>
+<a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources" class="global-nav-item active" aria-current="page">Evidence</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/applications/{{ app_id }}" class="button secondary">Back to workspace</a>
+{% endblock %}
+
+{% block content %}
+<section class="evidence-page">
+  <header class="page-header">
+    <h1 class="page-title">Legacy Intake</h1>
+    <p class="page-description">
+      Upload a completed legacy intake workbook from the previous process. We'll match the
+      application, let you choose the target intake, and propose answers for review.
+    </p>
+  </header>
+
+  {% if upload_message %}<p class="notice notice--{{ upload_message_type }}" role="status">{{ upload_message }}</p>{% endif %}
+
+  <div class="lane-grid">
+    <section class="card lane-card lane-card--legacy" aria-labelledby="lane-legacy-heading">
+      <h2 class="lane-card__heading" id="lane-legacy-heading">
+        Legacy intake
+      </h2>
+      <p class="lane-card__lede">
+        Upload a seven-sheet App Data Capture workbook completed using the previous
+        intake process. We'll match the application, let you choose the target intake,
+        and propose answers for review.
+      </p>
+      <form class="lane-card__form" method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/legacy-intake/upload" enctype="multipart/form-data">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <div class="dropfield">
+          <label class="form-label" for="legacy-intake-file">Legacy intake workbook</label>
+          <input id="legacy-intake-file" name="file" type="file" accept=".xlsx" required>
+          <p class="dropfield__hint">App Data Capture workbook. Extracted answers are staged for review.</p>
+        </div>
+        <button type="submit" class="button button--primary">Upload legacy intake</button>
+      </form>
+    </section>
+    <section class="card lane-card" aria-labelledby="lane-ai-heading">
+      <h2 class="lane-card__heading" id="lane-ai-heading">AI synthetic mapping</h2>
+      <p class="lane-card__lede">
+        Run a bounded synthetic mapping probe. Output is staged as <strong>PROPOSED</strong>
+        candidates only and still requires review.
+      </p>
+      {% if ai_mapping_available %}
+      <form class="lane-card__form" method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/ai-mapping/run">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <label class="form-label" for="ai-source-fragment">Synthetic source fragment</label>
+        <textarea id="ai-source-fragment" name="source_fragment" rows="4" required>Linux host with Oracle database and active production workload.</textarea>
+        <input type="hidden" name="source_locator" value="Manual:AI/Row:1">
+        <input type="hidden" name="source_type" value="manual_text">
+        <p class="dropfield__hint">Profile: {{ ai_mapping_profile }} · Provider: {{ ai_mapping_provider }}</p>
+        <button type="submit" class="button button--secondary">Run AI mapping</button>
+      </form>
+      {% else %}
+      <p class="dropfield__hint">
+        AI mapping is disabled for this environment/profile.
+      </p>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="imports-section">
+    <h2>Imports</h2>
+    {% if sources %}
+    <div class="table-wrapper">
+      <table class="data-table imports-table">
+        <thead>
+          <tr><th scope="col">File</th><th scope="col">Lane</th><th scope="col">Result</th><th scope="col">Next step</th></tr>
+        </thead>
+        <tbody>
+          {% for source in sources %}
+          {% set identity = source.identity %}
+          <tr class="import-row{% if source.latest_run and identity.quarantined %} import-row--quarantined{% endif %}">
+            <td>
+              <strong class="import-row__file">{{ source.evidence.original_filename }}</strong>
+              <span class="import-row__meta">{{ source.evidence.created_at | short_datetime }} · {{ source.evidence.state }}</span>
+              {% if source.latest_run %}
+              <a class="import-row__meta" href="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ source.latest_run.id }}">View import details</a>
+              {% endif %}
+            </td>
+            <td>{{ source.lane }}</td>
+            <td>
+              {% if source.latest_run %}
+              <span class="status-pill status-pill--{{ identity.tone }}">{{ identity.label }}</span>
+              {% if identity.quarantined %}
+              <span class="import-row__explanation">{{ identity.explanation }}</span>
+              {% else %}
+              <span class="import-row__counts">
+                <strong>{{ source.proposal_count }} proposal{% if source.proposal_count != 1 %}s{% endif %}</strong>
+                · {{ source.problem_count }} problem{% if source.problem_count != 1 %}s{% endif %}
+              </span>
+              {% endif %}
+              <span class="import-row__meta">Import {{ source.latest_run.state }}</span>
+              {% else %}
+              <span class="status-pill status-pill--neutral">Not processed</span>
+              <span class="import-row__meta">Uploaded but not read yet.</span>
+              {% endif %}
+            </td>
+            <td class="import-row__action">
+              {% if not source.latest_run %}
+                <span class="import-row__meta">Upload in progress...</span>
+              {% elif identity.quarantined %}
+              <details class="how-to-fix">
+                <summary>How to fix</summary>
+                <ol class="how-to-fix__steps">
+                  {% for step in identity.fix_steps %}<li>{{ step }}</li>{% endfor %}
+                </ol>
+                <p class="how-to-fix__foot">
+                  This application's correlation identifier is
+                  <code>{{ correlation_id or "not set" }}</code>.
+                </p>
+                <a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/imports/{{ source.latest_run.id }}">See the full import diagnostics</a>
+              </details>
+              {% elif source.lane == "Legacy intake" and source.latest_run.state == "PENDING" %}
+              <span class="import-row__meta">Processing workbook...</span>
+              {% elif source.proposal_count %}
+              <a class="button button--primary button--sm" href="/applications/{{ app_id }}/intakes/{{ intake_id }}/questionnaire">Review →</a>
+              <span class="import-row__status">{{ overall_status.completed_count }} of {{ overall_status.question_count }} questions completed</span>
+              {% elif source.has_reviewable_proposals %}
+              <a class="button button--primary button--sm" href="/applications/{{ app_id }}/intakes/{{ intake_id }}/questionnaire">Review proposal</a>
+              <span class="import-row__status">{{ overall_status.completed_count }} of {{ overall_status.question_count }} questions completed</span>
+              {% else %}
+              <a class="button button--secondary button--sm" href="/applications/{{ app_id }}/intakes/{{ intake_id }}/questionnaire">Nothing to decide</a>
+              <span class="import-row__status">{{ overall_status.completed_count }} of {{ overall_status.question_count }} questions completed</span>
+              {% endif %}
+              {% if source.latest_run %}
+              <form method="post" action="/applications/{{ app_id }}/intakes/{{ intake_id }}/sources/{{ source.evidence.id }}/delete" class="inline-form evidence-delete-form" data-confirm="Delete this evidence import and its proposals? This cannot be undone.">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="button button--secondary button--sm">Delete</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p>Nothing has been uploaded to either lane yet.</p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

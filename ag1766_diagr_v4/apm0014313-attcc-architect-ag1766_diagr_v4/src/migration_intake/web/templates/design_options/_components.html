@@ -1,0 +1,38 @@
+{% macro icon(name) -%}<span class="lab-icon lab-icon--{{ name }}" aria-hidden="true"></span>{%- endmacro %}
+
+{% macro status(label, tone="neutral") -%}
+<span class="lab-status lab-status--{{ tone }}"><span aria-hidden="true"></span>{{ label }}</span>
+{%- endmacro %}
+
+{% macro metric(value, label) -%}
+<div class="lab-metric"><strong>{{ value }}</strong><span>{{ label }}</span></div>
+{%- endmacro %}
+
+{% macro empty_state(title, copy, action="") -%}
+<section class="lab-state lab-empty-state" data-lab-state-panel="empty" hidden>
+  {{ icon("empty") }}<h2>{{ title }}</h2><p>{{ copy }}</p>
+  {% if action %}<button class="lab-button lab-button--primary" type="button" data-lab-dialog-open>{{ action }}</button>{% endif %}
+</section>
+{%- endmacro %}
+
+{% macro common_states() -%}
+<section class="lab-state lab-loading-state" data-lab-state-panel="loading" hidden aria-live="polite" aria-busy="true">
+  <span></span><span></span><span></span><span class="lab-sr-only">Loading content</span>
+</section>
+<section class="lab-state lab-error-state" data-lab-state-panel="error" hidden role="alert">
+  {{ icon("warning") }}<div><h2>We could not load this view</h2><p>Your context is preserved. Retry when the service is available.</p></div>
+  <button class="lab-button lab-button--secondary" type="button" data-lab-state="populated">Try again</button>
+</section>
+{%- endmacro %}
+
+{% macro state_switch() -%}
+<div class="lab-state-switch" aria-label="Preview state">
+  {% for state in ["populated", "loading", "empty", "error", "success"] %}
+  <button type="button" data-lab-state="{{ state }}" aria-pressed="{{ 'true' if state == 'populated' else 'false' }}">{{ state | title }}</button>
+  {% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro screen_link(option, key, label, current) -%}
+<a href="/design-options/{{ option }}/{{ key }}"{% if key == current %} class="is-active" aria-current="page"{% endif %}>{{ icon(key) }}<span>{{ label }}</span></a>
+{%- endmacro %}

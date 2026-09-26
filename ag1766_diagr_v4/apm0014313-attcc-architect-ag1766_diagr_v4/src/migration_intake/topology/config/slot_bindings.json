@@ -1,0 +1,54 @@
+{
+  "_description": "Versioned slot-binding config for DiagramFiller, in the POC's slots.yaml shape. Edit here, not in fill.py. Each slot binds cells by ordinal position among cells whose visible label matches `find`, never by cell ID. `required: true` mirrors the POC's strict behavior (zero matches is a hard failure); `required: false` (default) reports a warning instead, since uploaded base diagrams may legitimately omit a slot.",
+  "version": 2,
+  "slots": [
+    {
+      "slot_name": "app_name",
+      "find": {"label_contains": "Application Name"},
+      "mode": "replace_label",
+      "template": "Application Name: {app_name}",
+      "expected_matches": 1,
+      "required": false
+    },
+    {
+      "slot_name": "app_acronym",
+      "find": {"label_contains": "App Acronym"},
+      "mode": "replace_label",
+      "template": "App Acronym: {app_acronym}",
+      "expected_matches": 1,
+      "required": false
+    },
+    {
+      "slot_name": "correlation_id",
+      "find": {"label_contains": "Correlation ID"},
+      "mode": "replace_label",
+      "template": "Correlation ID: {correlation_id}",
+      "expected_matches": 1,
+      "required": false
+    },
+    {
+      "slot_name": "environment_region",
+      "find": {"label_contains_all": ["Environment", "Region"]},
+      "mode": "replace_label",
+      "template": "Environment: {environment} | Region: {region}",
+      "expected_matches": 1,
+      "required": false
+    },
+    {
+      "slot_name": "network_cidrs",
+      "find": {"label_contains_all": ["VPC CIDR", "Subnet CIDR"]},
+      "mode": "replace_label",
+      "template": "VPC CIDR: {vpc_cidr} | Subnet CIDR: {subnet_cidr}",
+      "expected_matches": 1,
+      "required": false
+    },
+    {
+      "slot_name": "database_info",
+      "find": {"label_contains_all": ["Database Engine", "DB Version"]},
+      "mode": "replace_label",
+      "template": "Database Engine: {db_engine} | DB Version: {db_version}",
+      "expected_matches": 1,
+      "required": false
+    }
+  ]
+}

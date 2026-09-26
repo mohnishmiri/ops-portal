@@ -1,0 +1,58 @@
+{#
+  Measurement set editor - repeatable measurements.
+
+  Context:
+    question: dict with code, text, help, required_level, units
+    answer: dict | None with value.measurements (list of {label, value, unit})
+    errors: dict | None
+#}
+<div class="measurement-set-editor collection-editor">
+  <div class="measurement-list" data-collection="measurements">
+    {% set measurements = answer.value.measurements if answer and answer.value and answer.value.measurements else [{}] %}
+    {% for m in measurements %}
+    <div class="measurement-row" data-index="{{ loop.index0 }}">
+      <div class="form-group">
+        <label class="form-label">Label</label>
+        <input 
+          type="text"
+          name="measurements[{{ loop.index0 }}].label"
+          class="form-control"
+          value="{{ m.label or '' }}"
+          placeholder="Label"
+        >
+      </div>
+      <div class="form-group">
+        <label class="form-label">Value</label>
+        <input 
+          type="number"
+          name="measurements[{{ loop.index0 }}].value"
+          class="form-control"
+          value="{{ m.value or '' }}"
+          step="any"
+          placeholder="0"
+        >
+      </div>
+      <div class="form-group">
+        <label class="form-label">Unit</label>
+        <select name="measurements[{{ loop.index0 }}].unit" class="form-control">
+          <option value="">-- Unit --</option>
+          {% for unit in question.units or [] %}
+          <option value="{{ unit }}" {% if m.unit == unit %}selected{% endif %}>{{ unit }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="button" class="button button--ghost button--sm remove-measurement" aria-label="Remove">
+        Remove
+      </button>
+    </div>
+    {% endfor %}
+  </div>
+  
+  <button type="button" class="button button--ghost button--sm add-measurement">
+    Add measurement
+  </button>
+  
+  {% if errors and errors.measurements %}
+  <span class="form-error">{{ errors.measurements | join(', ') }}</span>
+  {% endif %}
+</div>

@@ -1,0 +1,46 @@
+{#
+  Identifier editor - identifier type + value.
+
+  Context:
+    question: dict with code, text, help, required_level
+    answer: dict | None with value.identifier_type, value.value
+    errors: dict | None
+#}
+<div class="identifier-editor">
+  <div class="form-grid">
+    <div class="form-group">
+      <label for="q-{{ question.code }}-type" class="form-label">Type</label>
+      <select 
+        name="identifier_type"
+        id="q-{{ question.code }}-type"
+        class="form-control{% if errors and errors.identifier_type %} form-control--error{% endif %}"
+      >
+        <option value="">-- Select type --</option>
+        <option value="ITAP_ID" {% if answer and answer.value and answer.value.identifier_type == 'ITAP_ID' %}selected{% endif %}>iTAP ID</option>
+        <option value="MOTS_ID" {% if answer and answer.value and answer.value.identifier_type == 'MOTS_ID' %}selected{% endif %}>MOTS ID</option>
+        <option value="CORRELATION_ID" {% if answer and answer.value and answer.value.identifier_type == 'CORRELATION_ID' %}selected{% endif %}>Correlation ID</option>
+        <option value="OTHER" {% if answer and answer.value and answer.value.identifier_type == 'OTHER' %}selected{% endif %}>Other</option>
+      </select>
+      {% if errors and errors.identifier_type %}
+      <span class="form-error">{{ errors.identifier_type | join(', ') }}</span>
+      {% endif %}
+    </div>
+    
+    <div class="form-group">
+      <label for="q-{{ question.code }}-input" class="form-label">Value</label>
+      <input 
+        type="text"
+        name="value"
+        id="q-{{ question.code }}-input"
+        class="form-control{% if errors and errors.value %} form-control--error{% endif %}"
+        value="{{ answer.value.value if answer and answer.value and answer.value.value else '' }}"
+        {% if question.required_level == 'REQUIRED' %}required{% endif %}
+        {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+        placeholder="Enter identifier"
+      >
+      {% if errors and errors.value %}
+      <span class="form-error">{{ errors.value | join(', ') }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>

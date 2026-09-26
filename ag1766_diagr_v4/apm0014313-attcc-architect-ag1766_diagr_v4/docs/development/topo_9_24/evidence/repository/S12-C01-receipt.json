@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S12-C01",
+  "validated_at": "2026-09-24T17:19:39.7644559-05:00",
+  "result": "BLOCKED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "evidence/runtime_trace/runtime_authorization.md"
+  ],
+  "inspected_files": [],
+  "checks": [
+    "No command executed",
+    "No tests or fixtures imported",
+    "No existing database/service/cloud/LLM access",
+    "All proposed writes confined to analysis workspace"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

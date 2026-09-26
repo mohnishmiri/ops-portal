@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S09-C01",
+  "validated_at": "2026-09-24T17:12:28.2247056-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/data_lineage/projection_identity.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/topology/scope.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\scope.py",
+      "file_type": ".py",
+      "size_bytes": 9717,
+      "modified_utc": "2026-09-24T12:08:58.5412644Z",
+      "sha256": "da6a36d31ce194d3cd1d188067464d43f20dcbcc78e917d7754e2c80ab9f52be",
+      "chunk_id": "S09-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-268",
+      "relevant_section": "Scope states/selection/resource/ref/relationship graph contracts",
+      "evidence_id": "EV-PROJ-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/guide_policy.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\guide_policy.py",
+      "file_type": ".py",
+      "size_bytes": 3424,
+      "modified_utc": "2026-09-22T22:00:33.0908606Z",
+      "sha256": "dbbdf9d85902034318e6190b9f39ca6f5cfacde58c43f438114c39c775949b92",
+      "chunk_id": "S09-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-104",
+      "relevant_section": "Projection allowlist, aliases and normalized flow identity",
+      "evidence_id": "EV-PROJ-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/strict_projection.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\strict_projection.py",
+      "file_type": ".py",
+      "size_bytes": 27891,
+      "modified_utc": "2026-09-22T22:55:27.8103956Z",
+      "sha256": "eab531e25699583c86266f6e6609a67a4818c81c04d54b39c27e0f7059e503bc",
+      "chunk_id": "S09-C01",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-735",
+      "relevant_section": "Fact/resource/relationship and semantic node/flow projection",
+      "evidence_id": "EV-PROJ-001",
+      "further_content_inspection_required": true
+    }
+  ],
+  "checks": [
+    "Exactly three controlling modules",
+    "Captured allowlist compared with every semantic scope lookup",
+    "Node and flow identity keys compared",
+    "Guide categories compared with alias/group propagation",
+    "Captured resource provenance shape compared with projector lookup",
+    "No runtime result claimed"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

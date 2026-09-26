@@ -1,0 +1,13 @@
+{
+  "evidence_id":"EV-DIAG-001",
+  "method":"Pylance textDocument/diagnostic",
+  "source":"src/migration_intake/web/health.py",
+  "positions":"1-based lines below; original LSP positions were 0-based",
+  "diagnostics":[
+    {"line":37,"severity":2,"code":"reportMissingImports","message":"Import sqlalchemy could not be resolved","qualification":"Editor analysis environment only; dependency is declared in pyproject.toml"},
+    {"line":91,"severity":2,"code":"reportUndefinedVariable","message":"literal is not defined"},
+    {"line":37,"severity":4,"code":null,"message":"text is not accessed"}
+  ],
+  "application_executed":false,
+  "excluded_paths_inspected":false
+}

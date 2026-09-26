@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S14-C01",
+  "validated_at": "2026-09-24T17:23:58.4677795-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/architecture/root_causes.md"
+  ],
+  "inspected_files": [],
+  "checks": [
+    "All 40 persisted findings normalized by severity/kind",
+    "Every root cause cites existing findings/evidence",
+    "Hypothesis H-PIPE-001 remains labeled",
+    "No new source/runtime claim introduced",
+    "Out-of-scope intake/tests/archive respected"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

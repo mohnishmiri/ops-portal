@@ -1,0 +1,13 @@
+{
+  "id":"S15-C02","stage":"15","result":"COMPLETED","completed_stage":"15","stage_result":"COMPLETE",
+  "objective":"Define target architecture boundaries, state machine, data model and architecture decisions",
+  "inputs":["EV-OPTION-001","EV-ROOT-001","Current component/data/status evidence"],
+  "outputs":["analysis/architecture/target.md"],
+  "inspected_files":[],
+  "checks":["Uses current stack and no unjustified infrastructure","Defines responsibility/input/output/failure/signals for every component","Includes component/sequence/state/ER diagrams","Separates proposed from implemented state","Migration preserves legacy history/default-off containment","Security/observability/backward compatibility addressed"],
+  "established":["Target modular-monolith component boundaries defined","Scoped projection v2 is central contract","Production profile/prototype renderer and uniform fenced protocol specified","Verified read/delivery/review model unifies UI truth","Seven ADR proposals and staged rollout defined"],
+  "uncertainties":["Exact interface scope-decision persistence requires source/data preflight and approval","Authentication provider/shared production storage remain outside current evidence","Numeric performance budgets remain historical/unverified","Implementation and runtime execution not approved"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"Synthesize target component/data/state/security/observability/migration design from EV-OPTION-001 and EV-ROOT-001","result":"Proposed target architecture and ADR set completed","mutation":"Analysis artifact only","output":"analysis/architecture/target.md"}],
+  "evidence":[{"id":"EV-ARCH-001","path":"analysis/architecture/target.md","source":"Validated current-state/root-cause/options evidence","description":"Proposed component, sequence, state, ER, security, observability, ADR and rollout design","kind":"Target architecture proposal","reliability":"PROPOSED; not implemented or runtime-certified"}],
+  "next_chunk":"S16-C01","next_action":"Specify the first small vertical TDD corrective slice with objective gates and rollback"
+}

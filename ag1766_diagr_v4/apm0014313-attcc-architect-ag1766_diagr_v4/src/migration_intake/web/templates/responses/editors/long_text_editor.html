@@ -1,0 +1,23 @@
+{#
+  Long text editor - multi-line textarea.
+
+  Context:
+    question: dict with code, text, help, required_level
+    answer: dict | None with value.text
+    errors: dict | None
+#}
+<div class="long-text-editor">
+  <textarea 
+    name="text"
+    id="q-{{ question.code }}-input"
+    class="form-control{% if errors and errors.text %} form-control--error{% endif %}"
+    rows="4"
+    {% if question.required_level == 'REQUIRED' %}required{% endif %}
+    {% if question.help %}aria-describedby="q-{{ question.code }}-help"{% endif %}
+    placeholder="Enter detailed text"
+  >{{ answer.value.text if answer and answer.value and answer.value.text else '' }}</textarea>
+  
+  {% if errors and errors.text %}
+  <span class="form-error">{{ errors.text | join(', ') }}</span>
+  {% endif %}
+</div>

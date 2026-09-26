@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S09-C02",
+  "validated_at": "2026-09-24T17:13:45.6031602-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/business_rules/token_mappings.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/topology/profiles/loader.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\loader.py",
+      "file_type": ".py",
+      "size_bytes": 25496,
+      "modified_utc": "2026-09-22T23:24:31.1140233Z",
+      "sha256": "816d730a62429f948da3b69217fabc7ca086e7dae6aa9dc19d37dd07e4d50091",
+      "chunk_id": "S09-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-720",
+      "relevant_section": "Profile data classes, hashes, parsing/loading/compatibility",
+      "evidence_id": "EV-PROFILE-001",
+      "further_content_inspection_required": true
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_label_only/manifest.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_label_only\\manifest.json",
+      "file_type": ".json",
+      "size_bytes": 1069,
+      "modified_utc": "2026-09-22T22:38:24.4124184Z",
+      "sha256": "d579589fe25dbca6906ebb92de16533d98d743ccc073650129c59dbe3b863596",
+      "chunk_id": "S09-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "Synthetic label profile identity/components/version metadata",
+      "evidence_id": "EV-PROFILE-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_label_only/slots.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_label_only\\slots.json",
+      "file_type": ".json",
+      "size_bytes": 228,
+      "modified_utc": "2026-09-22T16:12:16.9721765Z",
+      "sha256": "715311096ffbc492d1721e9285b21852e82efc0c803489370a3ad52ba6722330",
+      "chunk_id": "S09-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "APPLICATION_NAME mandatory Overview marker slot",
+      "evidence_id": "EV-PROFILE-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_label_only/mappings.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_label_only\\mappings.json",
+      "file_type": ".json",
+      "size_bytes": 96,
+      "modified_utc": "2026-09-21T19:20:13.4015495Z",
+      "sha256": "ef93cbce4de1471fd32fcbba0f1aa9e5d1e31c26da41409c1a0ed58a8bdad280",
+      "chunk_id": "S09-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "APPLICATION_NAME projection token",
+      "evidence_id": "EV-PROFILE-001",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/topology/profiles/synthetic_label_only/markers.json",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\topology\\profiles\\synthetic_label_only\\markers.json",
+      "file_type": ".json",
+      "size_bytes": 102,
+      "modified_utc": "2026-09-21T19:20:12.8788197Z",
+      "sha256": "b804f410e6c91affa308ea0cdf768698f47e6bb13ff94054c0e437db5a7eaef7",
+      "chunk_id": "S09-C02",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "complete one-line JSON",
+      "relevant_section": "Required application-name marker",
+      "evidence_id": "EV-PROFILE-001",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Exactly five profile files",
+    "Manifest/component integrity separated from semantic suitability",
+    "Packaged directory inventory compared with expected target needs",
+    "Label capability claims bounded",
+    "Structural behavior deferred rather than inferred"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

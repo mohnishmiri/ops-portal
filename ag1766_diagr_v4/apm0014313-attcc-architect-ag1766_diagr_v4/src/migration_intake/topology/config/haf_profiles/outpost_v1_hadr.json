@@ -1,0 +1,215 @@
+{
+  "_description": "HAF profile for Tab 3 ('HA/DR with Global Load Balancer') of the multi-tab master template v1.7. Two outpost regions filled from same app data.",
+  "profile_id": "OUTPOST_V1_HADR",
+  "template_version": "1.7",
+  "schema_version": "1.0.0",
+  "variant_tab": "HA/DR with Global Load Balancer",
+  "placeholder_bindings": [
+    {
+      "haf_role": "header_line",
+      "pattern": "NEEDS-OUTPOST-ID",
+      "token": "outpost_id",
+      "required": true
+    },
+    {
+      "haf_role": "private_application_subnet",
+      "pattern": "NEEDS-CIDR",
+      "token": "subnet_cidr",
+      "required": true
+    },
+    {
+      "haf_role": "private_application_subnet",
+      "pattern": "UNRESOLVED-subnet",
+      "token": "subnet_name",
+      "required": true
+    },
+    {
+      "haf_role": "app_security_group",
+      "pattern_regex": "UNRESOLVED-[\\w-]+-sg(?!.*db)",
+      "token": "app_sg_name",
+      "required": true
+    },
+    {
+      "haf_role": "app_account_container",
+      "pattern_regex": "ACC-[\\w-]+-UNRESOLVED",
+      "token": "aws_account_id",
+      "required": true
+    },
+    {
+      "haf_role": "workload_vpc",
+      "pattern": "NEEDS-AZ",
+      "token": "availability_zone",
+      "required": true
+    },
+    {
+      "haf_role": "workload_vpc",
+      "pattern": "NEEDS-CIDR",
+      "token": "vpc_cidr",
+      "required": true
+    },
+    {
+      "haf_role": "db_security_group",
+      "pattern_regex": "UNRESOLVED-[\\w-]+-db-sg",
+      "token": "db_sg_name",
+      "required": true
+    }
+  ],
+  "interface_regions": [
+    {
+      "haf_role": "att_internal_in_slot",
+      "category": "INTERNAL",
+      "direction": "INBOUND",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "att_internal_out_primary_slot",
+      "category": "INTERNAL",
+      "direction": "OUTBOUND",
+      "group": "PRIMARY",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "att_internal_out_secondary_slot",
+      "category": "INTERNAL",
+      "direction": "OUTBOUND",
+      "group": "SECONDARY",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "att_internal_in_out_slot",
+      "category": "INTERNAL",
+      "direction": "BIDIRECTIONAL",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "azure_apps_slot",
+      "category": "AZURE",
+      "direction": null,
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "tier2_internet_slot",
+      "category": "TIER2_INTERNET",
+      "direction": null,
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "r2_att_internal_in_slot",
+      "category": "INTERNAL",
+      "direction": "INBOUND",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "r2_att_internal_out_primary_slot",
+      "category": "INTERNAL",
+      "direction": "OUTBOUND",
+      "group": "PRIMARY",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "r2_att_internal_out_secondary_slot",
+      "category": "INTERNAL",
+      "direction": "OUTBOUND",
+      "group": "SECONDARY",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    },
+    {
+      "haf_role": "r2_att_internal_in_out_slot",
+      "category": "INTERNAL",
+      "direction": "BIDIRECTIONAL",
+      "rendering": "MULTILINE_TEXT",
+      "format": "{app_name} ({correlation_id})",
+      "empty_value": "<None found in source data \u2014 please verify>"
+    }
+  ],
+  "detail_blocks": [
+    {
+      "haf_role": "nas_detail_block",
+      "fields": ["nas_server", "ec2_names"],
+      "template": " - NAS Server: {nas_server}\n - EC2 Names: {ec2_names}"
+    },
+    {
+      "haf_role": "ebr_detail_block",
+      "fields": ["strategy", "ec2_names"],
+      "template": " - Strategy: {strategy}\n - EC2 Names: {ec2_names}"
+    },
+    {
+      "haf_role": "r2_nas_detail_block",
+      "fields": ["nas_server", "ec2_names"],
+      "template": " - NAS Server: {nas_server}\n - EC2 Names: {ec2_names}"
+    },
+    {
+      "haf_role": "r2_ebr_detail_block",
+      "fields": ["strategy", "ec2_names"],
+      "template": " - Strategy: {strategy}\n - EC2 Names: {ec2_names}"
+    }
+  ],
+  "standard_sections": [
+    "GitHub Runners",
+    "GitHub JFrog Artifactory IaC",
+    "DNS PHZs",
+    "AWS Home Region",
+    "AWS Direct Connect Region",
+    "AT&T Conexus/GPN",
+    "AWS Tier 2",
+    "Internet",
+    "VPCE via AT&T Regional Bastion",
+    "SMTP Cluster - outbound email",
+    "SMTP Relay",
+    "SMTP Cluster - inbound email"
+  ],
+  "protected_roles": [
+    "legend_*",
+    "outer_frame",
+    "root_layer",
+    "cloudwatch",
+    "directconnect",
+    "directconnect_icon",
+    "dns_phz_container",
+    "azure_apps_bridge_box",
+    "azure_apps_bridge_label",
+    "azure_apps_icon_express_route",
+    "azure_apps_label",
+    "azure_apps_container",
+    "att_internal_interfaces_band",
+    "aws_tier1_bg",
+    "aws_tier1_title",
+    "aws_tier1_container",
+    "aws_tier2_label",
+    "vpce_bastion_label",
+    "internet_label",
+    "nas_title_label",
+    "ebr_title_label",
+    "network_account_container",
+    "idns_icon",
+    "f5_eni",
+    "r2_outer_frame",
+    "r2_cloudwatch",
+    "r2_directconnect",
+    "r2_dns_phz_container",
+    "r2_network_account_container",
+    "r2_att_internal_interfaces_band",
+    "r2_nas_title_label",
+    "r2_ebr_title_label",
+    "r2_f5_eni",
+    "idns_global_label"
+  ]
+}

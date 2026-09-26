@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}WaveUtil — {{ app_name or "Application" }}{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+{% if app_name %}
+<a href="/applications/{{ app_id }}" class="global-nav-item">{{ app_name }}</a>
+{% endif %}
+<a href="#" class="global-nav-item active" aria-current="page">WaveUtil</a>
+{% endblock %}
+
+{% block command_actions %}
+{% if command_actions and command_actions.export_href %}
+<a href="{{ command_actions.export_href }}" class="button button--ghost">Export →</a>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="wave-util-page">
+
+  {# Summary stat bar #}
+  <div class="stat-bar">
+    <span class="stat-chip">{{ total_rows }} total</span>
+    {% set envs = rows | map(attribute='environment') | select | list | unique | list %}
+    {% for env in envs %}
+    <span class="stat-chip">{{ env }}</span>
+    {% endfor %}
+    <span class="stat-chip">Page {{ current_page }} of {{ total_pages }}</span>
+  </div>
+
+  {# Client-side filter row #}
+  <div class="filter-row">
+    <div class="filter-pills" role="group" aria-label="Filter by environment">
+      <button class="filter-pill filter-pill--active" data-filter-env="ALL" type="button">ALL</button>
+      <button class="filter-pill" data-filter-env="PROD" type="button">PROD</button>
+      <button class="filter-pill" data-filter-env="DEV" type="button">DEV</button>
+      <button class="filter-pill" data-filter-env="UAT" type="button">UAT</button>
+      <button class="filter-pill" data-filter-env="TEST" type="button">TEST</button>
+    </div>
+    <select data-filter-state aria-label="Filter by state" class="form-select">
+      <option value="ALL">All states</option>
+      <option value="ACTIVE">Active</option>
+      <option value="RETIRED">Retired</option>
+    </select>
+    <input
+      type="search"
+      data-filter-search
+      class="form-input"
+      placeholder="Search hostname…"
+      aria-label="Search by hostname"
+    >
+  </div>
+
+  {# Data table #}
+  {% if rows %}
+  <div class="table-container">
+    <table class="data-table" data-wave-util-list>
+      <thead>
+        <tr>
+          <th scope="col">Hostname</th>
+          <th scope="col">Environment</th>
+          <th scope="col">State</th>
+          <th scope="col">Scope</th>
+          <th scope="col">Last updated</th>
+          <th scope="col"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr
+          data-environment="{{ row.environment or '' }}"
+          data-state="{{ row.state or '' }}"
+          data-hostname="{{ row.server_name or '' }}"
+        >
+          <td class="cell-primary">
+            <a href="/applications/{{ app_id }}/intakes/{{ intake_id }}/wave-util/{{ row.id }}">
+              {{ row.server_name }}
+            </a>
+          </td>
+          <td>
+            {% if row.environment %}
+            <span class="status-pill">{{ row.environment }}</span>
+            {% else %}
+            <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if row.state == 'ACTIVE' %}
+            <span class="status-pill status-pill--success">
+              <span class="pill-dot"></span>Active
+            </span>
+            {% elif row.state == 'RETIRED' %}
+            <span class="status-pill status-pill--muted">
+              <span class="pill-dot"></span>Retired
+            </span>
+            {% else %}
+            <span class="status-pill">{{ row.state }}</span>
+            {% endif %}
+          </td>
+          <td>{{ row.scope or '—' }}</td>
+          <td class="cell-meta">
+            {% if row.updated_at %}
+            {{ row.updated_at.strftime('%Y-%m-%d') if row.updated_at.strftime is defined else row.updated_at }}
+            {% else %}—{% endif %}
+          </td>
+          <td class="cell-actions">
+            <a
+              href="/applications/{{ app_id }}/intakes/{{ intake_id }}/wave-util/{{ row.id }}"
+              class="button button--ghost button--sm"
+            >View →</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {# Pagination #}
+  {% if total_pages > 1 %}
+  <nav class="pagination" aria-label="Pagination">
+    {% if current_page > 1 %}
+    <a
+      href="?page={{ current_page - 1 }}{% if filter_state %}&state={{ filter_state }}{% endif %}{% if filter_environment %}&environment={{ filter_environment }}{% endif %}"
+      class="pagination-link"
+    >← Prev</a>
+    {% else %}
+    <span class="pagination-link pagination-link--disabled">← Prev</span>
+    {% endif %}
+
+    <span class="pagination-info">Page {{ current_page }} of {{ total_pages }}</span>
+
+    {% if current_page < total_pages %}
+    <a
+      href="?page={{ current_page + 1 }}{% if filter_state %}&state={{ filter_state }}{% endif %}{% if filter_environment %}&environment={{ filter_environment }}{% endif %}"
+      class="pagination-link"
+    >Next →</a>
+    {% else %}
+    <span class="pagination-link pagination-link--disabled">Next →</span>
+    {% endif %}
+  </nav>
+  {% endif %}
+
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-message">No WaveUtil rows found.</p>
+    <p class="form-hint">Import a WaveUtil workbook to populate the register.</p>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Catalog Releases{% endblock %}
+
+{% block global_nav %}
+<a href="/applications" class="global-nav-item">Applications</a>
+<a href="/admin/catalog" class="global-nav-item active" aria-current="page">Catalog Admin</a>
+{% endblock %}
+
+{% block command_actions %}
+<a href="/admin/catalog/upload" class="button button--primary">Upload new catalog</a>
+{% endblock %}
+
+{% block content %}
+<div class="card card--elevated">
+  <div class="card-header">
+    <h1 class="card-title">Catalog Releases</h1>
+  </div>
+
+  {% if releases %}
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th scope="col">Version</th>
+          <th scope="col">State</th>
+          <th scope="col">Published</th>
+          <th scope="col">Questions</th>
+          <th scope="col">Pinned intakes</th>
+          <th scope="col">Latest</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for release in releases %}
+        <tr>
+          <td>{{ release.semantic_version }}</td>
+          <td><span class="status-pill status-pill--active"><span class="pill-dot"></span>{{ release.pub_state }}</span></td>
+          <td>{{ release.published_at if release.published_at else "Not published" }}</td>
+          <td>{{ release.compiler_report.question_count if release.compiler_report else "—" }}</td>
+          <td>{{ release.pinned_intake_count }}</td>
+          <td>
+            {% if release.is_latest %}
+            <span class="tag" data-testid="latest-flag">Latest</span>
+            {% endif %}
+          </td>
+          <td><a href="/admin/catalog/{{ release.id }}">View detail</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p>No catalog releases have been published yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

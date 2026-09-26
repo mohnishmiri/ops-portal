@@ -1,0 +1,13 @@
+{
+  "id":"S04-C01","stage":"04","result":"COMPLETED",
+  "objective":"Safely inventory candidate expected-output pages and cell categories separately from input",
+  "inputs":["Supplied candidate expected-output Draw.io only"],
+  "outputs":["evidence/drawio/expected_inventory.json"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/CCPM_out_put_18678_TargetState_AWS_OutPosts_v01 (1).drawio","lines":"XML page/cell category inventory only","symbols":"Two uncompressed pages; cell/category counts","further":true}],
+  "checks":["Safe XML parser; source hash unchanged","JSON valid; no raw labels/IDs copied","Explicit ID uniqueness checked independently per page"],
+  "established":["Two uncompressed pages","Page 1: 244 cells, 179 vertices, 63 edges","Page 2: 262 cells, 184 vertices, 76 edges","No duplicate explicit cell IDs; three/two wrapper objects respectively"],
+  "uncertainties":["No approved application/scope meaning assigned to either page","More cells/pages do not alone establish a required implementation change","Hierarchy, connections and semantic comparison still pending"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/inventory_drawio.ps1 -Source Expected","result":"0; INVENTORIED; source unchanged","mutation":"Redacted inventory JSON only","output":"evidence/drawio/expected_inventory.json"}],
+  "evidence":[{"id":"EV-DRAWIO-004","path":"evidence/drawio/expected_inventory.json","source":"Supplied expected-output candidate","description":"Two-page structural inventory, not approved target semantics","kind":"Normalized document metadata","reliability":"VERIFIED counts; applicability unverified"}],
+  "next_chunk":"S04-C02","next_action":"Inspect candidate expected-output hierarchy without assuming semantic equivalence or approved applicability"
+}

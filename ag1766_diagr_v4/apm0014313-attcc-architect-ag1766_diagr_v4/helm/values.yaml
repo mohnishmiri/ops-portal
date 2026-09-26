@@ -1,0 +1,128 @@
+replicaCount: 1
+
+image:
+  fullName: artifact.it.att.com/apm0014313-dkr-attcc-stage/com.att.attcc/migration-intake:1.0.0
+  repository: ""
+  tag: ""
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: artifact-att-pull-secret
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 100m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "240"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  host: aws-outpost.test.att.com
+  tlsSecretName: aws-outpost-test-tls
+  azureKeyVaultCertificates:
+    enabled: false
+    vaultName: ""
+    items: []
+
+app:
+  env: shared_test
+  port: 8000
+  actorId: 00000000-0000-0000-0000-000000000001
+  actorDisplayName: Migration Intake Service
+  databaseUrl: ""
+  # Oracle Instant Client baked into the image. Required for python-oracledb thick
+  # mode; thin mode is rejected by listeners enforcing native network encryption.
+  oracleClientLibDir: /opt/oracle/instantclient
+  logLevel: INFO
+  logFormat: json
+  secretName: migration-intake-secrets
+  # When true, the ConfigMap omits this key so the Kubernetes Secret
+  # (via extraEnvFrom) is the only source, avoiding duplicate definitions.
+  secretManaged:
+    appEnv: false
+    databaseUrl: false
+    evidenceRoot: false
+    actorId: false
+    actorDisplayName: false
+
+llm:
+  enabled: false
+  provider: mock
+  profile: disabled
+  outboundEnabled: false
+  baseUrl: ""
+  model: ""
+  authMode: bearer_token
+  allowedClassifications: "SYNTHETIC"
+  connectTimeoutSeconds: 10
+  readTimeoutSeconds: 60
+  maxAttempts: 3
+  # Quoted: Helm renders unquoted large ints as float64 scientific notation (1.048576e+07).
+  maxResponseBytes: "10485760"
+  maxFragmentChars: 12000
+  maxRequestsPerImport: 20
+
+extraEnvFrom: []
+
+azureKeyVaultSecrets:
+  enabled: false
+  vaultName: ""
+  items: []
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: azurefile-csi
+  accessMode: ReadWriteMany
+  size: 20Gi
+  retain: true
+  mountPath: /app/evidence
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+probes:
+  startup:
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations: []
+affinity: {}
+
+networkPolicy:
+  enabled: false

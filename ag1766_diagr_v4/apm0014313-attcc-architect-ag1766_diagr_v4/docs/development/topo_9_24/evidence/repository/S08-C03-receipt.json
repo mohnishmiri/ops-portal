@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "chunk": "S08-C03",
+  "validated_at": "2026-09-24T17:11:08.4074453-05:00",
+  "result": "COMPLETED",
+  "commit": "80d0994f1a5cdf49f11a836f81660a06ccf2f7cd",
+  "unmerged_count": 0,
+  "excluded_repository_paths": [
+    "to_archive/",
+    "tests/"
+  ],
+  "outputs": [
+    "analysis/data_lineage/database_portability.md"
+  ],
+  "inspected_files": [
+    {
+      "repository_path": "src/migration_intake/persistence/types.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\types.py",
+      "file_type": ".py",
+      "size_bytes": 9462,
+      "modified_utc": "2026-09-24T12:08:58.4997789Z",
+      "sha256": "62ee9afdec1abbac0008f6b1aced90fc7fac810715d6ed8dfef258053c2fb4a6",
+      "chunk_id": "S08-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-257",
+      "relevant_section": "PortableUUID/UTC/Decimal/CanonicalJSON/Sha256Hex",
+      "evidence_id": "EV-DATA-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/naming.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\naming.py",
+      "file_type": ".py",
+      "size_bytes": 1408,
+      "modified_utc": "2026-09-21T19:20:15.9385550Z",
+      "sha256": "2095ccaa70c7c4e69cbfa3504a1dfbc084ffa7073765e9476fc2fe9301e64d60",
+      "chunk_id": "S08-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-43",
+      "relevant_section": "Shared metadata and naming convention",
+      "evidence_id": "EV-DATA-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "src/migration_intake/persistence/migrations/env.py",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\src\\migration_intake\\persistence\\migrations\\env.py",
+      "file_type": ".py",
+      "size_bytes": 5543,
+      "modified_utc": "2026-09-22T22:00:32.7072054Z",
+      "sha256": "7072923b108cb9600eb375b93015b32fb6dc299c657790c74b48d8fda25e06c8",
+      "chunk_id": "S08-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-147",
+      "relevant_section": "Model registration; URL resolution; offline/online migration engines",
+      "evidence_id": "EV-DATA-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "alembic.ini",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\alembic.ini",
+      "file_type": ".ini",
+      "size_bytes": 1596,
+      "modified_utc": "2026-09-21T19:19:36.9690472Z",
+      "sha256": "ba7ffb5b0ab9494178bcc3e535314e98c8559022db5f18db547897158f61bdaa",
+      "chunk_id": "S08-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-61",
+      "relevant_section": "Empty URL placeholder and logging",
+      "evidence_id": "EV-DATA-004",
+      "further_content_inspection_required": false
+    },
+    {
+      "repository_path": "docker-compose.yml",
+      "full_path": "C:\\GitHub\\aws_diag_v4_1\\aws_diag_v4\\docker-compose.yml",
+      "file_type": ".yml",
+      "size_bytes": 1017,
+      "modified_utc": "2026-09-23T22:07:52.6948244Z",
+      "sha256": "a38a0b99252f3840ddae1e969c9b691f98d83c56ef4226d64905c587733c3580",
+      "chunk_id": "S08-C03",
+      "inspection_status": "PARTIAL_TEXT_INSPECTION",
+      "inspected_lines": "1-26",
+      "relevant_section": "Local defaults, volumes and liveness healthcheck",
+      "evidence_id": "EV-DATA-004",
+      "further_content_inspection_required": false
+    }
+  ],
+  "checks": [
+    "Exactly five configuration/type files",
+    "No environment values or .env contents read",
+    "Alembic URL/engine behavior compared with previously inspected application engine",
+    "Liveness/readiness semantics compared with EV-REPO-006",
+    "No migration/container/database execution"
+  ],
+  "application_tests_run": false,
+  "production_files_modified": false
+}

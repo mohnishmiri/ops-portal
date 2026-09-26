@@ -1,0 +1,13 @@
+{
+  "id":"S04-C02","stage":"04","result":"COMPLETED",
+  "objective":"Inspect candidate expected-output hierarchy and wrapper identity separately per page",
+  "inputs":["Supplied candidate expected-output Draw.io; validated inventory"],
+  "outputs":["evidence/drawio/expected_hierarchy.json","analysis/semantic_diff/expected_hierarchy.md"],
+  "inspected_files":[{"path":"docs/development/topo_9_24/CCPM_out_put_18678_TargetState_AWS_OutPosts_v01 (1).drawio","lines":"Hierarchy category only, per page","symbols":"Wrapper identity; parent refs; containment cycles","further":true}],
+  "checks":["Safe parser; unchanged source hash","Per-page effective identity uniqueness enforced","No raw labels/IDs persisted"],
+  "established":["506 cells across two pages; five wrapper identities","No missing effective identities, dangling parents or containment cycles","59 cells have children"],
+  "uncertainties":["Page scope/applicability unverified","More containment is not automatically a required generator change","Approved protected/generated boundaries not yet established"],"unblock_chunks":[],"resolve_questions":[],
+  "commands":[{"command":"& ./docs/development/topo_9_24/inspect_drawio_category.ps1 -Source Expected -Category Hierarchy","result":"0; INSPECTED; source unchanged","mutation":"Redacted JSON only","output":"evidence/drawio/expected_hierarchy.json"}],
+  "evidence":[{"id":"EV-DRAWIO-005","path":"evidence/drawio/expected_hierarchy.json","source":"Expected-output candidate, hierarchy category","description":"Per-page opaque hierarchy with resolved wrapper IDs","kind":"Normalized structural evidence","reliability":"VERIFIED structure; semantic authority unknown"}],
+  "next_chunk":"S04-C03","next_action":"Inspect expected-output connection categories without assigning page scope or business direction"
+}
