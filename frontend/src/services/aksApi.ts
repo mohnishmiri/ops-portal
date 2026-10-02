@@ -1062,7 +1062,10 @@ export type AksSyncResourceType =
   | "services"
   | "secrets"
   | "configmaps"
-  | "ingress";
+  | "ingress"
+  | "statefulsets"
+  | "daemonsets"
+  | "akvs";
 
 export interface SyncJobDetail {
   id: number;
@@ -1138,6 +1141,9 @@ function invalidateAksResourceQueries(
     secrets: ["aks-secrets-cached"],
     configmaps: ["aks-configmaps-cached"],
     ingress: ["aks-ingress-cached"],
+    statefulsets: ["aks-statefulsets-cached"],
+    daemonsets: ["aks-daemonsets-cached"],
+    akvs: ["aks-akvs-cached"],
   };
   keyMap[resourceType].forEach((key) => {
     if (resourceType === "clusters" || !clusterId) {
@@ -3039,5 +3045,403 @@ export function useAksAuditHistory(clusterId?: string, namespace?: string) {
     refetchInterval: safeInterval(5_000),
     retry: false,
     refetchOnWindowFocus: false,
+  });
+}
+
+// ── StatefulSets / DaemonSets ─────────────────────────────────────────
+
+export type WorkloadKind = "statefulset" | "daemonset";
+export type WorkloadStatus = "Healthy" | "Updating" | "Degraded" | "Unavailable" | "Idle";
+
+export interface WorkloadCondition {
+  type: string;
+  status: string;
+  reason: string | null;
+  message: string | null;
+  last_transition_time: string | null;
+}
+
+export interface K8sWorkload {
+  kind: "StatefulSet" | "DaemonSet";
+  name: string;
+  namespace: string;
+  uid: string;
+  labels: Record<string, string>;
+  selector: Record<string, string>;
+  images: string[];
+  containers: { name: string; image: string }[];
+  created_at: string | null;
+  generation: number | null;
+  observed_generation: number | null;
+  update_strategy: "RollingUpdate" | "OnDelete" | null;
+  max_unavailable: string | null;
+  min_ready_seconds: number;
+  node_selector: Record<string, string>;
+  service_account: string | null;
+  cpu_request: string;
+  cpu_limit: string;
+  memory_request: string;
+  memory_limit: string;
+  conditions: WorkloadCondition[];
+  desired: number;
+  ready: number;
+  updated: number;
+  available: number;
+  current: number;
+  status: WorkloadStatus;
+  update_pending: boolean;
+  // StatefulSet
+  service_name?: string | null;
+  pod_management_policy?: string | null;
+  partition?: number;
+  current_revision?: string | null;
+  update_revision?: string | null;
+  volume_claim_templates?: { name: string; storage_class: string | null; access_modes: string[]; storage: string | null }[];
+  pvc_retention_policy?: { when_deleted: string | null; when_scaled: string | null } | null;
+  // DaemonSet
+  unavailable?: number;
+  misscheduled?: number;
+  max_surge?: string | null;
+  tolerations?: number;
+}
+
+export interface WorkloadPod {
+  pod_name: string;
+  namespace: string;
+  phase: string | null;
+  ready: boolean;
+  node: string | null;
+  pod_ip: string | null;
+  started_at: string | null;
+  restarts: number;
+  containers: string[];
+  revision: string | null;
+}
+
+export interface WorkloadRevision {
+  name: string;
+  revision: number;
+  created_at: string | null;
+  images: string[];
+  is_current: boolean;
+}
+
+export interface WorkloadEvent {
+  type: string | null;
+  reason: string | null;
+  message: string | null;
+  count: number;
+  last_seen: string | null;
+}
+
+export interface WorkloadPvc {
+  name: string;
+  template: string;
+  ordinal: number;
+  phase: string | null;
+  capacity: string | null;
+  storage_class: string | null;
+  access_modes: string[];
+  volume_name: string | null;
+  created_at: string | null;
+}
+
+export interface WorkloadDetail extends K8sWorkload {
+  annotations: Record<string, string>;
+  pods: WorkloadPod[];
+  revisions: WorkloadRevision[];
+  events: WorkloadEvent[];
+  pvcs?: WorkloadPvc[];
+  yaml: string;
+}
+
+type WorkloadRefPayload = { clusterId: string; kind: WorkloadKind; namespace: string; name: string };
+
+const workloadBody = ({ clusterId, namespace, name }: WorkloadRefPayload) => ({
+  cluster_id: clusterId,
+  namespace,
+  name,
+});
+
+export async function fetchCachedWorkloads(kind: WorkloadKind, clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/workloads/${kind}/cached`, {
+    params: extendedCachedParams(clusterId, namespace),
+    timeout: 15000,
+  });
+  return data as { source: string; last_sync: string | null; kind: string; items: K8sWorkload[]; count: number };
+}
+
+export async function fetchWorkloadDetail(kind: WorkloadKind, clusterId: string, namespace: string, name: string) {
+  const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
+  const { data } = await apiClient.get(`${API_PREFIX}/workloads/${kind}/detail`, { params, timeout: 30000 });
+  return data as WorkloadDetail;
+}
+
+const workloadsCachedKey = (kind: WorkloadKind) => `aks-${kind}s-cached`;
+
+export function useCachedWorkloads(kind: WorkloadKind, clusterId: string, namespace?: string, enabled = true) {
+  return useQuery({
+    queryKey: [workloadsCachedKey(kind), clusterId, namespace],
+    queryFn: () => fetchCachedWorkloads(kind, clusterId, namespace),
+    enabled: !!clusterId && enabled,
+    placeholderData: (prev) => prev,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useWorkloadDetail(
+  kind: WorkloadKind,
+  clusterId: string,
+  namespace: string | undefined,
+  name: string | undefined,
+  enabled = true
+) {
+  return useQuery({
+    queryKey: ["aks-workload-detail", kind, clusterId, namespace, name],
+    queryFn: () => fetchWorkloadDetail(kind, clusterId, namespace!, name!),
+    enabled: !!clusterId && !!namespace && !!name && enabled,
+    staleTime: 4_000,
+    refetchInterval: safeInterval(10_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+function useWorkloadMutation<T extends WorkloadRefPayload>(fn: (payload: T) => Promise<unknown>) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: (_data, payload) => {
+      queryClient.invalidateQueries({ queryKey: [workloadsCachedKey(payload.kind)] });
+      queryClient.invalidateQueries({ queryKey: ["aks-workload-detail"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
+  });
+}
+
+export function useScaleWorkload() {
+  return useWorkloadMutation(async (p: WorkloadRefPayload & { replicas: number }) => {
+    const { data } = await apiClient.post(`${API_PREFIX}/workloads/${p.kind}/scale`, {
+      ...workloadBody(p),
+      replicas: p.replicas,
+    });
+    return data;
+  });
+}
+
+export function useRestartWorkload() {
+  return useWorkloadMutation(async (p: WorkloadRefPayload) => {
+    const { data } = await apiClient.post(`${API_PREFIX}/workloads/${p.kind}/restart`, workloadBody(p));
+    return data;
+  });
+}
+
+export function useUpdateWorkloadImage() {
+  return useWorkloadMutation(async (p: WorkloadRefPayload & { container: string; image: string }) => {
+    const { data } = await apiClient.post(`${API_PREFIX}/workloads/${p.kind}/image`, {
+      ...workloadBody(p),
+      container: p.container,
+      image: p.image,
+    });
+    return data;
+  });
+}
+
+export function useUpdateWorkloadStrategy() {
+  return useWorkloadMutation(
+    async (
+      p: WorkloadRefPayload & {
+        strategyType: "RollingUpdate" | "OnDelete";
+        partition?: number | null;
+        maxUnavailable?: string | null;
+        maxSurge?: string | null;
+      }
+    ) => {
+      const { data } = await apiClient.post(`${API_PREFIX}/workloads/${p.kind}/strategy`, {
+        ...workloadBody(p),
+        strategy_type: p.strategyType,
+        partition: p.partition ?? null,
+        max_unavailable: p.maxUnavailable || null,
+        max_surge: p.maxSurge || null,
+      });
+      return data;
+    }
+  );
+}
+
+export function useRollbackWorkload() {
+  return useWorkloadMutation(async (p: WorkloadRefPayload & { revision: number }) => {
+    const { data } = await apiClient.post(`${API_PREFIX}/workloads/${p.kind}/rollback`, {
+      ...workloadBody(p),
+      revision: p.revision,
+    });
+    return data;
+  });
+}
+
+export function useDeleteWorkload() {
+  return useWorkloadMutation(
+    async (p: WorkloadRefPayload & { propagationPolicy?: "Background" | "Foreground" | "Orphan" }) => {
+      const params = new URLSearchParams({
+        cluster_id: p.clusterId,
+        namespace: p.namespace,
+        name: p.name,
+        propagation_policy: p.propagationPolicy ?? "Background",
+      });
+      const { data } = await apiClient.delete(`${API_PREFIX}/workloads/${p.kind}`, { params });
+      return data;
+    }
+  );
+}
+
+// ── AKV → AKS secret sync (akv2k8s AzureKeyVaultSecret / "akvs") ─────
+
+export type AkvsStatus = "Synced" | "Failed" | "Degraded" | "Pending" | "EnvInjector";
+
+export interface AkvsEvent {
+  type: string | null;
+  reason: string | null;
+  message: string | null;
+  count: number;
+  last_seen: string | null;
+}
+
+export interface AkvsVaultCheck {
+  checked: boolean;
+  checked_at: string;
+  error?: string;
+  vault_uri?: string;
+  latest_version?: string;
+  latest_version_created?: string;
+  latest_version_expires?: string | null;
+  pinned_version?: string | null;
+  in_sync?: boolean | null;
+}
+
+export interface AkvsItem {
+  name: string;
+  namespace: string;
+  vault_name: string | null;
+  object_name: string | null;
+  object_type: string;
+  object_version: string | null;
+  content_type: string | null;
+  output_kind: "secret" | "configmap" | "env-injection";
+  output_name: string | null;
+  output_data_key: string | null;
+  output_type: string | null;
+  transforms: string[];
+  output_exists: boolean | null;
+  key_present: boolean | null;
+  secret_hash: string | null;
+  last_azure_update: string | null;
+  last_event: AkvsEvent | null;
+  labels: Record<string, string>;
+  created_at: string | null;
+  status: AkvsStatus;
+  status_reason: string;
+}
+
+export interface AkvsDetail extends AkvsItem {
+  events: AkvsEvent[];
+  output_keys: string[];
+  vault_check?: AkvsVaultCheck;
+}
+
+export interface AkvsSummary {
+  total: number;
+  Synced: number;
+  Failed: number;
+  Degraded: number;
+  Pending: number;
+  EnvInjector: number;
+  vaults: number;
+  outputs: number;
+}
+
+export interface AkvsCachedResponse {
+  source: string;
+  last_sync: string | null;
+  items: AkvsItem[];
+  count: number;
+  summary: AkvsSummary;
+}
+
+export interface AkvsController {
+  installed: boolean | null;
+  versions: string[];
+  components: { component: string; namespace: string; pods: number; ready: number; image: string | null }[];
+}
+
+export async function fetchCachedAkvs(clusterId: string, namespace?: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/akv-sync/cached`, {
+    params: extendedCachedParams(clusterId, namespace),
+    timeout: 15000,
+  });
+  return data as AkvsCachedResponse;
+}
+
+export async function fetchAkvsController(clusterId: string) {
+  const { data } = await apiClient.get(`${API_PREFIX}/akv-sync/controller`, {
+    params: { cluster_id: clusterId },
+    timeout: 30000,
+  });
+  return data as AkvsController;
+}
+
+export async function fetchAkvsDetail(clusterId: string, namespace: string, name: string, checkVault = false) {
+  const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
+  if (checkVault) params.set("check_vault", "true");
+  const { data } = await apiClient.get(`${API_PREFIX}/akv-sync/detail`, { params, timeout: 60000 });
+  return data as AkvsDetail;
+}
+
+export function useCachedAkvs(clusterId: string, namespace?: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-akvs-cached", clusterId, namespace],
+    queryFn: () => fetchCachedAkvs(clusterId, namespace),
+    enabled: !!clusterId && enabled,
+    placeholderData: (prev) => prev,
+    staleTime: 4_000,
+    gcTime: 60_000,
+    refetchInterval: safeInterval(5_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useAkvsController(clusterId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-akvs-controller", clusterId],
+    queryFn: () => fetchAkvsController(clusterId),
+    enabled: !!clusterId && enabled,
+    staleTime: 60_000,
+    refetchInterval: safeInterval(120_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useAkvsDetail(clusterId: string, namespace: string | undefined, name: string | undefined) {
+  return useQuery({
+    queryKey: ["aks-akvs-detail", clusterId, namespace, name],
+    queryFn: () => fetchAkvsDetail(clusterId, namespace!, name!),
+    enabled: !!clusterId && !!namespace && !!name,
+    staleTime: 10_000,
+    refetchInterval: safeInterval(30_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** On-demand comparison against Key Vault — not polled, it calls the vault API. */
+export function useAkvsVaultCheck() {
+  return useMutation({
+    mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
+      fetchAkvsDetail(clusterId, namespace, name, true),
   });
 }

@@ -65,6 +65,8 @@ class CacheTTL:
     # cached only briefly — a manually triggered Job must appear promptly.
     JOBS: int = 30
     JOB_DETAIL: int = 30
+    WORKLOADS: int = 30  # StatefulSets / DaemonSets
+    AKV_SYNC: int = 60  # akv2k8s controller status
     NODE_POOLS: int = 300  # 5 min — rarely changes
     SUBSCRIPTIONS: int = 600  # 10 min — almost static
     UNDERUTILIZED: int = 600  # 10 min — DB aggregation cache
@@ -122,6 +124,14 @@ class CacheKeys:
     @staticmethod
     def job_detail(cluster_id: str, namespace: str, name: str) -> str:
         return f"{CacheKeys.PREFIX}:jobs:detail:{_hash_params(cluster_id, namespace, name)}"
+
+    @staticmethod
+    def workloads(kind: str, cluster_id: str, namespace: str | None = None) -> str:
+        return f"{CacheKeys.PREFIX}:workloads:{kind}:{_hash_params(cluster_id, namespace)}"
+
+    @staticmethod
+    def akv_sync(cluster_id: str, namespace: str | None = None) -> str:
+        return f"{CacheKeys.PREFIX}:akvsync:{_hash_params(cluster_id, namespace)}"
 
     @staticmethod
     def node_pools(cluster_id: str) -> str:
@@ -278,6 +288,13 @@ class DataCacheService:
         count = await cache_manager.invalidate("aks:jobs:*")
         self._stats["invalidations"] += count
         logger.info("cache_invalidated", scope="jobs", cluster_id=cluster_id[:60], keys=count)
+        return count
+
+    async def invalidate_for_workloads(self, cluster_id: str) -> int:
+        count = await cache_manager.invalidate("aks:workloads:*")
+        count += await cache_manager.invalidate("aks:pods:metrics:*")
+        self._stats["invalidations"] += count
+        logger.info("cache_invalidated", scope="workloads", cluster_id=cluster_id[:60], keys=count)
         return count
 
     async def invalidate_for_pods(self, cluster_id: str) -> int:

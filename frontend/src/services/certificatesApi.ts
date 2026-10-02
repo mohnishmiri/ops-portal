@@ -115,6 +115,12 @@ export interface EnrollRequest {
   enrollment_type: EnrollmentType;
   certificate_authority: string;
   template: string;
+  /** Keyfactor enrollment pattern; takes precedence over `template`. */
+  enrollment_pattern_id?: number;
+  /** Elliptic curve OID, sent for ECC keys only. */
+  curve?: string;
+  /** Collection whose cache is refreshed after enrollment. */
+  collection_id?: number;
   include_chain?: boolean;
   sans?: Record<string, string[]>;
   metadata?: Record<string, unknown>;
@@ -896,12 +902,19 @@ export interface CertificateTemplate {
   oid: string;
   key_size: string;
   key_type: string;
+  /** "keyfactor" when enumerated upstream, "configured-default" when derived from KEYFACTOR_DEFAULT_TEMPLATE. */
+  source?: string;
 }
 
 export interface CertificateAuthority {
   id: number;
   name: string;
+  logical_name?: string;
   host_name: string;
+  /** What enrollment must send: Keyfactor identifies a CA as `HostName\LogicalName`. */
+  value?: string;
+  /** "keyfactor" when enumerated upstream, "configured-default" when derived from KEYFACTOR_DEFAULT_CA. */
+  source?: string;
 }
 
 export const fetchCollections = async (): Promise<CertificateCollection[]> => {
@@ -918,6 +931,63 @@ export const fetchAuthorities = async (): Promise<CertificateAuthority[]> => {
   const response = await apiClient.get<CertificateAuthority[]>(`${API_BASE}/authorities`);
   return response.data;
 };
+
+export interface EnrollmentPatternKeyAlgorithm {
+  /** "RSA" or "ECC" — the KeyType enrollment sends. */
+  name: string;
+  key_sizes: number[];
+  /** Curve OIDs, e.g. "1.3.132.0.34" (P-384). */
+  curves: string[];
+}
+
+export interface EnrollmentPattern {
+  id: number;
+  name: string;
+  template_name: string;
+  /** "keyfactor" when enumerated upstream, "configured" when from KEYFACTOR_ENROLLMENT_PATTERNS. */
+  source: string;
+  /** Keyfactor's grouping in the pattern dropdown (AD forest or CA configuration tenant). */
+  group: string;
+  key_algorithms: EnrollmentPatternKeyAlgorithm[];
+  certificate_authorities: string[];
+}
+
+export const fetchEnrollmentPatterns = async (): Promise<EnrollmentPattern[]> => {
+  const response = await apiClient.get<EnrollmentPattern[]>(`${API_BASE}/enrollment-patterns`);
+  return response.data;
+};
+
+export const useEnrollmentPatterns = () =>
+  useQuery({
+    queryKey: ["certificates", "enrollment-patterns"],
+    queryFn: fetchEnrollmentPatterns,
+    staleTime: 5 * 60_000,
+  });
+
+/** A Keyfactor certificate metadata field as shown on enrollment. */
+export interface MetadataField {
+  name: string;
+  data_type: "string" | "integer" | "date" | "boolean" | "choice" | "text" | "email";
+  /** Allowed values for choice fields — Keyfactor rejects anything else. */
+  options: string[];
+  hint: string;
+  /** Regex Keyfactor validates the value against, if any. */
+  validation: string;
+  default_value: string;
+  required: boolean;
+}
+
+export const fetchMetadataFields = async (): Promise<MetadataField[]> => {
+  const response = await apiClient.get<MetadataField[]>(`${API_BASE}/metadata-fields`);
+  return response.data;
+};
+
+export const useMetadataFields = () =>
+  useQuery({
+    queryKey: ["certificates", "metadata-fields"],
+    queryFn: fetchMetadataFields,
+    staleTime: 5 * 60_000,
+  });
 
 export const useCollections = () =>
   useQuery({
@@ -939,6 +1009,124 @@ export const useAuthorities = () =>
     queryFn: fetchAuthorities,
     staleTime: 5 * 60_000,
   });
+
+// ── Saved enrollment profiles ─────────────────────────────────────────
+
+/**
+ * The reusable part of an enrollment request. Deliberately excludes the common
+ * name, the SANs, the PFX password and the CSR — those are per-request, and the
+ * last two are key material the backend refuses to store.
+ */
+export interface EnrollmentProfileDefaults {
+  template?: string;
+  enrollment_pattern_id?: number;
+  certificate_authority?: string;
+  key_type?: string;
+  key_length?: number;
+  curve?: string;
+  organization?: string;
+  organizational_unit?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  email?: string;
+  owner_role_name?: string;
+  include_chain?: boolean;
+  use_legacy_encryption?: boolean;
+  mots_profile_id?: string;
+  requester_att_user_id?: string;
+  requester_att_manager_user_id?: string;
+  server_type?: string;
+  environment?: string;
+  tls_port_services_internet_traffic?: string;
+  port?: string;
+  pci_data?: string;
+  /** Keyfactor metadata values keyed by field name; supersedes the legacy per-field keys above. */
+  metadata?: Record<string, string>;
+}
+
+export interface EnrollmentProfile {
+  id: number;
+  name: string;
+  description: string;
+  template: string;
+  certificate_authority: string;
+  defaults: EnrollmentProfileDefaults;
+  shared: boolean;
+  owner_user_id: string;
+  created_by: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface EnrollmentProfileInput {
+  name: string;
+  description?: string;
+  shared: boolean;
+  defaults: EnrollmentProfileDefaults;
+}
+
+const ENROLLMENT_PROFILES_KEY = ["certificates", "enrollment-profiles"];
+
+export const fetchEnrollmentProfiles = async (): Promise<EnrollmentProfile[]> => {
+  const response = await apiClient.get<EnrollmentProfile[]>(`${API_BASE}/enrollment-profiles`);
+  return response.data;
+};
+
+export const createEnrollmentProfile = async (data: EnrollmentProfileInput): Promise<EnrollmentProfile> => {
+  const response = await apiClient.post<EnrollmentProfile>(`${API_BASE}/enrollment-profiles`, data);
+  return response.data;
+};
+
+export const updateEnrollmentProfile = async (
+  id: number,
+  data: EnrollmentProfileInput,
+): Promise<EnrollmentProfile> => {
+  const response = await apiClient.put<EnrollmentProfile>(`${API_BASE}/enrollment-profiles/${id}`, data);
+  return response.data;
+};
+
+export const deleteEnrollmentProfile = async (id: number): Promise<void> => {
+  await apiClient.delete(`${API_BASE}/enrollment-profiles/${id}`);
+};
+
+export const useEnrollmentProfiles = () =>
+  useQuery({
+    queryKey: ENROLLMENT_PROFILES_KEY,
+    queryFn: fetchEnrollmentProfiles,
+    staleTime: 5 * 60_000,
+  });
+
+export const useCreateEnrollmentProfile = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createEnrollmentProfile,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ENROLLMENT_PROFILES_KEY });
+    },
+  });
+};
+
+export const useUpdateEnrollmentProfile = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: number; data: EnrollmentProfileInput }) =>
+      updateEnrollmentProfile(id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ENROLLMENT_PROFILES_KEY });
+    },
+  });
+};
+
+export const useDeleteEnrollmentProfile = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteEnrollmentProfile,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ENROLLMENT_PROFILES_KEY });
+    },
+  });
+};
 
 // ── Load Certificate to Azure Key Vault ───────────────────────────────
 

@@ -79,6 +79,8 @@ import {
   AuditHistoryTab,
 } from "../features/aks/AKSExtendedTabs";
 import { JobsTab, JobFocus } from "../features/aks/JobsTab";
+import { WorkloadsTab } from "../features/aks/WorkloadsTab";
+import { AkvSyncTab } from "../features/aks/AkvSyncTab";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import {
   BarChart,
@@ -178,6 +180,21 @@ const Icons = {
       <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
     </svg>
   ),
+  statefulset: (cls = "") => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
+      <ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" /><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+    </svg>
+  ),
+  daemonset: (cls = "") => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
+      <rect x="2" y="2" width="8" height="8" rx="1" /><rect x="14" y="2" width="8" height="8" rx="1" /><rect x="2" y="14" width="8" height="8" rx="1" /><rect x="14" y="14" width="8" height="8" rx="1" />
+    </svg>
+  ),
+  keyvault: (cls = "") => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
+      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+    </svg>
+  ),
 };
 
 /**
@@ -208,8 +225,8 @@ function jobPodToPodMetrics(pod: JobPod): PodMetrics {
 // ── Tab Types ─────────────────────────────────────────────────────────
 
 type TabKey =
-  | "clusters" | "nodepools" | "deployments" | "pods"
-  | "services" | "secrets" | "configmaps" | "ingress" | "helm"
+  | "clusters" | "nodepools" | "deployments" | "statefulsets" | "daemonsets" | "pods"
+  | "services" | "secrets" | "akvsync" | "configmaps" | "ingress" | "helm"
   | "cronjobs" | "jobs" | "history" | "audit";
 
 // ── Color Constants ───────────────────────────────────────────────────
@@ -1188,9 +1205,12 @@ const AKSOperationsPage: React.FC = () => {
     { key: "clusters", label: "Clusters", icon: Icons.cluster() },
     { key: "nodepools", label: "Node Pools", icon: Icons.scale() },
     { key: "deployments", label: "Deployments", icon: Icons.deployment() },
+    { key: "statefulsets", label: "StatefulSets", icon: Icons.statefulset() },
+    { key: "daemonsets", label: "DaemonSets", icon: Icons.daemonset() },
     { key: "pods", label: "Pod Metrics", icon: Icons.pod() },
     { key: "services", label: "Services", icon: Icons.deployment() },
     { key: "secrets", label: "Secrets", icon: Icons.warning() },
+    { key: "akvsync", label: "AKV Sync", icon: Icons.keyvault() },
     { key: "configmaps", label: "ConfigMaps", icon: Icons.memory() },
     { key: "ingress", label: "Ingress", icon: Icons.cluster() },
     { key: "helm", label: "Helm", icon: Icons.scale() },
@@ -3045,6 +3065,41 @@ const AKSOperationsPage: React.FC = () => {
           )
         )}
         {activeTab === "history" && renderHistoryTab()}
+        {(activeTab === "statefulsets" || activeTab === "daemonsets") && (
+          selectedCluster ? (
+            <WorkloadsTab
+              key={activeTab}
+              kind={activeTab === "statefulsets" ? "statefulset" : "daemonset"}
+              cluster={selectedCluster}
+              namespace={selectedNamespace}
+              namespaces={namespaceOptions}
+              onNamespaceChange={setSelectedNamespace}
+              showToast={showToast}
+              formatDate={formatDate}
+              canManage={canWrite && hasCapability("AKS_WORKLOAD_MANAGE")}
+              canDelete={canWrite && hasCapability("AKS_WORKLOAD_DELETE")}
+              canDeletePod={canWrite && hasCapability("AKS_POD_DELETE")}
+              onViewPodLogs={(pod) => setPodLogDialog(jobPodToPodMetrics(pod))}
+              onDeletePod={(pod) => handleDeletePod(jobPodToPodMetrics(pod))}
+            />
+          ) : (
+            <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
+          )
+        )}
+        {activeTab === "akvsync" && (
+          selectedCluster ? (
+            <AkvSyncTab
+              cluster={selectedCluster}
+              namespace={selectedNamespace}
+              namespaces={namespaceOptions}
+              onNamespaceChange={setSelectedNamespace}
+              showToast={showToast}
+              formatDate={formatDate}
+            />
+          ) : (
+            <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
+          )
+        )}
         {activeTab === "audit" && (
           <AuditHistoryTab clusterId={selectedCluster?.id} namespace={selectedNamespace || undefined} />
         )}

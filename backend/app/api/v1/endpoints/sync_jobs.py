@@ -49,6 +49,9 @@ _AKS_RESOURCE_TYPES = {
     "secrets",
     "configmaps",
     "ingress",
+    "statefulsets",
+    "daemonsets",
+    "akvs",
 }
 _STALE_RUNNING_MINUTES = 30
 
@@ -73,6 +76,12 @@ def _get_aks_sync_fn(svc, resource_type: str, cluster_id: str | None, namespace:
         return lambda: svc.sync_configmaps_to_db(str(cluster_id), namespace)
     if resource_type == "ingress":
         return lambda: svc.sync_ingress_to_db(str(cluster_id), namespace)
+    if resource_type == "statefulsets":
+        return lambda: svc.sync_workloads_to_db("statefulset", str(cluster_id), namespace)
+    if resource_type == "daemonsets":
+        return lambda: svc.sync_workloads_to_db("daemonset", str(cluster_id), namespace)
+    if resource_type == "akvs":
+        return lambda: svc.sync_akvs_to_db(str(cluster_id), namespace)
     return None
 
 

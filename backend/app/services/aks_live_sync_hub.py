@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,20 @@ from app.services.aks_operations_service import get_aks_operations_service
 logger = structlog.get_logger(__name__)
 
 POLL_INTERVAL_SECONDS = 60
+
+# In-cluster resources re-synced into the DB while a client watches them.
+_K8S_SYNC: dict[str, Callable[[Any, str, str | None], Awaitable[dict[str, Any]]]] = {
+    "deployments": lambda svc, cid, ns: svc.sync_deployments_to_db(cid, ns),
+    "cronjobs": lambda svc, cid, ns: svc.sync_cronjobs_to_db(cid, ns),
+    "services": lambda svc, cid, ns: svc.sync_services_to_db(cid, ns),
+    "secrets": lambda svc, cid, ns: svc.sync_secrets_to_db(cid, ns),
+    "configmaps": lambda svc, cid, ns: svc.sync_configmaps_to_db(cid, ns),
+    "ingress": lambda svc, cid, ns: svc.sync_ingress_to_db(cid, ns),
+    "pods": lambda svc, cid, ns: svc.sync_pods_to_db(cid, ns),
+    "statefulsets": lambda svc, cid, ns: svc.sync_workloads_to_db("statefulset", cid, ns),
+    "daemonsets": lambda svc, cid, ns: svc.sync_workloads_to_db("daemonset", cid, ns),
+    "akvs": lambda svc, cid, ns: svc.sync_akvs_to_db(cid, ns),
+}
 
 
 @dataclass
@@ -101,15 +116,7 @@ class AKSLiveSyncHub:
                 self._poll_tasks[key] = asyncio.create_task(self._poll_nodepools_loop(sub.cluster_id))
         if sub.cluster_id:
             for resource in sub.resources:
-                if resource in {
-                    "deployments",
-                    "pods",
-                    "services",
-                    "secrets",
-                    "configmaps",
-                    "ingress",
-                    "cronjobs",
-                }:
+                if resource in _K8S_SYNC:
                     ns = sub.namespace or ""
                     key = f"k8s:{resource}:{sub.cluster_id}:{ns}"
                     if key not in self._watch_tasks or self._watch_tasks[key].done():
@@ -130,15 +137,7 @@ class AKSLiveSyncHub:
                 wanted_poll.add(f"azure:nodepools:{sub.cluster_id}")
             if sub.cluster_id:
                 for resource in sub.resources:
-                    if resource in {
-                        "deployments",
-                        "pods",
-                        "services",
-                        "secrets",
-                        "configmaps",
-                        "ingress",
-                        "cronjobs",
-                    }:
+                    if resource in _K8S_SYNC:
                         ns = sub.namespace or ""
                         wanted_watch.add(f"k8s:{resource}:{sub.cluster_id}:{ns}")
 
@@ -249,29 +248,16 @@ class AKSLiveSyncHub:
         if fp_store_key not in self._workload_fingerprints:
             self._workload_fingerprints[fp_store_key] = {}
 
-        sync_map = {
-            "deployments": "sync_deployments_to_db",
-            "cronjobs": "sync_cronjobs_to_db",
-            "services": "sync_services_to_db",
-            "secrets": "sync_secrets_to_db",
-            "configmaps": "sync_configmaps_to_db",
-            "ingress": "sync_ingress_to_db",
-            "pods": "sync_pods_to_db",
-        }
-        sync_method = sync_map.get(resource)
-        if not sync_method:
+        sync_fn = _K8S_SYNC.get(resource)
+        if not sync_fn:
             return
 
         while self._any_subscriber_wants(resource, cluster_id):
             try:
                 async for db in get_db_session():
                     svc = get_aks_operations_service(db)
-                    sync_fn = getattr(svc, sync_method, None)
-                    if sync_fn is None:
-                        await asyncio.sleep(POLL_INTERVAL_SECONDS * 2)
-                        break
                     ns_arg = namespace or None
-                    result = await sync_fn(cluster_id, ns_arg)
+                    result = await sync_fn(svc, cluster_id, ns_arg)
                     prev_map = self._workload_fingerprints[fp_store_key]
                     for item in result.get("resources") or []:
                         name = item.get("name", "")

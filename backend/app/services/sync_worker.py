@@ -213,6 +213,9 @@ async def _run_job(job: SyncJob) -> tuple[str, str | None, dict | None]:
                 "secrets": lambda: svc.sync_secrets_to_db(str(cluster_id), namespace),
                 "configmaps": lambda: svc.sync_configmaps_to_db(str(cluster_id), namespace),
                 "ingress": lambda: svc.sync_ingress_to_db(str(cluster_id), namespace),
+                "statefulsets": lambda: svc.sync_workloads_to_db("statefulset", str(cluster_id), namespace),
+                "daemonsets": lambda: svc.sync_workloads_to_db("daemonset", str(cluster_id), namespace),
+                "akvs": lambda: svc.sync_akvs_to_db(str(cluster_id), namespace),
             }
             sync_fn = sync_map.get(resource_type)
             if sync_fn is None:

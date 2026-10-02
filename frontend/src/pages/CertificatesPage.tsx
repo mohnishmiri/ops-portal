@@ -1743,7 +1743,7 @@ const CertificatesPage: React.FC = () => {
       </div>
 
       {/* Modals */}
-      {modal === "enroll" && <EnrollCertificateModal onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
+      {modal === "enroll" && <EnrollCertificateModal collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       {modal === "view" && selected && <CertificateDetailsModal certificate={selected} onClose={closeModal} />}
       {modal === "renew" && selected && <RenewCertificateModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       {modal === "metadata" && selected && <UpdateMetadataModal certificate={selected} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}

@@ -80,8 +80,10 @@ read from environment variables / `.env` / Key Vault.
 | `KEYFACTOR_API_VERSION` | No | Value for the `x-keyfactor-api-version` header (default `1`). |
 | `KEYFACTOR_TIMEOUT_SECONDS` | No | Request timeout (default `30`). |
 | `KEYFACTOR_VERIFY_SSL` | No | Verify TLS certificates when calling Keyfactor (default `true`). |
+| `KEYFACTOR_CA_BUNDLE` | No | PEM CA file trusted in addition to the default bundle. Set locally behind the AT&T CSO proxy (e.g. `C:/binary/ATTInternalRootCA.crt`), which re-signs Keyfactor's TLS certificate. |
 | `KEYFACTOR_DEFAULT_CA` | No | Optional default issuing CA to pre-fill enrollment. |
 | `KEYFACTOR_DEFAULT_TEMPLATE` | No | Optional default template to pre-fill enrollment. |
+| `KEYFACTOR_ENROLLMENT_PATTERNS` | No | Enrollment patterns offered in the enrollment dropdown when the service account lacks `/enrollment_pattern/read/`, as comma-separated `id:name|template` entries (e.g. `28:Digicert-Standard-SHA2-4096Key|Digicert-Standard-SHA2-4096Key,37:Private TLS Certificate|TLSServerProfile_TLSServerProfile`). IDs are shown in Keyfactor Command's PFX Enrollment page; the template short name links each pattern to its key algorithm, key size/curve and CA from `/Enrollment/PFX/Context/My`. |
 | `KEYFACTOR_LIST_CACHE_TTL` | No | Reserved for short-lived list caching (default `60`). |
 | `CERT_KEY_ESCROW_ENABLED` | No | Capture issuance-time PFX material for later AKV loads (default `false`). |
 | `CERT_KEY_ESCROW_VAULT` | No | Name of the dedicated escrow Key Vault. Required when escrow is enabled. |

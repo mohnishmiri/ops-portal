@@ -11,8 +11,10 @@ from app.services import keyfactor_client as kc
 from app.services.keyfactor_client import (
     KeyfactorAuthError,
     KeyfactorClient,
+    KeyfactorConnectionError,
     KeyfactorNotFoundError,
     KeyfactorServerError,
+    KeyfactorTimeoutError,
     KeyfactorTokenProvider,
 )
 
@@ -55,7 +57,10 @@ class FakeAsyncClient:
 
     async def request(self, method, url, params=None, json=None, headers=None):
         FakeAsyncClient.calls.append((method, url, params, json, headers))
-        return FakeAsyncClient.responses.pop(0)
+        item = FakeAsyncClient.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 @pytest.fixture(autouse=True)
@@ -245,3 +250,53 @@ async def test_renew_omits_collection_param_when_unscoped():
     await client.renew_certificate({"CertificateId": 1})
     renew_calls = [c for c in FakeAsyncClient.calls if "/Enrollment/Renew" in c[1]]
     assert renew_calls[-1][2] is None
+
+
+# ── Transport failures ──────────────────────────────────────────────────────
+
+
+async def test_tls_verification_failure_is_not_reported_as_timeout():
+    tls_error = kc.httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate")
+    FakeAsyncClient.responses = [
+        FakeResponse(200, {"access_token": "tok", "expires_in": 3600}),
+        tls_error,
+        tls_error,
+    ]
+    client = KeyfactorClient(token_provider=KeyfactorTokenProvider())
+    with pytest.raises(KeyfactorConnectionError) as exc_info:
+        await client.enroll_pfx({"Subject": "CN=x"})
+    assert "TLS certificate verification failed" in exc_info.value.detail
+    assert "KEYFACTOR_CA_BUNDLE" in exc_info.value.detail
+
+
+async def test_read_timeout_is_reported_as_timeout():
+    timeout = kc.httpx.ReadTimeout("read timed out")
+    FakeAsyncClient.responses = [
+        FakeResponse(200, {"access_token": "tok", "expires_in": 3600}),
+        timeout,
+        timeout,
+    ]
+    client = KeyfactorClient(token_provider=KeyfactorTokenProvider())
+    with pytest.raises(KeyfactorTimeoutError):
+        await client.get_certificate(1)
+
+
+def test_verify_uses_ca_bundle_when_configured(monkeypatch):
+    monkeypatch.setattr(settings, "KEYFACTOR_VERIFY_SSL", True)
+    monkeypatch.setattr(settings, "KEYFACTOR_CA_BUNDLE", kc.certifi.where())
+    assert isinstance(kc._verify(), kc.ssl.SSLContext)
+
+
+def test_verify_defaults_without_ca_bundle(monkeypatch):
+    monkeypatch.setattr(settings, "KEYFACTOR_VERIFY_SSL", True)
+    monkeypatch.setattr(settings, "KEYFACTOR_CA_BUNDLE", "")
+    assert kc._verify() is True
+    monkeypatch.setattr(settings, "KEYFACTOR_VERIFY_SSL", False)
+    assert kc._verify() is False
+
+
+def test_verify_rejects_missing_ca_bundle(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "KEYFACTOR_VERIFY_SSL", True)
+    monkeypatch.setattr(settings, "KEYFACTOR_CA_BUNDLE", str(tmp_path / "missing.pem"))
+    with pytest.raises(KeyfactorConnectionError):
+        kc._verify()

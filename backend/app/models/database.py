@@ -1536,6 +1536,36 @@ class CertificateSyncStatus(Base):
     triggered_by = Column(String(100), nullable=True)  # 'scheduler', 'manual', 'mutation', 'startup'
 
 
+class CertificateEnrollmentProfile(Base):
+    """Saved enrollment defaults so a request only needs a CN and its SANs.
+
+    ``defaults`` stores the enrollment form values verbatim (key parameters,
+    subject fields, AT&T metadata) so adding a form field later needs no
+    migration. Key material never lands here: the PFX password and the CSR are
+    stripped before insert.
+
+    ``owner_user_id`` is ``""`` for a profile shared with everyone, otherwise
+    the owning user's id. An empty string rather than NULL so the unique
+    constraint still applies to shared names, which NULL would not compare.
+    """
+
+    __tablename__ = "cert_enrollment_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    template = Column(String(500), nullable=True)
+    certificate_authority = Column(String(500), nullable=True)
+    defaults = Column(JSONB, nullable=False, default=dict)
+    owner_user_id = Column(String(255), nullable=False, default="", index=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_by = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("owner_user_id", "name", name="uq_cert_enroll_profile_owner_name"),)
+
+
 class PageCache(Base):
     """Key-value cache stored in PostgreSQL, replacing Redis for page/application caching."""
 

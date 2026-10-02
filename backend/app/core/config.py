@@ -210,6 +210,13 @@ class Settings(BaseSettings):
         default=True,
         description="Verify TLS certificates when calling Keyfactor",
     )
+    KEYFACTOR_CA_BUNDLE: str = Field(
+        default="",
+        description=(
+            "Optional PEM CA file trusted in addition to the default bundle, e.g. the corporate root "
+            "CA when a TLS-inspecting proxy sits between the portal and Keyfactor"
+        ),
+    )
     KEYFACTOR_DEFAULT_CA: str = Field(
         default="",
         description="Optional default issuing CA (logical name) used to pre-fill enrollment",
@@ -217,6 +224,14 @@ class Settings(BaseSettings):
     KEYFACTOR_DEFAULT_TEMPLATE: str = Field(
         default="",
         description="Optional default certificate template short name used to pre-fill enrollment",
+    )
+    KEYFACTOR_ENROLLMENT_PATTERNS: str = Field(
+        default="",
+        description=(
+            "Enrollment patterns offered when the service account cannot list them, as comma-separated "
+            "'id:name|template' entries, e.g. '28:Digicert-Standard-SHA2-4096Key|Digicert-Standard-SHA2-4096Key'. "
+            "The template short name links the pattern to its key and CA policy."
+        ),
     )
     KEYFACTOR_LIST_CACHE_TTL: int = Field(
         default=60,

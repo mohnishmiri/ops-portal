@@ -46,6 +46,7 @@ class FakeService:
         self.last_download_kwargs: dict | None = None
         self.download_calls: list[dict] = []
         self.renew_result: dict | None = None
+        self.last_enroll_kwargs: dict | None = None
 
     def _maybe_raise(self):
         if self.error:
@@ -66,6 +67,7 @@ class FakeService:
         return {"thumbprint": "ABC", "serial_number": "01", "certificate_id": 1}
 
     async def enroll_pfx(self, **kwargs):
+        self.last_enroll_kwargs = kwargs
         self._maybe_raise()
         return {"thumbprint": "DEF", "pfx_base64": "BLOB", "certificate_id": 2}
 
@@ -249,6 +251,61 @@ async def test_enroll_invalid_type_returns_422(app, admin_client):
         json={"enrollment_type": "bogus", "certificate_authority": "ca", "template": "t"},
     )
     assert resp.status_code == 422
+
+
+async def test_enroll_requires_template_or_pattern(app, admin_client):
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={"enrollment_type": "csr", "certificate_authority": "ca", "csr": "x"},
+    )
+    assert resp.status_code == 422
+    assert "enrollment_pattern_id" in resp.text
+
+
+async def test_enroll_accepts_pattern_without_template(app, admin_client):
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={"enrollment_type": "csr", "certificate_authority": "ca", "enrollment_pattern_id": 12, "csr": "x"},
+    )
+    assert resp.status_code == 201
+
+
+async def test_enroll_without_ca_lets_keyfactor_auto_select(app, admin_client):
+    _use_service(app, FakeService())
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={"enrollment_type": "csr", "enrollment_pattern_id": 28, "csr": "x"},
+    )
+    assert resp.status_code == 201
+
+
+async def test_enroll_missing_default_pattern_is_actionable(app, admin_client):
+    upstream = (
+        "No default enrollment pattern found for template 'Digicert-Standard-SHA2-4096Key', "
+        "cannot use this template for enrollment"
+    )
+    _use_service(app, FakeService(error=CertificateServiceError(upstream, status_code=400)))
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={"enrollment_type": "csr", "certificate_authority": "ca", "template": "t", "csr": "x"},
+    )
+    assert resp.status_code == 422
+    assert "Enrollment Pattern ID" in resp.json()["detail"]
+
+
+async def test_enroll_missing_owner_is_actionable(app, admin_client):
+    upstream = (
+        "Either the global or enrollment pattern policy requires the certificate to have an owner. Cannot set to null."
+    )
+    _use_service(app, FakeService(error=CertificateServiceError(upstream, status_code=400)))
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={"enrollment_type": "csr", "certificate_authority": "ca", "template": "t", "csr": "x"},
+    )
+    assert resp.status_code == 422
+    assert "Owner Role Name" in resp.json()["detail"]
 
 
 async def test_enroll_upstream_5xx_returns_502(app, admin_client):
@@ -1436,6 +1493,55 @@ async def test_enroll_audit_names_the_certificate(app, admin_client, db_session)
     entry = await _last_audit(db_session, "enroll_certificate")
     assert entry.details["summary"] == "Enrolled new.example.com (pfx) via WebServer"
     assert entry.details["common_name"] == "new.example.com"
+
+
+async def test_enroll_pfx_escapes_commas_in_subject(app, admin_client):
+    # Keyfactor rejects "O=AT&T Services, Inc." as a malformed directory string.
+    svc = FakeService()
+    _use_service(app, svc)
+    resp = await admin_client.post(
+        "/api/v1/certificates/enroll",
+        json={
+            "enrollment_type": "pfx",
+            "enrollment_pattern_id": 28,
+            "common_name": " app.example.att.com ",
+            "organization": "AT&T Services, Inc.",
+            "organizational_unit": "",
+            "city": "Dallas",
+            "state": "Texas",
+            "country": "US",
+            "password": "a-long-enough-password",
+        },
+    )
+    assert resp.status_code == 201
+    assert svc.last_enroll_kwargs["subject"] == (
+        "CN=app.example.att.com,O=AT&T Services\\, Inc.,L=Dallas,ST=Texas,C=US"
+    )
+
+
+def test_escape_dn_value_handles_rfc4514_specials():
+    from app.api.v1.endpoints.certificates import _escape_dn_value
+
+    assert _escape_dn_value('a,b+c"d\\e<f>g;h=i') == 'a\\,b\\+c\\"d\\\\e\\<f\\>g\\;h\\=i'
+    assert _escape_dn_value("#hash") == "\\#hash"
+    assert _escape_dn_value("AT&T") == "AT&T"
+
+
+async def test_enrollment_sync_target_scopes_to_a_collection(db_session):
+    from app.api.v1.endpoints.certificates import _enrollment_sync_target
+    from app.models.database import CertificateCollectionSnapshot
+
+    db_session.add(CertificateCollectionSnapshot(collection_id=2573, name="AP-KF-ATTCC-31599"))
+    await db_session.commit()
+
+    # The caller's selected collection wins.
+    assert await _enrollment_sync_target(db_session, 77, "AP-KF-ATTCC-31599") == 77
+    # Otherwise the collection named after the owner role.
+    assert await _enrollment_sync_target(db_session, None, " ap-kf-attcc-31599 ") == 2573
+    # Unknown: the caller falls back to a full refresh.
+    assert await _enrollment_sync_target(db_session, None, "AP-KF-UNKNOWN") is None
+    assert await _enrollment_sync_target(db_session, None, None) is None
+    assert await _enrollment_sync_target(None, None, "AP-KF-ATTCC-31599") is None
 
 
 async def test_audit_falls_back_to_the_id_when_the_name_is_unknown(app, admin_client, db_session):

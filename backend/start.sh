@@ -15,6 +15,15 @@ export ENVIRONMENT="${ENVIRONMENT:-development}"
 export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
 export no_proxy="127.0.0.1,localhost,${no_proxy:-}"
 
+# Corporate proxy re-signs TLS; without its CA the Azure SDK fails with CERTIFICATE_VERIFY_FAILED.
+CORP_CA_BUNDLE="${CORP_CA_BUNDLE:-/c/binary/cacert.pem}"
+if [ -z "${REQUESTS_CA_BUNDLE:-}" ] && [ -f "$CORP_CA_BUNDLE" ]; then
+    CA_PATH="$(cygpath -m "$CORP_CA_BUNDLE" 2>/dev/null || echo "$CORP_CA_BUNDLE")"
+    export REQUESTS_CA_BUNDLE="$CA_PATH"
+    export SSL_CERT_FILE="${SSL_CERT_FILE:-$CA_PATH}"
+    echo "Using CA bundle: $CA_PATH"
+fi
+
 # ── Cleanup: kill any existing process on the backend port ──
 cleanup_port() {
     echo "Checking for existing processes on port $PORT..."

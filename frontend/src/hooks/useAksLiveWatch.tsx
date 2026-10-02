@@ -22,6 +22,9 @@ const RESOURCE_QUERY_KEYS: Record<string, string[]> = {
   services: ["aks-services-cached"],
   configmaps: ["aks-configmaps-cached"],
   ingress: ["aks-ingress-cached"],
+  statefulsets: ["aks-statefulsets-cached"],
+  daemonsets: ["aks-daemonsets-cached"],
+  akvs: ["aks-akvs-cached"],
   helm: ["aks-helm-releases"],
 };
 

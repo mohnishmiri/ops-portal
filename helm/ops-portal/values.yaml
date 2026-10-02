@@ -194,6 +194,10 @@ backend:
         akvSecretName: opsportal-backend-keyfactor-default-template
         kubernetesSecretName: ops-portal-backend-keyfactor-default-template
         optional: true
+      - envName: KEYFACTOR_ENROLLMENT_PATTERNS
+        akvSecretName: opsportal-backend-keyfactor-enrollment-patterns
+        kubernetesSecretName: ops-portal-backend-keyfactor-enrollment-patterns
+        optional: true
 
   # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.
   secretProvider:

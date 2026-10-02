@@ -34,7 +34,9 @@ from app.models.database import (
     DeploymentScaleHistory,
     PodUtilizationHistory,
 )
+from app.services.aks_akvs_operations import AKSAkvsOperationsMixin
 from app.services.aks_resource_operations import AKSResourceOperationsMixin
+from app.services.aks_workload_operations import AKSWorkloadOperationsMixin
 from app.services.data_cache_service import (
     TTL,
     CacheKeys,
@@ -47,7 +49,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = structlog.get_logger(__name__)
 
 
-class AKSOperationsService(AKSResourceOperationsMixin):
+class AKSOperationsService(AKSResourceOperationsMixin, AKSWorkloadOperationsMixin, AKSAkvsOperationsMixin):
     """
     Enterprise AKS Operations Service.
 

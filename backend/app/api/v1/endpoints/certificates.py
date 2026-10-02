@@ -24,14 +24,19 @@ from typing import Any, Literal, NoReturn
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.config import settings
 from app.core.database import get_db, get_db_session
 from app.models.auth import UserContext, UserRole
-from app.models.database import AuditLog, CertificateSnapshot
+from app.models.database import (
+    AuditLog,
+    CertificateCollectionSnapshot,
+    CertificateEnrollmentProfile,
+    CertificateSnapshot,
+)
 from app.services.certificate_escrow_service import CertificateEscrowService
 from app.services.certificate_sync_service import CertificateSyncService
 from app.services.keyfactor_client import REVOCATION_REASONS
@@ -89,6 +94,30 @@ def _schedule_sync(collection_id: int | None, *, triggered_by: str = "mutation",
         asyncio.create_task(_bg_sync(collection_id, triggered_by=triggered_by, skip_if_running=skip_if_running))
 
 
+async def _enrollment_sync_target(
+    db: AsyncSession | None, collection_id: int | None, owner_role: str | None
+) -> int | None:
+    """Collection to refresh after enrollment: the caller's, else the one named after the owner role.
+
+    AT&T collections share their name with the Keyfactor owner role (e.g. AP-KF-ATTCC-31599),
+    so a new certificate lands in that collection.
+    """
+    if collection_id is not None:
+        return collection_id
+    if db is None or not owner_role or not owner_role.strip():
+        return None
+    try:
+        result = await db.execute(
+            select(CertificateCollectionSnapshot.collection_id).where(
+                func.lower(CertificateCollectionSnapshot.name) == owner_role.strip().lower()
+            )
+        )
+        return result.scalars().first()
+    except Exception as exc:  # pragma: no cover - cache lookup is best effort
+        logger.warning("cert_enroll_sync_target_lookup_failed", error=str(exc)[:200])
+        return None
+
+
 # ── Request models ─────────────────────────────────────────────────────
 
 
@@ -96,9 +125,21 @@ class EnrollRequest(BaseModel):
     """Enroll a new certificate via CSR or PFX enrollment."""
 
     enrollment_type: str = Field(..., description="'csr' or 'pfx'")
-    certificate_authority: str = Field(..., min_length=1)
-    template: str = Field(..., min_length=1)
+    certificate_authority: str = Field(default="", description="Blank lets Keyfactor auto-select the pattern's CA")
+    template: str = Field(default="", description="Template short name; optional when enrollment_pattern_id is set")
+    enrollment_pattern_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Keyfactor enrollment pattern id. Required for templates that have no default "
+            "enrollment pattern; takes precedence over template."
+        ),
+    )
     include_chain: bool = Field(default=True)
+    collection_id: int | None = Field(
+        default=None,
+        description="Collection to refresh after enrollment; defaults to the one named after owner_role_name",
+    )
     sans: dict[str, list[str]] | None = Field(
         default=None,
         description="Subject alternative names keyed by type, e.g. {'dns': ['a.example.com']}",
@@ -111,8 +152,9 @@ class EnrollRequest(BaseModel):
     # PFX enrollment fields (matching Keyfactor PFX Enrollment form)
     subject: str | None = Field(default=None, description="Subject DN (required for pfx enrollment)")
     password: str | None = Field(default=None, description="PFX password (min 12 chars for pfx enrollment)")
-    key_type: str = Field(default="RSA")
-    key_length: int = Field(default=4096, ge=2048, le=8192)
+    key_type: str = Field(default="RSA", description="RSA or ECC")
+    key_length: int = Field(default=4096, ge=256, le=8192)
+    curve: str | None = Field(default=None, description="Elliptic curve OID for ECC keys, e.g. 1.3.132.0.34")
 
     # Subject information fields (PFX enrollment)
     common_name: str | None = Field(default=None, description="Common Name (CN)")
@@ -147,6 +189,13 @@ class EnrollRequest(BaseModel):
         if v not in ("csr", "pfx"):
             raise ValueError("enrollment_type must be 'csr' or 'pfx'")
         return v
+
+    @model_validator(mode="after")
+    def _template_or_pattern(self) -> EnrollRequest:
+        self.template = self.template.strip()
+        if not self.template and self.enrollment_pattern_id is None:
+            raise ValueError("template or enrollment_pattern_id is required")
+        return self
 
 
 class RenewRequest(BaseModel):
@@ -304,13 +353,83 @@ class UpdateMetadataRequest(BaseModel):
         return v
 
 
+# Key material must never reach the profile table: a profile is shared and
+# long-lived, a PFX password and a CSR are neither.
+_PROFILE_FORBIDDEN_KEYS = {"password", "certificate_password", "csr", "pfx_base64", "private_key"}
+
+
+class EnrollmentProfileRequest(BaseModel):
+    """A saved set of enrollment defaults, so a request only needs a CN and SANs."""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(default="", max_length=1000)
+    shared: bool = Field(default=True, description="Visible to everyone; false keeps it private to the creator")
+    defaults: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Enrollment form defaults keyed by field name, e.g. template, certificate_authority, "
+            "organization, environment, mots_profile_id"
+        ),
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _trimmed_name(cls, v: str) -> str:
+        name = v.strip()
+        if not name:
+            raise ValueError("name must not be blank")
+        return name
+
+    @field_validator("defaults")
+    @classmethod
+    def _no_key_material(cls, v: dict[str, Any]) -> dict[str, Any]:
+        found = sorted(k for k in v if k.lower() in _PROFILE_FORBIDDEN_KEYS)
+        if found:
+            raise ValueError(f"defaults must not contain key material: {', '.join(found)}")
+        return v
+
+
 # ── Helpers ────────────────────────────────────────────────────────────
+
+
+def _escape_dn_value(value: str) -> str:
+    """Escape an attribute value per RFC 4514 (e.g. ``AT&T Services, Inc.`` -> ``AT&T Services\\, Inc.``)."""
+    escaped = "".join(f"\\{ch}" if ch in '\\,+"<>;=' else ch for ch in value)
+    if escaped.startswith((" ", "#")):
+        escaped = "\\" + escaped
+    if escaped.endswith(" ") and not escaped.endswith("\\ "):
+        escaped = escaped[:-1] + "\\ "
+    return escaped
+
+
+def _build_subject_dn(*parts: tuple[str, str | None]) -> str:
+    """Join ``(attribute, value)`` pairs into a DN, skipping blanks and escaping values."""
+    return ",".join(f"{attr}={_escape_dn_value(value.strip())}" for attr, value in parts if value and value.strip())
 
 
 def _raise_http(exc: CertificateServiceError) -> NoReturn:
     """Translate a domain error to a sanitized HTTP response."""
     code = exc.status_code
     message = exc.message or ""
+    if "no default enrollment pattern" in message.lower():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "This template has no default enrollment pattern in Keyfactor Command. Enter the "
+                "Enrollment Pattern ID for it (Keyfactor Command > Enrollment Patterns), or ask a "
+                "Keyfactor administrator to mark one of its patterns as the template default. "
+                f"Keyfactor reported: {message}"
+            ),
+        )
+    if "requires the certificate to have an owner" in message.lower():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Keyfactor requires a certificate owner. Enter the Owner Role Name — the Keyfactor "
+                "security role that owns your collection's certificates (e.g. AP-KF-ATTCC-31599). "
+                f"Keyfactor reported: {message}"
+            ),
+        )
     if "suspended workflow" in message.lower():
         # A previous renewal attempt left a pending (suspended) Keyfactor workflow
         # on this certificate, which blocks new renewal requests until resolved.
@@ -920,6 +1039,30 @@ async def list_certificate_authorities(
         _raise_http(exc)
 
 
+@router.get("/enrollment-patterns")
+async def list_enrollment_patterns(
+    user: UserContext = Depends(get_current_user),
+    service: CertificateService = Depends(_get_service),
+) -> list[dict[str, Any]]:
+    """Return enrollment patterns available for enrollment."""
+    try:
+        return await service.list_enrollment_patterns()
+    except CertificateServiceError as exc:
+        _raise_http(exc)
+
+
+@router.get("/metadata-fields")
+async def list_metadata_fields(
+    user: UserContext = Depends(get_current_user),
+    service: CertificateService = Depends(_get_service),
+) -> list[dict[str, Any]]:
+    """Return the certificate metadata fields shown on enrollment, with allowed values."""
+    try:
+        return await service.list_enrollment_metadata_fields()
+    except CertificateServiceError as exc:
+        _raise_http(exc)
+
+
 @router.get("/audit-history")
 async def get_certificate_audit_history(
     days: int = Query(default=90, ge=1, le=365, description="Number of days of history"),
@@ -946,6 +1089,9 @@ async def get_certificate_audit_history(
         "cert_alert_run",
         "cert_key_escrow",
         "load_certificate_to_akv",
+        "create_certificate_enrollment_profile",
+        "update_certificate_enrollment_profile",
+        "delete_certificate_enrollment_profile",
     )
     since = datetime.utcnow() - timedelta(days=days)
 
@@ -1330,6 +1476,183 @@ async def delete_alert_config(
     return {"id": config_id, "status": "deleted"}
 
 
+# ── Saved enrollment profiles ──────────────────────────────────────────
+
+
+def _profile_payload(profile: CertificateEnrollmentProfile) -> dict[str, Any]:
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "description": profile.description or "",
+        "template": profile.template or "",
+        "certificate_authority": profile.certificate_authority or "",
+        "defaults": profile.defaults or {},
+        "shared": not profile.owner_user_id,
+        "owner_user_id": profile.owner_user_id or "",
+        "created_by": profile.created_by or "",
+        "created_at": profile.created_at.isoformat() if profile.created_at else None,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
+
+
+async def _load_profile(db: AsyncSession, profile_id: int, user: UserContext) -> CertificateEnrollmentProfile:
+    """Return a profile the user may modify, else raise 404/403."""
+    result = await db.execute(select(CertificateEnrollmentProfile).where(CertificateEnrollmentProfile.id == profile_id))
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Enrollment profile not found")
+    if profile.owner_user_id and profile.owner_user_id != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This enrollment profile is private to another user.",
+        )
+    return profile
+
+
+@router.get("/enrollment-profiles")
+async def list_enrollment_profiles(
+    user: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Return the shared enrollment profiles plus the caller's private ones."""
+    if db is None:
+        return []
+    result = await db.execute(
+        select(CertificateEnrollmentProfile)
+        .where(CertificateEnrollmentProfile.owner_user_id.in_(["", user.user_id]))
+        .order_by(CertificateEnrollmentProfile.name)
+    )
+    return [_profile_payload(p) for p in result.scalars().all()]
+
+
+@router.post("/enrollment-profiles", status_code=status.HTTP_201_CREATED)
+async def create_enrollment_profile(
+    payload: EnrollmentProfileRequest,
+    request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Save a reusable set of enrollment defaults."""
+    if db is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is unavailable")
+
+    owner = "" if payload.shared else user.user_id
+    duplicate = await db.execute(
+        select(CertificateEnrollmentProfile.id)
+        .where(CertificateEnrollmentProfile.owner_user_id == owner)
+        .where(CertificateEnrollmentProfile.name == payload.name)
+    )
+    if duplicate.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An enrollment profile named '{payload.name}' already exists.",
+        )
+
+    profile = CertificateEnrollmentProfile(
+        name=payload.name,
+        description=payload.description.strip(),
+        template=str(payload.defaults.get("template") or "") or None,
+        certificate_authority=str(payload.defaults.get("certificate_authority") or "") or None,
+        defaults=payload.defaults,
+        owner_user_id=owner,
+        created_by=user.email or user.user_id,
+        updated_by=user.email or user.user_id,
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="create_certificate_enrollment_profile",
+        resource_id=str(profile.id),
+        summary=f"Created enrollment profile '{profile.name}'",
+        outcome="success",
+        details={"profile_name": profile.name, "shared": payload.shared, "template": profile.template},
+    )
+    return _profile_payload(profile)
+
+
+@router.put("/enrollment-profiles/{profile_id}")
+async def update_enrollment_profile(
+    profile_id: int,
+    payload: EnrollmentProfileRequest,
+    request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Replace a saved enrollment profile's defaults."""
+    if db is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is unavailable")
+
+    profile = await _load_profile(db, profile_id, user)
+    owner = "" if payload.shared else user.user_id
+    duplicate = await db.execute(
+        select(CertificateEnrollmentProfile.id)
+        .where(CertificateEnrollmentProfile.owner_user_id == owner)
+        .where(CertificateEnrollmentProfile.name == payload.name)
+        .where(CertificateEnrollmentProfile.id != profile_id)
+    )
+    if duplicate.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An enrollment profile named '{payload.name}' already exists.",
+        )
+
+    profile.name = payload.name
+    profile.description = payload.description.strip()
+    profile.template = str(payload.defaults.get("template") or "") or None
+    profile.certificate_authority = str(payload.defaults.get("certificate_authority") or "") or None
+    profile.defaults = payload.defaults
+    profile.owner_user_id = owner
+    profile.updated_by = user.email or user.user_id
+    await db.commit()
+    await db.refresh(profile)
+
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="update_certificate_enrollment_profile",
+        resource_id=str(profile.id),
+        summary=f"Updated enrollment profile '{profile.name}'",
+        outcome="success",
+        details={"profile_name": profile.name, "shared": payload.shared, "template": profile.template},
+    )
+    return _profile_payload(profile)
+
+
+@router.delete("/enrollment-profiles/{profile_id}")
+async def delete_enrollment_profile(
+    profile_id: int,
+    request: Request,
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Delete a saved enrollment profile."""
+    if db is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is unavailable")
+
+    profile = await _load_profile(db, profile_id, user)
+    name = profile.name
+    await db.delete(profile)
+    await db.commit()
+
+    await _write_audit(
+        db,
+        request=request,
+        user=user,
+        action="delete_certificate_enrollment_profile",
+        resource_id=str(profile_id),
+        summary=f"Deleted enrollment profile '{name}'",
+        outcome="success",
+        details={"profile_name": name},
+    )
+    return {"id": profile_id, "deleted": True}
+
+
 @router.get("/{certificate_id}")
 async def get_certificate(
     certificate_id: int,
@@ -1363,6 +1686,8 @@ async def enroll_certificate(
                 csr=payload.csr,
                 certificate_authority=payload.certificate_authority,
                 template=payload.template,
+                enrollment_pattern_id=payload.enrollment_pattern_id,
+                owner_role_name=payload.owner_role_name,
                 sans=payload.sans,
                 metadata=payload.metadata,
                 include_chain=payload.include_chain,
@@ -1372,18 +1697,14 @@ async def enroll_certificate(
             # Build subject DN from individual fields if not provided directly
             subject_dn = payload.subject
             if not subject_dn and payload.common_name:
-                parts = [f"CN={payload.common_name}"]
-                if payload.organization:
-                    parts.append(f"O={payload.organization}")
-                if payload.organizational_unit:
-                    parts.append(f"OU={payload.organizational_unit}")
-                if payload.city:
-                    parts.append(f"L={payload.city}")
-                if payload.state:
-                    parts.append(f"ST={payload.state}")
-                if payload.country:
-                    parts.append(f"C={payload.country}")
-                subject_dn = ",".join(parts)
+                subject_dn = _build_subject_dn(
+                    ("CN", payload.common_name),
+                    ("O", payload.organization),
+                    ("OU", payload.organizational_unit),
+                    ("L", payload.city),
+                    ("ST", payload.state),
+                    ("C", payload.country),
+                )
 
             if not subject_dn or not payload.password:
                 raise HTTPException(
@@ -1414,9 +1735,12 @@ async def enroll_certificate(
                 subject=subject_dn,
                 certificate_authority=payload.certificate_authority,
                 template=payload.template,
+                enrollment_pattern_id=payload.enrollment_pattern_id,
+                owner_role_name=payload.owner_role_name,
                 password=payload.password,
                 key_type=payload.key_type,
                 key_length=payload.key_length,
+                curve=payload.curve,
                 sans=payload.sans,
                 metadata=merged_metadata or None,
                 include_chain=payload.include_chain,
@@ -1438,6 +1762,7 @@ async def enroll_certificate(
                 "common_name": payload.common_name or None,
                 "enrollment_type": payload.enrollment_type,
                 "template": payload.template,
+                "enrollment_pattern_id": payload.enrollment_pattern_id,
             },
         )
         _raise_http(exc)
@@ -1449,12 +1774,16 @@ async def enroll_certificate(
         user=user,
         action="enroll_certificate",
         resource_id=str(result.get("certificate_id") or target),
-        summary=(f"Enrolled {enrolled_name or 'certificate'} ({payload.enrollment_type}) via {payload.template}"),
+        summary=(
+            f"Enrolled {enrolled_name or 'certificate'} ({payload.enrollment_type}) via "
+            f"{payload.template or f'enrollment pattern {payload.enrollment_pattern_id}'}"
+        ),
         outcome="success",
         details={
             "common_name": enrolled_name,
             "enrollment_type": payload.enrollment_type,
             "template": payload.template,
+            "enrollment_pattern_id": payload.enrollment_pattern_id,
             "certificate_authority": payload.certificate_authority,
             "thumbprint": result.get("thumbprint"),
         },
@@ -1469,7 +1798,12 @@ async def enroll_certificate(
         source="enroll",
         common_name=enrolled_name,
     )
-    _schedule_sync(None, triggered_by="mutation")
+    sync_target = await _enrollment_sync_target(db, payload.collection_id, payload.owner_role_name)
+    if sync_target is not None:
+        _schedule_sync(sync_target, triggered_by="mutation")
+    else:
+        # The new certificate's collection is unknown, so only a full refresh can surface it.
+        _schedule_sync(None, triggered_by="mutation")
     return result
 
 

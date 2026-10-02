@@ -24,6 +24,7 @@ from typing import Any, TypeVar
 import structlog
 from cryptography import x509
 
+from app.core.config import settings
 from app.services.keyfactor_client import (
     REVOCATION_REASONS,
     KeyfactorClient,
@@ -320,6 +321,122 @@ def normalize_certificate(cert: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _template_or_pattern(template: str, enrollment_pattern_id: int | None) -> dict[str, Any]:
+    """Enrollment selector: the pattern id when given, else the legacy template name.
+
+    Keyfactor resolves a bare template to its default enrollment pattern and rejects
+    the request when the template has none, so an explicit pattern id wins.
+    """
+    if enrollment_pattern_id is not None:
+        return {"EnrollmentPatternId": enrollment_pattern_id}
+    return {"Template": template}
+
+
+def _ca_enrollment_value(ca: dict[str, Any]) -> str:
+    """Return the ``HostName\\LogicalName`` string Keyfactor enrollment expects."""
+    logical = str(ca.get("LogicalName") or ca.get("Name") or "").strip()
+    host = str(ca.get("HostName") or "").strip()
+    if "\\" in logical:
+        return logical
+    return f"{host}\\{logical}" if host and logical else logical
+
+
+def _configured_default_authorities() -> list[dict[str, Any]]:
+    """The single CA from ``KEYFACTOR_DEFAULT_CA``, or nothing if unset."""
+    value = settings.KEYFACTOR_DEFAULT_CA.strip()
+    if not value:
+        return []
+    host, _, logical = value.rpartition("\\")
+    logical = logical or value
+    return [
+        {
+            "id": 0,
+            "name": logical,
+            "logical_name": logical,
+            "host_name": host,
+            "value": value,
+            "source": "configured-default",
+        }
+    ]
+
+
+def _configured_default_templates() -> list[dict[str, Any]]:
+    """The single template from ``KEYFACTOR_DEFAULT_TEMPLATE``, or nothing if unset."""
+    name = settings.KEYFACTOR_DEFAULT_TEMPLATE.strip()
+    if not name:
+        return []
+    return [
+        {
+            "id": 0,
+            "common_name": name,
+            "template_name": name,
+            "oid": "",
+            "key_size": "",
+            "key_type": "",
+            "source": "configured-default",
+        }
+    ]
+
+
+# Keyfactor MetadataField DataType and Enrollment enums.
+_METADATA_TYPES = {1: "string", 2: "integer", 3: "date", 4: "boolean", 5: "choice", 6: "text", 7: "email"}
+_METADATA_REQUIRED = 1
+_METADATA_HIDDEN = 2
+
+
+def _configured_enrollment_patterns() -> list[dict[str, Any]]:
+    """Patterns from ``KEYFACTOR_ENROLLMENT_PATTERNS`` (``id:name|template``); malformed entries are skipped."""
+    patterns: list[dict[str, Any]] = []
+    for entry in settings.KEYFACTOR_ENROLLMENT_PATTERNS.split(","):
+        raw_id, sep, rest = entry.partition(":")
+        name, _, template_name = rest.partition("|")
+        raw_id, name = raw_id.strip(), name.strip()
+        if not sep or not raw_id.isdigit() or not name or int(raw_id) < 1:
+            continue
+        patterns.append(
+            {"id": int(raw_id), "name": name, "template_name": template_name.strip(), "source": "configured"}
+        )
+    return patterns
+
+
+def _template_policy(template: dict[str, Any]) -> dict[str, Any]:
+    """Group, allowed key algorithms and CAs for a PFX-context template."""
+    policy = template.get("EnrollmentTemplatePolicy")
+    key_info = (policy.get("KeyInfo") if isinstance(policy, dict) else None) or {}
+    algorithms: list[dict[str, Any]] = []
+    # Keyfactor reports ECDSA in policy but takes KeyType "ECC" on enrollment.
+    for policy_key, key_type in (("RSA", "RSA"), ("ECDSA", "ECC")):
+        info = key_info.get(policy_key) or {}
+        sizes = [int(b) for b in info.get("bit_lengths") or [] if str(b).isdigit()]
+        curves = [str(c) for c in info.get("curves") or [] if c]
+        if sizes or curves:
+            algorithms.append({"name": key_type, "key_sizes": sizes, "curves": curves})
+    return {
+        "group": template.get("Forest") or "",
+        "key_algorithms": algorithms,
+        "certificate_authorities": [
+            str(ca["Name"]) for ca in template.get("CAs") or [] if isinstance(ca, dict) and ca.get("Name")
+        ],
+    }
+
+
+def _with_template_policy(patterns: list[dict[str, Any]], templates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach each pattern's template policy, matched on template or pattern name."""
+    index: dict[str, dict[str, Any]] = {}
+    for t in templates:
+        if not isinstance(t, dict):
+            continue
+        for key in (t.get("Name"), t.get("DisplayName")):
+            if key:
+                index.setdefault(str(key).strip().lower(), t)
+    empty: dict[str, Any] = {"group": "", "key_algorithms": [], "certificate_authorities": []}
+    enriched = []
+    for p in patterns:
+        match = index.get(p["template_name"].lower()) or index.get(p["name"].lower())
+        enriched.append({**p, **(_template_policy(match) if match else empty)})
+    return enriched
+
+
 class CertificateService:
     """High-level certificate lifecycle operations."""
 
@@ -382,14 +499,19 @@ class CertificateService:
         sans: dict[str, list[str]] | None,
         metadata: dict[str, Any] | None,
         include_chain: bool,
+        enrollment_pattern_id: int | None = None,
+        owner_role_name: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "CSR": csr,
-            "CertificateAuthority": certificate_authority,
-            "Template": template,
+            **_template_or_pattern(template, enrollment_pattern_id),
             "IncludeChain": include_chain,
             "Timestamp": datetime.now(UTC).isoformat(),
         }
+        if certificate_authority.strip():
+            payload["CertificateAuthority"] = certificate_authority.strip()
+        if owner_role_name and owner_role_name.strip():
+            payload["OwnerRoleName"] = owner_role_name.strip()
         normalized_sans = _normalize_san_keys(sans)
         if normalized_sans:
             payload["SANs"] = normalized_sans
@@ -410,17 +532,26 @@ class CertificateService:
         sans: dict[str, list[str]] | None,
         metadata: dict[str, Any] | None,
         include_chain: bool,
+        enrollment_pattern_id: int | None = None,
+        owner_role_name: str | None = None,
+        curve: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "Subject": subject,
-            "CertificateAuthority": certificate_authority,
-            "Template": template,
+            **_template_or_pattern(template, enrollment_pattern_id),
             "Password": password,
             "KeyType": key_type,
             "KeyLength": key_length,
             "IncludeChain": include_chain,
             "Timestamp": datetime.now(UTC).isoformat(),
         }
+        # Blank means Keyfactor's "Auto-Select": the pattern picks the CA.
+        if certificate_authority.strip():
+            payload["CertificateAuthority"] = certificate_authority.strip()
+        if curve and curve.strip():
+            payload["Curve"] = curve.strip()
+        if owner_role_name and owner_role_name.strip():
+            payload["OwnerRoleName"] = owner_role_name.strip()
         normalized_sans = _normalize_san_keys(sans)
         if normalized_sans:
             payload["SANs"] = normalized_sans
@@ -667,9 +798,13 @@ class CertificateService:
         ]
 
     async def list_templates(self) -> list[dict[str, Any]]:
-        """Return enrollment templates."""
-        raw = await self._guard(self._client.get_enrollment_templates())
-        return [
+        """Return enrollment templates, falling back to the configured default.
+
+        See :meth:`list_certificate_authorities` for why enumeration failures
+        degrade instead of raising.
+        """
+        raw = await self._list_or_empty(self._client.get_enrollment_templates(), what="templates")
+        templates = [
             {
                 "id": t.get("Id"),
                 "common_name": t.get("CommonName") or t.get("Name") or "",
@@ -677,23 +812,96 @@ class CertificateService:
                 "oid": t.get("Oid") or "",
                 "key_size": t.get("KeySize") or "",
                 "key_type": t.get("KeyType") or "",
+                "source": "keyfactor",
             }
             for t in raw
             if isinstance(t, dict)
         ]
+        return templates or _configured_default_templates()
 
     async def list_certificate_authorities(self) -> list[dict[str, Any]]:
-        """Return available CAs."""
-        raw = await self._guard(self._client.get_certificate_authorities())
-        return [
+        """Return available CAs, falling back to the configured default.
+
+        Listing CAs needs a Keyfactor permission (``CertificateAuthorities:
+        Read``) that the portal's service account is frequently not granted even
+        when it is allowed to enroll. Raising there empties the dropdown and
+        blocks enrollment outright, so the failure degrades to
+        ``KEYFACTOR_DEFAULT_CA`` and the entry is tagged
+        ``source="configured-default"`` for the UI to explain itself.
+
+        ``value`` is what enrollment must send: Keyfactor identifies a CA as
+        ``HostName\\LogicalName``, not by its display name.
+        """
+        raw = await self._list_or_empty(self._client.get_certificate_authorities(), what="authorities")
+        authorities = [
             {
                 "id": ca.get("Id"),
                 "name": ca.get("Name") or ca.get("LogicalName") or "",
+                "logical_name": ca.get("LogicalName") or ca.get("Name") or "",
                 "host_name": ca.get("HostName") or "",
+                "value": _ca_enrollment_value(ca),
+                "source": "keyfactor",
             }
             for ca in raw
             if isinstance(ca, dict)
         ]
+        return [a for a in authorities if a["value"]] or _configured_default_authorities()
+
+    async def list_enrollment_patterns(self) -> list[dict[str, Any]]:
+        """Return enrollment patterns, falling back to ``KEYFACTOR_ENROLLMENT_PATTERNS``."""
+        raw = await self._list_or_empty(self._client.get_enrollment_patterns(), what="enrollment_patterns")
+        patterns: list[dict[str, Any]] = []
+        for p in raw:
+            if not isinstance(p, dict) or p.get("Id") is None:
+                continue
+            template = p.get("Template") if isinstance(p.get("Template"), dict) else {}
+            patterns.append(
+                {
+                    "id": p.get("Id"),
+                    "name": p.get("Name") or "",
+                    "template_name": template.get("TemplateName") or template.get("CommonName") or "",
+                    "source": "keyfactor",
+                }
+            )
+        patterns = patterns or _configured_enrollment_patterns()
+        if not patterns:
+            return []
+        templates = await self._list_or_empty(self._client.get_pfx_enrollment_context(), what="pfx_context")
+        return _with_template_policy(patterns, templates)
+
+    async def list_enrollment_metadata_fields(self) -> list[dict[str, Any]]:
+        """Metadata fields shown on enrollment, with Keyfactor's allowed options and validation.
+
+        Keyfactor's ``Enrollment`` flag is 0 = optional, 1 = required, 2 = hidden;
+        hidden fields are left out.
+        """
+        raw = await self._list_or_empty(self._client.get_metadata_fields(), what="metadata_fields")
+        fields = []
+        for f in raw:
+            if not isinstance(f, dict) or not f.get("Name") or f.get("Enrollment") == _METADATA_HIDDEN:
+                continue
+            options = [o.strip() for o in str(f.get("Options") or "").split(",") if o.strip()]
+            fields.append(
+                {
+                    "name": str(f["Name"]),
+                    "data_type": _METADATA_TYPES.get(f.get("DataType"), "string"),
+                    "options": options,
+                    "hint": f.get("Hint") or "",
+                    "validation": f.get("Validation") or "",
+                    "default_value": f.get("DefaultValue") or "",
+                    "required": f.get("Enrollment") == _METADATA_REQUIRED,
+                }
+            )
+        # Required first, keeping Keyfactor's order within each group.
+        return sorted(fields, key=lambda f: not f["required"])
+
+    async def _list_or_empty(self, coro: Awaitable[list[dict[str, Any]]], *, what: str) -> list[dict[str, Any]]:
+        """Run a Keyfactor list call, returning ``[]`` instead of raising."""
+        try:
+            return await self._guard(coro)
+        except CertificateServiceError as exc:
+            logger.warning("keyfactor_enrollment_list_unavailable", what=what, detail=exc.message)
+            return []
 
     # -- helpers --------------------------------------------------------
 

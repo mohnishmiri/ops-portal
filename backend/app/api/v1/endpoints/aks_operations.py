@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.aks_extended_endpoints import register_extended_routes
+from app.api.v1.endpoints.aks_workload_endpoints import register_workload_routes
 from app.auth import get_current_user, require_role
 from app.core.authz import require_capability
 from app.core.database import get_db, get_standalone_session
@@ -1991,3 +1992,5 @@ register_extended_routes(
     write_audit=_write_aks_audit_log,
     serialize_audit=_serialize_aks_audit_entry,
 )
+
+register_workload_routes(router, get_service=_get_service, write_audit=_write_aks_audit_log)

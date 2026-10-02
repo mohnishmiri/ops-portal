@@ -326,6 +326,22 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
     ("aks_deployment_scale", "Scale, restart, and delete deployments", "edit", ("write",), "aks_operations"),
     ("aks_secret_view", "Reveal Kubernetes secret values", "view", ("write",), "aks_operations"),
     ("aks_secret_update", "Create, update, or delete Kubernetes secrets", "edit", ("write",), "aks_operations"),
+    ("aks_workload_view", "View StatefulSets and DaemonSets", "view", ("read", "write"), "aks_operations"),
+    (
+        "aks_workload_manage",
+        "Scale, restart, update image/strategy, and roll back StatefulSets and DaemonSets",
+        "edit",
+        ("write",),
+        "aks_operations",
+    ),
+    ("aks_workload_delete", "Delete StatefulSets and DaemonSets", "edit", ("write",), "aks_operations"),
+    (
+        "aks_akv_sync_view",
+        "View Azure Key Vault to AKS secret sync status",
+        "view",
+        ("read", "write"),
+        "aks_operations",
+    ),
     # Azure resource power control.  Previously admin-only, which contradicted
     # both the Infrastructure Alerts UI (it renders the power buttons for any
     # user who can write) and the equivalent AKS cluster start/stop routes

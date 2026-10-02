@@ -92,6 +92,26 @@ CREATE TABLE IF NOT EXISTS cert_certificates (
 """
 
 
+# cert_enrollment_profiles stores its form defaults in JSONB, which SQLite
+# cannot compile.  TEXT holds the same JSON for the profile CRUD tests.
+_CERT_ENROLLMENT_PROFILES_SQLITE_DDL = """
+CREATE TABLE IF NOT EXISTS cert_enrollment_profiles (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                  VARCHAR(200) NOT NULL,
+    description           TEXT,
+    template              VARCHAR(500),
+    certificate_authority VARCHAR(500),
+    defaults              TEXT NOT NULL DEFAULT '{}',
+    owner_user_id         VARCHAR(255) NOT NULL DEFAULT '',
+    created_by            VARCHAR(255),
+    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by            VARCHAR(255),
+    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_cert_enroll_profile_owner_name UNIQUE (owner_user_id, name)
+)
+"""
+
+
 # ── In-memory SQLite engine ────────────────────────────────────────────────────
 
 
@@ -114,6 +134,7 @@ async def db_engine():
         await conn.run_sync(lambda c: CertificateCollectionSnapshot.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
         await conn.execute(text(_CERT_CERTIFICATES_SQLITE_DDL))
+        await conn.execute(text(_CERT_ENROLLMENT_PROFILES_SQLITE_DDL))
     yield engine
     await engine.dispose()
 

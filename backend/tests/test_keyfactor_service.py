@@ -181,6 +181,84 @@ async def test_enroll_pfx_passes_key_material_through_once():
     assert result["pfx_base64"] == "BLOB"
 
 
+async def test_enroll_pfx_sends_pattern_id_instead_of_template():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.enroll_pfx(
+        subject="CN=x",
+        certificate_authority="ca",
+        template="tmpl",
+        password="pw",
+        key_type="RSA",
+        key_length=4096,
+        sans=None,
+        metadata=None,
+        include_chain=True,
+        enrollment_pattern_id=12,
+    )
+    payload = client.calls[-1][1]
+    assert payload["EnrollmentPatternId"] == 12
+    assert "Template" not in payload
+
+
+async def test_enroll_pfx_sends_owner_role():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.enroll_pfx(
+        subject="CN=x",
+        certificate_authority="ca",
+        template="tmpl",
+        password="pw",
+        key_type="RSA",
+        key_length=4096,
+        sans=None,
+        metadata=None,
+        include_chain=True,
+        owner_role_name=" AP-KF-ATTCC-31599 ",
+    )
+    assert client.calls[-1][1]["OwnerRoleName"] == "AP-KF-ATTCC-31599"
+
+
+async def test_enroll_pfx_auto_select_ca_and_ecc_curve():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.enroll_pfx(
+        subject="CN=x",
+        certificate_authority="",
+        template="",
+        password="pw",
+        key_type="ECC",
+        key_length=384,
+        sans=None,
+        metadata=None,
+        include_chain=True,
+        enrollment_pattern_id=39,
+        curve="1.3.132.0.34",
+    )
+    payload = client.calls[-1][1]
+    assert "CertificateAuthority" not in payload
+    assert payload["KeyType"] == "ECC"
+    assert payload["Curve"] == "1.3.132.0.34"
+    assert payload["EnrollmentPatternId"] == 39
+
+
+async def test_enroll_csr_without_pattern_sends_template():
+    client = FakeClient()
+    svc = CertificateService(client=client)
+    await svc.enroll_csr(
+        csr="x",
+        certificate_authority="ca",
+        template="tmpl",
+        sans=None,
+        metadata=None,
+        include_chain=True,
+    )
+    payload = client.calls[-1][1]
+    assert payload["Template"] == "tmpl"
+    assert "EnrollmentPatternId" not in payload
+    assert "OwnerRoleName" not in payload
+
+
 async def test_revoke_rejects_invalid_reason():
     svc = CertificateService(client=FakeClient())
     with pytest.raises(CertificateServiceError) as exc:

@@ -4,8 +4,57 @@
 
 import React, { useMemo, useState } from "react";
 import { AutoRefreshIndicator, gridStyles, Spinner, type SortState } from "../../components/gridStyles";
+import type { useAksBackgroundSync } from "../../services/aksApi";
 
 export const AKS_PAGE_SIZE = 15;
+
+type BackgroundSyncState = ReturnType<typeof useAksBackgroundSync>;
+
+/** "Sync from Kubernetes" button — same look and behaviour as the Deployments tab. */
+export function SyncFromKubernetesButton({ sync, title }: { sync: BackgroundSyncState; title?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={() => sync.start(false)}
+      disabled={sync.isRunning}
+      title={title}
+      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={sync.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4"}>
+        <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+      </svg>
+      {sync.isRunning ? "Syncing…" : "Sync from Kubernetes"}
+    </button>
+  );
+}
+
+/** Source / last-sync row shown under the Deployments toolbar, shared by DB-cached tabs. */
+export function CachedSyncStatus({
+  source,
+  lastSync,
+  sync,
+  formatDate,
+}: {
+  source?: string;
+  lastSync?: string | null;
+  sync: BackgroundSyncState;
+  formatDate: (value: string) => string;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <span className={`px-2 py-1 rounded-full text-xs font-medium ${source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"}`}>
+        Source: {source === "db" ? "Database" : "Kubernetes Live"}
+      </span>
+      {lastSync ? (
+        <span className="text-sm text-gray-500">Last synced: {formatDate(lastSync)}</span>
+      ) : (
+        <span className="text-sm text-yellow-600">Not synced yet — cached table will update after background refresh</span>
+      )}
+      {sync.isRetrying && <span className="text-sm text-amber-600">Refresh delayed, retrying...</span>}
+      {!sync.isRunning && sync.error && <span className="text-sm text-red-600">{sync.error}</span>}
+    </div>
+  );
+}
 
 export function useSearchPagination<T>(items: T[], searchFn: (item: T, q: string) => boolean) {
   const [search, setSearch] = useState("");

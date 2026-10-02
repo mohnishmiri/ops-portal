@@ -21,9 +21,12 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import ssl
 import time
+from functools import lru_cache
 from typing import Any
 
+import certifi
 import httpx
 import structlog
 
@@ -85,6 +88,45 @@ class KeyfactorServerError(KeyfactorError):
     """Keyfactor returned a 5xx / upstream server error."""
 
 
+class KeyfactorConnectionError(KeyfactorError):
+    """Keyfactor or Azure AD could not be reached (DNS, proxy, TLS handshake)."""
+
+
+# ── TLS / transport helpers ────────────────────────────────────────────
+
+
+@lru_cache(maxsize=4)
+def _ssl_context_with_bundle(ca_bundle: str) -> ssl.SSLContext:
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    ctx.load_verify_locations(cafile=ca_bundle)
+    return ctx
+
+
+def _verify() -> ssl.SSLContext | bool:
+    """TLS verification setting for outbound Keyfactor / Azure AD calls."""
+    if not settings.KEYFACTOR_VERIFY_SSL:
+        return False
+    ca_bundle = settings.KEYFACTOR_CA_BUNDLE.strip()
+    if not ca_bundle:
+        return True
+    try:
+        return _ssl_context_with_bundle(ca_bundle)
+    except (OSError, ssl.SSLError) as exc:
+        raise KeyfactorConnectionError("KEYFACTOR_CA_BUNDLE could not be loaded as a PEM CA file.") from exc
+
+
+def _transport_failure(target: str, exc: Exception | None) -> KeyfactorError:
+    """Map a transport exception to a typed error that names the real cause."""
+    if exc is None or isinstance(exc, httpx.TimeoutException):
+        return KeyfactorTimeoutError(f"Timed out contacting {target}.")
+    if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+        return KeyfactorConnectionError(
+            f"TLS certificate verification failed contacting {target}. If a TLS-inspecting proxy is in "
+            "the path, set KEYFACTOR_CA_BUNDLE to the corporate root CA."
+        )
+    return KeyfactorConnectionError(f"Could not connect to {target}.")
+
+
 # ── Token provider ─────────────────────────────────────────────────────
 
 
@@ -129,7 +171,7 @@ class KeyfactorTokenProvider:
             try:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(settings.KEYFACTOR_TIMEOUT_SECONDS),
-                    verify=settings.KEYFACTOR_VERIFY_SSL,
+                    verify=_verify(),
                 ) as client:
                     resp = await client.post(settings.keyfactor_token_url, data=data)
                 if resp.status_code >= 400:
@@ -157,7 +199,7 @@ class KeyfactorTokenProvider:
             except KeyfactorAuthError:
                 raise
 
-        raise KeyfactorTimeoutError("Timed out contacting Azure AD for a Keyfactor token.") from last_exc
+        raise _transport_failure("Azure AD for a Keyfactor token", last_exc) from last_exc
 
 
 # ── Client ─────────────────────────────────────────────────────────────
@@ -238,7 +280,7 @@ class KeyfactorClient:
             try:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(settings.KEYFACTOR_TIMEOUT_SECONDS),
-                    verify=settings.KEYFACTOR_VERIFY_SSL,
+                    verify=_verify(),
                 ) as client:
                     resp = await client.request(
                         method,
@@ -268,7 +310,7 @@ class KeyfactorClient:
                     await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
                     continue
 
-        raise KeyfactorTimeoutError("Timed out contacting Keyfactor.") from last_exc
+        raise _transport_failure("Keyfactor", last_exc) from last_exc
 
     # -- operations -----------------------------------------------------
 
@@ -374,7 +416,7 @@ class KeyfactorClient:
         }
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(settings.KEYFACTOR_TIMEOUT_SECONDS),
-            verify=settings.KEYFACTOR_VERIFY_SSL,
+            verify=_verify(),
         ) as client:
             resp = await client.post(
                 url,
@@ -407,6 +449,25 @@ class KeyfactorClient:
         resp = await self._request("GET", "/CertificateAuthority")
         data = resp.json()
         return data if isinstance(data, list) else []
+
+    async def get_enrollment_patterns(self) -> list[dict[str, Any]]:
+        """Return enrollment patterns (needs Keyfactor ``/enrollment_pattern/read/``)."""
+        resp = await self._request("GET", "/EnrollmentPatterns", params={"ReturnLimit": 500})
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+    async def get_metadata_fields(self) -> list[dict[str, Any]]:
+        """Return certificate metadata field definitions (types, options, validation)."""
+        resp = await self._request("GET", "/MetadataFields")
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+    async def get_pfx_enrollment_context(self) -> list[dict[str, Any]]:
+        """Templates the caller may PFX-enroll with, including key policy and CAs."""
+        resp = await self._request("GET", "/Enrollment/PFX/Context/My")
+        data = resp.json()
+        templates = data.get("Templates") if isinstance(data, dict) else None
+        return templates if isinstance(templates, list) else []
 
 
 # Module-level singleton token provider so the token cache is shared across
