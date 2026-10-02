@@ -255,19 +255,8 @@ yellow "► Starting backend on port $BACKEND_PORT …"
 BACKEND_PID=$!
 echo "$BACKEND_PID" > "$BACKEND_DIR/.backend.pid"
 
-# Wait for backend health (max 30s, poll every 1s)
-MAX_WAIT=30
-WAITED=0
-while [[ $WAITED -lt $MAX_WAIT ]]; do
-  if curl --noproxy '*' -sf "http://127.0.0.1:$BACKEND_PORT/healthz" > /dev/null 2>&1; then
-    green "  ✓ Backend ready (${WAITED}s)"
-    break
-  fi
-  sleep 1
-  WAITED=$((WAITED + 1))
-done
-[[ $WAITED -ge $MAX_WAIT ]] && yellow "  ⚠ Backend health check timed out after ${MAX_WAIT}s"
-
+# Vite does not need the backend, so start it now instead of after the backend
+# health check — on slow Windows disks each server can take a minute to boot.
 yellow "► Starting frontend on port $FRONTEND_PORT …"
 (
   cd "$FRONTEND_DIR"
@@ -277,25 +266,81 @@ yellow "► Starting frontend on port $FRONTEND_PORT …"
 FRONTEND_PID=$!
 echo "$FRONTEND_PID" > "$FRONTEND_DIR/.frontend.pid"
 
-# Wait briefly for Vite to start (max 10s)
-WAITED=0
-while [[ $WAITED -lt 10 ]]; do
-  if curl --noproxy '*' -sf "http://127.0.0.1:$FRONTEND_PORT" > /dev/null 2>&1; then
-    green "  ✓ Frontend ready (${WAITED}s)"
-    break
-  fi
-  sleep 1
-  WAITED=$((WAITED + 1))
-done
-
 trap 'kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null; exit 0' INT TERM
+
+# Print the end of a server log so startup failures are visible in the terminal.
+show_log_tail() {
+  local log="$1"
+  if [[ -s "$log" ]]; then
+    yellow "    ── last 30 lines of $log ──"
+    tail -n 30 "$log" | sed 's/^/    /'
+  else
+    yellow "    ($log is empty)"
+  fi
+}
+
+# wait_for_http NAME URL PID MAX_SECONDS
+# Returns 0 once URL responds, 1 if the server process exited, 2 on timeout.
+wait_for_http() {
+  local name="$1" url="$2" pid="$3" max="$4" waited=0
+  while [[ $waited -lt $max ]]; do
+    if curl --noproxy '*' -sf "$url" > /dev/null 2>&1; then
+      green "  ✓ $name ready (${waited}s)"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+    if [[ $((waited % 15)) -eq 0 ]]; then
+      yellow "  … still waiting for $name (${waited}s)"
+    fi
+  done
+  return 2
+}
+
+BACKEND_WAIT="${BACKEND_WAIT:-180}"
+FRONTEND_WAIT="${FRONTEND_WAIT:-120}"
+ALL_READY=true
+
+# check_server NAME URL PID MAX_SECONDS LOG
+# Exits the launcher with the log tail if the server died; warns on timeout.
+check_server() {
+  local name="$1" url="$2" pid="$3" max="$4" log="$5" rc=0
+  wait_for_http "$name" "$url" "$pid" "$max" || rc=$?
+  case $rc in
+    0) ;;
+    1)
+      red "  ✗ $name exited during startup"
+      show_log_tail "$log"
+      kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+      exit 1
+      ;;
+    *)
+      yellow "  ⚠ $name not responding after ${max}s — it may still be starting"
+      show_log_tail "$log"
+      ALL_READY=false
+      ;;
+  esac
+}
+
+check_server "Backend" "http://127.0.0.1:$BACKEND_PORT/healthz" \
+  "$BACKEND_PID" "$BACKEND_WAIT" "$BACKEND_DIR/backend.log"
+# localhost, not 127.0.0.1: Vite binds to "localhost", which can resolve to ::1 only.
+check_server "Frontend" "http://localhost:$FRONTEND_PORT" \
+  "$FRONTEND_PID" "$FRONTEND_WAIT" "$FRONTEND_DIR/frontend.log"
 
 printf '\n'
 bold "============================================================"
-green "  Application is running"
+if [[ "$ALL_READY" == "true" ]]; then
+  green "  Application is running"
+else
+  yellow "  Application started, but not every server is responding yet"
+fi
 bold "============================================================"
-green "  Backend API : http://localhost:$BACKEND_PORT"
-green "  Frontend    : http://localhost:$FRONTEND_PORT"
+green "  Backend API : http://localhost:$BACKEND_PORT  (log: backend/backend.log)"
+green "  Frontend    : http://localhost:$FRONTEND_PORT  (log: frontend/frontend.log)"
 printf '\n'
 yellow "  Press Ctrl+C to stop both servers."
 wait

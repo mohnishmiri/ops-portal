@@ -38,6 +38,15 @@ export default defineConfig({
   },
   server: {
     port: 5177,
+    watch: {
+      // Native fs.watch on Windows network/mapped drives (e.g. H:) fails with
+      // "Error: UNKNOWN: unknown error, watch" (errno -4094), and the unhandled
+      // watcher error kills the dev server. Polling avoids fs.watch entirely.
+      usePolling: process.platform === "win32",
+      interval: 500,
+      // The launcher writes frontend.log into this directory while Vite runs.
+      ignored: ["**/*.log", "**/coverage/**"],
+    },
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8002",
