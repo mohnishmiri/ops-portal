@@ -3,7 +3,7 @@
  * page and tab against realistic API payloads and check the key affordances.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -180,5 +180,69 @@ describe("AccessManagementPage", () => {
     await waitFor(() =>
       expect(apiClient.put).toHaveBeenCalledWith("/access/admin/subscriptions/sub-2", { app_id: 10, tier: "nonprod" }),
     );
+  });
+});
+
+describe("KPI tiles open their list", () => {
+  it("Unplaced Subscriptions shows the Subscriptions tab filtered to unplaced rows", async () => {
+    mockSession(true);
+    renderPage(<AccessManagementPage />, "/access/manage?tab=projects");
+
+    const tile = await screen.findByRole("button", { name: "Show unplaced subscriptions" });
+    fireEvent.click(tile);
+
+    expect(await screen.findByText("ACC-NPRD-31599-ATTCC")).toBeInTheDocument();
+    expect(screen.queryByText("ACC-PROD-31599-ATTCC")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Subscriptions" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Show")).toHaveValue("unplaced");
+    expect(tile).toHaveAttribute("aria-pressed", "true");
+
+    // Choosing another view from the dropdown releases the tile.
+    fireEvent.change(screen.getByLabelText("Show"), { target: { value: "all" } });
+    expect(await screen.findByText("ACC-PROD-31599-ATTCC")).toBeInTheDocument();
+    expect(tile).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("Pending Requests returns to the pending queue from another tab", async () => {
+    mockSession(true);
+    renderPage(<AccessManagementPage />, "/access/manage?tab=subscriptions&view=unplaced");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show pending requests" }));
+
+    expect(screen.getByRole("tab", { name: /Requests/ })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("Pat Doe")).toBeInTheDocument();
+    expect(screen.getByLabelText("Status")).toHaveValue("pending");
+  });
+
+  it("tiles work from the keyboard", async () => {
+    mockSession(true);
+    renderPage(<AccessManagementPage />, "/access/manage");
+
+    const tile = await screen.findByRole("button", { name: "Show access grants" });
+    fireEvent.keyDown(tile, { key: "Enter" });
+
+    expect(screen.getByRole("tab", { name: "User Access" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("My Access: Pending Requests filters my requests until the chip is cleared", async () => {
+    mockSession(false);
+    const original = RESPONSES["/access/requests/mine"];
+    onTestFinished(() => {
+      RESPONSES["/access/requests/mine"] = original;
+    });
+    RESPONSES["/access/requests/mine"] = [
+      { ...REQUEST, items: [{ ...REQUEST.items[0], can_decide: false }] },
+      { ...REQUEST, id: 13, status: "cancelled", justification: "Old cancelled request",
+        items: [{ ...REQUEST.items[0], id: 32, status: "cancelled", can_decide: false }] },
+    ];
+    renderPage(<MyAccessPage />, "/access");
+
+    expect(await screen.findByText("Old cancelled request")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show my pending requests" }));
+
+    expect(screen.queryByText("Old cancelled request")).toBeNull();
+    expect(screen.getByText("Need ATTCC prod for on-call")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Pending only \(1\)/ }));
+    expect(await screen.findByText("Old cancelled request")).toBeInTheDocument();
   });
 });

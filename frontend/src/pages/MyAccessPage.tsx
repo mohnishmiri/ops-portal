@@ -8,7 +8,7 @@
  * panel.
  */
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
 import { SortableHeader, gridStyles } from "../components/gridStyles";
@@ -238,8 +238,12 @@ const MyRequestsGrid: React.FC<{
   isLoading: boolean;
   error: string | null;
   onCancel: (request: AccessRequest) => void;
-}> = ({ requests, isLoading, error, onCancel }) => {
-  const grid = useGridRows<AccessRequest, RequestSortKey>(requests, {
+  /** Set by the "Pending Requests" tile; the chip in the header clears it. */
+  pendingOnly?: boolean;
+  onShowAll?: () => void;
+}> = ({ requests, isLoading, error, onCancel, pendingOnly = false, onShowAll }) => {
+  const shown = pendingOnly ? requests.filter((request) => request.status === "pending") : requests;
+  const grid = useGridRows<AccessRequest, RequestSortKey>(shown, {
     matches: requestMatches,
     accessor: requestAccessor,
     initialSort: { key: "created_at", direction: "desc" },
@@ -264,7 +268,18 @@ const MyRequestsGrid: React.FC<{
         search={grid.search}
         onSearch={grid.setSearch}
         placeholder="Search requests…"
-      />
+      >
+        {pendingOnly && (
+          <button
+            type="button"
+            onClick={onShowAll}
+            className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+            title="Show all my requests"
+          >
+            Pending only ({shown.length}) <span aria-hidden="true">✕</span>
+          </button>
+        )}
+      </GridHeader>
       <div className="overflow-x-auto">
         <table className={gridStyles.table}>
           <thead className={gridStyles.head}>
@@ -344,7 +359,12 @@ const MyAccessPage: React.FC = () => {
   const { hasSubscriptionAccess, isSuperAdmin, adminProjectIds, refreshSession } = useSession();
   const [toast, setToast] = useState<ToastState | null>(null);
   const [cancelTarget, setCancelTarget] = useState<AccessRequest | null>(null);
+  const [pendingOnly, setPendingOnly] = useState(false);
+  const grantsRef = useRef<HTMLDivElement>(null);
+  const requestsRef = useRef<HTMLDivElement>(null);
   const closeToast = useCallback(() => setToast(null), []);
+  const scrollTo = (ref: React.RefObject<HTMLDivElement>) =>
+    ref.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
 
   // An approval or revocation since sign-in: bring the cached session (which
   // gates the module pages and the scope picker) in line with what the
@@ -463,6 +483,12 @@ const MyAccessPage: React.FC = () => {
           subtitle="awaiting an approver"
           icon={MetricCardIcons.calendar()}
           tone={(data?.pending_requests ?? 0) > 0 ? "amber" : "slate"}
+          onClick={() => {
+            setPendingOnly(true);
+            scrollTo(requestsRef);
+          }}
+          active={pendingOnly}
+          actionLabel="Show my pending requests"
         />
         <MetricCard
           title="Access Grants"
@@ -470,32 +496,40 @@ const MyAccessPage: React.FC = () => {
           subtitle={`level cap: ${LEVEL_LABELS[roleCeiling]} (Entra role)`}
           icon={MetricCardIcons.checkCircle()}
           tone="att"
+          onClick={() => scrollTo(grantsRef)}
+          actionLabel="Show my access grants"
         />
       </div>
 
       {noAccess && form}
 
-      <MyGrantsGrid
-        grants={data?.grants ?? []}
-        roleCeiling={roleCeiling}
-        isLoading={me.isLoading}
-        error={meError}
-        emptyText={
-          superAdmin
-            ? "No individual grants — as a Super Admin you already have access to every subscription."
-            : "You have no access grants yet. Request access below."
-        }
-      />
+      <div ref={grantsRef} className="scroll-mt-4">
+        <MyGrantsGrid
+          grants={data?.grants ?? []}
+          roleCeiling={roleCeiling}
+          isLoading={me.isLoading}
+          error={meError}
+          emptyText={
+            superAdmin
+              ? "No individual grants — as a Super Admin you already have access to every subscription."
+              : "You have no access grants yet. Request access below."
+          }
+        />
+      </div>
 
-      <MyRequestsGrid
-        requests={myRequests.data ?? []}
-        isLoading={myRequests.isLoading}
-        error={myRequests.isError ? formatAxiosError(myRequests.error, "Failed to load your requests") : null}
-        onCancel={(request) => {
-          cancelRequest.reset();
-          setCancelTarget(request);
-        }}
-      />
+      <div ref={requestsRef} className="scroll-mt-4">
+        <MyRequestsGrid
+          requests={myRequests.data ?? []}
+          isLoading={myRequests.isLoading}
+          error={myRequests.isError ? formatAxiosError(myRequests.error, "Failed to load your requests") : null}
+          onCancel={(request) => {
+            cancelRequest.reset();
+            setCancelTarget(request);
+          }}
+          pendingOnly={pendingOnly}
+          onShowAll={() => setPendingOnly(false)}
+        />
+      </div>
 
       {!noAccess && form}
 

@@ -14,7 +14,7 @@
  * (a 403 here carries a readable `detail`, surfaced inline).
  */
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
 import Toast, { type ToastState } from "../components/Toast";
@@ -51,6 +51,19 @@ const AccessManagementPage: React.FC = () => {
   const tabs = useMemo(() => TABS.filter((tab) => isSuperAdmin || !tab.superAdminOnly), [isSuperAdmin]);
   const requested = params.get("tab") as TabKey | null;
   const activeTab: TabKey = tabs.some((tab) => tab.key === requested) ? (requested as TabKey) : "requests";
+  const sectionRef = useRef<HTMLDivElement>(null);
+
+  // KPI tiles open their list: switch tab, apply the tile's filter (kept in
+  // the URL like the tab, so the view can be linked), and bring it into view.
+  const openView = useCallback(
+    (tab: TabKey, filter: Record<string, string> = {}) => {
+      setParams({ ...(tab === "requests" ? {} : { tab }), ...filter }, { replace: true });
+      sectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    },
+    [setParams],
+  );
+  const requestStatus = params.get("status") ?? "pending";
+  const placementView = params.get("view") ?? "all";
 
   const projects = useAdminProjects();
   const grants = useAdminGrants();
@@ -97,6 +110,9 @@ const AccessManagementPage: React.FC = () => {
           subtitle={`${decidable} line${decidable === 1 ? "" : "s"} you can decide`}
           icon={AccessIcons.inbox()}
           tone={decidable > 0 ? "amber" : "slate"}
+          onClick={() => openView("requests", { status: "pending" })}
+          active={activeTab === "requests" && requestStatus === "pending"}
+          actionLabel="Show pending requests"
         />
         <MetricCard
           title={isSuperAdmin ? "Projects" : "Your Projects"}
@@ -104,6 +120,10 @@ const AccessManagementPage: React.FC = () => {
           subtitle={`${projectList.reduce((total, project) => total + project.apps.length, 0)} apps`}
           icon={AccessIcons.folder()}
           tone="att"
+          // Project Admins have no Projects tab; their projects' grants are under User Access.
+          onClick={() => openView(isSuperAdmin ? "projects" : "users")}
+          active={isSuperAdmin && activeTab === "projects"}
+          actionLabel={isSuperAdmin ? "Show projects and apps" : "Show access in your projects"}
         />
         <MetricCard
           title="Access Grants"
@@ -111,6 +131,9 @@ const AccessManagementPage: React.FC = () => {
           subtitle={`${people} ${people === 1 ? "person" : "people"} with direct grants`}
           icon={MetricCardIcons.shield()}
           tone="blue"
+          onClick={() => openView("users")}
+          active={activeTab === "users"}
+          actionLabel="Show access grants"
         />
         {isSuperAdmin && (
           <MetricCard
@@ -119,6 +142,9 @@ const AccessManagementPage: React.FC = () => {
             subtitle="visible to Super Admins only"
             icon={MetricCardIcons.layers()}
             tone={unplaced > 0 ? "orange" : "emerald"}
+            onClick={() => openView("subscriptions", { view: "unplaced" })}
+            active={activeTab === "subscriptions" && placementView === "unplaced"}
+            actionLabel="Show unplaced subscriptions"
           />
         )}
       </div>
@@ -127,7 +153,7 @@ const AccessManagementPage: React.FC = () => {
       <ErrorNote message={projectsError} />
 
       {/* Tab bar */}
-      <div className="border-b border-gray-200">
+      <div ref={sectionRef} className="border-b border-gray-200 scroll-mt-4">
         <nav className="flex flex-wrap gap-1" role="tablist" aria-label="Access management sections">
           {tabs.map((tab) => (
             <button

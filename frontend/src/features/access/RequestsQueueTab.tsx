@@ -9,6 +9,7 @@
  */
 
 import React, { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { SortableHeader, gridStyles } from "../../components/gridStyles";
 import TierBadge from "../../components/TierBadge";
 import { formatAxiosError } from "../../services/apiErrors";
@@ -194,7 +195,21 @@ const DecisionDialog: React.FC<{
 };
 
 const RequestsQueueTab: React.FC<{ onNotify: (message: string) => void }> = ({ onNotify }) => {
-  const [status, setStatus] = useState<RequestStatusFilter>("pending");
+  // The status filter lives in `?status=` so the page's KPI tile can set it.
+  const [params, setParams] = useSearchParams();
+  const requestedStatus = params.get("status") as RequestStatusFilter | null;
+  const status: RequestStatusFilter =
+    requestedStatus && STATUS_FILTERS.includes(requestedStatus) ? requestedStatus : "pending";
+  const setStatus = (next: RequestStatusFilter) =>
+    setParams(
+      (prev) => {
+        const updated = new URLSearchParams(prev);
+        if (next === "pending") updated.delete("status");
+        else updated.set("status", next);
+        return updated;
+      },
+      { replace: true },
+    );
   const { data: requests = [], isLoading, isError, error } = useAdminRequests(status);
   const [target, setTarget] = useState<DecisionTarget | null>(null);
 

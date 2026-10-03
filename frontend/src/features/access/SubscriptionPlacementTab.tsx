@@ -8,6 +8,7 @@
  */
 
 import React, { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { SortableHeader, gridStyles } from "../../components/gridStyles";
 import TierBadge, { TIER_LABELS } from "../../components/TierBadge";
 import { formatAxiosError } from "../../services/apiErrors";
@@ -34,6 +35,7 @@ import {
 
 type Draft = { app_id: number | null; tier: Tier };
 type View = "all" | "unplaced" | "suggestion";
+const VIEWS: View[] = ["all", "unplaced", "suggestion"];
 type SortKey = "name" | "project" | "app" | "tier" | "suggestion";
 
 const currentTier = (row: SubscriptionPlacement): Tier => row.tier ?? row.suggested_tier ?? "prod";
@@ -48,7 +50,20 @@ const SubscriptionPlacementTab: React.FC<{
   const { data: rows = [], isLoading, isError, error } = useSubscriptionPlacements();
   const place = usePlaceSubscription();
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
-  const [view, setView] = useState<View>("all");
+  // The view lives in `?view=` so the page's "Unplaced" tile can set it.
+  const [params, setParams] = useSearchParams();
+  const requestedView = params.get("view") as View | null;
+  const view: View = requestedView && VIEWS.includes(requestedView) ? requestedView : "all";
+  const setView = (next: View) =>
+    setParams(
+      (prev) => {
+        const updated = new URLSearchParams(prev);
+        if (next === "all") updated.delete("view");
+        else updated.set("view", next);
+        return updated;
+      },
+      { replace: true },
+    );
   const [savingId, setSavingId] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
 

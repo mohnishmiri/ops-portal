@@ -81,6 +81,12 @@ export interface MetricCardProps {
   tone?: MetricCardTone;
   className?: string;
   valueClassName?: string;
+  /** Makes the card a control (e.g. "show these rows"). Keyboard: Enter / Space. */
+  onClick?: () => void;
+  /** Highlights the card while the view it opens is showing. */
+  active?: boolean;
+  /** Accessible name / tooltip for a clickable card, e.g. "Show unplaced subscriptions". */
+  actionLabel?: string;
 }
 
 export const MetricCard: React.FC<MetricCardProps> = ({
@@ -92,12 +98,39 @@ export const MetricCard: React.FC<MetricCardProps> = ({
   tone = "att",
   className = "",
   valueClassName = "",
+  onClick,
+  active = false,
+  actionLabel,
 }) => {
   const styles = toneStyles[tone];
+  // A div with role="button" rather than a <button>: the card's <p> content is
+  // not valid inside a button element.
+  const interactive = onClick
+    ? {
+        role: "button",
+        tabIndex: 0,
+        "aria-pressed": active,
+        "aria-label": actionLabel,
+        title: actionLabel,
+        onClick,
+        onKeyDown: (event: React.KeyboardEvent) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onClick();
+          }
+        },
+      }
+    : {};
+  const interactiveClass = onClick
+    ? `cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-att-400 ${
+        active ? "ring-2 ring-att-400" : ""
+      }`
+    : "";
 
   return (
     <div
-      className={`relative overflow-hidden rounded-2xl border border-att-100 bg-gradient-to-br from-white via-white to-att-50/70 p-5 shadow-sm shadow-att-100/40 ${className}`}
+      {...interactive}
+      className={`relative overflow-hidden rounded-2xl border border-att-100 bg-gradient-to-br from-white via-white to-att-50/70 p-5 shadow-sm shadow-att-100/40 ${interactiveClass} ${className}`}
     >
       <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${styles.accent}`} />
       <div className="flex items-start gap-3">
