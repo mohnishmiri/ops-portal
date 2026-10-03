@@ -36,7 +36,6 @@ import {
   useDeletePod,
   useTriggerCronJob,
   useCronJobDetail,
-  useDeploymentDetail,
   useConfigMapDetail,
   useCachedCronJobs,
   useScaleNodePool,
@@ -53,7 +52,6 @@ import {
   usePodContainers,
   AKSCluster,
   Deployment,
-  DeploymentDetail,
   PodMetrics,
   JobPod,
   CronJob,
@@ -80,6 +78,9 @@ import {
 } from "../features/aks/AKSExtendedTabs";
 import { JobsTab, JobFocus } from "../features/aks/JobsTab";
 import { WorkloadsTab } from "../features/aks/WorkloadsTab";
+import { DeploymentDetailModal } from "../features/aks/DeploymentDetailModal";
+import { PodDetailModal } from "../features/aks/PodDetailModal";
+import { DownloadLogsButton, LogArchiveProgress, useLogArchiveDownload } from "../features/aks/LogArchiveDownload";
 import { AkvSyncTab } from "../features/aks/AkvSyncTab";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import {
@@ -318,6 +319,8 @@ const AKSOperationsPage: React.FC = () => {
   const [podLogDialog, setPodLogDialog] = useState<PodMetrics | null>(null);
   const [podExecDialog, setPodExecDialog] = useState<PodMetrics | null>(null);
   const [podMetricsDialog, setPodMetricsDialog] = useState<PodMetrics | null>(null);
+  // Pod drill-down, opened from the Pods grid or any workload's pod list.
+  const [podDetail, setPodDetail] = useState<{ namespace: string; name: string } | null>(null);
   // Set when the user follows "View Job" after triggering a CronJob — the Jobs
   // tab consumes it once to pre-select and open that Job.
   const [jobFocus, setJobFocus] = useState<JobFocus>(null);
@@ -345,6 +348,8 @@ const AKSOperationsPage: React.FC = () => {
   // Toast notification
   const [toast, setToast] = useState<ToastState | null>(null);
   const showToast = useCallback((message: string, type: "success" | "error" = "success") => setToast({ message, type }), []);
+  // One complete-log archive download at a time, owned by the page so it outlives the modal that started it.
+  const logDownload = useLogArchiveDownload(showToast);
 
   // Generic confirmation dialog (replaces window.confirm)
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -1641,7 +1646,14 @@ const AKSOperationsPage: React.FC = () => {
               {pagedDeps.map((deployment) => (
                 <tr key={`${deployment.namespace}/${deployment.name}`} className={gridStyles.row}>
                   <td className={gridStyles.strongCell}>
-                    {deployment.name}
+                    <button
+                      type="button"
+                      onClick={() => setViewDeploymentDialog({ cluster_id: selectedCluster!.id, namespace: deployment.namespace, name: deployment.name })}
+                      className="text-left text-blue-600 hover:text-blue-800 hover:underline"
+                      title="View deployment details"
+                    >
+                      {deployment.name}
+                    </button>
                   </td>
                   <td className={gridStyles.cell}>{deployment.namespace}</td>
                   <td className={gridStyles.monoCell}>
@@ -1691,7 +1703,7 @@ const AKSOperationsPage: React.FC = () => {
                       <button
                         onClick={() => setViewDeploymentDialog({ cluster_id: selectedCluster!.id, namespace: deployment.namespace, name: deployment.name })}
                         className="p-2 text-slate-600 hover:bg-slate-50 rounded-lg"
-                        title="View Deployment YAML"
+                        title="View Details"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
                       </button>
@@ -1702,6 +1714,14 @@ const AKSOperationsPage: React.FC = () => {
                       >
                         {Icons.pod()}
                       </button>
+                      <DownloadLogsButton
+                        variant="icon"
+                        download={logDownload}
+                        downloadKey={`deployment:${deployment.namespace}/${deployment.name}`}
+                        request={{ clusterId: selectedCluster!.id, kind: "deployment", namespace: deployment.namespace, name: deployment.name }}
+                        label={`Deployment ${deployment.namespace}/${deployment.name}`}
+                        podCount={deployment.replicas === 0 && deployment.ready_replicas === 0 ? 0 : undefined}
+                      />
                       {canWrite && (
                       <>
                       <button
@@ -1982,6 +2002,30 @@ const AKSOperationsPage: React.FC = () => {
                 </option>
               ))}
             </select>
+            <DownloadLogsButton
+              download={logDownload}
+              downloadKey="pods-tab"
+              request={{
+                clusterId: selectedCluster.id,
+                kind: "pods",
+                pods: filteredPods.map((p) => ({ namespace: p.namespace, name: p.pod_name })),
+              }}
+              label={`${filteredPods.length} pod${filteredPods.length === 1 ? "" : "s"}`}
+              podCount={filteredPods.length}
+              confirm={(proceed) =>
+                setConfirmDialog({
+                  title: "Download complete pod logs",
+                  message:
+                    `Download the complete logs of ${filteredPods.length} pod${filteredPods.length === 1 ? "" : "s"}` +
+                    `${pSearch ? ` matching "${pSearch}"` : ""} in ${selectedNamespace ? `namespace ${selectedNamespace}` : "all namespaces"}?` +
+                    "\n\nEvery container's log since it started is included, plus the previous instance of restarted containers. " +
+                    "Large selections can take a few minutes.",
+                  confirmLabel: "Download",
+                  variant: "info",
+                  onConfirm: proceed,
+                })
+              }
+            />
             {canWrite && (
             <button
               onClick={() => podMetricsRefresh.start(true)}
@@ -2055,7 +2099,14 @@ const AKSOperationsPage: React.FC = () => {
                   return (
                   <tr key={`${pod.namespace}/${pod.pod_name}`} className={gridStyles.row}>
                     <td className={gridStyles.cell}>
-                      <div className="font-mono text-xs text-gray-800 truncate max-w-[180px]" title={pod.pod_name}>{pod.pod_name}</div>
+                      <button
+                        type="button"
+                        onClick={() => setPodDetail({ namespace: pod.namespace, name: pod.pod_name })}
+                        className="block font-mono text-xs text-blue-600 hover:text-blue-800 hover:underline truncate max-w-[180px] text-left"
+                        title={`${pod.pod_name} — view pod details`}
+                      >
+                        {pod.pod_name}
+                      </button>
                       {pod.pod_ip && <div className="text-xs text-gray-400">{pod.pod_ip}</div>}
                     </td>
                     <td className={gridStyles.cell}>{pod.namespace}</td>
@@ -3079,6 +3130,8 @@ const AKSOperationsPage: React.FC = () => {
               canManage={canWrite && hasCapability("AKS_WORKLOAD_MANAGE")}
               canDelete={canWrite && hasCapability("AKS_WORKLOAD_DELETE")}
               canDeletePod={canWrite && hasCapability("AKS_POD_DELETE")}
+              logDownload={logDownload}
+              onOpenPod={(pod) => setPodDetail({ namespace: pod.namespace, name: pod.pod_name })}
               onViewPodLogs={(pod) => setPodLogDialog(jobPodToPodMetrics(pod))}
               onDeletePod={(pod) => handleDeletePod(jobPodToPodMetrics(pod))}
             />
@@ -3131,8 +3184,33 @@ const AKSOperationsPage: React.FC = () => {
           <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
         )}
 
-      {/* View Deployment Detail Dialog */}
-      {viewDeploymentDialog && <DeploymentDetailDialog {...viewDeploymentDialog} onClose={() => setViewDeploymentDialog(null)} />}
+      {/* Deployment drill-down. Rendered before the pod detail and log viewer so those stack above it. */}
+      {viewDeploymentDialog && (
+        <DeploymentDetailModal
+          clusterId={viewDeploymentDialog.cluster_id}
+          namespace={viewDeploymentDialog.namespace}
+          name={viewDeploymentDialog.name}
+          formatDate={formatDate}
+          logDownload={logDownload}
+          canDeletePod={canWrite && hasCapability("AKS_POD_DELETE")}
+          onOpenPod={(pod) => setPodDetail({ namespace: pod.namespace, name: pod.pod_name })}
+          onViewPodLogs={(pod) => setPodLogDialog(jobPodToPodMetrics(pod))}
+          onDeletePod={(pod) => handleDeletePod(jobPodToPodMetrics(pod))}
+          onClose={() => setViewDeploymentDialog(null)}
+        />
+      )}
+      {podDetail && selectedCluster && (
+        <PodDetailModal
+          clusterId={selectedCluster.id}
+          namespace={podDetail.namespace}
+          name={podDetail.name}
+          formatDate={formatDate}
+          logDownload={logDownload}
+          onViewLogs={(pod) => setPodLogDialog(jobPodToPodMetrics(pod))}
+          onClose={() => setPodDetail(null)}
+        />
+      )}
+      <LogArchiveProgress download={logDownload} />
 
       {/* Generic Confirmation Modal */}
       {/* CronJob → Job handoff. A toast auto-dismisses, so the "View Job"
@@ -3922,43 +4000,6 @@ function CronJobDetailDialog({ cluster_id, namespace, name, onClose }: { cluster
         <div className="flex justify-end mt-4">
           <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Close</button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function DeploymentDetailDialog({ cluster_id, namespace, name, onClose }: { cluster_id: string; namespace: string; name: string; onClose: () => void }) {
-  const { data, isLoading, isError, error } = useDeploymentDetail(cluster_id, namespace, name);
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-[760px] max-h-[85vh] overflow-y-auto">
-        <div className="flex justify-between items-center mb-4">
-          <div>
-            <h3 className="text-lg font-semibold">Deployment YAML: {name}</h3>
-            <p className="text-sm text-gray-500">Namespace: {namespace}</p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
-        </div>
-        {isLoading ? (
-          <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading deployment YAML…</div>
-        ) : isError ? (
-          <div className="text-center py-8">
-            <div className="text-red-500 font-medium">Failed to load deployment YAML.</div>
-            <div className="text-xs text-gray-400 mt-2">{(error as Error)?.message || "Unknown error"}</div>
-          </div>
-        ) : data ? (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-              <div className="text-gray-500">Deployment</div><div className="font-medium">{data.name}</div>
-              <div className="text-gray-500">Namespace</div><div className="font-medium">{data.namespace}</div>
-            </div>
-            <div>
-              <div className="mb-2 text-sm font-medium text-gray-700">YAML Manifest</div>
-              <pre className="max-h-[55vh] overflow-auto rounded-lg bg-slate-950 p-4 text-xs leading-6 text-slate-100"><code>{data.yaml}</code></pre>
-            </div>
-          </div>
-        ) : null}
       </div>
     </div>
   );

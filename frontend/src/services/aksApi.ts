@@ -77,9 +77,76 @@ export interface Deployment {
   memory_limit?: string;
 }
 
+export interface DeploymentRevision {
+  name: string;
+  revision: number;
+  desired: number;
+  ready: number;
+  available: number;
+  images: string[];
+  created_at: string | null;
+  pod_template_hash: string | null;
+  is_current: boolean;
+}
+
+export interface DeploymentHpa {
+  name: string;
+  min_replicas: number;
+  max_replicas: number;
+  current_replicas: number | null;
+  desired_replicas: number | null;
+  last_scale_time: string | null;
+  metrics: { name: string; target: string | null; current: string | null }[];
+}
+
+export interface DeploymentContainer {
+  name: string;
+  image: string;
+  ports: string[];
+  cpu_request: string;
+  cpu_limit: string;
+  memory_request: string;
+  memory_limit: string;
+}
+
 export interface DeploymentDetail {
+  kind: "Deployment";
   name: string;
   namespace: string;
+  uid: string;
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  selector: Record<string, string>;
+  images: string[];
+  containers: DeploymentContainer[];
+  created_at: string | null;
+  generation: number | null;
+  observed_generation: number | null;
+  desired: number;
+  ready: number;
+  updated: number;
+  available: number;
+  unavailable: number;
+  update_strategy: string | null;
+  max_surge: string | null;
+  max_unavailable: string | null;
+  min_ready_seconds: number;
+  revision_history_limit: number | null;
+  progress_deadline_seconds: number | null;
+  paused: boolean;
+  revision: string | null;
+  node_selector: Record<string, string>;
+  service_account: string | null;
+  cpu_request: string;
+  cpu_limit: string;
+  memory_request: string;
+  memory_limit: string;
+  conditions: WorkloadCondition[];
+  status: WorkloadStatus;
+  pods: WorkloadPod[];
+  revisions: DeploymentRevision[];
+  events: WorkloadEvent[];
+  hpa: DeploymentHpa | null;
   yaml: string;
 }
 
@@ -801,7 +868,7 @@ export async function fetchDeploymentDetail(
   name: string,
 ): Promise<DeploymentDetail> {
   const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
-  const { data } = await apiClient.get(`${API_PREFIX}/deployments/details`, { params });
+  const { data } = await apiClient.get(`${API_PREFIX}/deployments/details`, { params, timeout: 30000 });
   return data;
 }
 
@@ -1878,14 +1945,16 @@ export function useCronJobDetail(clusterId: string, namespace: string, name: str
   });
 }
 
-export function useDeploymentDetail(clusterId: string, namespace: string, name: string) {
+export function useDeploymentDetail(clusterId: string, namespace: string, name: string, enabled = true) {
   return useQuery({
     queryKey: ["aks-deployment-detail", clusterId, namespace, name],
     queryFn: () => fetchDeploymentDetail(clusterId, namespace, name),
-    enabled: !!clusterId && !!namespace && !!name,
-    staleTime: 2 * 60 * 1000,
-    gcTime: 5 * 60 * 1000,
+    enabled: !!clusterId && !!namespace && !!name && enabled,
+    // Live view, like the StatefulSet/DaemonSet detail: pods and events change during rollouts.
+    staleTime: 4_000,
+    refetchInterval: safeInterval(10_000),
     retry: 1,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -3151,6 +3220,8 @@ export interface WorkloadPod {
   pod_name: string;
   namespace: string;
   phase: string | null;
+  /** kubectl-style status, e.g. "CrashLoopBackOff" or "Init:0/1". */
+  status?: string | null;
   ready: boolean;
   node: string | null;
   pod_ip: string | null;
@@ -3174,6 +3245,8 @@ export interface WorkloadEvent {
   message: string | null;
   count: number;
   last_seen: string | null;
+  /** "Kind/name" of the object the event is about. */
+  object?: string | null;
 }
 
 export interface WorkloadPvc {
@@ -3486,4 +3559,153 @@ export function useAkvsVaultCheck() {
     mutationFn: ({ clusterId, namespace, name }: { clusterId: string; namespace: string; name: string }) =>
       fetchAkvsDetail(clusterId, namespace, name, true),
   });
+}
+
+// ── Pod detail ────────────────────────────────────────────────────────
+
+export interface ContainerStateDetail {
+  state: "running" | "waiting" | "terminated";
+  reason?: string | null;
+  message?: string | null;
+  exit_code?: number | null;
+  signal?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface PodContainerDetail {
+  name: string;
+  image: string;
+  image_id: string | null;
+  init: boolean;
+  sidecar: boolean;
+  ready: boolean;
+  restart_count: number;
+  state: ContainerStateDetail | null;
+  last_state: ContainerStateDetail | null;
+  ports: string[];
+  cpu_request: string;
+  cpu_limit: string;
+  memory_request: string;
+  memory_limit: string;
+  probes: Partial<Record<"liveness" | "readiness" | "startup", string>>;
+  volume_mounts: { name: string; mount_path: string; read_only: boolean; sub_path: string | null }[];
+}
+
+export interface PodDetail {
+  name: string;
+  namespace: string;
+  uid: string;
+  phase: string | null;
+  status: string;
+  status_message: string | null;
+  ready_containers: number;
+  total_containers: number;
+  restarts: number;
+  node: string | null;
+  pod_ip: string | null;
+  pod_ips: string[];
+  host_ip: string | null;
+  qos_class: string | null;
+  service_account: string | null;
+  restart_policy: string | null;
+  priority_class: string | null;
+  termination_grace_period_seconds: number | null;
+  created_at: string | null;
+  started_at: string | null;
+  deletion_timestamp: string | null;
+  owner: { kind: string; name: string } | null;
+  workload: { kind: string; name: string } | null;
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  node_selector: Record<string, string>;
+  tolerations: string[];
+  conditions: WorkloadCondition[];
+  init_containers: PodContainerDetail[];
+  containers: PodContainerDetail[];
+  volumes: { name: string; type: string; source: string | null }[];
+  events: WorkloadEvent[];
+  yaml: string;
+}
+
+export async function fetchPodDetail(clusterId: string, namespace: string, name: string) {
+  const params = new URLSearchParams({ cluster_id: clusterId, namespace, name });
+  const { data } = await apiClient.get(`${API_PREFIX}/pods/detail`, { params, timeout: 30000 });
+  return data as PodDetail;
+}
+
+export function usePodDetail(clusterId: string, namespace: string | undefined, name: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-pod-detail", clusterId, namespace, name],
+    queryFn: () => fetchPodDetail(clusterId, namespace!, name!),
+    enabled: !!clusterId && !!namespace && !!name && enabled,
+    staleTime: 4_000,
+    refetchInterval: safeInterval(10_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+// ── Complete log archive ──────────────────────────────────────────────
+
+export type LogArchiveKind = "deployment" | "statefulset" | "daemonset" | "pods";
+
+export interface LogArchiveRequest {
+  clusterId: string;
+  kind: LogArchiveKind;
+  namespace?: string;
+  name?: string;
+  pods?: { namespace: string; name: string }[];
+  /** Also include the previous instance of restarted containers (default true). */
+  includePrevious?: boolean;
+}
+
+/** Mirrors the backend's per-archive pod limit. */
+export const MAX_LOG_ARCHIVE_PODS = 500;
+
+/** Error bodies arrive as a Blob when the request asked for one — surface the API's detail message. */
+async function logArchiveError(err: unknown): Promise<unknown> {
+  const response = (err as { response?: { status?: number; data?: unknown } })?.response;
+  if (!response || !(response.data instanceof Blob)) return err;
+  let detail: unknown;
+  try {
+    detail = JSON.parse(await response.data.text())?.detail;
+  } catch {
+    detail = undefined;
+  }
+  return new Error(typeof detail === "string" ? detail : `Log download failed (HTTP ${response.status ?? "error"}).`);
+}
+
+/**
+ * Download the complete logs of a workload's pods (or an explicit pod list) as one ZIP.
+ * The backend streams the archive, so there is no request timeout; progress reports bytes received.
+ */
+export async function downloadLogArchive(
+  req: LogArchiveRequest,
+  options: { onProgress?: (bytes: number) => void; signal?: AbortSignal } = {}
+): Promise<{ blob: Blob; filename: string }> {
+  try {
+    const response = await apiClient.post(
+      `${API_PREFIX}/logs/archive`,
+      {
+        cluster_id: req.clusterId,
+        kind: req.kind,
+        namespace: req.namespace,
+        name: req.name,
+        pods: req.pods ?? [],
+        include_previous: req.includePrevious ?? true,
+      },
+      {
+        responseType: "blob",
+        timeout: 0,
+        signal: options.signal,
+        onDownloadProgress: (e) => options.onProgress?.(e.loaded),
+      }
+    );
+    const disposition = String(response.headers["content-disposition"] ?? "");
+    const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `${req.name ?? req.kind}-logs.zip`;
+    return { blob: response.data as Blob, filename };
+  } catch (err) {
+    throw await logArchiveError(err);
+  }
 }

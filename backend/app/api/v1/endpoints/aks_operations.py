@@ -18,8 +18,9 @@ from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.endpoints.aks_detail_endpoints import register_detail_routes
 from app.api.v1.endpoints.aks_extended_endpoints import register_extended_routes
-from app.api.v1.endpoints.aks_workload_endpoints import register_workload_routes
+from app.api.v1.endpoints.aks_workload_endpoints import _workload_api_error, register_workload_routes
 from app.auth import get_current_user, require_role
 from app.core.authz import require_capability
 from app.core.database import get_db, get_standalone_session
@@ -82,6 +83,7 @@ def _audit_summary(action: str, resource_type: str, resource_name: str) -> str:
         "helm_upgrade": "Upgraded",
         "helm_uninstall": "Uninstalled",
         "helm_rollback": "Rolled back",
+        "download_logs": "Downloaded logs of",
     }.get(action, "Changed")
     return f"{verb} {resource_type} {resource_name}"
 
@@ -565,7 +567,10 @@ async def list_deployments(
 @router.get(
     "/deployments/details",
     summary="Get deployment details",
-    description="Get a live YAML manifest view for a specific deployment.",
+    description=(
+        "Live deployment detail: overview, pods, ReplicaSet revisions, events (including ReplicaSet "
+        "events), HPA, and the YAML manifest."
+    ),
 )
 async def get_deployment_detail(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
@@ -577,6 +582,8 @@ async def get_deployment_detail(
     """Get live deployment detail including YAML manifest."""
     try:
         return await service.get_deployment_detail(cluster_id, namespace, name)
+    except ApiException as e:
+        raise _workload_api_error(e, label="Deployment", name=name, namespace=namespace) from e
     except Exception as e:
         logger.error("get_deployment_detail_failed", name=name, namespace=namespace, error=str(e))
         raise HTTPException(status_code=502, detail=f"Failed to fetch deployment detail: {str(e)}") from e
@@ -1994,3 +2001,4 @@ register_extended_routes(
 )
 
 register_workload_routes(router, get_service=_get_service, write_audit=_write_aks_audit_log)
+register_detail_routes(router, get_service=_get_service, write_audit=_write_aks_audit_log)

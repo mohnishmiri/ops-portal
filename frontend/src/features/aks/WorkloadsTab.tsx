@@ -39,6 +39,19 @@ import {
 } from "./aksGridShared";
 import { useAksLiveWatch } from "../../hooks/useAksLiveWatch";
 import { ModalShell } from "./K8sResourceModals";
+import {
+  apiErrorDetail,
+  DetailIcons,
+  DetailTabs,
+  EventList,
+  formatAge,
+  iconProps,
+  KeyValue,
+  WORKLOAD_STATUS_STYLES,
+  WorkloadPodsTable,
+  YamlView,
+} from "./detailShared";
+import { DownloadLogsButton, LogArchiveDownload } from "./LogArchiveDownload";
 
 type WorkloadsTabProps = {
   kind: WorkloadKind;
@@ -51,6 +64,8 @@ type WorkloadsTabProps = {
   canManage: boolean;
   canDelete: boolean;
   canDeletePod: boolean;
+  logDownload: LogArchiveDownload;
+  onOpenPod?: (pod: WorkloadPod) => void;
   onViewPodLogs: (pod: WorkloadPod) => void;
   onDeletePod?: (pod: WorkloadPod) => void;
 };
@@ -71,14 +86,6 @@ type ModalState =
   | { type: "rollback"; item: K8sWorkload; revision: number }
   | null;
 
-const STATUS_STYLES: Record<WorkloadStatus, string> = {
-  Healthy: "bg-green-100 text-green-700",
-  Updating: "bg-blue-100 text-blue-700",
-  Degraded: "bg-amber-100 text-amber-700",
-  Unavailable: "bg-red-100 text-red-700",
-  Idle: "bg-gray-100 text-gray-600",
-};
-
 const STATUS_FILTERS: (WorkloadStatus | "All")[] = ["All", "Healthy", "Updating", "Degraded", "Unavailable", "Idle"];
 
 const LABELS: Record<WorkloadKind, { singular: string; plural: string }> = {
@@ -96,21 +103,6 @@ const btn = {
 const inputCls =
   "w-full rounded-lg border border-att-200 px-3 py-2 text-sm focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100";
 
-function formatAge(iso: string | null): string {
-  if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return "—";
-  const hours = ms / 3_600_000;
-  if (hours < 1) return `${Math.max(0, Math.round(hours * 60))}m`;
-  if (hours < 24) return `${Math.floor(hours)}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
-
-function errorDetail(e: unknown, fallback: string): string {
-  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  return typeof detail === "string" ? detail : fallback;
-}
-
 function strategyLabel(item: K8sWorkload): string {
   if (item.update_strategy !== "RollingUpdate") return item.update_strategy ?? "—";
   if (item.kind === "StatefulSet") return item.partition ? `RollingUpdate (partition ${item.partition})` : "RollingUpdate";
@@ -122,24 +114,13 @@ function strategyLabel(item: K8sWorkload): string {
 }
 
 // Inline SVG action icons, matching the stroke style used across the AKS page.
-const svgProps = {
-  width: 16,
-  height: 16,
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 2,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
 const ActionIcons = {
-  view: <svg {...svgProps}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>,
-  scale: <svg {...svgProps}><polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" /></svg>,
-  restart: <svg {...svgProps}><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>,
-  image: <svg {...svgProps}><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" /></svg>,
-  strategy: <svg {...svgProps}><line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" /></svg>,
-  trash: <svg {...svgProps}><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></svg>,
-  logs: <svg {...svgProps}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>,
+  view: DetailIcons.view,
+  scale: <svg {...iconProps}><polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" /></svg>,
+  restart: <svg {...iconProps}><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>,
+  image: <svg {...iconProps}><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" /></svg>,
+  strategy: <svg {...iconProps}><line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" /></svg>,
+  trash: DetailIcons.trash,
 };
 
 export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
@@ -153,6 +134,8 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
   canManage,
   canDelete,
   canDeletePod,
+  logDownload,
+  onOpenPod,
   onViewPodLogs,
   onDeletePod,
 }) => {
@@ -233,7 +216,7 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
     // Like Deployments: force a Kubernetes sync so the DB-backed grid reflects the change right away.
     backgroundSync.start(false);
   };
-  const failed = (e: unknown, msg: string) => showToast(errorDetail(e, msg), "error");
+  const failed = (e: unknown, msg: string) => showToast(apiErrorDetail(e, msg), "error");
 
   const submitModal = () => {
     if (!modal) return;
@@ -395,7 +378,7 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
                   </td>
                   <td className={gridStyles.cell}>{item.namespace}</td>
                   <td className={gridStyles.cell}>
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[item.status] ?? "bg-gray-100 text-gray-700"}`}>
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${WORKLOAD_STATUS_STYLES[item.status] ?? "bg-gray-100 text-gray-700"}`}>
                       {item.status}
                     </span>
                   </td>
@@ -462,6 +445,8 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
       {selected && (
         <WorkloadDetailModal
           kind={kind}
+          clusterId={cluster.id}
+          target={selected}
           title={`${labels.singular}: ${selected.namespace}/${selected.name}`}
           detail={detail.data}
           isLoading={detail.isLoading}
@@ -469,6 +454,8 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
           formatDate={formatDate}
           canManage={canManage}
           canDeletePod={canDeletePod}
+          logDownload={logDownload}
+          onOpenPod={onOpenPod}
           onViewPodLogs={onViewPodLogs}
           onDeletePod={onDeletePod}
           onRollback={(item, revision) => setModal({ type: "rollback", item, revision })}
@@ -669,6 +656,8 @@ type DetailSection = "overview" | "pods" | "revisions" | "volumes" | "events" | 
 
 function WorkloadDetailModal({
   kind,
+  clusterId,
+  target,
   title,
   detail,
   isLoading,
@@ -676,12 +665,16 @@ function WorkloadDetailModal({
   formatDate,
   canManage,
   canDeletePod,
+  logDownload,
+  onOpenPod,
   onViewPodLogs,
   onDeletePod,
   onRollback,
   onClose,
 }: {
   kind: WorkloadKind;
+  clusterId: string;
+  target: { namespace: string; name: string };
   title: string;
   detail: WorkloadDetail | undefined;
   isLoading: boolean;
@@ -689,6 +682,8 @@ function WorkloadDetailModal({
   formatDate: (value: string) => string;
   canManage: boolean;
   canDeletePod: boolean;
+  logDownload: LogArchiveDownload;
+  onOpenPod?: (pod: WorkloadPod) => void;
   onViewPodLogs: (pod: WorkloadPod) => void;
   onDeletePod?: (pod: WorkloadPod) => void;
   onRollback: (item: K8sWorkload, revision: number) => void;
@@ -700,17 +695,11 @@ function WorkloadDetailModal({
     { key: "pods", label: `Pods${detail ? ` (${detail.pods.length})` : ""}` },
     { key: "revisions", label: "Revisions" },
     ...(kind === "statefulset" ? [{ key: "volumes" as const, label: "Volumes" }] : []),
-    { key: "events", label: "Events" },
+    { key: "events", label: `Events${detail ? ` (${detail.events.length})` : ""}` },
     { key: "yaml", label: "YAML" },
   ];
   const fmt = (v: string | null | undefined) => (v ? formatDate(v) : "—");
-
-  const kv = (label: string, value: React.ReactNode) => (
-    <div className="flex justify-between gap-4 border-b border-att-100 py-1.5 text-sm">
-      <span className="text-gray-500">{label}</span>
-      <span className="text-right font-medium text-gray-800 break-all">{value ?? "—"}</span>
-    </div>
-  );
+  const kv = (label: string, value: React.ReactNode) => <KeyValue label={label} value={value} />;
 
   return (
     <ModalShell title={title} onClose={onClose} wide>
@@ -718,23 +707,21 @@ function WorkloadDetailModal({
       {isError && <p className="text-sm text-red-600">Failed to load details.</p>}
       {detail && (
         <div className="space-y-4">
-          <div className="flex flex-wrap gap-1 border-b border-att-100">
-            {sections.map((s) => (
-              <button
-                key={s.key}
-                type="button"
-                onClick={() => setSection(s.key)}
-                className={`px-3 py-2 text-sm border-b-2 -mb-px ${section === s.key ? "border-att-500 text-att-700 font-medium" : "border-transparent text-gray-500 hover:text-gray-700"}`}
-              >
-                {s.label}
-              </button>
-            ))}
+          <div className="flex justify-end">
+            <DownloadLogsButton
+              download={logDownload}
+              downloadKey={`${kind}:${target.namespace}/${target.name}`}
+              request={{ clusterId, kind, namespace: target.namespace, name: target.name }}
+              label={`${LABELS[kind].singular} ${target.namespace}/${target.name}`}
+              podCount={detail.pods.length}
+            />
           </div>
+          <DetailTabs tabs={sections} active={section} onChange={setSection} />
 
           {section === "overview" && (
             <div className="grid grid-cols-1 gap-x-6 md:grid-cols-2">
               <div>
-                {kv("Status", <span className={`px-2 py-0.5 rounded-full text-xs ${STATUS_STYLES[detail.status]}`}>{detail.status}</span>)}
+                {kv("Status", <span className={`px-2 py-0.5 rounded-full text-xs ${WORKLOAD_STATUS_STYLES[detail.status]}`}>{detail.status}</span>)}
                 {kv("Ready / Desired", `${detail.ready}/${detail.desired}`)}
                 {kv("Up-to-date", detail.updated)}
                 {kv("Available", detail.available)}
@@ -796,42 +783,13 @@ function WorkloadDetailModal({
           )}
 
           {section === "pods" && (
-            <div className="overflow-x-auto">
-              <table className={gridStyles.table}>
-                <thead className={gridStyles.head}>
-                  <tr>
-                    <th className={gridStyles.headerCell}>Pod</th>
-                    <th className={gridStyles.headerCell}>Phase</th>
-                    <th className={gridStyles.headerCell}>Ready</th>
-                    <th className={gridStyles.headerCell}>Node</th>
-                    <th className={gridStyles.headerCell}>Restarts</th>
-                    <th className={gridStyles.headerCell}>Revision</th>
-                    <th className={gridStyles.headerCellCenter}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detail.pods.length === 0 && <GridStateRow colSpan={7} emptyText="No pods" />}
-                  {detail.pods.map((p) => (
-                    <tr key={p.pod_name} className={gridStyles.row}>
-                      <td className={gridStyles.cell}>{p.pod_name}</td>
-                      <td className={gridStyles.cell}>{p.phase ?? "—"}</td>
-                      <td className={gridStyles.cell}>{p.ready ? <span className="text-green-700">Yes</span> : <span className="text-amber-700">No</span>}</td>
-                      <td className={gridStyles.cell}><span className="text-xs">{p.node ?? "—"}</span></td>
-                      <td className={gridStyles.cell}><span className={p.restarts > 0 ? "text-red-600 font-semibold" : ""}>{p.restarts}</span></td>
-                      <td className={gridStyles.cell}><span className="font-mono text-xs">{p.revision ?? "—"}</span></td>
-                      <td className={gridStyles.centerCell}>
-                        <div className="flex items-center justify-center gap-1">
-                          <button type="button" title="View Logs" onClick={() => onViewPodLogs(p)} className={`${btn.icon} hover:bg-blue-50 text-blue-600`}>{ActionIcons.logs}</button>
-                          {canDeletePod && onDeletePod && (
-                            <button type="button" title="Delete Pod" onClick={() => onDeletePod(p)} className={`${btn.icon} hover:bg-red-50 text-red-600`}>{ActionIcons.trash}</button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <WorkloadPodsTable
+              pods={detail.pods}
+              onOpenPod={onOpenPod}
+              onViewPodLogs={onViewPodLogs}
+              onDeletePod={onDeletePod}
+              canDeletePod={canDeletePod}
+            />
           )}
 
           {section === "revisions" && (
@@ -895,24 +853,9 @@ function WorkloadDetailModal({
             </table>
           )}
 
-          {section === "events" && (
-            <ul className="space-y-2">
-              {detail.events.length === 0 && <li className="text-sm text-gray-400">No recent events</li>}
-              {detail.events.map((ev, i) => (
-                <li key={i} className={`rounded-lg border px-3 py-2 text-sm ${ev.type === "Warning" ? "border-amber-200 bg-amber-50" : "border-att-100"}`}>
-                  <div className="flex justify-between gap-2">
-                    <span className="font-medium">{ev.reason}{ev.count > 1 && <span className="text-gray-500"> ×{ev.count}</span>}</span>
-                    <span className="text-xs text-gray-500">{fmt(ev.last_seen)}</span>
-                  </div>
-                  <p className="text-gray-700">{ev.message}</p>
-                </li>
-              ))}
-            </ul>
-          )}
+          {section === "events" && <EventList events={detail.events} formatDate={formatDate} />}
 
-          {section === "yaml" && (
-            <pre className="max-h-[55vh] overflow-auto rounded-lg bg-gray-900 p-3 text-xs text-gray-100">{detail.yaml || "Manifest unavailable"}</pre>
-          )}
+          {section === "yaml" && <YamlView yaml={detail.yaml} />}
         </div>
       )}
     </ModalShell>

@@ -187,19 +187,62 @@ def serialize_workload(kind: str, obj: Any) -> dict[str, Any]:
     return item
 
 
+def pod_status_reason(pod: Any) -> str:
+    """The pod's display status, derived the way ``kubectl get pods`` derives its STATUS column."""
+    status = pod.status
+    if getattr(pod.metadata, "deletion_timestamp", None):
+        return "Terminating"
+    init_specs = {c.name: c for c in (getattr(pod.spec, "init_containers", None) or [])}
+    for i, cs in enumerate(getattr(status, "init_container_statuses", None) or []):
+        state = cs.state
+        if state and state.terminated and state.terminated.exit_code == 0:
+            continue
+        # Sidecar init containers (restartPolicy: Always) keep running alongside the app.
+        sidecar = getattr(init_specs.get(cs.name), "restart_policy", None) == "Always"
+        if sidecar and state and state.running and getattr(cs, "started", False):
+            continue
+        if state and state.terminated:
+            term = state.terminated
+            return f"Init:{term.reason or f'ExitCode:{term.exit_code}'}"
+        if state and state.waiting and state.waiting.reason and state.waiting.reason != "PodInitializing":
+            return f"Init:{state.waiting.reason}"
+        return f"Init:{i}/{len(init_specs)}"
+
+    reason = getattr(status, "reason", None) or status.phase or "Unknown"
+    running = False
+    # Like kubectl, walk containers in reverse so the first container's state wins.
+    for cs in reversed(status.container_statuses or []):
+        state = cs.state
+        if not state:
+            continue
+        if state.waiting and state.waiting.reason:
+            reason = state.waiting.reason
+        elif state.terminated:
+            term = state.terminated
+            reason = term.reason or (f"Signal:{term.signal}" if term.signal else f"ExitCode:{term.exit_code}")
+        elif state.running and cs.ready:
+            running = True
+    if reason == "Completed" and running:
+        reason = "Running"
+    return reason
+
+
 def serialize_pod(pod: Any) -> dict[str, Any]:
     statuses = pod.status.container_statuses or []
+    labels = pod.metadata.labels or {}
     return {
         "pod_name": pod.metadata.name,
         "namespace": pod.metadata.namespace,
         "phase": pod.status.phase,
+        "status": pod_status_reason(pod),
         "ready": bool(statuses) and all(cs.ready for cs in statuses),
         "node": pod.spec.node_name,
         "pod_ip": pod.status.pod_ip,
         "started_at": _iso(pod.status.start_time),
         "restarts": sum(cs.restart_count or 0 for cs in statuses),
         "containers": [cs.name for cs in statuses] or [c.name for c in (pod.spec.containers or [])],
-        "revision": (pod.metadata.labels or {}).get("controller-revision-hash"),
+        # StatefulSet/DaemonSet pods carry controller-revision-hash; Deployment pods carry pod-template-hash.
+        "revision": labels.get("controller-revision-hash") or labels.get("pod-template-hash"),
     }
 
 
@@ -219,6 +262,22 @@ def _revision_images(data: Any) -> list[str]:
 
 def _event_time(event: Any) -> Any:
     return event.last_timestamp or event.event_time or event.first_timestamp
+
+
+def serialize_event(event: Any) -> dict[str, Any]:
+    involved = getattr(event, "involved_object", None)
+    return {
+        "type": event.type,
+        "reason": event.reason,
+        "message": event.message,
+        "count": event.count or 1,
+        "last_seen": _iso(_event_time(event)),
+        "object": f"{involved.kind}/{involved.name}" if involved else None,
+    }
+
+
+def newest_events(events: list[dict[str, Any]], limit: int = 50) -> list[dict[str, Any]]:
+    return sorted(events, key=lambda e: e["last_seen"] or "", reverse=True)[:limit]
 
 
 # ── Service mixin ─────────────────────────────────────────────────────
@@ -349,17 +408,7 @@ class AKSWorkloadOperationsMixin:
         except ApiException as e:
             logger.warning("workload_events_failed", namespace=namespace, error=str(e))
             return []
-        events = [
-            {
-                "type": ev.type,
-                "reason": ev.reason,
-                "message": ev.message,
-                "count": ev.count or 1,
-                "last_seen": _iso(_event_time(ev)),
-            }
-            for ev in ev_list.items
-        ]
-        return sorted(events, key=lambda e: e["last_seen"] or "", reverse=True)[:50]
+        return newest_events([serialize_event(ev) for ev in ev_list.items])
 
     async def _statefulset_pvcs(
         self, core_v1: Any, namespace: str, name: str, templates: list[dict[str, Any]]

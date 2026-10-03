@@ -16,7 +16,6 @@ from typing import Any
 import httpx
 import structlog
 import urllib3
-import yaml
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
 from kubernetes import client as k8s_client
@@ -35,6 +34,8 @@ from app.models.database import (
     PodUtilizationHistory,
 )
 from app.services.aks_akvs_operations import AKSAkvsOperationsMixin
+from app.services.aks_detail_operations import AKSDetailOperationsMixin
+from app.services.aks_log_archive import AKSLogArchiveMixin
 from app.services.aks_resource_operations import AKSResourceOperationsMixin
 from app.services.aks_workload_operations import AKSWorkloadOperationsMixin
 from app.services.data_cache_service import (
@@ -49,7 +50,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = structlog.get_logger(__name__)
 
 
-class AKSOperationsService(AKSResourceOperationsMixin, AKSWorkloadOperationsMixin, AKSAkvsOperationsMixin):
+class AKSOperationsService(
+    AKSResourceOperationsMixin,
+    AKSWorkloadOperationsMixin,
+    AKSAkvsOperationsMixin,
+    AKSDetailOperationsMixin,
+    AKSLogArchiveMixin,
+):
     """
     Enterprise AKS Operations Service.
 
@@ -648,32 +655,6 @@ class AKSOperationsService(AKSResourceOperationsMixin, AKSWorkloadOperationsMixi
                 history.error_message = str(e)
                 await self._db_commit()
             raise
-
-    async def get_deployment_detail(
-        self,
-        cluster_id: str,
-        namespace: str,
-        deployment_name: str,
-    ) -> dict[str, Any]:
-        """Get live deployment details plus a YAML manifest view."""
-        apps_v1, _, _ = await self._get_k8s_clients(cluster_id)
-
-        deployment = await asyncio.to_thread(
-            apps_v1.read_namespaced_deployment,
-            deployment_name,
-            namespace,
-        )
-        deployment_dict = deployment.to_dict()
-        return {
-            "name": deployment.metadata.name,
-            "namespace": deployment.metadata.namespace,
-            "yaml": yaml.safe_dump(
-                deployment_dict,
-                sort_keys=False,
-                default_flow_style=False,
-                allow_unicode=False,
-            ),
-        }
 
     async def create_deployment(
         self,
