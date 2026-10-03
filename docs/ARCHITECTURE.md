@@ -68,10 +68,11 @@
 |--------------------------|-----------------------|------------------------------------------|
 | Cost Service             | /api/v1/costs         | Cost data ingestion & aggregation        |
 | Optimization Service     | /api/v1/optimize      | FinOps recommendations & wastage         |
-| Auth Service             | /api/v1/auth          | Token validation, RBAC enforcement       |
+| Auth Service             | /api/v1/auth          | Session, role introspection, subscription picker |
+| Access Service           | /api/v1/access        | Project/app grants, access requests & approvals |
 | Notification Service     | /api/v1/notifications | SMTP alerts, budget notifications        |
 | Report Service           | /api/v1/reports       | PDF generation, scheduling               |
-| Admin Service            | /api/v1/admin         | Subscription & user management           |
+| Admin Service            | /api/v1/admin         | Subscriptions, config, health (Super Admin) |
 | Plugin Service           | /api/v1/plugins       | Extensible module loading                |
 
 ### 2.3 Data Flow
@@ -84,7 +85,9 @@
 ## 3. Security Architecture
 
 - **Authentication**: Azure AD (Entra ID) via MSAL — OIDC/OAuth2 code flow
-- **Authorization**: Claims-based RBAC (Admin / Write / Read) via FastAPI middleware
+- **Authorization**: two dimensions, both enforced by FastAPI router dependencies (not middleware) — see [access-control-design.md](access-control-design.md)
+  - *What*: Entra app roles Super Admin / Admin / Write / Read, plus module, page and capability permissions
+  - *Where*: per-user grants on a project or app × Prod / Non-Prod; every subscription a request names is checked ([PROJECT_ACCESS.md](PROJECT_ACCESS.md))
 - **Secrets**: Azure Key Vault + Workload Identity — zero secrets in config
 - **Network**: AKS Network Policy, private ingress options, TLS termination
 - **Audit**: All API calls logged with user identity, action, timestamp

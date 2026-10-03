@@ -11,12 +11,13 @@ The OpsPortal codebase **already has full authentication and RBAC infrastructure
 | Layer | File | Status |
 |-------|------|--------|
 | Backend JWT validation | `backend/app/auth/__init__.py` | ✅ Complete — JWKS caching, token decode, role mapping, `get_current_user`, `require_role` |
-| Backend auth models | `backend/app/models/auth.py` | ✅ Complete — `UserRole` enum (ADMIN/WRITE/READ), `TokenClaims`, `UserContext` |
+| Backend auth models | `backend/app/schemas/auth.py` | ✅ Complete — `UserRole` enum (SUPER_ADMIN/ADMIN/WRITE/READ), `TokenClaims`, `UserContext` |
+| Project / subscription access | `backend/app/core/access_scope.py`, `target_access.py` | ✅ Complete — grants per project/app × Prod/Non-Prod, requests & approvals ([PROJECT_ACCESS.md](PROJECT_ACCESS.md)) |
 | Backend config | `backend/app/core/config.py` | ✅ Complete — `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, role names configured |
 | Frontend MSAL | `frontend/src/config/authConfig.ts` | ✅ Complete — MSAL config, MFA claims challenge, dev-mode bypass |
 | Frontend API client | `frontend/src/services/apiClient.ts` | ✅ Complete — Bearer token injection, silent renewal, 401 redirect |
 | Frontend auth gate | `frontend/src/components/App.tsx` | ✅ Complete — `MsalProvider`, `AuthenticatedTemplate`, login page |
-| Dev mode bypass | Both frontend & backend | ✅ Complete — `isDevMode` / `ENVIRONMENT=development` |
+| Dev mode bypass | Both frontend & backend | ✅ Complete — `isDevMode` / `ENVIRONMENT=development` + `DEV_AUTH_BYPASS=true` (token-less requests only) |
 
 **What remains is Azure Portal configuration** — creating the App Registration, defining roles, assigning users, and setting environment variables. This document provides every step.
 
@@ -94,17 +95,23 @@ These roles are sent in the JWT `roles` claim and mapped by `_map_roles()` in th
 
 | Display Name | Value | Description | Allowed member types |
 |---|---|---|---|
-| `OpsPortal Admin` | `OpsPortal.Admin` | Full administrative access — manage subscriptions, sync data, manage users | Users/Groups |
-| `OpsPortal Write` | `OpsPortal.Write` | Write access — trigger syncs, modify configurations | Users/Groups |
-| `OpsPortal Read` | `OpsPortal.Read` | Read-only access — view dashboards and reports | Users/Groups |
+| `Ops Portal Super Admin` | `OpsPortal.SuperAdmin` | Manages every project, the Admin console and permissions. **Granted in Entra only** | Users/Groups |
+| `OpsPortal Admin` | `OpsPortal.Admin` | Project Admin — manages access for the projects a Super Admin assigns | Users/Groups |
+| `OpsPortal Write` | `OpsPortal.Write` | Every change on operational pages, within the subscriptions granted | Users/Groups |
+| `OpsPortal Read` | `OpsPortal.Read` | View and export, within the subscriptions granted | Users/Groups |
 
 2. Click **Create** for each role
-3. Verify all three roles appear with **Enabled** status
+3. Verify all four roles appear with **Enabled** status
 
 > These values match exactly with `backend/app/core/config.py`:
+> - `ROLE_SUPER_ADMIN = "OpsPortal.SuperAdmin"`
 > - `ROLE_ADMIN = "OpsPortal.Admin"`
 > - `ROLE_WRITE = "OpsPortal.Write"`
 > - `ROLE_READ = "OpsPortal.Read"`
+>
+> An app role decides **what** a user may do. **Where** (which project, app,
+> and Prod / Non-Prod subscriptions) is granted inside the portal — see
+> [PROJECT_ACCESS.md](PROJECT_ACCESS.md).
 
 ---
 
@@ -126,24 +133,30 @@ These roles are sent in the JWT `roles` claim and mapped by `_map_roles()` in th
 2. Go to **Users and groups** blade → **+ Add user/group**
 3. Assign roles following this matrix:
 
-| Team / Group | Role | Justification |
+| Team / Group | Entra role | Portal grant (set in Access Management) |
 |---|---|---|
-| Infra / Ops team | `OpsPortal.Admin` | Full access — manage subscriptions, config, syncs |
-| DevOps / SRE leads | `OpsPortal.Write` | Can trigger syncs, view & export all data |
-| Dev team | `OpsPortal.Read` | View dashboards only |
-| Test / QA team | `OpsPortal.Read` | View dashboards only |
-| Management / Leadership | `OpsPortal.Read` | View leadership dashboard & cost reports |
+| Platform owners (few people) | `OpsPortal.SuperAdmin` | None needed — every project |
+| Project owners / leads | `OpsPortal.Admin` | Appointed Project Admin of their project by a Super Admin |
+| Ops / SRE | `OpsPortal.Write` | e.g. Commissions · Prod + Non-Prod · Write |
+| Dev team | `OpsPortal.Write` | e.g. Commissions · Non-Prod · Write (Prod only if an admin grants it) |
+| Test / QA team | `OpsPortal.Read` | Non-Prod · Read |
+| Management / Leadership | `OpsPortal.Read` | Project-level Read |
 
 ### 5.2 Using Azure AD Groups (Recommended)
 
 For easier management, create security groups and assign roles to groups:
 
-1. Create groups in Entra ID:
-   - `SG-OpsPortal-Admins` → assign `OpsPortal.Admin`
-   - `SG-OpsPortal-Writers` → assign `OpsPortal.Write`
-   - `SG-OpsPortal-Readers` → assign `OpsPortal.Read`
+1. Create groups in Entra ID. Each project gets its own Read / Write / Admin
+   groups, so the project owns who joins them (today's Commissions groups are
+   `AP-31599-ATTCC-Ops-Portal-Read` / `-Write`):
+   - `<project>-Ops-Portal-Admin` → assign `OpsPortal.Admin`
+   - `<project>-Ops-Portal-Write` → assign `OpsPortal.Write`
+   - `<project>-Ops-Portal-Read` → assign `OpsPortal.Read`
+   - one small platform group → assign `OpsPortal.SuperAdmin` (PIM-eligible if available)
 2. Add individual users to the appropriate groups
-3. When new team members join, just add them to the group — no per-user role assignment needed
+3. When new team members join, add them to the group. They can then sign in
+   and **request** subscription access in the portal (My Access); a Project
+   Admin or Super Admin approves it.
 
 ### 5.3 Require Assignment (Recommended)
 
@@ -204,12 +217,20 @@ AZURE_CLIENT_SECRET=<your-client-secret>             # From Step 1.3
 
 # ── RBAC Role Names (match App Roles in Step 3) ──
 # These are already set in config.py defaults:
+# ROLE_SUPER_ADMIN=OpsPortal.SuperAdmin
 # ROLE_ADMIN=OpsPortal.Admin
 # ROLE_WRITE=OpsPortal.Write
 # ROLE_READ=OpsPortal.Read
+
+# ── Links in access-request / alert emails ──
+PORTAL_BASE_URL=https://<portal-host>
 ```
 
-**Critical**: Change `ENVIRONMENT` from `development` to `staging` or `production` to activate JWT validation. In `development` mode, the backend returns a synthetic admin user without checking tokens.
+**Critical**: JWT validation is always on. The local bypass applies only when
+`ENVIRONMENT=development` **and** `DEV_AUTH_BYPASS=true`, and only to requests
+with **no** token; those run as a synthetic Super Admin. An invalid or expired
+token is always rejected, and the backend refuses to start if the bypass is
+enabled in any other environment.
 
 ### 7.2 Frontend (`.env` or Vite build-time config)
 
@@ -279,11 +300,12 @@ stringData:
 
 ### 8.4 Test Role-Based Access
 
-1. Sign in with a user assigned `OpsPortal.Admin` → should access all pages including Admin
-2. Sign in with a user assigned `OpsPortal.Read` → should be able to view dashboards
-3. Sign in with a user that has NO role assigned:
+1. Sign in with a user assigned `OpsPortal.SuperAdmin` → sees every page, including Admin and Manage Access
+2. Sign in with an `OpsPortal.Write` user who has a *Non-Prod* grant → can change Non-Prod resources; Prod subscriptions are not listed, and direct Prod calls get 403
+3. Sign in with an `OpsPortal.Read` user with no grant → lands on "You don't have access to any subscription yet" and can submit a request from My Access
+4. Sign in with a user that has NO role assigned:
    - If "Assignment required" is **Yes** → login is blocked entirely
-   - If "Assignment required" is **No** → user gets default `READ` role (via `_map_roles()` fallback)
+   - If "Assignment required" is **No** → the portal refuses them (403, "No app role assigned"). There is no default role.
 
 ### 8.5 Test MFA (if Conditional Access configured)
 
@@ -294,6 +316,11 @@ stringData:
 ---
 
 ## Step 9: Endpoint-Role Matrix
+
+> **Current policy:** see [access-control-design.md §4](access-control-design.md#4-what-a-role-may-do).
+> It is enforced for every route by `backend/tests/test_role_matrix.py`. The
+> table below is the original plan and is out of date. In particular, Write
+> users can restart and delete, and `/admin/*` is Super Admin only.
 
 Once auth is active, apply `require_role()` to protect endpoints. The dependency is already imported in all endpoint files.
 
@@ -357,7 +384,9 @@ async def delete_subscription(
 
 - [ ] App Registration created with correct redirect URIs
 - [ ] API exposed with `access_as_user` scope
-- [ ] Three App Roles defined: `OpsPortal.Admin`, `OpsPortal.Write`, `OpsPortal.Read`
+- [ ] Four App Roles defined: `OpsPortal.SuperAdmin`, `OpsPortal.Admin`, `OpsPortal.Write`, `OpsPortal.Read`
+- [ ] `OpsPortal.SuperAdmin` assigned to the platform owners **before** deploying (the Admin console needs it)
+- [ ] `PORTAL_BASE_URL` set for the environment (links in access-request emails)
 - [ ] Admin consent granted for API permissions
 - [ ] Users/Groups assigned to appropriate roles
 - [ ] "Assignment required" set to **Yes** on Enterprise Application
@@ -371,7 +400,8 @@ async def delete_subscription(
 - [ ] Verified logout clears session
 - [ ] Verified 401 is returned for unauthenticated requests
 - [ ] Verified 403 is returned for insufficient role
-- [ ] Frontend hides admin nav items for non-admin users (future enhancement)
+- [ ] Frontend hides the Admin nav item for non-Super-Admins and Manage Access for users who are neither Super Admins nor Project Admins
+- [ ] After go-live: individual grants set up, then the "everyone" transition grant removed ([PROJECT_ACCESS.md](PROJECT_ACCESS.md))
 
 ---
 

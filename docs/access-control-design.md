@@ -1,279 +1,309 @@
 # OpsPortal Access Control Design
-**Classification:** Internal — Security Architecture  
+**Classification:** Internal — Security Architecture
 **Audience:** Security Team, Azure AD Admins, DevOps
+**Last updated:** October 2026 (project / Prod-Non-Prod access, Super Admin)
+
+Companion document: [PROJECT_ACCESS.md](PROJECT_ACCESS.md). It has the
+project model in detail, the go-live runbook, and the steps for onboarding a
+project or an app.
 
 ---
 
 ## 1. Overview
 
-OpsPortal uses a **four-layer access control model**:
+Access is decided in two independent dimensions. Both must allow a request.
+
+| Dimension | Question | Decided by |
+|---|---|---|
+| **What** | May this user view or change this kind of thing? | Entra app role (Read / Write / Admin / Super Admin), plus module, page and operation permissions in the portal database |
+| **Where** | May this user touch *this* subscription? | Project / app / subscription grants in the portal database |
+
+Every check below runs **on the server**. The frontend hides what the server
+would refuse, but that is only for the user's convenience.
 
 ```
-[Azure AD / Entra ID]
-       │  App Role assignment (Admin / Write / Read)
-       ▼
-[JWT Token Validation]
-       │  Signature (RS256), audience, issuer, expiry
-       ▼
-[Role → UserContext Mapping]
-       │  OpsPortal.Admin → ADMIN | OpsPortal.Write → WRITE | OpsPortal.Read → READ
-       ▼
-[Permission Records (DB)]
-       │  (role, module/page, view|edit) — admin configurable
-       ▼
-[Frontend Route Guards]
-       │  ProtectedRoute + PermissionsContext + Nav visibility
-       ▼
-[User sees page or AccessDenied]
+[Entra ID]               App role in the token: SuperAdmin / Admin / Write / Read
+     │
+[Token validation]       RS256 signature, audience, issuer, expiry           → 401
+     │
+[Portal gate]            No recognised app role                              → 403
+     │
+[Module gate]            No view/edit permission on the API's module         → 403
+     │
+[Subscription scope]     Lists narrowed to the user's readable subscriptions;
+     │                   no subscription at all                              → 403 "Request access"
+     │
+[Target check]           A subscription named in the request (cluster ID,
+     │                   Key Vault, subscription_id) that the user may not
+     │                   read (GET) or change (other methods)                → 403
+     │
+[Role / capability]      require_role / require_capability on the route     → 403
+     │
+[Row checks]             Stored rows addressed by ID (schedules, alert
+     │                   configs) checked against the row's subscription     → 403
+     ▼
+  Handler runs
 ```
 
 ---
 
-## 2. Layer 1 — Azure AD / Entra ID App Roles
+## 2. Entra ID App Roles
 
-### How Roles Are Assigned
+| Entra app role | Portal role | Aliases also accepted | Granted where |
+|---|---|---|---|
+| `OpsPortal.SuperAdmin` | `SUPER_ADMIN` | `superadmin`, `super_admin` | **Entra only.** Nothing in the portal can grant it. |
+| `OpsPortal.Admin` | `ADMIN` | `admin` | Entra. It has effect only after a Super Admin assigns the person to a project. |
+| `OpsPortal.Write` | `WRITE` | `write`, `contributor` | Entra |
+| `OpsPortal.Read` | `READ` | `read`, `reader` | Entra |
 
-OpsPortal uses **Azure AD App Roles** (not Security Groups) defined in the App Registration manifest. The three roles are:
+The role values are configurable (`ROLE_SUPER_ADMIN`, `ROLE_ADMIN`,
+`ROLE_WRITE`, `ROLE_READ`); the defaults above match the app registration.
 
-| Entra App Role        | Portal Role | Aliases also accepted              |
-|-----------------------|-------------|------------------------------------|
-| `OpsPortal.Admin`     | `ADMIN`     | `admin`                            |
-| `OpsPortal.Write`     | `WRITE`     | `write`, `contributor`             |
-| `OpsPortal.Read`      | `READ`      | `read`, `reader`                   |
+**Roles are a ladder.** `SUPER_ADMIN ⊃ ADMIN ⊃ WRITE ⊃ READ`, so a route that
+requires `WRITE` admits Admins and Super Admins. A route that requires
+`SUPER_ADMIN` does **not** admit a plain Admin.
 
-**How roles flow:** When a user authenticates, Entra ID issues a JWT token. The `roles` claim in the token contains the App Roles assigned to that user. Example:
+**The role is a ceiling on grants.** A user in the Read group who is granted
+Write on a project can still only read there.
 
-```json
-{
-  "sub": "abc-123",
-  "name": "Jane Smith",
-  "email": "jane@company.com",
-  "roles": ["OpsPortal.Write"],
-  "aud": "<client-id>",
-  "iss": "https://login.microsoftonline.com/<tenant>/v2.0"
-}
-```
+### Assigning roles
 
-### Assigning App Roles via Entra ID
+1. **App registrations → OpsPortal → App roles**: the four roles above.
+2. **Enterprise applications → OpsPortal → Users and groups**: assign
+   **security groups**, not individuals.
+   - Each project should have its own Read / Write / Admin groups, so the
+     project owns who joins them.
+   - The Super Admin role should go to a small dedicated group, ideally
+     PIM-eligible.
+3. **Properties → Assignment required = Yes.** Remove any "Default Access"
+   (role-less) assignments as well. Those users get a token with no `roles`
+   claim and are refused by the portal anyway (see the Entra audit script
+   `backend/scripts/audit_portal_entra_access.py`).
 
-In the Azure Portal → **App registrations → OpsPortal → App roles**:
-1. Create roles: `OpsPortal.Admin`, `OpsPortal.Write`, `OpsPortal.Read`
-2. Go to **Enterprise Applications → OpsPortal → Users and groups**
-3. Assign individual users **or** Security Groups to each App Role
-
-> **Best practice:** Assign a Security Group (e.g., `SG-OpsPortal-Admins`) to the App Role. This way, adding/removing someone from the AD group immediately controls their portal role — no individual user assignments needed.
-
----
-
-## 3. Layer 2 — JWT Token Validation
-
-Every API request to the backend must carry a Bearer token. The backend:
-
-1. Fetches the Entra ID JWKS (cached 1 hour, auto-refreshed on key rotation)
-2. Verifies RS256 signature
-3. Validates `aud` = `AZURE_CLIENT_ID`, `iss` = expected tenant issuer, `exp`
-4. Extracts `roles`, `sub`, `oid`, `name`, `email`
-5. Maps roles → `UserContext` with `roles: [UserRole.ADMIN | WRITE | READ]`
-6. Rejects users with **no recognised App Role** (HTTP 403)
-
-If a user has no App Role assigned in Entra ID, they cannot log in at all.
+Being in an AD group gets a user **into** the portal. Which subscriptions they
+see depends on the grants in §5.
 
 ---
 
-## 4. Layer 3 — Permission Records (Database RBAC)
+## 3. Token Validation and Dev Mode
 
-This layer is the fine-grained control managed through **Admin → Access Management**.
+Every `/api/v1` request carries a Bearer **ID token** (`aud` = the app's client
+ID). The backend:
 
-### Data Model
+1. fetches the Entra JWKS (cached 1 h; refreshed when a signing key is unknown);
+2. verifies the RS256 signature, `aud`, `iss` and `exp`;
+3. maps the `roles` claim to portal roles;
+4. answers **403** to a valid identity with **no recognised role**. There is no
+   default role.
+
+**Dev bypass.** It applies only when `ENVIRONMENT=development` **and**
+`DEV_AUTH_BYPASS=true`, and only to requests with **no** token. Those requests
+run as a synthetic **Super Admin**. An invalid or expired token is always 401.
+The backend refuses to start if the bypass is enabled outside development.
+
+> Because the dev user is a Super Admin, restricted behaviour (Read-only,
+> Non-Prod-only) cannot be seen in local DEV MODE. Use a real account with
+> grants, or the backend tests.
+
+`GET /api/v1/auth/session` (outside the gated router) tells the UI whether the
+caller is authenticated, authorized, a Super Admin, and whether they have any
+subscription access. Each authorized sign-in is recorded in `portal_users`,
+which is the list admins pick from when granting access.
+
+---
+
+## 4. What a Role May Do
+
+Portal-wide policy, enforced by `backend/tests/test_role_matrix.py`. That test
+walks every route's dependency tree and fails CI on drift.
+
+| | Read | Write | Admin (Project Admin) | Super Admin |
+|---|:---:|:---:|:---:|:---:|
+| View every module, including details, exports and log downloads | ✅ | ✅ | ✅ | ✅ |
+| Every change on operational pages, including deletes | ❌ | ✅ | ✅ | ✅ |
+| Manage grants and decide requests **for their projects** | ❌ | ❌ | ✅ | ✅ (all projects) |
+| Create projects and apps, place subscriptions, appoint Project Admins | ❌ | ❌ | ❌ | ✅ |
+| Admin console (`/admin`): subscriptions, config, cache, health | ❌ | ❌ | ❌ | ✅ |
+| Module / page / capability permissions (`/admin/permissions`) | ❌ | ❌ | ❌ | ✅ |
+| Portal-wide maintenance (cache invalidation, compliance snapshot sync, certificate collections, notification history) | ❌ | ❌ | ❌ | ✅ |
+
+All of these apply **only within the subscriptions the user has been granted**
+(§5). The exception is Super Admin, which covers every subscription.
+
+A few POST/PUT routes change nothing in Azure and are open to Read users:
+cache refresh syncs, chart lint/template, cost queries, log archive download,
+the caller's own picker preference, and submitting or cancelling an access
+request. They are listed with reasons in `backend/app/core/route_policy.py`
+(`READ_PERMITTED_MUTATIONS`), and the role-matrix test keeps that list exact.
+
+---
+
+## 5. Where a User May Work — Project Access
 
 ```
-Resource (module/page)
-  ├── resource_type: "module" | "page"
-  ├── resource_name: "cost_management", "amortized_costs", etc.
-  ├── is_system: true (cannot be deleted)
-  └── parent_id → parent module
+Project (Commissions, BDS)  →  App (ATTCC 31599, DWS 17805, …)  →  Subscription (Prod | Non-Prod)
+```
+
+- **Grants** give a user **Read** or **Write** on:
+  - a project + tier (e.g. "Commissions · Non-Prod"),
+  - an app + tier, or
+  - one subscription.
+
+  Project and app grants also cover subscriptions added there later.
+- **No grant, no subscriptions.** Every module API answers 403 with "Request
+  access from the Access page".
+- **Project Admin** = the Entra Admin role plus an assignment by a Super Admin.
+  It gives read and write on every subscription of that project.
+- **Tier.** An unset tier counts as Prod, and DR is Prod. A subscription not
+  placed in an app is visible to Super Admins only.
+- **Access requests** are approved or rejected line by line by the project's
+  admins or a Super Admin. Nobody decides their own request. Grants last until
+  revoked.
+- **Timing.** Grants are read on every request, so approvals and revocations
+  take effect on the next call. Placement changes (project, app, tier) reach
+  every replica within 30 seconds.
+
+Details, the go-live transition grant and the onboarding steps are in
+[PROJECT_ACCESS.md](PROJECT_ACCESS.md).
+
+---
+
+## 6. Module, Page and Operation Permissions (Database)
+
+Fine-grained "what" control, managed by Super Admins at **Admin → Module &
+Page Permissions**.
+
+```
+Resource
+  ├── resource_type: "module" | "page" | "operation"   (operation = capability, e.g. aks_pod_delete)
+  ├── resource_name, route_path, parent_id → module
+  └── is_system: seeded at startup, cannot be deleted
 
 Permission
-  ├── subject_type: "role" | "user"
-  ├── subject_id: "read" | "write" | <azure-oid>
+  ├── subject_type: "user" | "role" | "group" (portal team)
+  ├── subject_id:   user ID | read/write/admin | team name
   ├── resource_id → Resource
-  └── permission_type: "view" | "edit"
+  └── permission_type: "view" | "edit"     (edit implies view)
 ```
 
-### How the Admin Can Control Access
-
-In **Admin → Access Management → Permissions tab**, an admin can:
-
-| Action | Effect |
-|--------|--------|
-| Grant `read` role `view` on `amortized_costs` | All users with Read role see Amortized Costs page |
-| Grant `write` role `edit` on `aks_main` | Write users can perform actions in AKS page |
-| Grant user `<oid>` `view` on `keyvault_main` | That specific user sees Key Vault even if their role doesn't |
-| Revoke `read` role `view` on `compliance_main` | Read users can no longer see the Compliance page |
-
-### Permission Inheritance
-
-**Module → Page inheritance:** If a role has permission on a module, it inherits permission on all child pages. Example: granting `write` role `view` on `cost_management` automatically grants `view` on `leadership_dashboard` and `amortized_costs`.
-
-### Admin Role Override
-
-`ADMIN` role **always bypasses** permission record checks. Admins see everything regardless of what's in the DB. This cannot be restricted via the permissions UI — it is enforced in code.
+- **Module gate.** Each API prefix belongs to a module (`/api/v1/aks` →
+  `aks_operations`, and so on; see `_API_MODULE_PREFIXES` in
+  `backend/app/core/authz.py`). The caller needs view or edit on it. This is
+  enforced on the API, not just the UI.
+- **Inheritance.** A grant on a module covers its pages.
+- **Capabilities.** Destructive operations are `operation` resources checked
+  with `require_capability(...)`. Write users get them by default and an admin
+  can revoke them. A capability missing from the database falls back to its
+  role requirement, never to open access.
+- **Admins** (Admin and Super Admin) skip module and capability checks. They do
+  **not** skip the subscription checks in §5. Only a Super Admin is
+  unrestricted there.
+- **Defaults** are seeded on every start from
+  `backend/app/core/resource_registry.py`: Read gets view and Write gets edit
+  on every non-admin module.
+- **Legacy `environment_scope`.** The old per-permission all/prod/nonprod
+  field was never enforced. It is no longer offered in the UI, and Prod /
+  Non-Prod is now decided by project grants (§5).
 
 ---
 
-## 5. Layer 4 — Frontend Route Guards
+## 7. Where It Is Enforced
 
-Every page route is wrapped in `<ProtectedRoute module="…" page="…">`.
+| Layer | Code |
+|---|---|
+| Token validation, role mapping, `require_role` | `backend/app/auth/__init__.py` |
+| Portal gate, module gate, capabilities | `backend/app/core/authz.py` (router dependencies, not middleware) |
+| Subscription scope and the "no access" 403 | `backend/app/core/subscription_scope.py` (`bind_subscription_scope`) |
+| Grant resolution, row-level helpers | `backend/app/core/access_scope.py` |
+| Subscriptions named in a request | `backend/app/core/target_access.py` (`enforce_target_access`) |
+| Read-only mutations list | `backend/app/core/route_policy.py` |
+| Access API (grants, requests, approvals) | `backend/app/api/v1/endpoints/access.py`, `backend/app/services/access_service.py` |
+| K8s Dashboard | `aks_dashboard.py`. The launch checks the cluster's subscription, and a session is writable only with write access there. |
+| AKS live-watch WebSocket | `aks_live_sync_hub.py`. Subscribing to a cluster checks its subscription. |
+| Router order | `backend/app/api/v1/router.py`: portal gate → module gate → scope → target check |
 
-**Check sequence:**
-1. `isAdmin` → pass through (no DB check)
-2. Permissions loading → show spinner (prevents false-deny on first render)
-3. `canViewModule(module)` → checks permission record for the module
-4. `canViewPage(page)` → checks permission record for the page
-5. Fail → render `<AccessDenied>` component
+Plugin routers get the same dependencies (`backend/app/plugins/__init__.py`).
 
-**Nav bar:** Menu items are hidden if the user has no view permission for that module/page. Users never see links they cannot access.
-
----
-
-## 6. Default Permission Matrix (Seeded on Startup)
-
-The following grants are seeded automatically when the backend starts. Admins can modify these at any time through the UI.
-
-| Resource | Type | read role | write role | admin role |
-|----------|------|-----------|------------|------------|
-| Cost Management | Module | view | view + edit | full (role-gated) |
-| Leadership Dashboard | Page | view | view + edit | full |
-| Amortized Costs | Page | view | view + edit | full |
-| AKS Operations | Module | view | view + edit | full |
-| AKS Main | Page | view | view + edit | full |
-| Compliance | Module | view | view + edit | full |
-| Compliance Dashboard | Page | view | view + edit | full |
-| Key Vault | Module | view | view + edit | full |
-| Key Vault Dashboard | Page | view | view + edit | full |
-| Infra Alerts | Module | view | view + edit | full |
-| Infra Alerts Dashboard | Page | view | view + edit | full |
-| **Admin Panel** | Module | — | — | role-gated (admin only) |
-| **Admin Dashboard** | Page | — | — | role-gated (admin only) |
-| **Access Management** | Page | — | — | role-gated (admin only) |
-
-> Admin pages are protected at the **role level** (code-enforced), not via permission records. No permission grant can give a non-admin user access to admin pages.
+**Startup guard.** If the database lacks the project-access columns (for
+example, the migration could not run), the backend refuses to start and logs
+`access_schema_incomplete`. Without the columns every request would fail.
 
 ---
 
-## 7. Recommended Entra ID Setup
+## 8. Frontend Guards
 
-```
-Azure AD App Registration: OpsPortal
-├── App Role: OpsPortal.Admin
-│   └── Assigned to: Security Group "SG-OpsPortal-Admins"
-│       └── Members: [DevOps leads, Security team]
-├── App Role: OpsPortal.Write
-│   └── Assigned to: Security Group "SG-OpsPortal-Contributors"
-│       └── Members: [Engineers, analysts who need to take actions]
-└── App Role: OpsPortal.Read
-    └── Assigned to: Security Group "SG-OpsPortal-Readers"
-        └── Members: [Leadership, stakeholders, auditors]
-```
+All of these are UX only; the server enforces everything above.
 
-**Adding a user to the portal:** Add them to the appropriate AD security group. The role flows automatically into their next login token — no portal config change needed.
+| Guard | Where | Rule |
+|---|---|---|
+| `ProtectedRoute module/page` | module pages | Page permission, then: no subscription access (and not Super Admin) → "Request access" panel |
+| `SuperAdminRoute` | `/admin`, `/admin/permissions` | Super Admin only; explains why otherwise |
+| `AccessAdminRoute` | `/access/manage` | Super Admin, or Admin assigned to at least one project |
+| Nav | `App.tsx` | "My Access" for everyone; "Manage Access" for Super Admins and Project Admins; "Admin" for Super Admins |
 
-**Removing access:** Remove from the AD group. Their existing JWT will still work until it expires (typically 1 hour). For immediate revocation, use **Entra ID → Revoke all refresh tokens** for that user.
+Role and access facts come from `/api/v1/auth/session`, not from the ID token.
 
 ---
 
-## 8. Access Control Gaps & Recommendations
+## 9. Audit
 
-### Gap 1 — Azure AD Groups Not Used in Role Mapping ⚠️
+Changes are written to `audit_logs` after they commit:
 
-**Current state:** The `groups` claim is parsed in the JWT model but is **not used** in role mapping. Only the `roles` claim (App Roles) is used.
+- permission changes and all access changes: grants, revocations, requests,
+  decisions, projects, apps, placements and project admins
+  (`resource_type = 'access_management'`);
+- AKS operations, **including denials**;
+- Key Vault, certificate and cost-cleanup operations.
 
-**Risk:** If your org assigns AD Security Groups directly to the app (instead of App Roles), those group memberships are silently ignored — users get no access.
-
-**Fix:** Either:
-- (Recommended) Use App Roles with Security Groups assigned to them (as shown above)
-- Or extend `_map_roles()` in `app/auth/__init__.py` to also check `claims.groups` against a configured group-ID → role mapping
-
-### Gap 2 — API Endpoints Don't Enforce Page-Level Permissions ⚠️
-
-**Current state:** API endpoints use `require_role(UserRole.READ)` or `require_role(UserRole.WRITE)` — they check the **role tier** but not the **page-level permission record**. A `write` role user whose `amortized_costs` page permission has been revoked can still call the `/api/v1/costs/amortized/summary` endpoint directly via curl or API client.
-
-**Risk:** Fine-grained page permission revocation only blocks the UI, not the API.
-
-**Recommended fix:** For sensitive endpoints, add a permission record check to the FastAPI dependency:
-```python
-# Example: require the user to have 'view' on amortized_costs resource
-async def require_page_permission(resource_name: str, perm: str = "view"):
-    async def _checker(user=Depends(get_current_user), db=Depends(get_db)):
-        if user.is_admin:
-            return user
-        # check DB permission record for user or their roles
-        ...
-    return _checker
-```
-
-### Gap 3 — No Token Revocation on Permission Change ⚠️
-
-**Current state:** When a permission is revoked in the Access Management UI, the user's frontend updates within 5 minutes (React Query `staleTime`). But their JWT is still valid for up to 1 hour.
-
-**Risk:** A user whose permission was revoked can still call the API directly using their current token until it expires.
-
-**Recommendation:** For high-sensitivity revocations (removing admin access, revoking all access), use **Entra ID → Revoke sign-in sessions** for that user, then use Entra Continuous Access Evaluation (CAE) to propagate revocation in near-real-time.
-
-### Gap 4 — No Subscription-Level Access Control ℹ️
-
-**Current state:** `UserContext.allowed_subscriptions` exists in the model but is never populated or enforced. All authenticated users with page access can see data for all Azure subscriptions.
-
-**Recommendation:** If multi-tenant or subscription-scoped access is needed, populate `allowed_subscriptions` during token processing (e.g., from a custom claim or a DB lookup) and filter cost/AKS/compliance queries accordingly.
-
-**Addressed (Oct 2026):** subscription access is now granted per project / app / tier from the portal — see [PROJECT_ACCESS.md](PROJECT_ACCESS.md). `allowed_subscriptions` is still unused; the resolved scope lives in `app/core/access_scope.py`.
-
-### Gap 5 — No Audit Log for Permission Changes ℹ️
-
-**Current state:** Permission grants and revocations are logged to the structlog at INFO level but there is no dedicated audit trail queryable through the portal.
-
-**Recommendation:** Add an `audit_log` table and write an entry on every permission create/delete with: `who changed`, `what changed`, `old value`, `new value`, `timestamp`.
+Super Admins can read the permission audit log at
+`GET /api/v1/permissions/audit-log`. Denials by the subscription checks are
+also logged (`subscription_access_denied`, `row_access_denied`).
 
 ---
 
-## 9. Access Decision Flow (End-to-End)
+## 10. Revocation Timing
 
-```
-User navigates to /env-costs (Amortized Costs)
-│
-├─ [Entra ID] User authenticated? JWT valid?
-│   └─ No → Redirect to login
-│
-├─ [Backend] JWT validated (RS256 + audience + issuer + expiry)?
-│   └─ No → 401 Unauthorized
-│
-├─ [Backend] User has recognised App Role?
-│   └─ No → 403 "No app role assigned"
-│
-├─ [Frontend] isAdmin?
-│   └─ Yes → Access granted, skip all further checks
-│
-├─ [Frontend] Permission loaded: canViewModule("cost_management")?
-│   └─ No → AccessDenied component rendered
-│
-├─ [Frontend] canViewPage("amortized_costs")?
-│   └─ No → AccessDenied component rendered
-│
-└─ [User sees Amortized Costs Dashboard]
-```
+| Change | Takes effect |
+|---|---|
+| Grant revoked / approved, project admin removed | Next request |
+| Subscription moved between apps, tier changed, project deactivated | Within 30 s on every replica |
+| Entra role or AD group membership changed | When the user next gets a token (up to ~1 h). For immediate effect, use **Entra → Revoke sessions**. |
 
 ---
 
-## 10. Quick Reference: Who Can Do What
+## 11. Access Decision Flow (Example)
 
-| Action | read | write | admin |
-|--------|------|-------|-------|
-| View all dashboards & pages | ✅ | ✅ | ✅ |
-| Trigger manual Azure sync | ❌ | ✅ | ✅ |
-| Add/modify subscriptions | ❌ | ✅ | ✅ |
-| Access Admin Dashboard | ❌ | ❌ | ✅ |
-| Manage permissions (RBAC) | ❌ | ❌ | ✅ |
-| Add/remove permission grants | ❌ | ❌ | ✅ |
-| Grant per-user access overrides | ❌ | ❌ | ✅ |
-| See other users' permissions | ❌ | ❌ | ✅ |
-| Revoke all permissions for a page | ❌ | ❌ | ✅ |
+A Write user with *Commissions · Non-Prod · Write* scales a deployment on a
+Prod ATTCC cluster:
+
+```
+Token valid, role WRITE ............................................. pass
+Module gate: aks_operations view/edit (seeded for write) ............ pass
+Scope: readable = Commissions Non-Prod subscriptions (non-empty) .... pass
+Target check: cluster_id → ATTCC Prod subscription, needs write ..... 403
+```
+
+The same request against the Non-Prod cluster passes every layer. A user with
+no grant is stopped at the scope step with "Request access from the Access
+page".
+
+---
+
+## 12. Known Gaps
+
+1. **Not yet project-scoped** (not tied to an Azure subscription). These are
+   controlled only by module permissions:
+   - certificates (Keyfactor collections),
+   - Synapse checksum runs addressed by workspace name,
+   - custom expiry alerts, the alert scheduler, notification history,
+   - budget run-rate, the checksum metrics snapshot.
+
+   See [PROJECT_ACCESS.md §5](PROJECT_ACCESS.md#not-yet-project-scoped).
+2. **Single Azure identity.** The portal reaches every project's subscriptions
+   with one identity. A separate identity per project would limit what a
+   compromise can reach.
+3. **Groups claim unused.** Roles come only from app roles in the `roles`
+   claim; `groups` is parsed but ignored. Assign security groups **to app
+   roles** (§2).
+4. **Token lifetime.** Removing someone from an AD group takes effect at their
+   next token. Portal grants take effect immediately.

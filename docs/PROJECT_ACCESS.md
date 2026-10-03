@@ -154,6 +154,11 @@ As Super Admin, under **Access Management**:
 | Request targets | `backend/app/core/target_access.py` | Every subscription a request names — ARM IDs (`cluster_id`, `resource_id`), `subscription_id`-like fields, Key Vault URIs/names — must be readable (GET, and the read-only mutations in `route_policy.py`) or writable (every other change). |
 | Rows by ID | `assert_resource_access` / `arm_scope_clause` | Environment schedules, sequences and history; infra-alert configs and alerts; Key Vault inventory. |
 | K8s Dashboard | `aks_dashboard.py` | An environment is listed and launchable only if the user can read its cluster's subscription. The session is writable only with write access. |
+| AKS live watch (WebSocket) | `aks_live_sync_hub.py` | Subscribing to a cluster checks its subscription. WebSocket routes skip the HTTP router's checks. |
+| Startup guard | `main.py` / `core/database.py` | Refuses to start when `admin_subscriptions.app_id` / `tier` are missing (`access_schema_incomplete`). |
+
+The full layer-by-layer model is in
+[access-control-design.md](access-control-design.md).
 
 **Adding a route.** If it names its target by ARM ID, `subscription_id` or
 vault, nothing is needed. If it loads a row by database ID, call

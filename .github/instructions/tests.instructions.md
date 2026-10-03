@@ -11,7 +11,15 @@ applyTo: "backend/tests/**/*.py"
 - API tests should use `httpx.AsyncClient` with `ASGITransport(app=app)`.
 - Mock Azure SDK calls, Redis access, and external HTTP requests. Do not make live Azure calls in tests.
 - Prefer regression tests that fail before the fix and pass after it.
-- The repo does not currently expose a standard frontend test script in `frontend/package.json`; do not assume Vitest is available unless you add and justify it.
+- **Subscription access in tests:** an autouse fixture in `conftest.py` gives
+  every user unrestricted subscription access. Tests of grants, Prod / Non-Prod
+  or project isolation must be marked `@pytest.mark.real_access`; they can build
+  fixtures with `tests/access_helpers.py` (`build_world`, `grant`,
+  `make_project_admin`, `client_as`).
+- To see READ/WRITE behaviour through the API, turn the dev bypass off (the
+  `strict_auth` fixture in `test_role_matrix.py`). With it on, `require_role`
+  skips every check.
+- The frontend has Vitest (`npm test` in `frontend/`).
 
 ## Verify (MANDATORY)
 
@@ -25,6 +33,9 @@ After **every** backend code change, run the following from `backend/` and fix a
 
 ## Key References
 
+- `backend/tests/conftest.py`, `backend/tests/access_helpers.py`
+- `backend/tests/test_role_matrix.py` (portal-wide role policy)
+- `backend/tests/test_access_scope.py`, `test_target_access.py`, `test_row_access.py`, `test_access_api.py`
 - `backend/tests/test_api.py`
 - `backend/tests/test_api_manual.py`
 - `backend/tests/test_import.py`

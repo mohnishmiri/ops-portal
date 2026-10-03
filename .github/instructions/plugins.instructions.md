@@ -9,7 +9,8 @@ applyTo: "backend/app/plugins/**"
 - Implement `PluginBase` from `backend/app/plugins/__init__.py`.
 - Required runtime methods are `get_metadata()` and `get_router()`.
 - Optional lifecycle hooks are `on_startup()` and `on_shutdown()`.
-- Keep plugin routes self-contained and use the same auth dependencies as the rest of the backend.
+- Keep plugin routes self-contained and use the same auth dependencies as the rest of the backend. The loader mounts every plugin router behind the module gate, subscription scope and target check (`enforce_target_access`).
+- Read subscriptions with `get_scoped_subscription_ids()`, never `get_monitored_subscription_ids()`, so users see only what they have been granted.
 - Plugins must not import from other plugins. Move shared code into `app.core` or `app.services`.
 - `plugin_registry.yaml` is useful documentation, but it is not the runtime registration mechanism in the current codebase.
 

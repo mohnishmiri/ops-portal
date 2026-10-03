@@ -287,7 +287,16 @@ All operations (manual, scheduled, sequence) are recorded with full audit detail
 - **Page:** `env_scheduler`
 - **Read operations:** Require `READ` role or above
 - **Write operations:** Require `WRITE` role or above
-- **Admin:** Bypasses all access checks
+- **Admin / Super Admin:** Bypass module and page checks. Only Super Admin
+  bypasses the subscription checks below.
+- **Subscription access** ([PROJECT_ACCESS.md](PROJECT_ACCESS.md)):
+  - Schedules, sequences and history are listed only for clusters in
+    subscriptions the user may read.
+  - Creating, editing, deleting, running or linking a sequence requires
+    **write** access to the cluster's subscription, so a Non-Prod-only user
+    cannot schedule a Prod scale-down.
+  - The background runner executes schedules with the portal's own authority;
+    the check happens when the schedule is created or changed.
 
 The page is registered in `resource_registry.py` and automatically seeded on startup.
 

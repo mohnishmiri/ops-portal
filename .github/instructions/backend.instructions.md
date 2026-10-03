@@ -16,6 +16,36 @@ applyTo: "backend/app/**/*.py, backend/tests/**/*.py"
 - Prefer explicit typing. When touching older model files, follow the local SQLAlchemy style instead of mixing patterns aggressively.
 - Startup and scheduler behavior belongs in `backend/app/main.py` and service modules, not inside route handlers.
 
+## Authorization (read before adding or changing a route)
+
+Access has two dimensions; both are enforced server-side. See
+`backend/app/docs/access_control_README.md` for the full guide.
+
+- **What** — roles form a ladder `SUPER_ADMIN ⊃ ADMIN ⊃ WRITE ⊃ READ`
+  (`require_role`). READ views everything, WRITE makes every change on
+  operational pages including deletes, and `/admin` + `/permissions` are
+  `SUPER_ADMIN` only. `tests/test_role_matrix.py` enforces this for every route.
+- **Where** — users see and change only the subscriptions granted to them
+  (project / app × Prod / Non-Prod). `enforce_target_access` already checks any
+  ARM ID, `subscription_id`-like field or Key Vault named in path, query or JSON
+  body.
+- **Row loaded by database ID?** After loading it, call
+  `assert_resource_access(row.<arm id or subscription column>, "read" | "write")`
+  from `app.core.access_scope`. Filter lists with `arm_scope_clause(...)` /
+  `subscription_scope_clause(...)`.
+- **POST/PUT that changes nothing in Azure** (cache refresh, local render, the
+  caller's own preference)? Add it to `READ_PERMITTED_MUTATIONS` in
+  `app/core/route_policy.py` with a reason.
+- **Destructive operation?** Add a capability to `CAPABILITY_SEEDS` and guard the
+  route with `require_capability(...)`.
+- **Never** treat an empty subscription list as "all", and never populate
+  `UserContext.allowed_subscriptions`. Cache keys for scoped data must include
+  the effective scope. Syncs that delete stale rows must stay within the
+  subscriptions they synced.
+- **WebSocket routes** skip router dependencies, so check access in the handler.
+- **New column on an existing table** → a new idempotent `.sql` file in
+  `backend/migrations/` (`create_all` never adds columns).
+
 ## SQLAlchemy Column Type Safety
 
 When building queries against SQLAlchemy models, **always match the Python literal type to the column's SQL type**:
@@ -58,8 +88,13 @@ After **every** backend code change, run the following from `backend/` and fix a
 - `backend/app/api/v1/router.py`
 - `backend/app/auth/__init__.py`
 - `backend/app/core/database.py`
+- `backend/app/core/authz.py` (portal gate, module gate, capabilities)
+- `backend/app/core/access_scope.py` (project / subscription grants, row helpers)
+- `backend/app/core/target_access.py` (subscriptions named in a request)
+- `backend/app/core/route_policy.py` (read-only mutations)
 - `backend/app/core/subscription_resolver.py` (admin monitored set; sync jobs)
 - `backend/app/core/subscription_scope.py` (per-request read scope)
+- `backend/app/docs/access_control_README.md`
 - `backend/README.md`
-- `docs/ARCHITECTURE.md` (§2.4 subscription scoping, §8 cost cleanup)
+- `docs/access-control-design.md`, `docs/PROJECT_ACCESS.md`
 - `.github/workflows/ci-cd.yaml`

@@ -101,10 +101,10 @@ Base path: `/api/v1/certificates`. All endpoints require an authenticated user.
 | `GET` | `/{id}` | view | Full metadata for one certificate. |
 | `POST` | `/enroll` | WRITE | Enroll a new certificate (CSR or PFX). |
 | `POST` | `/{id}/renew` | WRITE | Renew an existing certificate. |
-| `POST` | `/{id}/revoke` | ADMIN | Revoke a certificate with an RFC 5280 reason. |
+| `POST` | `/{id}/revoke` | WRITE | Revoke a certificate with an RFC 5280 reason. |
 | `PUT` | `/{id}/metadata` | WRITE | Update metadata / custom fields. |
 | `POST` | `/{id}/download` | view (WRITE for PFX/JKS) | Download as PEM, CER, CRT, DER, P7B, PFX, or JKS. |
-| `DELETE` | `/{id}` | ADMIN | Delete a certificate record. |
+| `DELETE` | `/{id}` | WRITE | Delete a certificate record. |
 
 ### List / search
 
@@ -201,8 +201,9 @@ Allowed `reason` values (RFC 5280): `unspecified`, `keyCompromise`, `caCompromis
 
 ## 4. RBAC / Permission Matrix
 
-Roles come from the existing Ops-Portal authorization model (`admin` / `write` /
-`read`). Admin implicitly satisfies every requirement.
+Roles come from the Ops Portal authorization model
+([access-control-design.md](access-control-design.md)): Read views, Write makes
+every change including revoke and delete, and Admin / Super Admin satisfy Write.
 
 | Operation | read | write | admin |
 | --- | :---: | :---: | :---: |
@@ -211,12 +212,22 @@ Roles come from the existing Ops-Portal authorization model (`admin` / `write` /
 | Enroll | ❌ | ✅ | ✅ |
 | Renew | ❌ | ✅ | ✅ |
 | Update metadata | ❌ | ✅ | ✅ |
-| Revoke | ❌ | ❌ | ✅ |
-| Delete | ❌ | ❌ | ✅ |
+| Revoke | ❌ | ✅ | ✅ |
+| Delete | ❌ | ✅ | ✅ |
 
 The module/page resources (`certificates`, `certificates_main`) are seeded in
 [backend/app/core/resource_registry.py](../backend/app/core/resource_registry.py); the
 UI hides write and destructive actions based on the caller's effective permissions.
+
+**Project access.**
+- Loading a certificate into a Key Vault names the vault's subscription, so the
+  caller needs **write** access to that subscription (Non-Prod-only users
+  cannot load into a Prod vault).
+- Choosing which Keyfactor collections are enabled affects every project, so it
+  is **Super Admin** only.
+- The certificate list itself is not yet split by project. Keyfactor
+  collections are not tied to Azure subscriptions; see
+  [PROJECT_ACCESS.md](PROJECT_ACCESS.md#not-yet-project-scoped).
 
 ---
 
@@ -230,8 +241,8 @@ UI hides write and destructive actions based on the caller's effective permissio
    download the returned `.pfx` immediately and store it securely.
 5. **Renew** (write) reissues from the same template.
 6. **Edit** (write) updates metadata / custom fields.
-7. **Revoke** (admin) requires selecting a reason and typing `REVOKE` to confirm.
-8. **Delete** (admin) requires typing `DELETE` to confirm.
+7. **Revoke** (write) requires selecting a reason and typing `REVOKE` to confirm.
+8. **Delete** (write) requires typing `DELETE` to confirm.
 
 All write operations are recorded in the audit log (who, what, when, target, outcome).
 Every certificate entry names the certificate it touched — summaries read
@@ -415,7 +426,7 @@ incident.
 | "Keyfactor authentication is not configured" | Missing SP config | Set `KEYFACTOR_CLIENT_ID`, `KEYFACTOR_CLIENT_SECRET`, `KEYFACTOR_OAUTH_SCOPE`. |
 | Repeated `502` with auth errors | Wrong scope or expired secret | Confirm the scope matches the Keyfactor app registration; rotate the client secret. |
 | Token expiry mid-session | Normal — handled automatically | The client re-acquires the token once on a 401 and retries. |
-| `403` in the UI | Caller lacks the role | Grant the `write` (enroll/renew/update) or `admin` (revoke/delete) permission. |
+| `403` in the UI | Caller lacks the role, or write access to the target vault's subscription | Add the user to the Write group, and/or grant write on that project or app in Access Management. |
 | `422` on enroll | Missing required fields | CSR enrollment needs `csr`; PFX needs `subject` and `password`. |
 | Revoke rejected for a missing comment | Keyfactor requires a non-empty revocation `Comment` | Handled: a blank comment is replaced with `Revoked via OpsPortal by <user> (reason: <reason>)`. The audit row keeps `comment_supplied` so you can tell them apart. |
 | `404` on view/renew | Certificate id not in Keyfactor | Refresh the list; the record may have been deleted. |

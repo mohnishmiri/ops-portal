@@ -2,6 +2,24 @@
 
 > Role definitions, team assignments, and endpoint protection strategy.
 
+> **Superseded (October 2026). Kept for history; do not use it as a reference.**
+> Current behaviour is in [access-control-design.md](access-control-design.md)
+> and [PROJECT_ACCESS.md](PROJECT_ACCESS.md). Main differences from this plan:
+>
+> - **Four roles**, adding `OpsPortal.SuperAdmin` (Entra-only).
+>   `/admin` and `/admin/permissions` are Super Admin only.
+> - **Admin no longer passes every role check.** `require_role` follows the
+>   ladder `SUPER_ADMIN ⊃ ADMIN ⊃ WRITE ⊃ READ`. An Admin is a *Project Admin*:
+>   full access to the projects a Super Admin assigned, and nothing else.
+> - **No default role.** A token with no recognised role gets 403, not READ.
+> - **Write = every change on operational pages, including deletes.** Read can
+>   view and export everything.
+> - **Subscription access is per user.** Grants on a project or app × Prod /
+>   Non-Prod × Read/Write, requested and approved in the portal. No grant means
+>   no subscriptions. `UserContext.allowed_subscriptions` is not used.
+> - **Dev developers** get the Write AD group plus a *Non-Prod* grant, rather
+>   than the Read role.
+
 ---
 
 ## 1. Role Definitions

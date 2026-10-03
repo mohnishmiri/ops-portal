@@ -15,6 +15,17 @@ applyTo: "frontend/src/**/*.ts, frontend/src/**/*.tsx"
 - Match the current repo icon approach first. Reuse inline SVGs unless a new icon dependency is explicitly approved.
 - Keep page components focused and extract large subsections into feature components.
 - MSAL bootstrapping already happens at the app shell. Most page work needs route wiring and UI role gating, not a separate auth wrapper.
+- Role and access facts come from the backend session (`useSession()`:
+  `isSuperAdmin`, `hasSubscriptionAccess`, `adminProjectIds`), not from the ID
+  token.
+- Wrap module pages in `<ProtectedRoute module="…" page="…">`. It also shows the
+  "no subscription access yet" panel. Portal-wide admin pages use
+  `SuperAdminRoute`; Access Management uses `AccessAdminRoute`
+  (`components/RoleGuards.tsx`).
+- Frontend gating is UX only. Gate an action exactly like the API it calls,
+  e.g. `canWrite && hasCapability(X)` where the route checks a capability.
+- Access APIs live in `services/accessApi.ts`; Prod / Non-Prod badges use
+  `components/TierBadge.tsx`.
 
 ## Verify (MANDATORY)
 
