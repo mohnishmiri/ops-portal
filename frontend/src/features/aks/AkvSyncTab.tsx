@@ -20,6 +20,7 @@ import {
   useAkvsDetail,
   useAkvsVaultCheck,
   useCachedAkvs,
+  useDeleteAkvs,
 } from "../../services/aksApi";
 import {
   CachedSyncStatus,
@@ -33,7 +34,8 @@ import {
 } from "./aksGridShared";
 import { useAksLiveWatch } from "../../hooks/useAksLiveWatch";
 import { DetailGrid } from "./DetailGrid";
-import { EventsGrid, formatAge, KeyValueGrid } from "./detailShared";
+import { DetailIcons, type EventFilter, EventsGrid, formatAge, KeyValueGrid } from "./detailShared";
+import { ModalShell } from "./K8sResourceModals";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type AkvSyncTabProps = {
@@ -43,6 +45,7 @@ type AkvSyncTabProps = {
   onNamespaceChange: (ns: string) => void;
   showToast: (msg: string, type?: "success" | "error") => void;
   formatDate: (value: string) => string;
+  canDelete: boolean;
 };
 
 const STATUS_STYLES: Record<AkvsStatus, string> = {
@@ -61,7 +64,25 @@ const STATUS_LABELS: Record<AkvsStatus, string> = {
   EnvInjector: "Env Injector",
 };
 
-const STATUS_FILTERS: (AkvsStatus | "All")[] = ["All", "Synced", "Failed", "Degraded", "Pending", "EnvInjector"];
+// "Problems" and "Waiting" are what the Failed / Degraded and Pending / Env Injector tiles select.
+type StatusFilter = AkvsStatus | "All" | "Problems" | "Waiting";
+const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+  { value: "All", label: "All Statuses" },
+  { value: "Synced", label: "Synced" },
+  { value: "Problems", label: "Failed or Degraded" },
+  { value: "Failed", label: "Failed" },
+  { value: "Degraded", label: "Degraded" },
+  { value: "Waiting", label: "Pending or Env Injector" },
+  { value: "Pending", label: "Pending" },
+  { value: "EnvInjector", label: "Env Injector" },
+];
+
+function matchesStatus(status: AkvsStatus, filter: StatusFilter): boolean {
+  if (filter === "All") return true;
+  if (filter === "Problems") return status === "Failed" || status === "Degraded";
+  if (filter === "Waiting") return status === "Pending" || status === "EnvInjector";
+  return status === filter;
+}
 
 function errorDetail(e: unknown, fallback: string): string {
   const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -89,9 +110,12 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
   onNamespaceChange,
   showToast,
   formatDate,
+  canDelete,
 }) => {
-  const [statusFilter, setStatusFilter] = useState<AkvsStatus | "All">("All");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
   const [selected, setSelected] = useState<{ namespace: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState<AkvsItem | null>(null);
+  const deleteMut = useDeleteAkvs();
 
   const nsFilter = namespace || undefined;
   const { data, isFetching, isError, refetch } = useCachedAkvs(cluster.id, nsFilter);
@@ -109,7 +133,7 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
   const summary = data?.summary;
 
   const filteredByStatus = useMemo(
-    () => (statusFilter === "All" ? allItems : allItems.filter((i) => i.status === statusFilter)),
+    () => allItems.filter((i) => matchesStatus(i.status, statusFilter)),
     [allItems, statusFilter]
   );
 
@@ -136,6 +160,10 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
     []
   );
   const { search, setSearch, page, setPage, paged, filtered, totalPages } = useSearchPagination(sorted, searchFn);
+  const applyTile = (filter: StatusFilter) => {
+    setStatusFilter((prev) => (prev === filter ? "All" : filter));
+    setPage(1);
+  };
 
   const header = (label: string, key: string) => (
     <SortableHeader label={label} active={sort.key === key} direction={sort.direction} onClick={() => setSort(nextSortState(sort, key))} />
@@ -155,14 +183,14 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
           <select
             value={statusFilter}
             onChange={(e) => {
-              setStatusFilter(e.target.value as AkvsStatus | "All");
+              setStatusFilter(e.target.value as StatusFilter);
               setPage(1);
             }}
             className={gridStyles.toolbarInput}
             aria-label="Filter by sync status"
           >
             {STATUS_FILTERS.map((s) => (
-              <option key={s} value={s}>{s === "All" ? "All Statuses" : STATUS_LABELS[s]}</option>
+              <option key={s.value} value={s.value}>{s.label}</option>
             ))}
           </select>
           <SyncFromKubernetesButton sync={backgroundSync} title="Refresh AzureKeyVaultSecrets from Kubernetes" />
@@ -196,10 +224,15 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
       <CachedSyncStatus source={data?.source} lastSync={data?.last_sync} sync={backgroundSync} formatDate={formatDate} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard title="AzureKeyVaultSecrets" value={summary?.total ?? 0} icon={MetricCardIcons.shield()} subtitle={`${summary?.vaults ?? 0} Key Vault(s) · ${summary?.outputs ?? 0} outputs`} tone="att" />
-        <MetricCard title="Synced" value={summary?.Synced ?? 0} icon={MetricCardIcons.checkCircle()} subtitle="Key Vault object written to Kubernetes" tone="green" />
-        <MetricCard title="Failed / Degraded" value={(summary?.Failed ?? 0) + (summary?.Degraded ?? 0)} icon={MetricCardIcons.alert()} subtitle="Vault read errors or missing output keys" tone="red" />
-        <MetricCard title="Pending / Env Injector" value={(summary?.Pending ?? 0) + (summary?.EnvInjector ?? 0)} icon={MetricCardIcons.cloud()} subtitle="Not yet synced, or injected into pods" tone="slate" />
+        {/* Each tile filters the grid; clicking the active tile again shows everything. */}
+        <MetricCard title="AzureKeyVaultSecrets" value={summary?.total ?? 0} icon={MetricCardIcons.shield()} subtitle={`${summary?.vaults ?? 0} Key Vault(s) · ${summary?.outputs ?? 0} outputs`} tone="att"
+          onClick={() => applyTile("All")} actionLabel="Show all AzureKeyVaultSecrets" />
+        <MetricCard title="Synced" value={summary?.Synced ?? 0} icon={MetricCardIcons.checkCircle()} subtitle="Key Vault object written to Kubernetes" tone="green"
+          onClick={() => applyTile("Synced")} active={statusFilter === "Synced"} actionLabel="Show synced secrets" />
+        <MetricCard title="Failed / Degraded" value={(summary?.Failed ?? 0) + (summary?.Degraded ?? 0)} icon={MetricCardIcons.alert()} subtitle="Vault read errors or missing output keys" tone="red"
+          onClick={() => applyTile("Problems")} active={statusFilter === "Problems"} actionLabel="Show failed or degraded secrets" />
+        <MetricCard title="Pending / Env Injector" value={(summary?.Pending ?? 0) + (summary?.EnvInjector ?? 0)} icon={MetricCardIcons.cloud()} subtitle="Not yet synced, or injected into pods" tone="slate"
+          onClick={() => applyTile("Waiting")} active={statusFilter === "Waiting"} actionLabel="Show pending or env-injector secrets" />
       </div>
 
       {isError && (
@@ -292,13 +325,16 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
                     )}
                   </td>
                   <td className={gridStyles.centerCell}>
-                    <button
-                      type="button"
-                      onClick={() => setSelected({ namespace: item.namespace, name: item.name })}
-                      className="text-sm text-blue-600 hover:underline"
-                    >
-                      Details
-                    </button>
+                    <div className="flex items-center justify-center gap-1">
+                      <button type="button" title="View Details" onClick={() => setSelected({ namespace: item.namespace, name: item.name })} className={`${iconBtn} hover:bg-blue-50 text-blue-600`}>
+                        {DetailIcons.view}
+                      </button>
+                      {canDelete && (
+                        <button type="button" title="Delete AzureKeyVaultSecret" disabled={deleteMut.isPending} onClick={() => setDeleting(item)} className={`${iconBtn} hover:bg-red-50 text-red-600`}>
+                          {DetailIcons.trash}
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -318,9 +354,109 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
           onClose={() => setSelected(null)}
         />
       )}
+
+      {deleting && (
+        <DeleteAkvsModal
+          item={deleting}
+          busy={deleteMut.isPending}
+          onClose={() => setDeleting(null)}
+          onConfirm={(keepOutput) =>
+            deleteMut.mutate(
+              { clusterId: cluster.id, namespace: deleting.namespace, name: deleting.name, keepOutput },
+              {
+                onSuccess: (res) => {
+                  const output = !res.output_kept && deleting.output_exists && res.output_name ? ` and its output ${res.output_name}` : "";
+                  showToast(`Deleted AzureKeyVaultSecret ${res.name}${output}`, "success");
+                  if (selected?.namespace === deleting.namespace && selected.name === deleting.name) setSelected(null);
+                  setDeleting(null);
+                },
+                onError: (e) => showToast(errorDetail(e, "Failed to delete the AzureKeyVaultSecret"), "error"),
+              }
+            )
+          }
+        />
+      )}
     </div>
   );
 };
+
+const iconBtn = "p-1 rounded disabled:opacity-50";
+
+/**
+ * akv2k8s owns the Secret/ConfigMap it writes, so deleting the
+ * AzureKeyVaultSecret removes that output too unless the user keeps it.
+ */
+function DeleteAkvsModal({
+  item,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  item: AkvsItem;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (keepOutput: boolean) => void;
+}) {
+  const [keepOutput, setKeepOutput] = useState(false);
+  const hasOutput = item.output_kind !== "env-injection" && item.output_exists === true;
+  const outputKind = item.output_kind === "configmap" ? "ConfigMap" : "Secret";
+  const helmManaged = item.labels["app.kubernetes.io/managed-by"] === "Helm";
+  return (
+    <ModalShell title="Delete AzureKeyVaultSecret" onClose={onClose}>
+      <div className="space-y-4">
+        <p className="text-sm text-gray-600">
+          Permanently delete AzureKeyVaultSecret "{item.name}" from namespace "{item.namespace}"? akv2k8s stops syncing
+          Key Vault object <span className="font-mono">{item.vault_name ?? "—"}/{item.object_name ?? "—"}</span>. Current status: {STATUS_LABELS[item.status] ?? item.status}.
+        </p>
+        {hasOutput ? (
+          <div>
+            <label htmlFor="akvs-delete-output" className="mb-1 block text-sm font-medium text-gray-700">
+              Synced {outputKind} <span className="font-mono">{item.output_name}</span>
+            </label>
+            <select
+              id="akvs-delete-output"
+              value={keepOutput ? "keep" : "delete"}
+              onChange={(e) => setKeepOutput(e.target.value === "keep")}
+              className="w-full rounded-lg border border-att-200 px-3 py-2 text-sm focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100"
+            >
+              <option value="delete">Delete it too</option>
+              <option value="keep">Keep it (stop syncing only)</option>
+            </select>
+            {!keepOutput && (
+              <p className="mt-1 text-xs text-amber-700">Pods that read this {outputKind} will fail to start once it is gone.</p>
+            )}
+          </div>
+        ) : (
+          item.output_kind !== "env-injection" && (
+            <p className="text-sm text-gray-600">
+              Its output {outputKind} <span className="font-mono">{item.output_name ?? "—"}</span> does not exist, so nothing else is removed.
+            </p>
+          )
+        )}
+        {helmManaged && (
+          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            This object is managed by Helm, so the next <span className="font-mono">helm upgrade</span> recreates it. To remove it
+            for good, skip it in the chart values (for the Ops Portal chart, <span className="font-mono">azureKeyVaultSecrets.skip</span> or{" "}
+            <span className="font-mono">skipGroups</span>).
+          </p>
+        )}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-lg border border-att-200 px-4 py-2 text-sm text-gray-700 hover:bg-att-50">
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onConfirm(hasOutput && keepOutput)}
+            className="rounded-lg bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            {busy ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
 
 type AkvsSection = "overview" | "keys" | "events" | "metadata";
 
@@ -359,6 +495,11 @@ export function AkvsDetailModal({
   const vaultCheckMut = useAkvsVaultCheck();
   const [vaultCheck, setVaultCheck] = useState<AkvsVaultCheck | null>(null);
   const [section, setSection] = useState<AkvsSection>("overview");
+  const [eventType, setEventType] = useState<EventFilter>("all");
+  const showEvents = (type: EventFilter) => {
+    setEventType(type);
+    setSection("events");
+  };
   const fmt = (v: string | null | undefined) => (v ? formatDate(v) : null);
 
   const runVaultCheck = () =>
@@ -419,7 +560,8 @@ export function AkvsDetailModal({
             </div>
           )}
           <KpiRow>
-            <MetricCard title="Sync Status" value={STATUS_LABELS[item.status] ?? item.status} subtitle={item.last_event?.reason ?? "No recent controller event"} icon={MetricCardIcons.activity()} tone={STATUS_TONE[item.status] ?? "slate"} valueClassName="text-xl" />
+            <MetricCard title="Sync Status" value={STATUS_LABELS[item.status] ?? item.status} subtitle={item.last_event?.reason ?? "No recent controller event"} icon={MetricCardIcons.activity()} tone={STATUS_TONE[item.status] ?? "slate"} valueClassName="text-xl"
+              onClick={() => showEvents(warnings > 0 ? "Warning" : "all")} actionLabel="Show the controller events behind this status" />
             <MetricCard
               title="Output"
               value={item.output_kind === "env-injection" ? "Env" : item.output_exists == null ? "n/a" : item.output_exists ? "Present" : "Missing"}
@@ -427,6 +569,8 @@ export function AkvsDetailModal({
               icon={MetricCardIcons.shield()}
               tone={item.output_exists === false ? "red" : "att"}
               valueClassName="text-xl"
+              onClick={hasOutputKeys ? () => setSection("keys") : undefined}
+              actionLabel="Show the output keys"
             />
             <MetricCard
               title="Output Keys"
@@ -434,6 +578,8 @@ export function AkvsDetailModal({
               subtitle={item.output_data_key ? `Data key ${item.output_data_key}${item.key_present === false ? " (missing)" : ""}` : "All keys from the object"}
               icon={MetricCardIcons.layers()}
               tone={item.key_present === false ? "red" : "indigo"}
+              onClick={hasOutputKeys ? () => setSection("keys") : undefined}
+              actionLabel="Show the output keys"
             />
             <MetricCard
               title="Last Azure Sync"
@@ -441,6 +587,8 @@ export function AkvsDetailModal({
               subtitle={fmt(item.last_azure_update) ?? "Never synced"}
               icon={MetricCardIcons.calendar()}
               tone={item.last_azure_update ? "att" : "amber"}
+              onClick={() => showEvents("all")}
+              actionLabel="Show controller events"
             />
           </KpiRow>
 
@@ -543,7 +691,9 @@ export function AkvsDetailModal({
         />
       )}
 
-      {item && section === "events" && <EventsGrid title="Controller Events" events={item.events} formatDate={formatDate} />}
+      {item && section === "events" && (
+        <EventsGrid title="Controller Events" events={item.events} formatDate={formatDate} type={eventType} onTypeChange={setEventType} />
+      )}
 
       {item && section === "metadata" && <KeyValueGrid title="Labels" entries={item.labels} />}
     </ResourceDetailShell>

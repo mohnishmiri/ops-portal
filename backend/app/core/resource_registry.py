@@ -342,6 +342,7 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
         ("read", "write"),
         "aks_operations",
     ),
+    ("aks_akv_sync_delete", "Delete AzureKeyVaultSecret sync objects", "edit", ("write",), "aks_operations"),
     # Azure resource power control.  Previously admin-only, which contradicted
     # both the Infrastructure Alerts UI (it renders the power buttons for any
     # user who can write) and the equivalent AKS cluster start/stop routes

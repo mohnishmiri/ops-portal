@@ -15,6 +15,7 @@ import {
   EventsGrid,
   formatAge,
   KeyValueGrid,
+  type PodFilter,
   splitImage,
   Truncate,
   WorkloadPodsGrid,
@@ -80,7 +81,17 @@ function ReplicaSetsGrid({ revisions, formatDate }: { revisions: DeploymentRevis
   );
 }
 
-function Overview({ detail, formatDate }: { detail: DeploymentDetail; formatDate: (v: string) => string }) {
+function Overview({
+  detail,
+  formatDate,
+  onShowPods,
+  onShowRevisions,
+}: {
+  detail: DeploymentDetail;
+  formatDate: (v: string) => string;
+  onShowPods: (filter: PodFilter) => void;
+  onShowRevisions: () => void;
+}) {
   const restarts = detail.pods.reduce((n, p) => n + p.restarts, 0);
   const restartedPods = detail.pods.filter((p) => p.restarts > 0).length;
   const fullyReady = detail.desired > 0 && detail.ready === detail.desired;
@@ -94,6 +105,8 @@ function Overview({ detail, formatDate }: { detail: DeploymentDetail; formatDate
           subtitle={`${detail.available} available · ${detail.unavailable} unavailable`}
           icon={MetricCardIcons.checkCircle()}
           tone={detail.desired === 0 ? "slate" : fullyReady ? "green" : "amber"}
+          onClick={() => onShowPods(detail.pods.some((p) => !p.ready) ? "not-ready" : "all")}
+          actionLabel="Show the pods that are not ready"
         />
         <MetricCard
           title="Up-to-date"
@@ -101,6 +114,8 @@ function Overview({ detail, formatDate }: { detail: DeploymentDetail; formatDate
           subtitle={detail.revision ? `Revision ${detail.revision}` : "Revision unknown"}
           icon={MetricCardIcons.layers()}
           tone="att"
+          onClick={onShowRevisions}
+          actionLabel="Show ReplicaSet revisions"
         />
         <MetricCard
           title="Restarts"
@@ -108,6 +123,8 @@ function Overview({ detail, formatDate }: { detail: DeploymentDetail; formatDate
           subtitle={restartedPods ? `${restartedPods} pod${restartedPods === 1 ? "" : "s"} restarted` : "No pod has restarted"}
           icon={MetricCardIcons.activity()}
           tone={restarts > 0 ? "red" : "green"}
+          onClick={() => onShowPods(restartedPods ? "restarted" : "all")}
+          actionLabel="Show pods that restarted"
         />
         <MetricCard
           title="Autoscaling"
@@ -115,6 +132,8 @@ function Overview({ detail, formatDate }: { detail: DeploymentDetail; formatDate
           subtitle={hpa ? `${hpa.current_replicas ?? "?"} current · ${hpa.desired_replicas ?? "?"} desired` : "No HorizontalPodAutoscaler"}
           icon={MetricCardIcons.server()}
           tone={hpa ? "indigo" : "slate"}
+          onClick={() => onShowPods("all")}
+          actionLabel="Show the pods the autoscaler manages"
         />
       </KpiRow>
 
@@ -177,6 +196,7 @@ export function DeploymentDetailModal({
   onClose: () => void;
 }) {
   const [section, setSection] = useState<Section>("overview");
+  const [podFilter, setPodFilter] = useState<PodFilter>("all");
   const { data: detail, isLoading, isError, error } = useDeploymentDetail(clusterId, namespace, name);
   const warnings = useMemo(() => (detail?.events ?? []).filter((e) => e.type === "Warning").length, [detail]);
 
@@ -221,9 +241,27 @@ export function DeploymentDetailModal({
       error={isError && !detail ? apiErrorDetail(error, "Failed to load deployment details.") : null}
       onClose={onClose}
     >
-      {detail && section === "overview" && <Overview detail={detail} formatDate={formatDate} />}
+      {detail && section === "overview" && (
+        <Overview
+          detail={detail}
+          formatDate={formatDate}
+          onShowPods={(filter) => {
+            setPodFilter(filter);
+            setSection("pods");
+          }}
+          onShowRevisions={() => setSection("revisions")}
+        />
+      )}
       {detail && section === "pods" && (
-        <WorkloadPodsGrid pods={detail.pods} onOpenPod={onOpenPod} onViewPodLogs={onViewPodLogs} onDeletePod={onDeletePod} canDeletePod={canDeletePod} />
+        <WorkloadPodsGrid
+          pods={detail.pods}
+          onOpenPod={onOpenPod}
+          onViewPodLogs={onViewPodLogs}
+          onDeletePod={onDeletePod}
+          canDeletePod={canDeletePod}
+          filter={podFilter}
+          onFilterChange={setPodFilter}
+        />
       )}
       {detail && section === "revisions" && <ReplicaSetsGrid revisions={detail.revisions} formatDate={formatDate} />}
       {detail && section === "events" && <EventsGrid events={detail.events} formatDate={formatDate} showObject />}

@@ -410,6 +410,41 @@ class AKSAkvsOperationsMixin:
             item["vault_check"] = await self._check_akvs_vault(item)
         return item
 
+    async def delete_akvs(
+        self, cluster_id: str, namespace: str, name: str, keep_output: bool = False
+    ) -> dict[str, Any]:
+        """Delete an AzureKeyVaultSecret.
+
+        akv2k8s sets the AzureKeyVaultSecret as controller owner of the Secret or
+        ConfigMap it writes, so Kubernetes garbage-collects that output with it
+        unless ``keep_output`` orphans it.
+        """
+        _, custom = await self._akvs_clients(cluster_id)
+        obj = await self._read_akvs(custom, namespace, name)
+        version = str(obj.get("apiVersion") or "").rpartition("/")[2] or AKVS_VERSIONS[0]
+        item = serialize_akvs(obj, None, {})
+        await asyncio.to_thread(
+            custom.delete_namespaced_custom_object,
+            AKVS_GROUP,
+            version,
+            namespace,
+            AKVS_PLURAL,
+            name,
+            propagation_policy="Orphan" if keep_output else "Background",
+        )
+        await self._delete_inventory_item(cluster_id, INVENTORY_SEGMENT, namespace, name)  # type: ignore[attr-defined]
+        logger.info("akvs_deleted", namespace=namespace, name=name, keep_output=keep_output)
+        return {
+            "success": True,
+            "name": name,
+            "namespace": namespace,
+            "vault_name": item["vault_name"],
+            "object_name": item["object_name"],
+            "output_kind": item["output_kind"],
+            "output_name": item["output_name"],
+            "output_kept": keep_output,
+        }
+
     async def _check_akvs_vault(self, item: dict[str, Any]) -> dict[str, Any]:
         """Compare the newest Key Vault version with the controller's last sync time (no values are read)."""
         checked_at = datetime.now(UTC).isoformat()

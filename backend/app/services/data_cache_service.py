@@ -68,6 +68,7 @@ class CacheTTL:
     WORKLOADS: int = 30  # StatefulSets / DaemonSets
     AKV_SYNC: int = 60  # akv2k8s controller status
     NODE_POOLS: int = 300  # 5 min — rarely changes
+    NAMESPACES: int = 300  # 5 min — the namespace picker on every AKS tab
     SUBSCRIPTIONS: int = 600  # 10 min — almost static
     UNDERUTILIZED: int = 600  # 10 min — DB aggregation cache
 
@@ -136,6 +137,10 @@ class CacheKeys:
     @staticmethod
     def node_pools(cluster_id: str) -> str:
         return f"{CacheKeys.PREFIX}:nodepools:{_hash_params(cluster_id)}"
+
+    @staticmethod
+    def namespaces(cluster_id: str) -> str:
+        return f"{CacheKeys.PREFIX}:namespaces:{_hash_params(cluster_id)}"
 
     @staticmethod
     def subscriptions(subscription_ids: list[str] | None = None) -> str:

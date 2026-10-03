@@ -42,9 +42,12 @@ export function CachedSyncStatus({
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <span className={`px-2 py-1 rounded-full text-xs font-medium ${source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"}`}>
-        Source: {source === "db" ? "Database" : "Kubernetes Live"}
-      </span>
+      {/* No badge until a response arrives — an unloaded grid is not "Kubernetes Live". */}
+      {source && (
+        <span className={`px-2 py-1 rounded-full text-xs font-medium ${source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"}`}>
+          Source: {source === "db" ? "Database" : "Kubernetes Live"}
+        </span>
+      )}
       {lastSync ? (
         <span className="text-sm text-gray-500">Last synced: {formatDate(lastSync)}</span>
       ) : (
@@ -277,6 +280,27 @@ export function ExtendedTabToolbar({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Shown above a grid while a KPI tile is filtering it, with a one-click clear. */
+export function TileFilterNotice({ label, onClear }: { label: string | null; onClear: () => void }) {
+  if (!label) return null;
+  return (
+    <div className="flex items-center">
+      <span className="inline-flex items-center gap-2 rounded-full border border-att-200 bg-att-50 px-3 py-1 text-sm text-att-700">
+        Filtered by tile: <span className="font-semibold">{label}</span>
+        <button
+          type="button"
+          onClick={onClear}
+          aria-label="Clear tile filter"
+          title="Clear filter"
+          className="rounded-full p-0.5 text-att-600 hover:bg-att-100"
+        >
+          <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+        </button>
+      </span>
     </div>
   );
 }

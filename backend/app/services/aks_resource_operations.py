@@ -161,12 +161,30 @@ class AKSResourceOperationsMixin:
             logger.warning("delete_inventory_item_failed", resource_id=resource_id, error=str(exc)[:200])
             await self.db.rollback()
 
-    async def list_namespaces_for_cluster(self, cluster_id: str) -> list[str]:
-        """List all namespaces from the K8s cluster, falling back to synced inventory."""
-        # Try fetching live from K8s first for the full list
+    async def list_namespaces_for_cluster(self, cluster_id: str, refresh: bool = False) -> list[str]:
+        """Namespaces of a cluster, cached for a few minutes.
+
+        Every AKS tab shows the namespace picker, so this is requested constantly;
+        namespaces change rarely, and a live call to a slow or unreachable cluster
+        used to hold up the whole page.
+        """
+        from app.services.data_cache_service import TTL, CacheKeys
+
+        if refresh:
+            return await self._fetch_namespaces(cluster_id)
+        namespaces, _tier = await data_cache.get_or_fetch(
+            key=CacheKeys.namespaces(cluster_id),
+            ttl=TTL.NAMESPACES,
+            fetch_fn=lambda: self._fetch_namespaces(cluster_id),
+        )
+        return namespaces
+
+    async def _fetch_namespaces(self, cluster_id: str) -> list[str]:
+        """Live namespace list, falling back to the synced inventory."""
         try:
             _, core_v1, _ = await self._get_k8s_clients(cluster_id)
-            resp = await asyncio.to_thread(core_v1.list_namespace)
+            # Bounded so an unreachable cluster fails over to the inventory quickly.
+            resp = await asyncio.to_thread(core_v1.list_namespace, _request_timeout=(5, 15))
             return sorted(ns.metadata.name for ns in resp.items if ns.metadata and ns.metadata.name)
         except Exception as exc:
             logger.warning("list_namespaces_live_failed", cluster_id=cluster_id[:80], error=str(exc)[:200])

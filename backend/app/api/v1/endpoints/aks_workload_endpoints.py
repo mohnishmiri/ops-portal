@@ -13,13 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.authz import require_capability
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
-from app.services.aks_akvs_operations import summarize_akvs
+from app.services.aks_akvs_operations import AKVS_KIND, summarize_akvs
 from app.services.aks_workload_operations import KIND_LABEL
 
 logger = structlog.get_logger(__name__)
 
 K8S_NAME_PATTERN = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
 WorkloadKind = Literal["statefulset", "daemonset"]
+# Resource kinds mutated through _mutate (audit action is "<op>_<kind>").
+MUTATION_LABEL: dict[str, str] = {**KIND_LABEL, "azurekeyvaultsecret": AKVS_KIND}
 
 
 class WorkloadRef(BaseModel):
@@ -87,7 +89,7 @@ def register_workload_routes(router, *, get_service, write_audit):
         summary: Callable[[dict[str, Any]], str],
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        label = KIND_LABEL[kind]
+        label = MUTATION_LABEL[kind]
 
         async def _audit(status: str, extra: dict[str, Any]) -> None:
             await write_audit(
@@ -379,3 +381,27 @@ def register_workload_routes(router, *, get_service, write_audit):
         except Exception as e:
             logger.error("get_akvs_detail_failed", name=name, error=str(e))
             raise HTTPException(status_code=502, detail="Failed to connect to cluster.") from e
+
+    @router.delete("/akv-sync", summary="Delete an AzureKeyVaultSecret")
+    async def delete_akvs(
+        request: Request,
+        cluster_id: str = Query(...),
+        namespace: str = Query(..., max_length=63, pattern=K8S_NAME_PATTERN),
+        name: str = Query(..., max_length=253, pattern=K8S_NAME_PATTERN),
+        keep_output: bool = Query(default=False, description="Keep the synced Secret/ConfigMap instead of removing it"),
+        user: UserContext = Depends(require_capability("aks_akv_sync_delete")),
+        service=Depends(get_service),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        ref = WorkloadRef(cluster_id=cluster_id, namespace=namespace, name=name)
+        return await _mutate(
+            op="delete",
+            kind="azurekeyvaultsecret",
+            ref=ref,
+            user=user,
+            request=request,
+            db=db,
+            call=lambda: service.delete_akvs(cluster_id, namespace, name, keep_output=keep_output),
+            summary=lambda _r: f"Deleted AzureKeyVaultSecret {name}",
+            details={"keep_output": keep_output},
+        )

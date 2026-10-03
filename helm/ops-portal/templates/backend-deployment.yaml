@@ -47,6 +47,7 @@ spec:
           env:
             {{- if .Values.backend.azureKeyVaultSecrets.enabled }}
             {{- range .Values.backend.azureKeyVaultSecrets.items }}
+            {{- if include "ops-portal.akvsItemEnabled" (dict "cfg" $.Values.backend.azureKeyVaultSecrets "item" .) }}
             - name: {{ .envName }}
               valueFrom:
                 secretKeyRef:
@@ -57,6 +58,7 @@ spec:
                   # default rather than blocking pod start.
                   optional: true
                   {{- end }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- if .Values.backend.env }}

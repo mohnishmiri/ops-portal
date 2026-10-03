@@ -66,6 +66,7 @@ import {
   AKS_PAGE_SIZE as PAGE_SIZE,
   GridPager,
   GridSearchBar,
+  TileFilterNotice,
   useSearchPagination,
 } from "../features/aks/aksGridShared";
 import {
@@ -83,6 +84,7 @@ import { PodDetailModal } from "../features/aks/PodDetailModal";
 import { DownloadLogsButton, LogArchiveProgress, useLogArchiveDownload } from "../features/aks/LogArchiveDownload";
 import { AkvSyncTab } from "../features/aks/AkvSyncTab";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
+import { formatAxiosError } from "../services/apiErrors";
 import {
   BarChart,
   Bar,
@@ -271,6 +273,9 @@ const AKSOperationsPage: React.FC = () => {
   const canTriggerCronJobs = canWrite && hasCapability("AKS_CRONJOB_TRIGGER");
   const canExecPods = canWrite && hasCapability("AKS_POD_EXEC");
   const [activeTab, setActiveTab] = useState<TabKey>("clusters");
+  // KPI tiles filter the grid beneath them; clicking an active tile again clears it.
+  const [clusterTile, setClusterTile] = useState<"all" | "running" | "with-nodes" | "region">("all");
+  const [poolTile, setPoolTile] = useState<"all" | "with-nodes" | "autoscaling" | "system">("all");
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
   const [scaleDialog, setScaleDialog] = useState<{ deployment: Deployment; replicas: number } | null>(null);
@@ -393,9 +398,16 @@ const AKSOperationsPage: React.FC = () => {
     isLoading: loadingClusters,
     isFetching: fetchingClusters,
     isPlaceholderData: clustersArePlaceholder,
+    isError: clustersLoadFailed,
+    error: clustersLoadError,
     refetch: refetchClusters,
   } = useCachedClusters(undefined, activeTab === "clusters");
   const clustersPending = fetchingClusters && clustersArePlaceholder;
+  // A failed load leaves the empty placeholder in place; say why instead of
+  // implying the inventory has simply never been synced.
+  const clustersErrorText = clustersLoadFailed && clustersArePlaceholder
+    ? formatAxiosError(clustersLoadError, (clustersLoadError as Error)?.message || "Request failed")
+    : null;
   const { data: deploymentsData, isFetching: fetchingDeployments, isPlaceholderData: deploymentsArePlaceholder, isError: deploymentsError, error: deploymentsErr } = useCachedDeployments(
     selectedCluster?.id || "",
     selectedNamespace || undefined,
@@ -1013,6 +1025,28 @@ const AKSOperationsPage: React.FC = () => {
     };
   }, [filteredClusterInventory]);
 
+  const tileFilteredClusters = useMemo(() => {
+    const region = clusterOverview.dominantLocation?.location;
+    return filteredClusterInventory.filter((c) =>
+      clusterTile === "running" ? c.power_state === "Running"
+      : clusterTile === "with-nodes" ? (c.node_count || 0) > 0
+      : clusterTile === "region" ? c.location === region
+      : true
+    );
+  }, [filteredClusterInventory, clusterTile, clusterOverview.dominantLocation]);
+  const clusterTotalPages = Math.max(1, Math.ceil(tileFilteredClusters.length / PAGE_SIZE));
+  const clusterPage = Math.min(clustersPag.page, clusterTotalPages);
+  const pagedTileClusters = tileFilteredClusters.slice((clusterPage - 1) * PAGE_SIZE, clusterPage * PAGE_SIZE);
+  const toggleClusterTile = (tile: typeof clusterTile) => {
+    setClusterTile((prev) => (prev === tile ? "all" : tile));
+    clustersPag.setPage(1);
+  };
+  const clusterTileLabel =
+    clusterTile === "running" ? "Running clusters"
+    : clusterTile === "with-nodes" ? "Clusters with nodes"
+    : clusterTile === "region" ? `Region ${clusterOverview.dominantLocation?.location ?? ""}`
+    : null;
+
   const allDeps = deploymentsData?.deployments || [];
   const searchDepsFn = useCallback((d: Deployment, q: string) =>
     d.name.toLowerCase().includes(q) || d.namespace.toLowerCase().includes(q) || d.images.some(i => i.toLowerCase().includes(q)), []);
@@ -1124,8 +1158,26 @@ const AKSOperationsPage: React.FC = () => {
       default: return "";
     }
   }, []);
-  const sortedPools = useMemo(() => sortItems(poolsPag.filtered, npSort.key, npSort.direction, npAccessor), [poolsPag.filtered, npSort, npAccessor, sortItems]);
-  const pagedSortedPools = useMemo(() => sortedPools.slice((poolsPag.page - 1) * PAGE_SIZE, poolsPag.page * PAGE_SIZE), [sortedPools, poolsPag.page]);
+  const tileFilteredPools = useMemo(
+    () =>
+      poolsPag.filtered.filter((p) =>
+        poolTile === "with-nodes" ? p.count > 0
+        : poolTile === "autoscaling" ? p.enable_auto_scaling
+        : poolTile === "system" ? p.mode === "System"
+        : true
+      ),
+    [poolsPag.filtered, poolTile]
+  );
+  const poolTotalPages = Math.max(1, Math.ceil(tileFilteredPools.length / PAGE_SIZE));
+  const poolPage = Math.min(poolsPag.page, poolTotalPages);
+  const sortedPools = useMemo(() => sortItems(tileFilteredPools, npSort.key, npSort.direction, npAccessor), [tileFilteredPools, npSort, npAccessor, sortItems]);
+  const pagedSortedPools = useMemo(() => sortedPools.slice((poolPage - 1) * PAGE_SIZE, poolPage * PAGE_SIZE), [sortedPools, poolPage]);
+  const togglePoolTile = (tile: typeof poolTile) => {
+    setPoolTile((prev) => (prev === tile ? "all" : tile));
+    poolsPag.setPage(1);
+  };
+  const poolTileLabel =
+    poolTile === "with-nodes" ? "Pools with nodes" : poolTile === "autoscaling" ? "Autoscaling pools" : poolTile === "system" ? "System pools" : null;
 
   const histAccessor = useCallback((h: typeof allHistory[0], key: string): string | number => {
     switch (key) {
@@ -1233,7 +1285,11 @@ const AKSOperationsPage: React.FC = () => {
   // ── Render Clusters Tab ─────────────────────────────────────────────
 
   const renderClustersTab = () => {
-    const { search: cSearch, setSearch: setCSearch, page: cPage, setPage: setCPage, paged: pagedClusters, filtered: filteredClusters, totalPages: cTotalPages } = clustersPag;
+    const { search: cSearch, setSearch: setCSearch, setPage: setCPage } = clustersPag;
+    const pagedClusters = pagedTileClusters;
+    const filteredClusters = tileFilteredClusters;
+    const cPage = clusterPage;
+    const cTotalPages = clusterTotalPages;
     const hasClusters = allClusters.length > 0;
     const isAzureSource = clustersData?.source === "azure";
     const sourceLabel = isAzureSource ? "Azure Live" : "Database Cache";
@@ -1273,7 +1329,9 @@ const AKSOperationsPage: React.FC = () => {
             Last synced: {formatDate(clustersData.last_sync)}
           </span>
         )}
-        {!clustersData?.last_sync && (
+        {clustersErrorText ? (
+          <span className="text-sm text-red-600">Couldn't load clusters: {clustersErrorText}</span>
+        ) : !clustersData?.last_sync && !clustersPending && (
           <span className="text-sm text-amber-600">
             No saved sync yet. Use Sync from Azure to populate the cache.
           </span>
@@ -1288,6 +1346,8 @@ const AKSOperationsPage: React.FC = () => {
           subtitle={`${clusterOverview.locations} location${clusterOverview.locations === 1 ? "" : "s"} represented`}
           icon={MetricCardIcons.layers()}
           tone="att"
+          onClick={() => toggleClusterTile("all")}
+          actionLabel="Show all clusters"
         />
         <MetricCard
           title="Running Clusters"
@@ -1295,6 +1355,9 @@ const AKSOperationsPage: React.FC = () => {
           subtitle={`${clusterOverview.succeededClusters} successfully provisioned`}
           icon={MetricCardIcons.checkCircle()}
           tone="green"
+          onClick={() => toggleClusterTile("running")}
+          active={clusterTile === "running"}
+          actionLabel="Show running clusters"
         />
         <MetricCard
           title="Total Nodes"
@@ -1302,6 +1365,9 @@ const AKSOperationsPage: React.FC = () => {
           subtitle="Combined worker footprint across filtered inventory"
           icon={MetricCardIcons.server()}
           tone="blue"
+          onClick={() => toggleClusterTile("with-nodes")}
+          active={clusterTile === "with-nodes"}
+          actionLabel="Show clusters that have nodes"
         />
         <MetricCard
           title="Primary Region"
@@ -1309,20 +1375,32 @@ const AKSOperationsPage: React.FC = () => {
           subtitle={clusterOverview.dominantLocation ? `${clusterOverview.dominantLocation.count} cluster${clusterOverview.dominantLocation.count === 1 ? "" : "s"}` : "No clusters available"}
           icon={MetricCardIcons.globe()}
           tone="indigo"
+          onClick={clusterOverview.dominantLocation ? () => toggleClusterTile("region") : undefined}
+          active={clusterTile === "region"}
+          actionLabel="Show clusters in the primary region"
         />
       </div>
+
+      <TileFilterNotice label={clusterTileLabel} onClear={() => toggleClusterTile("all")} />
 
       <GridSearchBar search={cSearch} onSearch={setCSearch} onPage={setCPage} totalItems={allClusters.length} shownItems={filteredClusters.length} placeholder="Search clusters..." />
 
       {clustersPending ? (
         <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading clusters…</div>
+      ) : clustersErrorText ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+          <span>The cluster inventory could not be loaded: {clustersErrorText}</span>
+          <button type="button" onClick={() => refetchClusters()} className="rounded-lg border border-red-300 bg-white px-3 py-1.5 font-medium text-red-700 hover:bg-red-100">
+            Retry
+          </button>
+        </div>
       ) : !hasClusters ? (
         <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-6 text-sm text-amber-800">
           No AKS clusters are available in the local inventory cache yet. The page is ready; run <span className="font-semibold">Sync from Azure</span> to refresh inventory without blocking navigation.
         </div>
       ) : filteredClusters.length === 0 ? (
         <div className="rounded-2xl border border-gray-200 bg-white p-6 text-center text-sm text-gray-500">
-          No clusters match “{cSearch}”.
+          {cSearch ? <>No clusters match “{cSearch}”{clusterTileLabel ? ` within ${clusterTileLabel.toLowerCase()}` : ""}.</> : `No ${clusterTileLabel?.toLowerCase() ?? "clusters"}.`}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -2580,7 +2658,10 @@ const AKSOperationsPage: React.FC = () => {
   // ── Render Node Pools Tab ─────────────────────────────────────────────
 
   const renderNodePoolsTab = () => {
-    const { search: npSearch, setSearch: setNpSearch, page: npPage, setPage: setNpPage, filtered: filteredPools, totalPages: npTotalPages } = poolsPag;
+    const { search: npSearch, setSearch: setNpSearch, setPage: setNpPage } = poolsPag;
+    const filteredPools = tileFilteredPools;
+    const npPage = poolPage;
+    const npTotalPages = poolTotalPages;
     const pagedPools = pagedSortedPools;
 
     return (
@@ -2645,26 +2726,38 @@ const AKSOperationsPage: React.FC = () => {
               value={poolsPag.filtered.length}
               icon={Icons.cluster("h-5 w-5")}
               tone="blue"
+              onClick={() => togglePoolTile("all")}
+              actionLabel="Show all node pools"
             />
             <MetricCard
               title="Total Nodes"
               value={poolsPag.filtered.reduce((sum, p) => sum + p.count, 0)}
               icon={MetricCardIcons.server()}
               tone="green"
+              onClick={() => togglePoolTile("with-nodes")}
+              active={poolTile === "with-nodes"}
+              actionLabel="Show node pools that have nodes"
             />
             <MetricCard
               title="Autoscaling"
               value={poolsPag.filtered.filter((p) => p.enable_auto_scaling).length}
               icon={Icons.scale("h-5 w-5")}
               tone="purple"
+              onClick={() => togglePoolTile("autoscaling")}
+              active={poolTile === "autoscaling"}
+              actionLabel="Show autoscaling node pools"
             />
             <MetricCard
               title="System Pools"
               value={poolsPag.filtered.filter((p) => p.mode === "System").length}
               icon={MetricCardIcons.layers()}
               tone="orange"
+              onClick={() => togglePoolTile("system")}
+              active={poolTile === "system"}
+              actionLabel="Show system node pools"
             />
           </div>
+          <TileFilterNotice label={poolTileLabel} onClear={() => togglePoolTile("all")} />
 
           {/* Node Pools Table */}
           <div className={gridStyles.shell}>
@@ -3154,6 +3247,7 @@ const AKSOperationsPage: React.FC = () => {
               onNamespaceChange={setSelectedNamespace}
               showToast={showToast}
               formatDate={formatDate}
+              canDelete={canWrite && hasCapability("AKS_AKV_SYNC_DELETE")}
             />
           ) : (
             <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>

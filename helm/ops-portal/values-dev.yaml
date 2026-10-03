@@ -8,6 +8,10 @@ backend:
   azureKeyVaultSecrets:
     enabled: true
     vaultName: "attcc-eastus2-stge-kv"
+    # Leave out secrets this vault doesn't hold (no AzureKeyVaultSecret, no
+    # secretKeyRef). Groups: ollama, agentLlm, k8sDashboard, keyfactor.
+    # skipGroups: [agentLlm, keyfactor]
+    # skip: [SMTP_PASSWORD]
   secretProvider:
     enabled: false
   autoscaling:

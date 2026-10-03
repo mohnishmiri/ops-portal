@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db_cache import cache_manager
@@ -41,6 +41,32 @@ class ComplianceSyncService:
 
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
+
+    async def _expire_abandoned_running_rows(self) -> int:
+        """Flip orphaned 'running' rows to 'failed' once they exceed the timeout.
+
+        A row stays 'running' forever if the process is killed mid-sync or the
+        task is cancelled before the except handler fires. Without this sweep
+        the sync history would show it as running indefinitely.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=RUNNING_SYNC_TIMEOUT_MINUTES)
+        result = await self._db.execute(
+            update(ComplianceSyncStatus)
+            .where(
+                ComplianceSyncStatus.status == "running",
+                ComplianceSyncStatus.started_at < cutoff,
+            )
+            .values(
+                status="failed",
+                completed_at=datetime.utcnow(),
+                error_message="abandoned: process restarted or timed out",
+            )
+        )
+        expired = getattr(result, "rowcount", 0) or 0
+        if expired:
+            await self._db.commit()
+            logger.warning("compliance_sync_expired_running_rows", count=expired)
+        return expired
 
     async def is_data_stale(self) -> bool:
         """Return True when the DB has no snapshot or hasn't been refreshed recently."""

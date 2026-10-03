@@ -8,11 +8,12 @@
 import React, { useState } from "react";
 import { MetricCard, MetricCardIcons } from "../../components/MetricCard";
 import { JobDetail, JobPod } from "../../services/aksApi";
-import { DetailGrid, type GridColumn } from "./DetailGrid";
+import { DetailGrid, GridFilterSelect, type GridColumn } from "./DetailGrid";
 import { ageMs, ConditionsGrid, DetailIcons, KeyValueGrid, Truncate } from "./detailShared";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type Section = "overview" | "pods" | "metadata";
+type PhaseFilter = "all" | "Succeeded" | "Failed" | "Running" | "Pending";
 
 const POD_PHASE_STYLES: Record<string, string> = {
   Running: "bg-blue-100 text-blue-700",
@@ -46,13 +47,19 @@ function JobPodsGrid({
   canDeletePod,
   onViewPodLogs,
   onDeletePod,
+  phase,
+  onPhaseChange,
 }: {
   pods: JobPod[];
   formatDate: (value: string) => string;
   canDeletePod: boolean;
   onViewPodLogs: (pod: JobPod) => void;
   onDeletePod?: (pod: JobPod) => void;
+  phase: PhaseFilter;
+  onPhaseChange: (phase: PhaseFilter) => void;
 }) {
+  const rows = phase === "all" ? pods : pods.filter((p) => p.phase === phase);
+  const count = (value: string) => pods.filter((p) => p.phase === value).length;
   const columns: GridColumn<JobPod>[] = [
     { key: "name", header: "Pod", sortValue: (p) => p.pod_name, render: (p) => <Truncate value={p.pod_name} className="font-mono text-xs" maxWidth="max-w-[24rem]" /> },
     {
@@ -90,18 +97,46 @@ function JobPodsGrid({
   return (
     <DetailGrid
       title="Pods"
-      rows={pods}
+      rows={rows}
       columns={columns}
       rowKey={(p) => p.pod_name}
+      toolbar={
+        <GridFilterSelect<PhaseFilter>
+          label="Filter pods by phase"
+          value={phase}
+          onChange={onPhaseChange}
+          options={[
+            { value: "all", label: `All phases (${pods.length})` },
+            { value: "Succeeded", label: `Succeeded (${count("Succeeded")})` },
+            { value: "Failed", label: `Failed (${count("Failed")})` },
+            { value: "Running", label: `Running (${count("Running")})` },
+            { value: "Pending", label: `Pending (${count("Pending")})` },
+          ]}
+        />
+      }
       searchText={(p) => `${p.pod_name} ${p.phase ?? ""} ${p.node ?? ""} ${p.pod_ip ?? ""}`}
       searchPlaceholder="Search pod, node, phase…"
-      emptyText="No pods found for this Job. They may have been cleaned up by its TTL or by the CronJob's history limits."
+      emptyText={
+        phase === "all"
+          ? "No pods found for this Job. They may have been cleaned up by its TTL or by the CronJob's history limits."
+          : `No ${phase} pods`
+      }
       initialSort={{ key: "started", direction: "asc" }}
     />
   );
 }
 
-function Overview({ detail, clusterName, formatDate }: { detail: JobDetail; clusterName: string; formatDate: (value: string) => string }) {
+function Overview({
+  detail,
+  clusterName,
+  formatDate,
+  onShowPods,
+}: {
+  detail: JobDetail;
+  clusterName: string;
+  formatDate: (value: string) => string;
+  onShowPods: (phase: PhaseFilter) => void;
+}) {
   const fmt = (v: string | null) => (v ? formatDate(v) : null);
   return (
     <>
@@ -112,6 +147,8 @@ function Overview({ detail, clusterName, formatDate }: { detail: JobDetail; clus
           subtitle={`Completion mode ${detail.completion_mode ?? "NonIndexed"}`}
           icon={MetricCardIcons.checkCircle()}
           tone={detail.succeeded >= (detail.completions ?? 1) ? "green" : "att"}
+          onClick={() => onShowPods("Succeeded")}
+          actionLabel="Show succeeded pods"
         />
         <MetricCard
           title="Failed"
@@ -119,6 +156,8 @@ function Overview({ detail, clusterName, formatDate }: { detail: JobDetail; clus
           subtitle={`Backoff limit ${detail.backoff_limit ?? "—"}`}
           icon={MetricCardIcons.alert()}
           tone={detail.failed > 0 ? "red" : "green"}
+          onClick={() => onShowPods("Failed")}
+          actionLabel="Show failed pods"
         />
         <MetricCard
           title="Active Pods"
@@ -126,6 +165,8 @@ function Overview({ detail, clusterName, formatDate }: { detail: JobDetail; clus
           subtitle={`Parallelism ${detail.parallelism ?? "—"}`}
           icon={MetricCardIcons.activity()}
           tone={detail.active > 0 ? "blue" : "slate"}
+          onClick={() => onShowPods("Running")}
+          actionLabel="Show running pods"
         />
         <MetricCard
           title="Duration"
@@ -133,6 +174,8 @@ function Overview({ detail, clusterName, formatDate }: { detail: JobDetail; clus
           subtitle={detail.completion_time ? "Finished" : detail.start_time ? "Still running" : "Not started"}
           icon={MetricCardIcons.calendar()}
           tone="att"
+          onClick={() => onShowPods("all")}
+          actionLabel="Show all pods"
         />
       </KpiRow>
 
@@ -191,6 +234,7 @@ export const JobDetailModal: React.FC<{
   onClose: () => void;
 }> = ({ clusterName, jobRef, detail, isLoading, isError, formatDate, canDeletePod, onViewPodLogs, onDeletePod, onClose }) => {
   const [section, setSection] = useState<Section>("overview");
+  const [phase, setPhase] = useState<PhaseFilter>("all");
   return (
     <ResourceDetailShell
       kind="Job"
@@ -216,9 +260,27 @@ export const JobDetailModal: React.FC<{
       error={!isLoading && (isError || !detail) ? "Unable to load details for this Job. It may have been deleted or its TTL may have expired." : null}
       onClose={onClose}
     >
-      {detail && section === "overview" && <Overview detail={detail} clusterName={clusterName} formatDate={formatDate} />}
+      {detail && section === "overview" && (
+        <Overview
+          detail={detail}
+          clusterName={clusterName}
+          formatDate={formatDate}
+          onShowPods={(next) => {
+            setPhase(next);
+            setSection("pods");
+          }}
+        />
+      )}
       {detail && section === "pods" && (
-        <JobPodsGrid pods={detail.pods} formatDate={formatDate} canDeletePod={canDeletePod} onViewPodLogs={onViewPodLogs} onDeletePod={onDeletePod} />
+        <JobPodsGrid
+          pods={detail.pods}
+          formatDate={formatDate}
+          canDeletePod={canDeletePod}
+          onViewPodLogs={onViewPodLogs}
+          onDeletePod={onDeletePod}
+          phase={phase}
+          onPhaseChange={setPhase}
+        />
       )}
       {detail && section === "metadata" && (
         <>

@@ -574,6 +574,63 @@ async def test_list_akvs_returns_none_when_crd_missing():
     assert await svc._list_akvs(FakeCustomObjects(served=set()), "data") is None
 
 
+class FakeAkvsCustomObjects:
+    """Serves one AzureKeyVaultSecret at v1 and records deletes."""
+
+    def __init__(self):
+        self.deleted: list[tuple] = []
+
+    def get_namespaced_custom_object(self, group, version, namespace, plural, name):
+        if version != "v1" or name != "aaf-id":
+            raise ApiException(status=404, reason="Not Found")
+        return {"apiVersion": "spv.no/v1", **make_akvs(name=name, namespace=namespace)}
+
+    def delete_namespaced_custom_object(self, group, version, namespace, plural, name, **kwargs):
+        self.deleted.append((group, version, namespace, plural, name, kwargs.get("propagation_policy")))
+        return {}
+
+
+@pytest.fixture
+def akvs_service():
+    svc = AKSOperationsService.__new__(AKSOperationsService)
+    svc.custom = FakeAkvsCustomObjects()
+    svc.inventory_deletes = []
+
+    async def _clients(_cluster_id):
+        return None, svc.custom
+
+    async def _delete_inventory_item(cluster_id, segment, namespace, name):
+        svc.inventory_deletes.append((segment, namespace, name))
+
+    svc._akvs_clients = _clients
+    svc._delete_inventory_item = _delete_inventory_item
+    return svc
+
+
+async def test_delete_akvs_uses_served_version_and_removes_output(akvs_service):
+    result = await akvs_service.delete_akvs(CLUSTER_ID, "data", "aaf-id")
+
+    assert akvs_service.custom.deleted == [("spv.no", "v1", "data", "azurekeyvaultsecrets", "aaf-id", "Background")]
+    assert akvs_service.inventory_deletes == [("akvs", "data", "aaf-id")]
+    assert result["output_name"] == "aaf-cred"
+    assert result["output_kept"] is False
+
+
+async def test_delete_akvs_can_keep_output(akvs_service):
+    result = await akvs_service.delete_akvs(CLUSTER_ID, "data", "aaf-id", keep_output=True)
+
+    assert akvs_service.custom.deleted[0][-1] == "Orphan"
+    assert result["output_kept"] is True
+
+
+async def test_delete_missing_akvs_deletes_nothing(akvs_service):
+    with pytest.raises(LookupError):
+        await akvs_service.delete_akvs(CLUSTER_ID, "data", "missing")
+
+    assert akvs_service.custom.deleted == []
+    assert akvs_service.inventory_deletes == []
+
+
 # ── API ───────────────────────────────────────────────────────────────
 
 
@@ -616,6 +673,18 @@ class FakeWorkloadService:
 
     async def get_akvs_detail(self, cluster_id, namespace, name, check_vault=False):
         raise LookupError(f"AzureKeyVaultSecret '{name}' was not found in namespace '{namespace}'.")
+
+    async def delete_akvs(self, cluster_id, namespace, name, keep_output=False):
+        self.calls.append(("delete_akvs", namespace, name, keep_output))
+        if self.raises:
+            raise self.raises
+        return {
+            "success": True,
+            "name": name,
+            "namespace": namespace,
+            "output_name": "aaf-cred",
+            "output_kept": keep_output,
+        }
 
 
 def make_user(*roles: UserRole, user_id: str = "u-test") -> UserContext:
@@ -824,3 +893,52 @@ async def test_akv_sync_detail_404(app, db_session):
         )
 
     assert resp.status_code == 404
+
+
+async def test_read_user_cannot_delete_akvs(app, db_session):
+    await _seed(db_session, "aks_akv_sync_delete", granted_to="write", permission_type="edit")
+    service = FakeWorkloadService()
+
+    async with client(app, db_session, make_user(UserRole.READ), service) as ac:
+        resp = await ac.delete(
+            "/api/v1/aks/akv-sync", params={"cluster_id": CLUSTER_ID, "namespace": "data", "name": "aaf-id"}
+        )
+
+    assert resp.status_code == 403
+    assert service.calls == []
+
+
+async def test_delete_akvs_is_audited(app, db_session):
+    from app.api.v1.endpoints import aks_operations
+
+    aks_operations._in_memory_audit_log.clear()
+    await _seed(db_session, "aks_akv_sync_delete", granted_to="write", permission_type="edit")
+    service = FakeWorkloadService()
+
+    async with client(app, db_session, make_user(UserRole.WRITE, user_id="u-op"), service) as ac:
+        resp = await ac.delete(
+            "/api/v1/aks/akv-sync",
+            params={"cluster_id": CLUSTER_ID, "namespace": "data", "name": "aaf-id", "keep_output": "true"},
+        )
+
+    entries = [e for e in aks_operations._in_memory_audit_log if e["action"] == "delete_azurekeyvaultsecret"]
+    aks_operations._in_memory_audit_log.clear()
+
+    assert resp.status_code == 200
+    assert service.calls == [("delete_akvs", "data", "aaf-id", True)]
+    assert len(entries) == 1
+    assert entries[0]["status"] == "success"
+    assert entries[0]["user_id"] == "u-op"
+
+
+async def test_delete_missing_akvs_is_404(app, db_session):
+    await _seed(db_session, "aks_akv_sync_delete", granted_to="write", permission_type="edit")
+    service = FakeWorkloadService(raises=LookupError("AzureKeyVaultSecret 'gone' was not found in namespace 'data'."))
+
+    async with client(app, db_session, make_user(UserRole.WRITE), service) as ac:
+        resp = await ac.delete(
+            "/api/v1/aks/akv-sync", params={"cluster_id": CLUSTER_ID, "namespace": "data", "name": "gone"}
+        )
+
+    assert resp.status_code == 404
+    assert "gone" in resp.json()["detail"]

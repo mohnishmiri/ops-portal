@@ -95,9 +95,21 @@ backend:
     # Empty = https://login.microsoftonline.com/<AZURE_TENANT_ID>
     AZURE_AUTHORITY: ""
 
+  # akv2k8s sync: one AzureKeyVaultSecret per item, wired into the backend env.
+  # When the vault doesn't hold a secret, or this project doesn't use the
+  # feature, skip it instead of deleting the item. A skipped item gets no
+  # AzureKeyVaultSecret and no secretKeyRef, so nothing looks for the secret
+  # and the app falls back to its default (or to backend.env):
+  #   skipGroups: [agentLlm, keyfactor]  # whole optional feature, by `group:`
+  #                                      # (ollama, agentLlm, k8sDashboard, keyfactor)
+  #   skip: [SMTP_PASSWORD]              # single items, by envName
+  # `enabled: false` on an item also skips it; `enabled: false` here turns the
+  # whole sync off. Unknown names in skip/skipGroups fail the render.
   azureKeyVaultSecrets:
     enabled: false
     vaultName: ""
+    skipGroups: []
+    skip: []
     items:
       - envName: ENVIRONMENT
         akvSecretName: opsportal-backend-environment
@@ -154,124 +166,154 @@ backend:
         akvSecretName: opsportal-backend-ollama-base-url
         kubernetesSecretName: ops-portal-backend-ollama-base-url
         optional: true
+        group: ollama
       - envName: OLLAMA_MODEL
         akvSecretName: opsportal-backend-ollama-model
         kubernetesSecretName: ops-portal-backend-ollama-model
         optional: true
+        group: ollama
       - envName: OLLAMA_TIMEOUT_SECONDS
         akvSecretName: opsportal-backend-ollama-timeout-seconds
         kubernetesSecretName: ops-portal-backend-ollama-timeout-seconds
         optional: true
+        group: ollama
       - envName: OLLAMA_AUTH_HEADER_NAME
         akvSecretName: opsportal-backend-ollama-auth-header-name
         kubernetesSecretName: ops-portal-backend-ollama-auth-header-name
         optional: true
+        group: ollama
       - envName: OLLAMA_AUTH_HEADER_VALUE
         akvSecretName: opsportal-backend-ollama-auth-header-value
         kubernetesSecretName: ops-portal-backend-ollama-auth-header-value
         optional: true
+        group: ollama
       # ── Agent assistant LLM (separate endpoint from the Leadership advisor) ──
       - envName: AGENT_LLM_BASE_URL
         akvSecretName: opsportal-backend-agent-llm-base-url
         kubernetesSecretName: ops-portal-backend-agent-llm-base-url
         optional: true
+        group: agentLlm
       - envName: AGENT_LLM_MODEL
         akvSecretName: opsportal-backend-agent-llm-model
         kubernetesSecretName: ops-portal-backend-agent-llm-model
         optional: true
+        group: agentLlm
       - envName: AGENT_LLM_TIMEOUT_SECONDS
         akvSecretName: opsportal-backend-agent-llm-timeout-seconds
         kubernetesSecretName: ops-portal-backend-agent-llm-timeout-seconds
         optional: true
+        group: agentLlm
       - envName: AGENT_LLM_AUTH_HEADER_NAME
         akvSecretName: opsportal-backend-agent-llm-auth-header-name
         kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-name
         optional: true
+        group: agentLlm
       - envName: AGENT_LLM_AUTH_HEADER_VALUE
         akvSecretName: opsportal-backend-agent-llm-auth-header-value
         kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-value
         optional: true
+        group: agentLlm
       - envName: K8S_DASHBOARD_TOKEN_PROD
         akvSecretName: opsportal-backend-k8s-dashboard-token-prod
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-prod
         optional: true
+        group: k8sDashboard
       - envName: K8S_DASHBOARD_TOKEN_PREPROD
         akvSecretName: opsportal-backend-k8s-dashboard-token-preprod
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-preprod
         optional: true
+        group: k8sDashboard
       - envName: K8S_DASHBOARD_TOKEN_PERF
         akvSecretName: opsportal-backend-k8s-dashboard-token-perf
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-perf
         optional: true
+        group: k8sDashboard
       - envName: K8S_DASHBOARD_TOKEN_UAT
         akvSecretName: opsportal-backend-k8s-dashboard-token-uat
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-uat
         optional: true
+        group: k8sDashboard
       - envName: K8S_DASHBOARD_TOKEN_DEV
         akvSecretName: opsportal-backend-k8s-dashboard-token-dev
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-dev
         optional: true
+        group: k8sDashboard
       - envName: K8S_DASHBOARD_TOKEN_DR
         akvSecretName: opsportal-backend-k8s-dashboard-token-dr
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-dr
         optional: true
+        group: k8sDashboard
       - envName: K8S_DASHBOARD_SESSION_SECRET
         akvSecretName: opsportal-backend-k8s-dashboard-session-secret
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-session-secret
         optional: true
+        group: k8sDashboard
       # ── Keyfactor Command (Certificate Management) ──
       - envName: KEYFACTOR_BASE_URL
         akvSecretName: opsportal-backend-keyfactor-base-url
         kubernetesSecretName: ops-portal-backend-keyfactor-base-url
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_TENANT_ID
         akvSecretName: opsportal-backend-keyfactor-tenant-id
         kubernetesSecretName: ops-portal-backend-keyfactor-tenant-id
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_CLIENT_ID
         akvSecretName: opsportal-backend-keyfactor-client-id
         kubernetesSecretName: ops-portal-backend-keyfactor-client-id
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_CLIENT_SECRET
         akvSecretName: opsportal-backend-keyfactor-client-secret
         kubernetesSecretName: ops-portal-backend-keyfactor-client-secret
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_OAUTH_SCOPE
         akvSecretName: opsportal-backend-keyfactor-oauth-scope
         kubernetesSecretName: ops-portal-backend-keyfactor-oauth-scope
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_API_VERSION
         akvSecretName: opsportal-backend-keyfactor-api-version
         kubernetesSecretName: ops-portal-backend-keyfactor-api-version
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_TIMEOUT_SECONDS
         akvSecretName: opsportal-backend-keyfactor-timeout-seconds
         kubernetesSecretName: ops-portal-backend-keyfactor-timeout-seconds
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_VERIFY_SSL
         akvSecretName: opsportal-backend-keyfactor-verify-ssl
         kubernetesSecretName: ops-portal-backend-keyfactor-verify-ssl
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_DEFAULT_CA
         akvSecretName: opsportal-backend-keyfactor-default-ca
         kubernetesSecretName: ops-portal-backend-keyfactor-default-ca
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_DEFAULT_TEMPLATE
         akvSecretName: opsportal-backend-keyfactor-default-template
         kubernetesSecretName: ops-portal-backend-keyfactor-default-template
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_ENROLLMENT_PATTERNS
         akvSecretName: opsportal-backend-keyfactor-enrollment-patterns
         kubernetesSecretName: ops-portal-backend-keyfactor-enrollment-patterns
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_TOKEN_URL
         akvSecretName: opsportal-backend-keyfactor-token-url
         kubernetesSecretName: ops-portal-backend-keyfactor-token-url
         optional: true
+        group: keyfactor
       - envName: KEYFACTOR_CA_BUNDLE
         akvSecretName: opsportal-backend-keyfactor-ca-bundle
         kubernetesSecretName: ops-portal-backend-keyfactor-ca-bundle
         optional: true
+        group: keyfactor
 
   # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.
   secretProvider:

@@ -14,6 +14,7 @@ import {
   ConditionsGrid,
   CopyButton,
   DetailIcons,
+  type EventFilter,
   EventsGrid,
   formatAge,
   KeyValueGrid,
@@ -261,7 +262,16 @@ function VolumesGrid({
   );
 }
 
-function Overview({ pod, formatDate }: { pod: PodDetail; formatDate: (v: string) => string }) {
+function Overview({
+  pod,
+  formatDate,
+  onShow,
+}: {
+  pod: PodDetail;
+  formatDate: (v: string) => string;
+  onShow: (section: Section, eventType?: EventFilter) => void;
+}) {
+  const hasWarnings = pod.events.some((e) => e.type === "Warning");
   const fmt = (v: string | null | undefined) => (v ? formatDate(v) : null);
   const failing = POD_FAILURE.test(pod.status);
   const allReady = pod.total_containers > 0 && pod.ready_containers === pod.total_containers;
@@ -278,6 +288,8 @@ function Overview({ pod, formatDate }: { pod: PodDetail; formatDate: (v: string)
           icon={MetricCardIcons.activity()}
           tone={pod.status === "Running" ? "green" : failing ? "red" : "amber"}
           valueClassName="text-xl"
+          onClick={() => onShow("events", hasWarnings ? "Warning" : "all")}
+          actionLabel="Show the events behind this status"
         />
         <MetricCard
           title="Containers Ready"
@@ -285,6 +297,8 @@ function Overview({ pod, formatDate }: { pod: PodDetail; formatDate: (v: string)
           subtitle={pod.init_containers.length ? `${pod.init_containers.length} init container${pod.init_containers.length === 1 ? "" : "s"}` : "No init containers"}
           icon={MetricCardIcons.checkCircle()}
           tone={allReady ? "green" : "amber"}
+          onClick={() => onShow("containers")}
+          actionLabel="Show containers"
         />
         <MetricCard
           title="Restarts"
@@ -292,6 +306,8 @@ function Overview({ pod, formatDate }: { pod: PodDetail; formatDate: (v: string)
           subtitle={pod.restarts ? "See Containers for the last termination" : "No container has restarted"}
           icon={MetricCardIcons.alert()}
           tone={pod.restarts > 0 ? "red" : "green"}
+          onClick={() => onShow("containers")}
+          actionLabel="Show containers and their last termination"
         />
         <MetricCard
           title="Age"
@@ -299,6 +315,8 @@ function Overview({ pod, formatDate }: { pod: PodDetail; formatDate: (v: string)
           subtitle={pod.started_at ? `Started ${formatDate(pod.started_at)}` : "Not started"}
           icon={MetricCardIcons.calendar()}
           tone="att"
+          onClick={() => onShow("events", "all")}
+          actionLabel="Show what has happened to this pod"
         />
       </KpiRow>
 
@@ -369,6 +387,7 @@ export function PodDetailModal({
 }) {
   const [section, setSection] = useState<Section>("overview");
   const [expandedVolume, setExpandedVolume] = useState<string | null>(null);
+  const [eventType, setEventType] = useState<EventFilter>("all");
   const { data: pod, isLoading, isError, error } = usePodDetail(clusterId, namespace, name);
   const fmt = (v: string | null | undefined) => (v ? formatDate(v) : "—");
   const allContainers = useMemo(() => (pod ? [...pod.init_containers, ...pod.containers] : []), [pod]);
@@ -429,7 +448,16 @@ export function PodDetailModal({
       error={isError && !pod ? apiErrorDetail(error, "Failed to load pod details.") : null}
       onClose={onClose}
     >
-      {pod && section === "overview" && <Overview pod={pod} formatDate={formatDate} />}
+      {pod && section === "overview" && (
+        <Overview
+          pod={pod}
+          formatDate={formatDate}
+          onShow={(next, type) => {
+            if (type) setEventType(type);
+            setSection(next);
+          }}
+        />
+      )}
       {pod && section === "containers" && <ContainersGrid containers={allContainers} fmt={fmt} onOpenVolume={openVolume} />}
       {pod && section === "volumes" && (
         <VolumesGrid
@@ -442,7 +470,7 @@ export function PodDetailModal({
           formatDate={formatDate}
         />
       )}
-      {pod && section === "events" && <EventsGrid events={pod.events} formatDate={formatDate} />}
+      {pod && section === "events" && <EventsGrid events={pod.events} formatDate={formatDate} type={eventType} onTypeChange={setEventType} />}
       {pod && section === "metadata" && (
         <>
           <KeyValueGrid title="Labels" entries={pod.labels} />

@@ -3131,13 +3131,14 @@ export function useAksNamespaces(clusterId: string | undefined, enabled = true) 
     queryKey: ["aks-namespaces", clusterId],
     queryFn: () => fetchAksNamespaces(clusterId!),
     enabled: !!clusterId && enabled,
-    placeholderData: (prev) => prev ?? {
-      namespaces: [],
-      count: 0,
-    },
-    staleTime: 4_000,
-    gcTime: 60_000,
-    refetchInterval: safeInterval(5_000),
+    // Keep the list while it refreshes, but never show another cluster's namespaces.
+    placeholderData: (prev, prevQuery) =>
+      prev && prevQuery?.queryKey[1] === clusterId ? prev : { namespaces: [], count: 0 },
+    // Namespaces change rarely and the backend caches them for 5 minutes; polling every
+    // few seconds only competed with the grids for the browser's connections.
+    staleTime: 5 * 60_000,
+    gcTime: 30 * 60_000,
+    refetchInterval: safeInterval(5 * 60_000),
     retry: 2,
     refetchOnWindowFocus: false,
   });
@@ -3550,6 +3551,33 @@ export function useAkvsDetail(clusterId: string, namespace: string | undefined, 
     refetchInterval: safeInterval(30_000),
     retry: 1,
     refetchOnWindowFocus: false,
+  });
+}
+
+export interface AkvsDeleteResult {
+  success: boolean;
+  name: string;
+  namespace: string;
+  output_kind: AkvsItem["output_kind"];
+  output_name: string | null;
+  output_kept: boolean;
+}
+
+/** Deletes the AzureKeyVaultSecret; its output Secret/ConfigMap goes with it unless keepOutput is set. */
+export function useDeleteAkvs() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (p: { clusterId: string; namespace: string; name: string; keepOutput: boolean }) => {
+      const params = new URLSearchParams({ cluster_id: p.clusterId, namespace: p.namespace, name: p.name });
+      if (p.keepOutput) params.set("keep_output", "true");
+      const { data } = await apiClient.delete(`${API_PREFIX}/akv-sync`, { params });
+      return data as AkvsDeleteResult;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["aks-akvs-cached"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-akvs-detail"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
+    },
   });
 }
 

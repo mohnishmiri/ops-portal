@@ -131,10 +131,11 @@ def register_extended_routes(router, *, get_service, write_audit, serialize_audi
     @router.get("/namespaces", summary="List namespaces for cluster")
     async def list_namespaces(
         cluster_id: str = Query(...),
+        refresh: bool = Query(default=False, description="Bypass the namespace cache"),
         user: UserContext = Depends(get_current_user),
         service=Depends(get_service),
     ) -> dict:
-        namespaces = await service.list_namespaces_for_cluster(cluster_id)
+        namespaces = await service.list_namespaces_for_cluster(cluster_id, refresh=refresh)
         return {"namespaces": namespaces, "count": len(namespaces)}
 
     @router.get("/history", summary="AKS audit history")

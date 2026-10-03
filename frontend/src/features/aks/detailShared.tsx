@@ -140,7 +140,7 @@ const actionBtn = "p-1.5 rounded-lg disabled:opacity-50";
 
 // ── Grids ─────────────────────────────────────────────────────────────
 
-type PodFilter = "all" | "ready" | "not-ready" | "restarted";
+export type PodFilter = "all" | "ready" | "not-ready" | "restarted";
 
 /** Pods of a workload, with drill-down into each pod plus logs and delete actions. */
 export function WorkloadPodsGrid({
@@ -149,14 +149,21 @@ export function WorkloadPodsGrid({
   onViewPodLogs,
   onDeletePod,
   canDeletePod,
+  filter: controlledFilter,
+  onFilterChange,
 }: {
   pods: WorkloadPod[];
   onOpenPod?: (pod: WorkloadPod) => void;
   onViewPodLogs: (pod: WorkloadPod) => void;
   onDeletePod?: (pod: WorkloadPod) => void;
   canDeletePod: boolean;
+  /** Optional controlled filter, so a KPI tile can open the grid pre-filtered. */
+  filter?: PodFilter;
+  onFilterChange?: (filter: PodFilter) => void;
 }) {
-  const [filter, setFilter] = useState<PodFilter>("all");
+  const [localFilter, setLocalFilter] = useState<PodFilter>("all");
+  const filter = controlledFilter ?? localFilter;
+  const setFilter = onFilterChange ?? setLocalFilter;
   const rows = useMemo(
     () =>
       pods.filter((p) =>
@@ -241,20 +248,27 @@ export function WorkloadPodsGrid({
   );
 }
 
-type EventFilter = "all" | "Warning" | "Normal";
+export type EventFilter = "all" | "Warning" | "Normal";
 
 export function EventsGrid({
   events,
   formatDate,
   showObject = false,
   title = "Events",
+  type: controlledType,
+  onTypeChange,
 }: {
   events: WorkloadEvent[];
   formatDate: (v: string) => string;
   showObject?: boolean;
   title?: string;
+  /** Optional controlled type filter, so a KPI tile can open the grid pre-filtered. */
+  type?: EventFilter;
+  onTypeChange?: (type: EventFilter) => void;
 }) {
-  const [type, setType] = useState<EventFilter>("all");
+  const [localType, setLocalType] = useState<EventFilter>("all");
+  const type = controlledType ?? localType;
+  const setType = onTypeChange ?? setLocalType;
   const keyed = useMemo(() => events.map((e, i) => ({ ...e, _key: String(i) })), [events]);
   const rows = useMemo(() => keyed.filter((e) => type === "all" || e.type === type), [keyed, type]);
   const warnings = events.filter((e) => e.type === "Warning").length;

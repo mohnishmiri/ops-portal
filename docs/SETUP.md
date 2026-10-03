@@ -483,6 +483,17 @@ helm upgrade --install ops-portal ./helm/ops-portal \
 
 The chart now creates one `AzureKeyVaultSecret` per environment variable in the `opsportal` namespace and expects the akv2k8s controller CRD to be installed already. Those CRs sync each Azure Key Vault secret into a Kubernetes `Secret`. The backend and frontend Deployments then read those synced Kubernetes secrets as environment variables with `secretKeyRef`.
 
+If the vault doesn't hold a secret, or the environment doesn't use a feature, skip it rather than leaving an `AzureKeyVaultSecret` that fails with `ErrAzureVault`. A skipped item gets no `AzureKeyVaultSecret` and no `secretKeyRef`, so nothing looks for the secret and the app uses its default (or a value from `backend.env`):
+
+```yaml
+backend:
+  azureKeyVaultSecrets:
+    skipGroups: [agentLlm, keyfactor]   # optional features: ollama, agentLlm, k8sDashboard, keyfactor
+    skip: [SMTP_PASSWORD]               # single items, by envName
+```
+
+`frontend.azureKeyVaultSecrets` takes the same keys, and `enabled: false` on a single item also skips it. A name in `skip` or `skipGroups` that matches no item fails the render, so a typo can't leave the secret in place. Removing an item from the chart deletes its `AzureKeyVaultSecret` on the next `helm upgrade`; akv2k8s owns the synced `Secret`, so Kubernetes removes that too.
+
 The same chart can also sync an exportable Azure Key Vault certificate into the Kubernetes TLS secret referenced by `ingress.tls[].secretName` by enabling `ingress.azureKeyVaultCertificates`. akv2k8s formats the destination secret as `kubernetes.io/tls` with `tls.crt` and `tls.key`.
 
 If ingress TLS is sourced from Azure Key Vault, do not point the same ingress at cert-manager for the same secret name. Remove or override `cert-manager.io/cluster-issuer` in that environment unless you intentionally want cert-manager to own TLS instead of akv2k8s.

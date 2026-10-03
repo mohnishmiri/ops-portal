@@ -11,7 +11,7 @@ Provides enterprise-grade AKS operational capabilities using:
 import asyncio
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import structlog
@@ -70,15 +70,18 @@ class AKSOperationsService(
     # K8s client cache TTL in seconds (tokens expire after ~1 hour)
     _K8S_CLIENT_TTL = 50 * 60  # 50 minutes
 
+    # Shared by every request in the process.  The service object is created per
+    # request, and building a client costs an Azure ARM credential call, an AAD
+    # token, and a fresh TLS pool — an instance-level cache rebuilt all of that on
+    # every Kubernetes call, which saturated the page with namespace polling.
+    _k8s_clients: ClassVar[dict[str, tuple[k8s_client.AppsV1Api, k8s_client.CoreV1Api, k8s_client.BatchV1Api]]] = {}
+    _k8s_clients_ts: ClassVar[dict[str, float]] = {}
+    # Keyed by (event loop, cluster): an asyncio.Lock is bound to the loop it first waits on.
+    _k8s_client_locks: ClassVar[dict[tuple[int, str], asyncio.Lock]] = {}
+
     def __init__(self, db_session: AsyncSession | None):
         self.db = db_session
         self.credential = get_azure_credential()
-        # Cached K8s clients with creation timestamps for TTL eviction
-        self._k8s_clients: dict[
-            str,
-            tuple[k8s_client.AppsV1Api, k8s_client.CoreV1Api, k8s_client.BatchV1Api],
-        ] = {}
-        self._k8s_clients_ts: dict[str, float] = {}
 
     # ── DB helper methods (async-safe, None-tolerant) ──────────────────
 
@@ -2956,94 +2959,112 @@ class AKSOperationsService(
         """
         import time as _time
 
-        # Evict stale clients whose tokens may have expired
-        if cluster_id in self._k8s_clients:
-            age = _time.time() - self._k8s_clients_ts.get(cluster_id, 0)
-            if age > self._K8S_CLIENT_TTL:
-                del self._k8s_clients[cluster_id]
-                del self._k8s_clients_ts[cluster_id]
-                logger.info("k8s_client_cache_evicted", cluster_id=cluster_id, age_s=round(age))
+        def _fresh() -> bool:
+            return (
+                cluster_id in self._k8s_clients
+                and _time.time() - self._k8s_clients_ts.get(cluster_id, 0) <= self._K8S_CLIENT_TTL
+            )
 
-        if cluster_id not in self._k8s_clients:
-            import yaml
+        if _fresh():
+            return self._k8s_clients[cluster_id]
 
-            # Parse cluster details from resource ID
-            parts = cluster_id.split("/")
-            subscription_id = parts[2]
-            resource_group = parts[4]
-            cluster_name = parts[8]
+        # One builder per cluster: concurrent requests wait for it instead of each
+        # fetching credentials from ARM.
+        lock = self._k8s_client_locks.setdefault((id(asyncio.get_running_loop()), cluster_id), asyncio.Lock())
+        async with lock:
+            if _fresh():
+                return self._k8s_clients[cluster_id]
+            if cluster_id in self._k8s_clients:
+                logger.info("k8s_client_cache_evicted", cluster_id=cluster_id)
+            self._k8s_clients[cluster_id] = await self._build_k8s_clients(cluster_id)
+            self._k8s_clients_ts[cluster_id] = _time.time()
+            return self._k8s_clients[cluster_id]
 
-            aks_client = ContainerServiceClient(self.credential, subscription_id)
-            kubeconfig = None
+    async def _build_k8s_clients(
+        self,
+        cluster_id: str,
+    ) -> tuple[k8s_client.AppsV1Api, k8s_client.CoreV1Api, k8s_client.BatchV1Api]:
+        """Create Kubernetes API clients for a cluster (see ``_get_k8s_clients``)."""
+        import yaml
 
-            # 1) Try user credentials (works with AAD-only / local-accounts-disabled clusters)
+        # Parse cluster details from resource ID
+        parts = cluster_id.split("/")
+        subscription_id = parts[2]
+        resource_group = parts[4]
+        cluster_name = parts[8]
+
+        aks_client = ContainerServiceClient(self.credential, subscription_id)
+        kubeconfig = None
+
+        # 1) Try user credentials (works with AAD-only / local-accounts-disabled clusters)
+        try:
+            creds = await asyncio.to_thread(
+                aks_client.managed_clusters.list_cluster_user_credentials,
+                resource_group,
+                cluster_name,
+            )
+            kubeconfig = creds.kubeconfigs[0].value.decode("utf-8")
+            logger.info("k8s_user_credentials_ok", cluster=cluster_name)
+        except Exception as e:
+            logger.warning("k8s_user_credentials_failed", cluster=cluster_name, error=str(e))
+
+        # 2) Fallback: admin credentials
+        if kubeconfig is None:
             try:
                 creds = await asyncio.to_thread(
-                    aks_client.managed_clusters.list_cluster_user_credentials,
+                    aks_client.managed_clusters.list_cluster_admin_credentials,
                     resource_group,
                     cluster_name,
                 )
                 kubeconfig = creds.kubeconfigs[0].value.decode("utf-8")
-                logger.info("k8s_user_credentials_ok", cluster=cluster_name)
+                logger.info("k8s_admin_credentials_ok", cluster=cluster_name)
             except Exception as e:
-                logger.warning("k8s_user_credentials_failed", cluster=cluster_name, error=str(e))
-
-            # 2) Fallback: admin credentials
-            if kubeconfig is None:
-                try:
-                    creds = await asyncio.to_thread(
-                        aks_client.managed_clusters.list_cluster_admin_credentials,
-                        resource_group,
-                        cluster_name,
-                    )
-                    kubeconfig = creds.kubeconfigs[0].value.decode("utf-8")
-                    logger.info("k8s_admin_credentials_ok", cluster=cluster_name)
-                except Exception as e:
-                    logger.warning(
-                        "k8s_admin_credentials_failed",
-                        cluster=cluster_name,
-                        error=str(e),
-                    )
-
-            configuration = k8s_client.Configuration()
-
-            if kubeconfig:
-                config_dict = yaml.safe_load(kubeconfig)
-                configuration.host = config_dict["clusters"][0]["cluster"]["server"]
-
-                ca_data = config_dict["clusters"][0]["cluster"].get("certificate-authority-data")
-                if ca_data:
-                    configuration.ssl_ca_cert = self._write_temp_cert(ca_data)
-
-                # Private-link AKS endpoints use Microsoft-internal TLS certs
-                # that are not in the default trust store. Skip verification for
-                # privatelink endpoints (common in enterprise environments).
-                if "privatelink" in configuration.host:
-                    configuration.verify_ssl = False
-            else:
-                # 3) Last resort: fetch FQDN directly from the cluster resource
-                cluster_info = await asyncio.to_thread(
-                    aks_client.managed_clusters.get,
-                    resource_group,
-                    cluster_name,
+                logger.warning(
+                    "k8s_admin_credentials_failed",
+                    cluster=cluster_name,
+                    error=str(e),
                 )
-                configuration.host = f"https://{cluster_info.fqdn}:443"
-                configuration.verify_ssl = False  # no CA cert available
-                logger.warning("k8s_using_fqdn_fallback", cluster=cluster_name)
 
-            # Always authenticate with Azure AD token (AKS AAD Server audience)
-            token = self._get_k8s_token()
-            configuration.api_key = {"authorization": f"Bearer {token}"}
+        configuration = k8s_client.Configuration()
 
-            api_client = k8s_client.ApiClient(configuration)
-            self._k8s_clients[cluster_id] = (
-                k8s_client.AppsV1Api(api_client),
-                k8s_client.CoreV1Api(api_client),
-                k8s_client.BatchV1Api(api_client),
+        if kubeconfig:
+            config_dict = yaml.safe_load(kubeconfig)
+            configuration.host = config_dict["clusters"][0]["cluster"]["server"]
+
+            ca_data = config_dict["clusters"][0]["cluster"].get("certificate-authority-data")
+            if ca_data:
+                configuration.ssl_ca_cert = self._write_temp_cert(ca_data)
+
+            # Private-link AKS endpoints use Microsoft-internal TLS certs
+            # that are not in the default trust store. Skip verification for
+            # privatelink endpoints (common in enterprise environments).
+            if "privatelink" in configuration.host:
+                configuration.verify_ssl = False
+        else:
+            # 3) Last resort: fetch FQDN directly from the cluster resource
+            cluster_info = await asyncio.to_thread(
+                aks_client.managed_clusters.get,
+                resource_group,
+                cluster_name,
             )
-            self._k8s_clients_ts[cluster_id] = _time.time()
+            configuration.host = f"https://{cluster_info.fqdn}:443"
+            configuration.verify_ssl = False  # no CA cert available
+            logger.warning("k8s_using_fqdn_fallback", cluster=cluster_name)
 
-        return self._k8s_clients[cluster_id]
+        # Always authenticate with Azure AD token (AKS AAD Server audience).
+        # Off the event loop: a CLI-backed credential shells out to `az`.
+        token = await asyncio.to_thread(self._get_k8s_token)
+        configuration.api_key = {"authorization": f"Bearer {token}"}
+        # The client is shared by concurrent requests; urllib3's default of 4
+        # pooled connections would discard and re-open TLS connections.
+        configuration.connection_pool_maxsize = 16
+
+        api_client = k8s_client.ApiClient(configuration)
+        return (
+            k8s_client.AppsV1Api(api_client),
+            k8s_client.CoreV1Api(api_client),
+            k8s_client.BatchV1Api(api_client),
+        )
 
     def _get_k8s_token(self) -> str:
         """Get Azure AD token for Kubernetes API authentication.

@@ -50,6 +50,7 @@ import {
   formatAge,
   iconProps,
   KeyValueGrid,
+  type PodFilter,
   splitImage,
   Truncate,
   WORKLOAD_STATUS_STYLES,
@@ -94,7 +95,23 @@ type ModalState =
   | { type: "rollback"; item: K8sWorkload; revision: number }
   | null;
 
-const STATUS_FILTERS: (WorkloadStatus | "All")[] = ["All", "Healthy", "Updating", "Degraded", "Unavailable", "Idle"];
+// "Attention" is what the Updating / Degraded tile selects.
+type StatusFilter = WorkloadStatus | "All" | "Attention";
+const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+  { value: "All", label: "All Statuses" },
+  { value: "Healthy", label: "Healthy" },
+  { value: "Attention", label: "Updating or Degraded" },
+  { value: "Updating", label: "Updating" },
+  { value: "Degraded", label: "Degraded" },
+  { value: "Unavailable", label: "Unavailable" },
+  { value: "Idle", label: "Idle" },
+];
+
+function matchesStatus(status: WorkloadStatus, filter: StatusFilter): boolean {
+  if (filter === "All") return true;
+  if (filter === "Attention") return status === "Updating" || status === "Degraded";
+  return status === filter;
+}
 
 const LABELS: Record<WorkloadKind, { singular: string; plural: string }> = {
   statefulset: { singular: "StatefulSet", plural: "StatefulSets" },
@@ -148,7 +165,7 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
   onDeletePod,
 }) => {
   const labels = LABELS[kind];
-  const [statusFilter, setStatusFilter] = useState<WorkloadStatus | "All">("All");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
   const [selected, setSelected] = useState<{ namespace: string; name: string } | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
 
@@ -193,7 +210,7 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
   }, [allItems]);
 
   const filteredByStatus = useMemo(
-    () => (statusFilter === "All" ? allItems : allItems.filter((i) => i.status === statusFilter)),
+    () => allItems.filter((i) => matchesStatus(i.status, statusFilter)),
     [allItems, statusFilter]
   );
 
@@ -216,6 +233,10 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
     []
   );
   const { search, setSearch, page, setPage, paged, filtered, totalPages } = useSearchPagination(sorted, searchFn);
+  const applyTile = (filter: StatusFilter) => {
+    setStatusFilter((prev) => (prev === filter ? "All" : filter));
+    setPage(1);
+  };
 
   const ref = (item: K8sWorkload) => ({ clusterId: cluster.id, kind, namespace: item.namespace, name: item.name });
   const done = (msg: string) => {
@@ -304,14 +325,14 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
           <select
             value={statusFilter}
             onChange={(e) => {
-              setStatusFilter(e.target.value as WorkloadStatus | "All");
+              setStatusFilter(e.target.value as StatusFilter);
               setPage(1);
             }}
             className={gridStyles.toolbarInput}
             aria-label="Filter by status"
           >
             {STATUS_FILTERS.map((s) => (
-              <option key={s} value={s}>{s === "All" ? "All Statuses" : s}</option>
+              <option key={s.value} value={s.value}>{s.label}</option>
             ))}
           </select>
           <SyncFromKubernetesButton sync={backgroundSync} title={`Refresh ${labels.plural} from Kubernetes`} />
@@ -321,10 +342,15 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
       <CachedSyncStatus source={data?.source} lastSync={data?.last_sync} sync={backgroundSync} formatDate={formatDate} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard title={labels.plural} value={kpis.total} icon={MetricCardIcons.layers()} subtitle={namespace ? `Namespace ${namespace}` : "All namespaces"} tone="att" />
-        <MetricCard title="Healthy" value={kpis.healthy} icon={MetricCardIcons.checkCircle()} subtitle={`${kpis.ready}/${kpis.desired} pods ready`} tone="green" />
-        <MetricCard title="Updating / Degraded" value={kpis.attention} icon={MetricCardIcons.activity()} subtitle="Rollout in progress or pods not ready" tone="amber" />
-        <MetricCard title="Unavailable" value={kpis.unavailable} icon={MetricCardIcons.alert()} subtitle="No ready pods" tone="red" />
+        {/* Each tile filters the grid; clicking the active tile again shows everything. */}
+        <MetricCard title={labels.plural} value={kpis.total} icon={MetricCardIcons.layers()} subtitle={namespace ? `Namespace ${namespace}` : "All namespaces"} tone="att"
+          onClick={() => applyTile("All")} actionLabel={`Show all ${labels.plural}`} />
+        <MetricCard title="Healthy" value={kpis.healthy} icon={MetricCardIcons.checkCircle()} subtitle={`${kpis.ready}/${kpis.desired} pods ready`} tone="green"
+          onClick={() => applyTile("Healthy")} active={statusFilter === "Healthy"} actionLabel={`Show healthy ${labels.plural}`} />
+        <MetricCard title="Updating / Degraded" value={kpis.attention} icon={MetricCardIcons.activity()} subtitle="Rollout in progress or pods not ready" tone="amber"
+          onClick={() => applyTile("Attention")} active={statusFilter === "Attention"} actionLabel={`Show updating or degraded ${labels.plural}`} />
+        <MetricCard title="Unavailable" value={kpis.unavailable} icon={MetricCardIcons.alert()} subtitle="No ready pods" tone="red"
+          onClick={() => applyTile("Unavailable")} active={statusFilter === "Unavailable"} actionLabel={`Show unavailable ${labels.plural}`} />
       </div>
 
       {isError && (
@@ -781,7 +807,17 @@ function VolumeClaimsGrids({ detail, formatDate }: { detail: WorkloadDetail; for
   );
 }
 
-function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; detail: WorkloadDetail; formatDate: (v: string) => string }) {
+function WorkloadOverview({
+  kind,
+  detail,
+  formatDate,
+  onShow,
+}: {
+  kind: WorkloadKind;
+  detail: WorkloadDetail;
+  formatDate: (v: string) => string;
+  onShow: (section: DetailSection, podFilter?: PodFilter) => void;
+}) {
   const restarts = detail.pods.reduce((n, p) => n + p.restarts, 0);
   const restartedPods = detail.pods.filter((p) => p.restarts > 0).length;
   const fullyReady = detail.desired > 0 && detail.ready === detail.desired;
@@ -794,6 +830,8 @@ function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; de
           subtitle={`${detail.available} available`}
           icon={MetricCardIcons.checkCircle()}
           tone={detail.desired === 0 ? "slate" : fullyReady ? "green" : "amber"}
+          onClick={() => onShow("pods", detail.pods.some((p) => !p.ready) ? "not-ready" : "all")}
+          actionLabel="Show the pods that are not ready"
         />
         <MetricCard
           title="Up-to-date"
@@ -801,6 +839,8 @@ function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; de
           subtitle={strategyLabel(detail)}
           icon={MetricCardIcons.layers()}
           tone="att"
+          onClick={() => onShow("revisions")}
+          actionLabel="Show revisions"
         />
         <MetricCard
           title="Restarts"
@@ -808,6 +848,8 @@ function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; de
           subtitle={restartedPods ? `${restartedPods} pod${restartedPods === 1 ? "" : "s"} restarted` : "No pod has restarted"}
           icon={MetricCardIcons.activity()}
           tone={restarts > 0 ? "red" : "green"}
+          onClick={() => onShow("pods", restartedPods ? "restarted" : "all")}
+          actionLabel="Show pods that restarted"
         />
         {kind === "statefulset" ? (
           <MetricCard
@@ -816,6 +858,8 @@ function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; de
             subtitle={`${detail.volume_claim_templates?.length ?? 0} template(s)`}
             icon={MetricCardIcons.database()}
             tone="indigo"
+            onClick={() => onShow("volumes")}
+            actionLabel="Show PersistentVolumeClaims"
           />
         ) : (
           <MetricCard
@@ -824,6 +868,8 @@ function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; de
             subtitle={`${detail.unavailable ?? 0} unavailable`}
             icon={MetricCardIcons.server()}
             tone={(detail.misscheduled ?? 0) > 0 ? "amber" : "slate"}
+            onClick={() => onShow("pods", detail.pods.some((p) => !p.ready) ? "not-ready" : "all")}
+            actionLabel="Show the pods that are not ready"
           />
         )}
       </KpiRow>
@@ -903,6 +949,7 @@ export function WorkloadDetailModal({
   onClose: () => void;
 }) {
   const [section, setSection] = useState<DetailSection>("overview");
+  const [podFilter, setPodFilter] = useState<PodFilter>("all");
   const label = LABELS[kind].singular;
   const warnings = (detail?.events ?? []).filter((e) => e.type === "Warning").length;
 
@@ -940,9 +987,27 @@ export function WorkloadDetailModal({
       error={isError && !detail ? `Failed to load ${label} details.` : null}
       onClose={onClose}
     >
-      {detail && section === "overview" && <WorkloadOverview kind={kind} detail={detail} formatDate={formatDate} />}
+      {detail && section === "overview" && (
+        <WorkloadOverview
+          kind={kind}
+          detail={detail}
+          formatDate={formatDate}
+          onShow={(next, filter) => {
+            if (filter) setPodFilter(filter);
+            setSection(next);
+          }}
+        />
+      )}
       {detail && section === "pods" && (
-        <WorkloadPodsGrid pods={detail.pods} onOpenPod={onOpenPod} onViewPodLogs={onViewPodLogs} onDeletePod={onDeletePod} canDeletePod={canDeletePod} />
+        <WorkloadPodsGrid
+          pods={detail.pods}
+          onOpenPod={onOpenPod}
+          onViewPodLogs={onViewPodLogs}
+          onDeletePod={onDeletePod}
+          canDeletePod={canDeletePod}
+          filter={podFilter}
+          onFilterChange={setPodFilter}
+        />
       )}
       {detail && section === "revisions" && <RevisionsGrid detail={detail} canManage={canManage} formatDate={formatDate} onRollback={onRollback} />}
       {detail && section === "volumes" && <VolumeClaimsGrids detail={detail} formatDate={formatDate} />}
