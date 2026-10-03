@@ -4,10 +4,12 @@
  * sources — the object behind it, including the file each key becomes.
  */
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Spinner } from "../../components/gridStyles";
 import { PodVolume, PodVolumeClaim, useConfigMapDetail, useSecretDetail } from "../../services/aksApi";
-import { apiErrorDetail, KeyValue, SectionTitle } from "./detailShared";
+import { DetailGrid } from "./DetailGrid";
+import { apiErrorDetail, DetailIcons } from "./detailShared";
+import { DetailCard, PropertyList } from "./ResourceDetailShell";
 
 export interface VolumeMountRef {
   container: string;
@@ -52,8 +54,8 @@ function Loading({ text }: { text: string }) {
 
 function KeyFiles({ keyName, items, mounts }: { keyName: string; items?: KeyToPath[]; mounts: VolumeMountRef[] }) {
   const files = projectedFilePaths(keyName, items, mounts);
-  if (files.length > 0) return <span className="font-mono text-[11px] text-gray-600 break-all">{files.join(", ")}</span>;
-  return <span className="text-[11px] text-gray-400">{items ? "not projected (not listed in items)" : "not mounted as a file"}</span>;
+  if (files.length > 0) return <span className="block max-w-[28rem] break-all font-mono text-xs text-slate-600">{files.join(", ")}</span>;
+  return <span className="text-xs text-slate-400">{items ? "not projected (not listed in items)" : "not mounted as a file"}</span>;
 }
 
 function ConfigMapKeys({
@@ -71,45 +73,48 @@ function ConfigMapKeys({
 }) {
   const { data, isLoading, isError, error } = useConfigMapDetail(clusterId, namespace, name);
   const [open, setOpen] = useState<string | null>(null);
+  const rows = useMemo(() => Object.entries(data?.data ?? {}).map(([key, value]) => ({ key, value })), [data]);
 
   if (isLoading) return <Loading text={`Loading ConfigMap ${name}…`} />;
   if (isError) return <p className="text-sm text-red-600">{apiErrorDetail(error, `ConfigMap ${name} could not be loaded.`)}</p>;
   if (data?.detail_source === "unavailable") {
     return <p className="text-sm text-amber-700">ConfigMap content is unavailable from the live cluster.{data.data_unavailable_reason ? ` ${data.data_unavailable_reason}` : ""}</p>;
   }
-  const entries = Object.entries(data?.data ?? {});
   return (
-    <div>
-      <SectionTitle>ConfigMap {name} — {entries.length} key{entries.length === 1 ? "" : "s"}</SectionTitle>
-      {entries.length === 0 ? (
-        <p className="text-sm text-gray-400">No data keys</p>
-      ) : (
-        <div className="divide-y divide-att-100 rounded-lg border border-att-100 bg-white">
-          {entries.map(([key, value]) => (
-            <div key={key}>
-              <button
-                type="button"
-                onClick={() => setOpen(open === key ? null : key)}
-                aria-expanded={open === key}
-                className="flex w-full items-start justify-between gap-3 px-3 py-1.5 text-left hover:bg-att-50"
-              >
-                <span className="font-mono text-xs text-blue-700 break-all">{key}</span>
-                <span className="flex shrink-0 flex-col items-end gap-0.5 text-right">
-                  <KeyFiles keyName={key} items={items} mounts={mounts} />
-                  <span className="text-[11px] text-gray-400">{sizeLabel(value)}</span>
-                </span>
+    <>
+      <DetailGrid
+        title={`ConfigMap ${name}`}
+        rows={rows}
+        columns={[
+          {
+            key: "key",
+            header: "Key",
+            sortValue: (r) => r.key,
+            render: (r) => (
+              <button type="button" aria-expanded={open === r.key} className="inline-flex items-center gap-1.5 whitespace-nowrap text-left font-mono text-xs text-blue-700 hover:underline">
+                <span className={`transition-transform ${open === r.key ? "rotate-90" : ""}`}>{DetailIcons.chevron}</span>
+                {r.key}
               </button>
-              {open === key && (
-                <pre className="mx-3 mb-2 max-h-[300px] overflow-auto whitespace-pre-wrap rounded bg-gray-900 p-3 font-mono text-xs text-green-300">{value}</pre>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+            ),
+          },
+          { key: "file", header: "File in Container", render: (r) => <KeyFiles keyName={r.key} items={items} mounts={mounts} /> },
+          { key: "size", header: "Size", align: "right", sortValue: (r) => r.value.length, render: (r) => <span className="whitespace-nowrap text-xs text-slate-500">{sizeLabel(r.value)}</span> },
+        ]}
+        rowKey={(r) => r.key}
+        searchText={(r) => `${r.key} ${r.value}`}
+        searchPlaceholder="Search keys or values…"
+        emptyText="No data keys"
+        initialSort={{ key: "key", direction: "asc" }}
+        expandedKey={open}
+        onRowClick={(r) => setOpen(open === r.key ? null : r.key)}
+        renderExpanded={(r) => (
+          <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 font-mono text-xs text-green-300">{r.value}</pre>
+        )}
+      />
       {(data?.binary_data_keys?.length ?? 0) > 0 && (
-        <p className="mt-1 text-xs text-gray-500">Binary keys: {data!.binary_data_keys.join(", ")}</p>
+        <p className="text-xs text-slate-500">Binary keys: {data!.binary_data_keys.join(", ")}</p>
       )}
-    </div>
+    </>
   );
 }
 
@@ -128,27 +133,29 @@ function SecretKeys({
 }) {
   // Never reveals values: the API returns key names and masked data unless reveal is requested.
   const { data, isLoading, isError, error } = useSecretDetail(clusterId, namespace, name, false, true);
+  const rows = useMemo(() => (data?.keys ?? []).map((key) => ({ key })), [data]);
 
   if (isLoading) return <Loading text={`Loading Secret ${name}…`} />;
   if (isError) return <p className="text-sm text-red-600">{apiErrorDetail(error, `Secret ${name} could not be loaded.`)}</p>;
-  const keys = data?.keys ?? [];
   return (
-    <div>
-      <SectionTitle>Secret {name}{data?.type ? ` (${data.type})` : ""} — {keys.length} key{keys.length === 1 ? "" : "s"}</SectionTitle>
-      <p className="mb-1 text-xs text-gray-500">Values are hidden here. Users with permission can reveal them from the Secrets tab, which is audited.</p>
-      {keys.length === 0 ? (
-        <p className="text-sm text-gray-400">No data keys</p>
-      ) : (
-        <ul className="divide-y divide-att-100 rounded-lg border border-att-100 bg-white">
-          {keys.map((key) => (
-            <li key={key} className="flex items-start justify-between gap-3 px-3 py-1.5">
-              <span className="font-mono text-xs text-gray-800 break-all">{key}</span>
-              <KeyFiles keyName={key} items={items} mounts={mounts} />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <>
+      <p className="text-xs text-slate-500">
+        {data?.type ? `Type ${data.type}. ` : ""}Values are hidden here. Users with permission can reveal them from the Secrets tab, which is audited.
+      </p>
+      <DetailGrid
+        title={`Secret ${name}`}
+        rows={rows}
+        columns={[
+          { key: "key", header: "Key", sortValue: (r) => r.key, render: (r) => <span className="whitespace-nowrap font-mono text-xs text-slate-800">{r.key}</span> },
+          { key: "file", header: "File in Container", render: (r) => <KeyFiles keyName={r.key} items={items} mounts={mounts} /> },
+        ]}
+        rowKey={(r) => r.key}
+        searchText={(r) => r.key}
+        searchPlaceholder="Search keys…"
+        emptyText="No data keys"
+        initialSort={{ key: "key", direction: "asc" }}
+      />
+    </>
   );
 }
 
@@ -157,16 +164,19 @@ function ClaimInfo({ name, claim, formatDate }: { name: string | null; claim?: P
     return <p className="text-sm text-amber-700">PersistentVolumeClaim {name ?? ""} could not be read — it may have been deleted.</p>;
   }
   return (
-    <div>
-      <SectionTitle>PersistentVolumeClaim {claim.name}</SectionTitle>
-      <KeyValue label="Phase" value={claim.phase} />
-      <KeyValue label="Capacity / requested" value={`${claim.capacity ?? "—"} / ${claim.requested ?? "—"}`} />
-      <KeyValue label="Access modes" value={claim.access_modes.join(", ") || "—"} />
-      <KeyValue label="Storage class" value={claim.storage_class} />
-      <KeyValue label="Bound volume" value={claim.volume_name} />
-      <KeyValue label="Volume mode" value={claim.volume_mode ?? "Filesystem"} />
-      <KeyValue label="Created" value={claim.created_at ? formatDate(claim.created_at) : "—"} />
-    </div>
+    <DetailCard title={`PersistentVolumeClaim ${claim.name}`}>
+      <PropertyList
+        items={[
+          { label: "Phase", value: claim.phase },
+          { label: "Capacity / Requested", value: `${claim.capacity ?? "—"} / ${claim.requested ?? "—"}` },
+          { label: "Access Modes", value: claim.access_modes.join(", ") },
+          { label: "Storage Class", value: claim.storage_class },
+          { label: "Bound Volume", value: claim.volume_name, mono: true },
+          { label: "Volume Mode", value: claim.volume_mode ?? "Filesystem" },
+          { label: "Created", value: claim.created_at ? formatDate(claim.created_at) : null },
+        ]}
+      />
+    </DetailCard>
   );
 }
 
@@ -188,30 +198,35 @@ export function PodVolumeDetail({
   const specRows = flattenSpec(spec);
 
   return (
-    <div className="space-y-1 text-sm">
-      <SectionTitle>Mounted at</SectionTitle>
-      {mounts.length === 0 ? (
-        <p className="text-sm text-gray-400">Not mounted by any container</p>
-      ) : (
-        <ul className="space-y-0.5">
-          {mounts.map((m) => (
-            <li key={`${m.container}:${m.mount_path}`} className="text-xs text-gray-700">
-              <span className="font-medium">{m.container}</span> → <span className="font-mono">{m.mount_path}</span>
-              <span className={m.read_only ? "ml-2 text-orange-600" : "ml-2 text-gray-500"}>{m.read_only ? "read-only" : "read-write"}</span>
-              {m.sub_path && <span className="ml-2 text-gray-500">subPath <span className="font-mono">{m.sub_path}</span></span>}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <SectionTitle>{volume.type} source</SectionTitle>
-      {specRows.length === 0 ? (
-        <p className="text-sm text-gray-400">No additional settings</p>
-      ) : (
-        specRows.map(([key, value]) => (
-          <KeyValue key={key} label={key} value={<span className="font-mono text-xs">{value}</span>} />
-        ))
-      )}
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <DetailCard title="Mounted At">
+          {mounts.length === 0 ? (
+            <p className="text-sm text-slate-400">Not mounted by any container</p>
+          ) : (
+            <ul className="space-y-2">
+              {mounts.map((m) => (
+                <li key={`${m.container}:${m.mount_path}`} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-700">
+                  <span className="font-medium">{m.container}</span>
+                  <span className="text-slate-400">→</span>
+                  <span className="font-mono">{m.mount_path}</span>
+                  <span className={`rounded px-1.5 py-0.5 ${m.read_only ? "bg-orange-50 text-orange-700" : "bg-slate-100 text-slate-600"}`}>
+                    {m.read_only ? "read-only" : "read-write"}
+                  </span>
+                  {m.sub_path && <span className="text-slate-500">subPath <span className="font-mono">{m.sub_path}</span></span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </DetailCard>
+        <DetailCard title={`${volume.type} Source`}>
+          {specRows.length === 0 ? (
+            <p className="text-sm text-slate-400">No additional settings</p>
+          ) : (
+            <PropertyList items={specRows.map(([key, value]) => ({ label: key, value, mono: true }))} />
+          )}
+        </DetailCard>
+      </div>
 
       {volume.type === "ConfigMap" && volume.source && (
         <ConfigMapKeys clusterId={clusterId} namespace={namespace} name={volume.source} items={items} mounts={mounts} />

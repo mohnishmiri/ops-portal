@@ -16,6 +16,8 @@ import {
   WorkloadDetail,
   WorkloadKind,
   WorkloadPod,
+  WorkloadPvc,
+  WorkloadRevision,
   WorkloadStatus,
   useAksBackgroundSync,
   useCachedWorkloads,
@@ -41,17 +43,23 @@ import { useAksLiveWatch } from "../../hooks/useAksLiveWatch";
 import { ModalShell } from "./K8sResourceModals";
 import {
   apiErrorDetail,
+  ConditionsGrid,
+  ContainerSpecGrid,
   DetailIcons,
-  DetailTabs,
-  EventList,
+  EventsGrid,
   formatAge,
   iconProps,
-  KeyValue,
+  KeyValueGrid,
+  splitImage,
+  Truncate,
   WORKLOAD_STATUS_STYLES,
-  WorkloadPodsTable,
-  YamlView,
+  WorkloadPodsGrid,
+  WorkloadStatusBadge,
+  YamlViewer,
 } from "./detailShared";
+import { DetailGrid, type GridColumn } from "./DetailGrid";
 import { DownloadLogsButton, LogArchiveDownload } from "./LogArchiveDownload";
+import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type WorkloadsTabProps = {
   kind: WorkloadKind;
@@ -447,7 +455,6 @@ export const WorkloadsTab: React.FC<WorkloadsTabProps> = ({
           kind={kind}
           clusterId={cluster.id}
           target={selected}
-          title={`${labels.singular}: ${selected.namespace}/${selected.name}`}
           detail={detail.data}
           isLoading={detail.isLoading}
           isError={detail.isError}
@@ -652,13 +659,220 @@ function WorkloadActionModal({
 
 // ── Detail modal ─────────────────────────────────────────────────────
 
-type DetailSection = "overview" | "pods" | "revisions" | "volumes" | "events" | "yaml";
+type DetailSection = "overview" | "pods" | "revisions" | "volumes" | "events" | "metadata" | "yaml";
 
-function WorkloadDetailModal({
+function selectorText(selector: Record<string, string>): string {
+  return Object.entries(selector).map(([k, v]) => `${k}=${v}`).join(", ");
+}
+
+function RevisionsGrid({
+  detail,
+  canManage,
+  formatDate,
+  onRollback,
+}: {
+  detail: WorkloadDetail;
+  canManage: boolean;
+  formatDate: (v: string) => string;
+  onRollback: (item: K8sWorkload, revision: number) => void;
+}) {
+  const columns: GridColumn<WorkloadRevision>[] = [
+    {
+      key: "revision",
+      header: "Revision",
+      sortValue: (r) => r.revision,
+      render: (r) => (
+        <span className="inline-flex items-center gap-2 whitespace-nowrap font-semibold text-slate-800">
+          {r.revision}
+          {r.is_current && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700">current</span>}
+        </span>
+      ),
+    },
+    { key: "name", header: "ControllerRevision", sortValue: (r) => r.name, render: (r) => <Truncate value={r.name} className="font-mono text-xs" maxWidth="max-w-[22rem]" /> },
+    {
+      key: "version",
+      header: "Version",
+      sortValue: (r) => r.images.join(","),
+      render: (r) => (
+        <span className="flex flex-wrap gap-1" title={r.images.join("\n")}>
+          {r.images.length === 0 && "—"}
+          {r.images.map((img) => (
+            <span key={img} className="whitespace-nowrap rounded bg-indigo-50 px-2 py-0.5 font-mono text-xs font-semibold text-indigo-700">{splitImage(img).tag}</span>
+          ))}
+        </span>
+      ),
+    },
+    { key: "created", header: "Created", sortValue: (r) => r.created_at ?? "", render: (r) => <span className="whitespace-nowrap text-xs text-slate-600">{r.created_at ? formatDate(r.created_at) : "—"}</span> },
+    {
+      key: "actions",
+      header: "Actions",
+      align: "center",
+      render: (r) =>
+        canManage && !r.is_current ? (
+          <button type="button" onClick={() => onRollback(detail, r.revision)} className="rounded-lg border border-att-200 px-2.5 py-1 text-xs font-medium text-att-700 hover:bg-att-50">
+            Roll back
+          </button>
+        ) : (
+          <span className="text-slate-300">—</span>
+        ),
+    },
+  ];
+  return (
+    <DetailGrid
+      title="Revisions"
+      rows={detail.revisions}
+      columns={columns}
+      rowKey={(r) => r.name}
+      searchText={(r) => `${r.revision} ${r.name} ${r.images.join(" ")}`}
+      searchPlaceholder="Search revision or image…"
+      emptyText="No revision history"
+      initialSort={{ key: "revision", direction: "desc" }}
+    />
+  );
+}
+
+function VolumeClaimsGrids({ detail, formatDate }: { detail: WorkloadDetail; formatDate: (v: string) => string }) {
+  const pvcColumns: GridColumn<WorkloadPvc>[] = [
+    { key: "name", header: "PersistentVolumeClaim", sortValue: (v) => v.name, render: (v) => <Truncate value={v.name} className="font-mono text-xs" maxWidth="max-w-[20rem]" /> },
+    { key: "template", header: "Template", sortValue: (v) => v.template, render: (v) => <span className="whitespace-nowrap">{v.template}</span> },
+    { key: "ordinal", header: "Ordinal", align: "center", sortValue: (v) => v.ordinal, render: (v) => <span className="font-mono text-xs">{v.ordinal}</span> },
+    {
+      key: "phase",
+      header: "Phase",
+      sortValue: (v) => v.phase ?? "",
+      render: (v) => (
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${v.phase === "Bound" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-800"}`}>{v.phase ?? "Unknown"}</span>
+      ),
+    },
+    { key: "capacity", header: "Capacity", sortValue: (v) => v.capacity ?? "", render: (v) => <span className="whitespace-nowrap font-mono text-xs">{v.capacity ?? "—"}</span> },
+    { key: "class", header: "Storage Class", sortValue: (v) => v.storage_class ?? "", render: (v) => <span className="whitespace-nowrap">{v.storage_class ?? "—"}</span> },
+    { key: "modes", header: "Access Modes", render: (v) => <span className="whitespace-nowrap text-xs">{v.access_modes.join(", ") || "—"}</span> },
+    { key: "volume", header: "Volume", sortValue: (v) => v.volume_name ?? "", render: (v) => <Truncate value={v.volume_name} className="font-mono text-xs" maxWidth="max-w-[14rem]" /> },
+    { key: "created", header: "Created", sortValue: (v) => v.created_at ?? "", render: (v) => <span className="whitespace-nowrap text-xs text-slate-600">{v.created_at ? formatDate(v.created_at) : "—"}</span> },
+  ];
+  const templates = detail.volume_claim_templates ?? [];
+  return (
+    <>
+      <DetailGrid
+        title="PersistentVolumeClaims"
+        rows={detail.pvcs ?? []}
+        columns={pvcColumns}
+        rowKey={(v) => v.name}
+        searchText={(v) => `${v.name} ${v.template} ${v.phase ?? ""} ${v.storage_class ?? ""} ${v.volume_name ?? ""}`}
+        searchPlaceholder="Search claim, class, volume…"
+        emptyText="No PersistentVolumeClaims"
+        initialSort={{ key: "ordinal", direction: "asc" }}
+      />
+      <DetailGrid
+        title="Volume Claim Templates"
+        rows={templates}
+        columns={[
+          { key: "name", header: "Template", sortValue: (t) => t.name, render: (t) => <span className="font-medium">{t.name}</span> },
+          { key: "storage", header: "Storage", sortValue: (t) => t.storage ?? "", render: (t) => <span className="font-mono text-xs">{t.storage ?? "—"}</span> },
+          { key: "class", header: "Storage Class", sortValue: (t) => t.storage_class ?? "", render: (t) => t.storage_class ?? "default class" },
+          { key: "modes", header: "Access Modes", render: (t) => <span className="text-xs">{t.access_modes.join(", ") || "—"}</span> },
+        ]}
+        rowKey={(t) => t.name}
+        searchText={(t) => `${t.name} ${t.storage_class ?? ""}`}
+        searchPlaceholder="Search templates…"
+        emptyText="No volume claim templates"
+      />
+    </>
+  );
+}
+
+function WorkloadOverview({ kind, detail, formatDate }: { kind: WorkloadKind; detail: WorkloadDetail; formatDate: (v: string) => string }) {
+  const restarts = detail.pods.reduce((n, p) => n + p.restarts, 0);
+  const restartedPods = detail.pods.filter((p) => p.restarts > 0).length;
+  const fullyReady = detail.desired > 0 && detail.ready === detail.desired;
+  return (
+    <>
+      <KpiRow>
+        <MetricCard
+          title="Pods Ready"
+          value={`${detail.ready}/${detail.desired}`}
+          subtitle={`${detail.available} available`}
+          icon={MetricCardIcons.checkCircle()}
+          tone={detail.desired === 0 ? "slate" : fullyReady ? "green" : "amber"}
+        />
+        <MetricCard
+          title="Up-to-date"
+          value={`${detail.updated}/${detail.desired}`}
+          subtitle={strategyLabel(detail)}
+          icon={MetricCardIcons.layers()}
+          tone="att"
+        />
+        <MetricCard
+          title="Restarts"
+          value={restarts}
+          subtitle={restartedPods ? `${restartedPods} pod${restartedPods === 1 ? "" : "s"} restarted` : "No pod has restarted"}
+          icon={MetricCardIcons.activity()}
+          tone={restarts > 0 ? "red" : "green"}
+        />
+        {kind === "statefulset" ? (
+          <MetricCard
+            title="Volume Claims"
+            value={detail.pvcs?.length ?? 0}
+            subtitle={`${detail.volume_claim_templates?.length ?? 0} template(s)`}
+            icon={MetricCardIcons.database()}
+            tone="indigo"
+          />
+        ) : (
+          <MetricCard
+            title="Misscheduled"
+            value={detail.misscheduled ?? 0}
+            subtitle={`${detail.unavailable ?? 0} unavailable`}
+            icon={MetricCardIcons.server()}
+            tone={(detail.misscheduled ?? 0) > 0 ? "amber" : "slate"}
+          />
+        )}
+      </KpiRow>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <DetailCard title="Rollout">
+          <PropertyList
+            items={[
+              { label: "Update Strategy", value: strategyLabel(detail) },
+              { label: "Min Ready Seconds", value: `${detail.min_ready_seconds}s` },
+              { label: "Generation (observed / spec)", value: `${detail.observed_generation ?? "—"} / ${detail.generation ?? "—"}` },
+              kind === "statefulset" && { label: "Pod Management", value: detail.pod_management_policy },
+              kind === "statefulset" && { label: "Current Revision", value: detail.current_revision, mono: true },
+              kind === "statefulset" && { label: "Update Revision", value: detail.update_revision, mono: true },
+              kind === "statefulset" && {
+                label: "PVC Retention",
+                value: detail.pvc_retention_policy
+                  ? `deleted: ${detail.pvc_retention_policy.when_deleted}, scaled: ${detail.pvc_retention_policy.when_scaled}`
+                  : "Retain (default)",
+              },
+            ]}
+          />
+        </DetailCard>
+        <DetailCard title="Scheduling & Identity">
+          <PropertyList
+            items={[
+              { label: "Selector", value: selectorText(detail.selector), mono: true, wide: true },
+              kind === "statefulset" && { label: "Headless Service", value: detail.service_name },
+              { label: "Service Account", value: detail.service_account },
+              { label: "CPU Request / Limit", value: `${detail.cpu_request || "—"} / ${detail.cpu_limit || "—"}`, mono: true },
+              { label: "Memory Request / Limit", value: `${detail.memory_request || "—"} / ${detail.memory_limit || "—"}`, mono: true },
+              kind === "daemonset" && { label: "Tolerations", value: detail.tolerations },
+              { label: "Node Selector", value: selectorText(detail.node_selector), mono: true, wide: true },
+              { label: "Created", value: detail.created_at ? `${formatDate(detail.created_at)} (${formatAge(detail.created_at)})` : null },
+            ]}
+          />
+        </DetailCard>
+      </div>
+
+      <ContainerSpecGrid containers={detail.containers} />
+      <ConditionsGrid conditions={detail.conditions} formatDate={formatDate} />
+    </>
+  );
+}
+
+export function WorkloadDetailModal({
   kind,
   clusterId,
   target,
-  title,
   detail,
   isLoading,
   isError,
@@ -675,7 +889,6 @@ function WorkloadDetailModal({
   kind: WorkloadKind;
   clusterId: string;
   target: { namespace: string; name: string };
-  title: string;
   detail: WorkloadDetail | undefined;
   isLoading: boolean;
   isError: boolean;
@@ -690,175 +903,59 @@ function WorkloadDetailModal({
   onClose: () => void;
 }) {
   const [section, setSection] = useState<DetailSection>("overview");
-  const sections: { key: DetailSection; label: string }[] = [
-    { key: "overview", label: "Overview" },
-    { key: "pods", label: `Pods${detail ? ` (${detail.pods.length})` : ""}` },
-    { key: "revisions", label: "Revisions" },
-    ...(kind === "statefulset" ? [{ key: "volumes" as const, label: "Volumes" }] : []),
-    { key: "events", label: `Events${detail ? ` (${detail.events.length})` : ""}` },
-    { key: "yaml", label: "YAML" },
-  ];
-  const fmt = (v: string | null | undefined) => (v ? formatDate(v) : "—");
-  const kv = (label: string, value: React.ReactNode) => <KeyValue label={label} value={value} />;
+  const label = LABELS[kind].singular;
+  const warnings = (detail?.events ?? []).filter((e) => e.type === "Warning").length;
 
   return (
-    <ModalShell title={title} onClose={onClose} wide>
-      {isLoading && <p className="text-sm text-gray-500">Loading…</p>}
-      {isError && <p className="text-sm text-red-600">Failed to load details.</p>}
-      {detail && (
-        <div className="space-y-4">
-          <div className="flex justify-end">
-            <DownloadLogsButton
-              download={logDownload}
-              downloadKey={`${kind}:${target.namespace}/${target.name}`}
-              request={{ clusterId, kind, namespace: target.namespace, name: target.name }}
-              label={`${LABELS[kind].singular} ${target.namespace}/${target.name}`}
-              podCount={detail.pods.length}
-            />
-          </div>
-          <DetailTabs tabs={sections} active={section} onChange={setSection} />
-
-          {section === "overview" && (
-            <div className="grid grid-cols-1 gap-x-6 md:grid-cols-2">
-              <div>
-                {kv("Status", <span className={`px-2 py-0.5 rounded-full text-xs ${WORKLOAD_STATUS_STYLES[detail.status]}`}>{detail.status}</span>)}
-                {kv("Ready / Desired", `${detail.ready}/${detail.desired}`)}
-                {kv("Up-to-date", detail.updated)}
-                {kv("Available", detail.available)}
-                {kv("Strategy", strategyLabel(detail))}
-                {kv("Min Ready Seconds", detail.min_ready_seconds)}
-                {kv("Generation", `${detail.observed_generation ?? "—"} / ${detail.generation ?? "—"}`)}
-                {kv("Created", fmt(detail.created_at))}
-              </div>
-              <div>
-                {kind === "statefulset" ? (
-                  <>
-                    {kv("Service", detail.service_name)}
-                    {kv("Pod Management", detail.pod_management_policy)}
-                    {kv("Current Revision", detail.current_revision)}
-                    {kv("Update Revision", detail.update_revision)}
-                    {kv("PVC Retention", detail.pvc_retention_policy ? `deleted: ${detail.pvc_retention_policy.when_deleted}, scaled: ${detail.pvc_retention_policy.when_scaled}` : "Retain (default)")}
-                  </>
-                ) : (
-                  <>
-                    {kv("Unavailable", detail.unavailable)}
-                    {kv("Misscheduled", detail.misscheduled)}
-                    {kv("Tolerations", detail.tolerations)}
-                    {kv("Node Selector", Object.entries(detail.node_selector).map(([k, v]) => `${k}=${v}`).join(", ") || "—")}
-                  </>
-                )}
-                {kv("Service Account", detail.service_account)}
-                {kv("CPU req / limit", `${detail.cpu_request || "—"} / ${detail.cpu_limit || "—"}`)}
-                {kv("Memory req / limit", `${detail.memory_request || "—"} / ${detail.memory_limit || "—"}`)}
-              </div>
-              <div className="md:col-span-2 mt-3">
-                <h4 className={gridStyles.sectionTitle}>Containers</h4>
-                <ul className="mt-1 space-y-1">
-                  {detail.containers.map((c) => (
-                    <li key={c.name} className="text-sm"><span className="font-medium">{c.name}</span> <span className="font-mono text-xs text-gray-600">{c.image}</span></li>
-                  ))}
-                </ul>
-              </div>
-              {detail.conditions.length > 0 && (
-                <div className="md:col-span-2 mt-3">
-                  <h4 className={gridStyles.sectionTitle}>Conditions</h4>
-                  <ul className="mt-1 space-y-1 text-sm">
-                    {detail.conditions.map((c) => (
-                      <li key={c.type}><span className="font-medium">{c.type}</span>={c.status} {c.reason && <span className="text-gray-500">({c.reason})</span>} {c.message}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {kind === "statefulset" && (detail.volume_claim_templates?.length ?? 0) > 0 && (
-                <div className="md:col-span-2 mt-3">
-                  <h4 className={gridStyles.sectionTitle}>Volume Claim Templates</h4>
-                  <ul className="mt-1 space-y-1 text-sm">
-                    {detail.volume_claim_templates!.map((t) => (
-                      <li key={t.name}>{t.name}: {t.storage ?? "?"} · {t.storage_class ?? "default class"} · {t.access_modes.join(", ")}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-
-          {section === "pods" && (
-            <WorkloadPodsTable
-              pods={detail.pods}
-              onOpenPod={onOpenPod}
-              onViewPodLogs={onViewPodLogs}
-              onDeletePod={onDeletePod}
-              canDeletePod={canDeletePod}
-            />
-          )}
-
-          {section === "revisions" && (
-            <table className={gridStyles.table}>
-              <thead className={gridStyles.head}>
-                <tr>
-                  <th className={gridStyles.headerCell}>Revision</th>
-                  <th className={gridStyles.headerCell}>Name</th>
-                  <th className={gridStyles.headerCell}>Images</th>
-                  <th className={gridStyles.headerCell}>Created</th>
-                  <th className={gridStyles.headerCellCenter}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {detail.revisions.length === 0 && <GridStateRow colSpan={5} emptyText="No revision history" />}
-                {detail.revisions.map((r) => (
-                  <tr key={r.name} className={gridStyles.row}>
-                    <td className={gridStyles.cell}>
-                      {r.revision}
-                      {r.is_current && <span className="ml-2 px-1.5 py-0.5 rounded bg-green-100 text-green-700 text-[10px] font-medium">current</span>}
-                    </td>
-                    <td className={gridStyles.cell}><span className="font-mono text-xs">{r.name}</span></td>
-                    <td className={gridStyles.cell}><span className="font-mono text-xs break-all">{r.images.join(", ") || "—"}</span></td>
-                    <td className={gridStyles.cell}><span className="text-xs">{fmt(r.created_at)}</span></td>
-                    <td className={gridStyles.centerCell}>
-                      {canManage && !r.is_current && (
-                        <button type="button" onClick={() => onRollback(detail, r.revision)} className="text-sm text-att-600 hover:underline">
-                          Roll back
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {section === "volumes" && (
-            <table className={gridStyles.table}>
-              <thead className={gridStyles.head}>
-                <tr>
-                  <th className={gridStyles.headerCell}>PVC</th>
-                  <th className={gridStyles.headerCell}>Phase</th>
-                  <th className={gridStyles.headerCell}>Capacity</th>
-                  <th className={gridStyles.headerCell}>Storage Class</th>
-                  <th className={gridStyles.headerCell}>Volume</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(detail.pvcs ?? []).length === 0 && <GridStateRow colSpan={5} emptyText="No PersistentVolumeClaims" />}
-                {(detail.pvcs ?? []).map((v) => (
-                  <tr key={v.name} className={gridStyles.row}>
-                    <td className={gridStyles.cell}>{v.name}</td>
-                    <td className={gridStyles.cell}>{v.phase ?? "—"}</td>
-                    <td className={gridStyles.cell}>{v.capacity ?? "—"}</td>
-                    <td className={gridStyles.cell}>{v.storage_class ?? "—"}</td>
-                    <td className={gridStyles.cell}><span className="font-mono text-xs">{v.volume_name ?? "—"}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {section === "events" && <EventList events={detail.events} formatDate={formatDate} />}
-
-          {section === "yaml" && <YamlView yaml={detail.yaml} />}
-        </div>
+    <ResourceDetailShell
+      kind={label}
+      name={target.name}
+      namespace={target.namespace}
+      icon={kind === "statefulset" ? ResourceKindIcons.statefulset : ResourceKindIcons.daemonset}
+      status={detail && <WorkloadStatusBadge status={detail.status} />}
+      meta={detail && <span className="font-mono">{detail.ready}/{detail.desired} ready</span>}
+      actions={
+        detail && (
+          <DownloadLogsButton
+            download={logDownload}
+            downloadKey={`${kind}:${target.namespace}/${target.name}`}
+            request={{ clusterId, kind, namespace: target.namespace, name: target.name }}
+            label={`${label} ${target.namespace}/${target.name}`}
+            podCount={detail.pods.length}
+          />
+        )
+      }
+      tabs={[
+        { key: "overview", label: "Overview" },
+        { key: "pods", label: "Pods", count: detail?.pods.length },
+        { key: "revisions", label: "Revisions", count: detail?.revisions.length },
+        ...(kind === "statefulset" ? [{ key: "volumes" as const, label: "Volumes", count: detail?.pvcs?.length }] : []),
+        { key: "events", label: "Events", count: detail?.events.length, attention: warnings > 0 },
+        { key: "metadata", label: "Metadata" },
+        { key: "yaml", label: "YAML" },
+      ]}
+      activeTab={section}
+      onTabChange={setSection}
+      isLoading={isLoading}
+      error={isError && !detail ? `Failed to load ${label} details.` : null}
+      onClose={onClose}
+    >
+      {detail && section === "overview" && <WorkloadOverview kind={kind} detail={detail} formatDate={formatDate} />}
+      {detail && section === "pods" && (
+        <WorkloadPodsGrid pods={detail.pods} onOpenPod={onOpenPod} onViewPodLogs={onViewPodLogs} onDeletePod={onDeletePod} canDeletePod={canDeletePod} />
       )}
-    </ModalShell>
+      {detail && section === "revisions" && <RevisionsGrid detail={detail} canManage={canManage} formatDate={formatDate} onRollback={onRollback} />}
+      {detail && section === "volumes" && <VolumeClaimsGrids detail={detail} formatDate={formatDate} />}
+      {detail && section === "events" && <EventsGrid events={detail.events} formatDate={formatDate} />}
+      {detail && section === "metadata" && (
+        <>
+          <KeyValueGrid title="Labels" entries={detail.labels} />
+          <KeyValueGrid title="Annotations" entries={detail.annotations} />
+          <KeyValueGrid title="Selector" entries={detail.selector} />
+        </>
+      )}
+      {detail && section === "yaml" && <YamlViewer yaml={detail.yaml} fileName={`${target.namespace}_${target.name}_${kind}.yaml`} />}
+    </ResourceDetailShell>
   );
 }
 

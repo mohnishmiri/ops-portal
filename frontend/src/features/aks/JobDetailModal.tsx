@@ -1,15 +1,18 @@
 /**
- * Job detail panel — basic info, execution counters, conditions, and the Job's pods.
- *
- * Uses the shared ModalShell so it matches every other AKS resource detail
- * view. Pod rows link out to the page's existing log viewer and pod-delete
- * flows rather than reimplementing them.
+ * Job drill-down — execution counters, conditions, the Job's pods, and
+ * metadata, in the same layout as every other AKS resource detail. Pod rows
+ * link out to the page's existing log viewer and pod-delete flows rather than
+ * reimplementing them.
  */
 
-import React from "react";
+import React, { useState } from "react";
+import { MetricCard, MetricCardIcons } from "../../components/MetricCard";
 import { JobDetail, JobPod } from "../../services/aksApi";
-import { gridStyles, Spinner } from "../../components/gridStyles";
-import { ModalShell } from "./K8sResourceModals";
+import { DetailGrid, type GridColumn } from "./DetailGrid";
+import { ageMs, ConditionsGrid, DetailIcons, KeyValueGrid, Truncate } from "./detailShared";
+import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
+
+type Section = "overview" | "pods" | "metadata";
 
 const POD_PHASE_STYLES: Record<string, string> = {
   Running: "bg-blue-100 text-blue-700",
@@ -18,30 +21,160 @@ const POD_PHASE_STYLES: Record<string, string> = {
   Pending: "bg-amber-100 text-amber-700",
 };
 
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
+const JOB_STATUS_STYLES: Record<string, string> = {
+  Completed: "bg-green-100 text-green-700",
+  Running: "bg-blue-100 text-blue-700",
+  Failed: "bg-red-100 text-red-700",
+  Suspended: "bg-gray-100 text-gray-600",
+};
+
+function duration(start: string | null, end: string | null): string {
+  if (!start) return "—";
+  const ms = (end ? Date.parse(end) : Date.now()) - Date.parse(start);
+  if (Number.isNaN(ms) || ms < 0) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+const actionBtn = "p-1.5 rounded-lg disabled:opacity-50";
+
+function JobPodsGrid({
+  pods,
+  formatDate,
+  canDeletePod,
+  onViewPodLogs,
+  onDeletePod,
+}: {
+  pods: JobPod[];
+  formatDate: (value: string) => string;
+  canDeletePod: boolean;
+  onViewPodLogs: (pod: JobPod) => void;
+  onDeletePod?: (pod: JobPod) => void;
+}) {
+  const columns: GridColumn<JobPod>[] = [
+    { key: "name", header: "Pod", sortValue: (p) => p.pod_name, render: (p) => <Truncate value={p.pod_name} className="font-mono text-xs" maxWidth="max-w-[24rem]" /> },
+    {
+      key: "phase",
+      header: "Phase",
+      sortValue: (p) => p.phase ?? "",
+      render: (p) => (
+        <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${POD_PHASE_STYLES[p.phase ?? ""] ?? "bg-gray-100 text-gray-600"}`}>{p.phase ?? "Unknown"}</span>
+      ),
+    },
+    { key: "node", header: "Node", sortValue: (p) => p.node ?? "", render: (p) => <Truncate value={p.node} className="text-xs" maxWidth="max-w-[16rem]" /> },
+    { key: "ip", header: "Pod IP", sortValue: (p) => p.pod_ip ?? "", render: (p) => <span className="whitespace-nowrap font-mono text-xs">{p.pod_ip ?? "—"}</span> },
+    {
+      key: "restarts",
+      header: "Restarts",
+      align: "center",
+      sortValue: (p) => p.restarts,
+      render: (p) => <span className={p.restarts > 0 ? "font-semibold text-red-600" : "text-slate-600"}>{p.restarts}</span>,
+    },
+    { key: "started", header: "Started", sortValue: (p) => ageMs(p.started_at), render: (p) => <span className="whitespace-nowrap text-xs text-slate-600">{p.started_at ? formatDate(p.started_at) : "—"}</span> },
+    {
+      key: "actions",
+      header: "Actions",
+      align: "center",
+      render: (p) => (
+        <div className="flex items-center justify-center gap-1">
+          <button type="button" onClick={() => onViewPodLogs(p)} title="View Logs" className={`${actionBtn} text-blue-600 hover:bg-blue-50`}>{DetailIcons.logs}</button>
+          {canDeletePod && onDeletePod && (
+            <button type="button" onClick={() => onDeletePod(p)} title="Delete Pod" className={`${actionBtn} text-red-600 hover:bg-red-50`}>{DetailIcons.trash}</button>
+          )}
+        </div>
+      ),
+    },
+  ];
   return (
-    <div>
-      <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500">{label}</dt>
-      <dd className="mt-0.5 text-sm text-gray-800 break-all">{value ?? "—"}</dd>
-    </div>
+    <DetailGrid
+      title="Pods"
+      rows={pods}
+      columns={columns}
+      rowKey={(p) => p.pod_name}
+      searchText={(p) => `${p.pod_name} ${p.phase ?? ""} ${p.node ?? ""} ${p.pod_ip ?? ""}`}
+      searchPlaceholder="Search pod, node, phase…"
+      emptyText="No pods found for this Job. They may have been cleaned up by its TTL or by the CronJob's history limits."
+      initialSort={{ key: "started", direction: "asc" }}
+    />
   );
 }
 
-function KeyValueList({ entries }: { entries: Record<string, string> }) {
-  const keys = Object.keys(entries);
-  if (keys.length === 0) return <span className="text-sm text-gray-400">None</span>;
+function Overview({ detail, clusterName, formatDate }: { detail: JobDetail; clusterName: string; formatDate: (value: string) => string }) {
+  const fmt = (v: string | null) => (v ? formatDate(v) : null);
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {keys.map((k) => (
-        <span
-          key={k}
-          className="rounded bg-gray-100 px-2 py-0.5 font-mono text-[11px] text-gray-700"
-          title={`${k}=${entries[k]}`}
-        >
-          {k}={entries[k]}
-        </span>
-      ))}
-    </div>
+    <>
+      <KpiRow>
+        <MetricCard
+          title="Succeeded"
+          value={`${detail.succeeded}/${detail.completions ?? 1}`}
+          subtitle={`Completion mode ${detail.completion_mode ?? "NonIndexed"}`}
+          icon={MetricCardIcons.checkCircle()}
+          tone={detail.succeeded >= (detail.completions ?? 1) ? "green" : "att"}
+        />
+        <MetricCard
+          title="Failed"
+          value={detail.failed}
+          subtitle={`Backoff limit ${detail.backoff_limit ?? "—"}`}
+          icon={MetricCardIcons.alert()}
+          tone={detail.failed > 0 ? "red" : "green"}
+        />
+        <MetricCard
+          title="Active Pods"
+          value={detail.active}
+          subtitle={`Parallelism ${detail.parallelism ?? "—"}`}
+          icon={MetricCardIcons.activity()}
+          tone={detail.active > 0 ? "blue" : "slate"}
+        />
+        <MetricCard
+          title="Duration"
+          value={duration(detail.start_time, detail.completion_time)}
+          subtitle={detail.completion_time ? "Finished" : detail.start_time ? "Still running" : "Not started"}
+          icon={MetricCardIcons.calendar()}
+          tone="att"
+        />
+      </KpiRow>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <DetailCard title="Execution">
+          <PropertyList
+            items={[
+              { label: "Start Time", value: fmt(detail.start_time) },
+              { label: "Completion Time", value: fmt(detail.completion_time) },
+              { label: "Desired Completions", value: detail.completions ?? 1 },
+              { label: "Parallelism", value: detail.parallelism },
+              { label: "Backoff Limit", value: detail.backoff_limit },
+              { label: "TTL After Finished", value: detail.ttl_seconds_after_finished !== null ? `${detail.ttl_seconds_after_finished}s` : "Not configured" },
+              { label: "Suspended", value: detail.suspended ? "Yes" : "No" },
+            ]}
+          />
+        </DetailCard>
+        <DetailCard title="Identity">
+          <PropertyList
+            items={[
+              { label: "Cluster", value: clusterName },
+              {
+                label: "Created By",
+                value: detail.created_by ? (
+                  <>
+                    {detail.created_by}
+                    {detail.trigger === "manual" && (
+                      <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">manual</span>
+                    )}
+                  </>
+                ) : null,
+              },
+              { label: "Created", value: fmt(detail.created_at) },
+              { label: "UID", value: detail.uid, mono: true },
+              { label: "Image", value: detail.image, mono: true, wide: true },
+            ]}
+          />
+        </DetailCard>
+      </div>
+
+      <ConditionsGrid conditions={detail.conditions} formatDate={formatDate} />
+    </>
   );
 }
 
@@ -56,213 +189,45 @@ export const JobDetailModal: React.FC<{
   onViewPodLogs: (pod: JobPod) => void;
   onDeletePod?: (pod: JobPod) => void;
   onClose: () => void;
-}> = ({
-  clusterName,
-  jobRef,
-  detail,
-  isLoading,
-  isError,
-  formatDate,
-  canDeletePod,
-  onViewPodLogs,
-  onDeletePod,
-  onClose,
-}) => (
-  <ModalShell title={`Job: ${jobRef.name}`} onClose={onClose} wide>
-    {isLoading && !detail ? (
-      <p className="flex items-center justify-center gap-2 py-8 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading Job details…</p>
-    ) : isError || !detail ? (
-      <p className="py-8 text-sm text-red-600">
-        Unable to load details for this Job. It may have been deleted or its TTL may have expired.
-      </p>
-    ) : (
-      <div className="space-y-6">
-        {/* ── Basic information ── */}
-        <section>
-          <h4 className={gridStyles.sectionTitle}>Basic Information</h4>
-          <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3">
-            <Field label="Job Name" value={detail.name} />
-            <Field label="Namespace" value={detail.namespace} />
-            <Field label="Cluster" value={clusterName} />
-            <Field label="UID" value={<span className="font-mono text-xs">{detail.uid}</span>} />
-            <Field
-              label="Created"
-              value={detail.created_at ? formatDate(detail.created_at) : "—"}
-            />
-            <Field
-              label="Start Time"
-              value={detail.start_time ? formatDate(detail.start_time) : "—"}
-            />
-            <Field
-              label="Completion Time"
-              value={detail.completion_time ? formatDate(detail.completion_time) : "—"}
-            />
-            <Field label="Image" value={<span className="font-mono text-xs">{detail.image}</span>} />
-            <Field
-              label="Created By"
-              value={
-                detail.created_by ? (
-                  <>
-                    {detail.created_by}
-                    {detail.trigger === "manual" && (
-                      <span className="ml-1 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
-                        manual
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  "—"
-                )
-              }
-            />
-          </dl>
-          <div className="mt-3 space-y-2">
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500">Labels</dt>
-              <dd className="mt-1">
-                <KeyValueList entries={detail.labels} />
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                Annotations
-              </dt>
-              <dd className="mt-1">
-                <KeyValueList entries={detail.annotations} />
-              </dd>
-            </div>
-          </div>
-        </section>
-
-        {/* ── Execution ── */}
-        <section>
-          <h4 className={gridStyles.sectionTitle}>Execution</h4>
-          <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-4">
-            <Field label="Status" value={detail.status} />
-            <Field label="Desired Completions" value={detail.completions ?? 1} />
-            <Field label="Succeeded" value={detail.succeeded} />
-            <Field
-              label="Failed"
-              value={
-                <span className={detail.failed > 0 ? "font-semibold text-red-600" : undefined}>
-                  {detail.failed}
-                </span>
-              }
-            />
-            <Field label="Active Pods" value={detail.active} />
-            <Field label="Parallelism" value={detail.parallelism ?? "—"} />
-            <Field label="Backoff Limit" value={detail.backoff_limit ?? "—"} />
-            <Field label="Completion Mode" value={detail.completion_mode ?? "—"} />
-            <Field
-              label="TTL After Finished"
-              value={
-                detail.ttl_seconds_after_finished !== null
-                  ? `${detail.ttl_seconds_after_finished}s`
-                  : "Not configured"
-              }
-            />
-            <Field label="Suspended" value={detail.suspended ? "Yes" : "No"} />
-          </dl>
-        </section>
-
-        {/* ── Conditions ── */}
-        {detail.conditions.length > 0 && (
-          <section>
-            <h4 className={gridStyles.sectionTitle}>Conditions</h4>
-            <ul className="mt-2 space-y-1.5">
-              {detail.conditions.map((c) => (
-                <li key={`${c.type}-${c.last_transition_time}`} className="text-sm text-gray-700">
-                  <span className="font-medium">{c.type}</span>
-                  <span className="text-gray-500"> = {c.status}</span>
-                  {c.reason && <span className="text-gray-500"> · {c.reason}</span>}
-                  {c.message && <span className="text-gray-500"> — {c.message}</span>}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {/* ── Pods ── */}
-        <section>
-          <h4 className={gridStyles.sectionTitle}>
-            Pods <span className="font-normal text-gray-500">({detail.pods.length})</span>
-          </h4>
-          {detail.pods.length === 0 ? (
-            <p className="mt-2 text-sm text-gray-500">
-              No pods found for this Job. They may have been cleaned up by its TTL or by the
-              CronJob's history limits.
-            </p>
-          ) : (
-            <div className={`mt-2 ${gridStyles.shell}`}>
-              <div className="overflow-x-auto">
-                <table className={gridStyles.table}>
-                  <thead className={gridStyles.head}>
-                    <tr>
-                      <th className={gridStyles.headerCell}>Pod</th>
-                      <th className={gridStyles.headerCell}>Phase</th>
-                      <th className={gridStyles.headerCell}>Node</th>
-                      <th className={gridStyles.headerCell}>Restarts</th>
-                      <th className={gridStyles.headerCell}>Started</th>
-                      <th className={gridStyles.headerCellCenter}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.pods.map((pod) => (
-                      <tr key={pod.pod_name} className={gridStyles.row}>
-                        <td className={gridStyles.cell}>
-                          <span className="font-mono text-xs">{pod.pod_name}</span>
-                        </td>
-                        <td className={gridStyles.cell}>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                              POD_PHASE_STYLES[pod.phase ?? ""] ?? "bg-gray-100 text-gray-600"
-                            }`}
-                          >
-                            {pod.phase ?? "Unknown"}
-                          </span>
-                        </td>
-                        <td className={gridStyles.cell}>{pod.node ?? "—"}</td>
-                        <td className={gridStyles.cell}>
-                          <span className={pod.restarts > 0 ? "font-semibold text-red-600" : undefined}>
-                            {pod.restarts}
-                          </span>
-                        </td>
-                        <td className={gridStyles.cell}>
-                          <span className="text-xs text-gray-600">
-                            {pod.started_at ? formatDate(pod.started_at) : "—"}
-                          </span>
-                        </td>
-                        <td className={gridStyles.centerCell}>
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => onViewPodLogs(pod)}
-                              title="View Logs"
-                              className="rounded p-1 text-blue-600 hover:bg-blue-50"
-                            >
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                            </button>
-                            {canDeletePod && onDeletePod && (
-                              <button
-                                onClick={() => onDeletePod(pod)}
-                                title="Delete Pod"
-                                className="rounded p-1 text-red-600 hover:bg-red-50"
-                              >
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </section>
-      </div>
-    )}
-  </ModalShell>
-);
+}> = ({ clusterName, jobRef, detail, isLoading, isError, formatDate, canDeletePod, onViewPodLogs, onDeletePod, onClose }) => {
+  const [section, setSection] = useState<Section>("overview");
+  return (
+    <ResourceDetailShell
+      kind="Job"
+      name={jobRef.name}
+      namespace={jobRef.namespace}
+      icon={ResourceKindIcons.job}
+      status={
+        detail && (
+          <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${JOB_STATUS_STYLES[detail.status] ?? "bg-amber-100 text-amber-700"}`}>
+            {detail.status}
+          </span>
+        )
+      }
+      meta={detail?.created_by && <span>From CronJob <span className="font-medium text-slate-700">{detail.created_by}</span></span>}
+      tabs={[
+        { key: "overview", label: "Overview" },
+        { key: "pods", label: "Pods", count: detail?.pods.length },
+        { key: "metadata", label: "Metadata" },
+      ]}
+      activeTab={section}
+      onTabChange={setSection}
+      isLoading={isLoading && !detail}
+      error={!isLoading && (isError || !detail) ? "Unable to load details for this Job. It may have been deleted or its TTL may have expired." : null}
+      onClose={onClose}
+    >
+      {detail && section === "overview" && <Overview detail={detail} clusterName={clusterName} formatDate={formatDate} />}
+      {detail && section === "pods" && (
+        <JobPodsGrid pods={detail.pods} formatDate={formatDate} canDeletePod={canDeletePod} onViewPodLogs={onViewPodLogs} onDeletePod={onDeletePod} />
+      )}
+      {detail && section === "metadata" && (
+        <>
+          <KeyValueGrid title="Labels" entries={detail.labels} />
+          <KeyValueGrid title="Annotations" entries={detail.annotations} />
+        </>
+      )}
+    </ResourceDetailShell>
+  );
+};
 
 export default JobDetailModal;

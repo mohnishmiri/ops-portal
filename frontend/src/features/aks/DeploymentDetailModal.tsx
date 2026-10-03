@@ -1,33 +1,156 @@
 /**
  * Deployment drill-down: overview, pods, ReplicaSet revisions, events
- * (Deployment + ReplicaSet), and the live manifest — the same layout as the
- * StatefulSet/DaemonSet detail.
+ * (Deployment + ReplicaSet), metadata, and the live manifest — the same
+ * layout as every other AKS resource detail.
  */
 
-import React, { useState } from "react";
-import { gridStyles, Spinner } from "../../components/gridStyles";
-import { DeploymentDetail, useDeploymentDetail, WorkloadPod } from "../../services/aksApi";
-import { GridStateRow } from "./aksGridShared";
+import React, { useMemo, useState } from "react";
+import { MetricCard, MetricCardIcons } from "../../components/MetricCard";
+import { DeploymentDetail, DeploymentRevision, useDeploymentDetail, WorkloadPod } from "../../services/aksApi";
+import { DetailGrid, type GridColumn } from "./DetailGrid";
 import {
   apiErrorDetail,
-  ConditionList,
-  DetailTabs,
-  EventList,
-  KeyValue,
-  LabelChips,
-  SectionTitle,
-  WorkloadPodsTable,
+  ConditionsGrid,
+  ContainerSpecGrid,
+  EventsGrid,
+  formatAge,
+  KeyValueGrid,
+  splitImage,
+  Truncate,
+  WorkloadPodsGrid,
   WorkloadStatusBadge,
-  YamlView,
+  YamlViewer,
 } from "./detailShared";
-import { ModalShell } from "./K8sResourceModals";
 import { DownloadLogsButton, LogArchiveDownload } from "./LogArchiveDownload";
+import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
-type Section = "overview" | "pods" | "revisions" | "events" | "yaml";
+type Section = "overview" | "pods" | "revisions" | "events" | "metadata" | "yaml";
 
-function strategyText(d: DeploymentDetail): string {
-  if (d.update_strategy !== "RollingUpdate") return d.update_strategy ?? "—";
-  return `RollingUpdate (maxSurge ${d.max_surge ?? "25%"}, maxUnavailable ${d.max_unavailable ?? "25%"})`;
+function selectorText(selector: Record<string, string>): string {
+  return Object.entries(selector).map(([k, v]) => `${k}=${v}`).join(", ");
+}
+
+function ReplicaSetsGrid({ revisions, formatDate }: { revisions: DeploymentRevision[]; formatDate: (v: string) => string }) {
+  const columns: GridColumn<DeploymentRevision>[] = [
+    {
+      key: "revision",
+      header: "Revision",
+      sortValue: (r) => r.revision,
+      render: (r) => (
+        <span className="inline-flex items-center gap-2 whitespace-nowrap font-semibold text-slate-800">
+          {r.revision || "—"}
+          {r.is_current && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700">current</span>}
+        </span>
+      ),
+    },
+    { key: "name", header: "ReplicaSet", sortValue: (r) => r.name, render: (r) => <Truncate value={r.name} className="font-mono text-xs" maxWidth="max-w-[22rem]" /> },
+    {
+      key: "pods",
+      header: "Pods Ready",
+      align: "center",
+      sortValue: (r) => r.desired,
+      render: (r) => <span className={`font-mono text-xs ${r.ready < r.desired ? "font-semibold text-amber-700" : ""}`}>{r.ready}/{r.desired}</span>,
+    },
+    {
+      key: "images",
+      header: "Version",
+      sortValue: (r) => r.images.join(","),
+      render: (r) => (
+        <span className="flex flex-wrap gap-1" title={r.images.join("\n")}>
+          {r.images.length === 0 && "—"}
+          {r.images.map((img) => (
+            <span key={img} className="whitespace-nowrap rounded bg-indigo-50 px-2 py-0.5 font-mono text-xs font-semibold text-indigo-700">{splitImage(img).tag}</span>
+          ))}
+        </span>
+      ),
+    },
+    { key: "created", header: "Created", sortValue: (r) => r.created_at ?? "", render: (r) => <span className="whitespace-nowrap text-xs text-slate-600">{r.created_at ? formatDate(r.created_at) : "—"}</span> },
+  ];
+  return (
+    <DetailGrid
+      title="ReplicaSets"
+      rows={revisions}
+      columns={columns}
+      rowKey={(r) => r.name}
+      searchText={(r) => `${r.revision} ${r.name} ${r.images.join(" ")}`}
+      searchPlaceholder="Search revision, ReplicaSet, image…"
+      emptyText="No ReplicaSets"
+      initialSort={{ key: "revision", direction: "desc" }}
+    />
+  );
+}
+
+function Overview({ detail, formatDate }: { detail: DeploymentDetail; formatDate: (v: string) => string }) {
+  const restarts = detail.pods.reduce((n, p) => n + p.restarts, 0);
+  const restartedPods = detail.pods.filter((p) => p.restarts > 0).length;
+  const fullyReady = detail.desired > 0 && detail.ready === detail.desired;
+  const hpa = detail.hpa;
+  return (
+    <>
+      <KpiRow>
+        <MetricCard
+          title="Pods Ready"
+          value={`${detail.ready}/${detail.desired}`}
+          subtitle={`${detail.available} available · ${detail.unavailable} unavailable`}
+          icon={MetricCardIcons.checkCircle()}
+          tone={detail.desired === 0 ? "slate" : fullyReady ? "green" : "amber"}
+        />
+        <MetricCard
+          title="Up-to-date"
+          value={`${detail.updated}/${detail.desired}`}
+          subtitle={detail.revision ? `Revision ${detail.revision}` : "Revision unknown"}
+          icon={MetricCardIcons.layers()}
+          tone="att"
+        />
+        <MetricCard
+          title="Restarts"
+          value={restarts}
+          subtitle={restartedPods ? `${restartedPods} pod${restartedPods === 1 ? "" : "s"} restarted` : "No pod has restarted"}
+          icon={MetricCardIcons.activity()}
+          tone={restarts > 0 ? "red" : "green"}
+        />
+        <MetricCard
+          title="Autoscaling"
+          value={hpa ? `${hpa.min_replicas}–${hpa.max_replicas}` : "Off"}
+          subtitle={hpa ? `${hpa.current_replicas ?? "?"} current · ${hpa.desired_replicas ?? "?"} desired` : "No HorizontalPodAutoscaler"}
+          icon={MetricCardIcons.server()}
+          tone={hpa ? "indigo" : "slate"}
+        />
+      </KpiRow>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <DetailCard title="Rollout">
+          <PropertyList
+            items={[
+              { label: "Strategy", value: detail.update_strategy },
+              detail.update_strategy === "RollingUpdate" && { label: "Max Surge / Unavailable", value: `${detail.max_surge ?? "25%"} / ${detail.max_unavailable ?? "25%"}` },
+              { label: "Min Ready Seconds", value: `${detail.min_ready_seconds}s` },
+              { label: "Progress Deadline", value: detail.progress_deadline_seconds != null ? `${detail.progress_deadline_seconds}s` : null },
+              { label: "Revision History Limit", value: detail.revision_history_limit },
+              { label: "Generation (observed / spec)", value: `${detail.observed_generation ?? "—"} / ${detail.generation ?? "—"}` },
+              { label: "Paused", value: detail.paused ? <span className="font-semibold text-amber-700">Yes</span> : "No" },
+            ]}
+          />
+        </DetailCard>
+        <DetailCard title="Scheduling & Identity">
+          <PropertyList
+            items={[
+              { label: "Selector", value: selectorText(detail.selector), mono: true, wide: true },
+              { label: "Service Account", value: detail.service_account },
+              { label: "Created", value: detail.created_at ? `${formatDate(detail.created_at)} (${formatAge(detail.created_at)})` : null },
+              { label: "Node Selector", value: selectorText(detail.node_selector), mono: true, wide: true },
+              ...(hpa
+                ? hpa.metrics.map((m) => ({ label: `HPA ${m.name}`, value: `${m.current ?? "?"} of ${m.target ?? "?"} target` }))
+                : []),
+            ]}
+          />
+        </DetailCard>
+      </div>
+
+      <ContainerSpecGrid containers={detail.containers} />
+      <ConditionsGrid conditions={detail.conditions} formatDate={formatDate} />
+    </>
+  );
 }
 
 export function DeploymentDetailModal({
@@ -55,145 +178,63 @@ export function DeploymentDetailModal({
 }) {
   const [section, setSection] = useState<Section>("overview");
   const { data: detail, isLoading, isError, error } = useDeploymentDetail(clusterId, namespace, name);
-  const fmt = (v: string | null | undefined) => (v ? formatDate(v) : "—");
-
-  const tabs: { key: Section; label: string }[] = [
-    { key: "overview", label: "Overview" },
-    { key: "pods", label: `Pods${detail ? ` (${detail.pods.length})` : ""}` },
-    { key: "revisions", label: `ReplicaSets${detail ? ` (${detail.revisions.length})` : ""}` },
-    { key: "events", label: `Events${detail ? ` (${detail.events.length})` : ""}` },
-    { key: "yaml", label: "YAML" },
-  ];
+  const warnings = useMemo(() => (detail?.events ?? []).filter((e) => e.type === "Warning").length, [detail]);
 
   return (
-    <ModalShell title={`Deployment: ${namespace}/${name}`} onClose={onClose} wide>
-      {isLoading && (
-        <div className="flex items-center justify-center gap-2 py-8 text-sm text-gray-500"><Spinner className="h-4 w-4" />Loading deployment…</div>
+    <ResourceDetailShell
+      kind="Deployment"
+      name={name}
+      namespace={namespace}
+      icon={ResourceKindIcons.deployment}
+      status={detail && <WorkloadStatusBadge status={detail.status} />}
+      meta={
+        detail && (
+          <>
+            <span className="font-mono">{detail.ready}/{detail.desired} ready</span>
+            {detail.revision && <span>Revision {detail.revision}</span>}
+            {detail.paused && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">Rollout paused</span>}
+          </>
+        )
+      }
+      actions={
+        detail && (
+          <DownloadLogsButton
+            download={logDownload}
+            downloadKey={`deployment:${namespace}/${name}`}
+            request={{ clusterId, kind: "deployment", namespace, name }}
+            label={`Deployment ${namespace}/${name}`}
+            podCount={detail.pods.length}
+          />
+        )
+      }
+      tabs={[
+        { key: "overview", label: "Overview" },
+        { key: "pods", label: "Pods", count: detail?.pods.length },
+        { key: "revisions", label: "ReplicaSets", count: detail?.revisions.length },
+        { key: "events", label: "Events", count: detail?.events.length, attention: warnings > 0 },
+        { key: "metadata", label: "Metadata" },
+        { key: "yaml", label: "YAML" },
+      ]}
+      activeTab={section}
+      onTabChange={setSection}
+      isLoading={isLoading}
+      error={isError && !detail ? apiErrorDetail(error, "Failed to load deployment details.") : null}
+      onClose={onClose}
+    >
+      {detail && section === "overview" && <Overview detail={detail} formatDate={formatDate} />}
+      {detail && section === "pods" && (
+        <WorkloadPodsGrid pods={detail.pods} onOpenPod={onOpenPod} onViewPodLogs={onViewPodLogs} onDeletePod={onDeletePod} canDeletePod={canDeletePod} />
       )}
-      {isError && !detail && (
-        <p className="text-sm text-red-600">{apiErrorDetail(error, "Failed to load deployment details.")}</p>
+      {detail && section === "revisions" && <ReplicaSetsGrid revisions={detail.revisions} formatDate={formatDate} />}
+      {detail && section === "events" && <EventsGrid events={detail.events} formatDate={formatDate} showObject />}
+      {detail && section === "metadata" && (
+        <>
+          <KeyValueGrid title="Labels" entries={detail.labels} />
+          <KeyValueGrid title="Annotations" entries={detail.annotations} />
+        </>
       )}
-      {detail && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <WorkloadStatusBadge status={detail.status} />
-              <span className="font-mono">{detail.ready}/{detail.desired} ready</span>
-              {detail.revision && <span>· revision {detail.revision}</span>}
-              {detail.paused && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800">Rollout paused</span>}
-            </div>
-            <DownloadLogsButton
-              download={logDownload}
-              downloadKey={`deployment:${namespace}/${name}`}
-              request={{ clusterId, kind: "deployment", namespace, name }}
-              label={`Deployment ${namespace}/${name}`}
-              podCount={detail.pods.length}
-            />
-          </div>
-
-          <DetailTabs tabs={tabs} active={section} onChange={setSection} />
-
-          {section === "overview" && (
-            <div className="grid grid-cols-1 gap-x-6 md:grid-cols-2">
-              <div>
-                <KeyValue label="Ready / Desired" value={`${detail.ready}/${detail.desired}`} />
-                <KeyValue label="Up-to-date" value={detail.updated} />
-                <KeyValue label="Available" value={detail.available} />
-                <KeyValue label="Unavailable" value={detail.unavailable} />
-                <KeyValue label="Strategy" value={strategyText(detail)} />
-                <KeyValue label="Min Ready Seconds" value={detail.min_ready_seconds} />
-                <KeyValue label="Progress Deadline" value={detail.progress_deadline_seconds != null ? `${detail.progress_deadline_seconds}s` : "—"} />
-                <KeyValue label="Revision History Limit" value={detail.revision_history_limit ?? "—"} />
-                <KeyValue label="Generation" value={`${detail.observed_generation ?? "—"} / ${detail.generation ?? "—"}`} />
-                <KeyValue label="Created" value={fmt(detail.created_at)} />
-              </div>
-              <div>
-                <KeyValue label="Selector" value={Object.entries(detail.selector).map(([k, v]) => `${k}=${v}`).join(", ") || "—"} />
-                <KeyValue label="Service Account" value={detail.service_account} />
-                <KeyValue label="CPU req / limit" value={`${detail.cpu_request || "—"} / ${detail.cpu_limit || "—"}`} />
-                <KeyValue label="Memory req / limit" value={`${detail.memory_request || "—"} / ${detail.memory_limit || "—"}`} />
-                <KeyValue label="Node Selector" value={Object.entries(detail.node_selector).map(([k, v]) => `${k}=${v}`).join(", ") || "—"} />
-                {detail.hpa ? (
-                  <>
-                    <KeyValue label="Autoscaler (HPA)" value={`${detail.hpa.name}: ${detail.hpa.min_replicas}–${detail.hpa.max_replicas} replicas`} />
-                    <KeyValue label="HPA current / desired" value={`${detail.hpa.current_replicas ?? "—"} / ${detail.hpa.desired_replicas ?? "—"}`} />
-                    {detail.hpa.metrics.map((m) => (
-                      <KeyValue key={m.name} label={`HPA ${m.name}`} value={`${m.current ?? "?"} of ${m.target ?? "?"} target`} />
-                    ))}
-                  </>
-                ) : (
-                  <KeyValue label="Autoscaler (HPA)" value="None" />
-                )}
-              </div>
-
-              <div className="md:col-span-2">
-                <SectionTitle>Containers</SectionTitle>
-                <ul className="space-y-1">
-                  {detail.containers.map((c) => (
-                    <li key={c.name} className="text-sm">
-                      <span className="font-medium">{c.name}</span>{" "}
-                      <span className="font-mono text-xs text-gray-600 break-all">{c.image}</span>
-                      {c.ports.length > 0 && <span className="ml-2 text-xs text-gray-500">ports {c.ports.join(", ")}</span>}
-                    </li>
-                  ))}
-                </ul>
-                <SectionTitle>Conditions</SectionTitle>
-                <ConditionList conditions={detail.conditions} formatDate={formatDate} />
-                <SectionTitle>Labels</SectionTitle>
-                <LabelChips labels={detail.labels} />
-                <SectionTitle>Annotations</SectionTitle>
-                <LabelChips labels={detail.annotations} />
-              </div>
-            </div>
-          )}
-
-          {section === "pods" && (
-            <WorkloadPodsTable
-              pods={detail.pods}
-              onOpenPod={onOpenPod}
-              onViewPodLogs={onViewPodLogs}
-              onDeletePod={onDeletePod}
-              canDeletePod={canDeletePod}
-            />
-          )}
-
-          {section === "revisions" && (
-            <div className="overflow-x-auto">
-              <table className={gridStyles.table}>
-                <thead className={gridStyles.head}>
-                  <tr>
-                    <th className={gridStyles.headerCell}>Revision</th>
-                    <th className={gridStyles.headerCell}>ReplicaSet</th>
-                    <th className={gridStyles.headerCell}>Pods</th>
-                    <th className={gridStyles.headerCell}>Images</th>
-                    <th className={gridStyles.headerCell}>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detail.revisions.length === 0 && <GridStateRow colSpan={5} emptyText="No ReplicaSets" />}
-                  {detail.revisions.map((r) => (
-                    <tr key={r.name} className={gridStyles.row}>
-                      <td className={gridStyles.cell}>
-                        {r.revision || "—"}
-                        {r.is_current && <span className="ml-2 px-1.5 py-0.5 rounded bg-green-100 text-green-700 text-[10px] font-medium">current</span>}
-                      </td>
-                      <td className={gridStyles.cell}><span className="font-mono text-xs">{r.name}</span></td>
-                      <td className={gridStyles.cell}><span className="font-mono text-xs">{r.ready}/{r.desired}</span></td>
-                      <td className={gridStyles.cell}><span className="font-mono text-xs break-all">{r.images.join(", ") || "—"}</span></td>
-                      <td className={gridStyles.cell}><span className="text-xs">{fmt(r.created_at)}</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {section === "events" && <EventList events={detail.events} formatDate={formatDate} showObject />}
-
-          {section === "yaml" && <YamlView yaml={detail.yaml} />}
-        </div>
-      )}
-    </ModalShell>
+      {detail && section === "yaml" && <YamlViewer yaml={detail.yaml} fileName={`${namespace}_${name}_deployment.yaml`} />}
+    </ResourceDetailShell>
   );
 }
 

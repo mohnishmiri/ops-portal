@@ -125,7 +125,7 @@ describe("DeploymentDetailModal", () => {
   it("lists the deployment's pods and opens a pod from its name", () => {
     const { onOpenPod, onViewPodLogs } = setup();
 
-    fireEvent.click(screen.getByRole("button", { name: "Pods (2)" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Pods (2)" }));
     expect(screen.getByText("CrashLoopBackOff")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "web-7b9c-b" }));
     expect(onOpenPod).toHaveBeenCalledWith(expect.objectContaining({ pod_name: "web-7b9c-b" }));
@@ -138,7 +138,7 @@ describe("DeploymentDetailModal", () => {
   it("shows ReplicaSet events with the object they concern", () => {
     setup();
 
-    fireEvent.click(screen.getByRole("button", { name: "Events (1)" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Events (1)" }));
 
     expect(screen.getByText("FailedCreate")).toBeTruthy();
     expect(screen.getByText("ReplicaSet/web-7b9c")).toBeTruthy();
@@ -281,25 +281,29 @@ describe("PodDetailModal", () => {
     setup();
 
     expect(screen.getByText("Deployment/web")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Containers (2)" }));
-    expect(screen.getByText(/Terminated: OOMKilled \(exit code 137\)/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Containers (2)" }));
+    expect(screen.getByText("OOMKilled · exit 137")).toBeTruthy(); // Last Termination column
     expect(screen.getByText("init")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "app" })); // expand the row
+    expect(screen.getByText(/Terminated: OOMKilled \(exit code 137\)/)).toBeTruthy();
   });
 
   it("shows the running image checksum in the overview and per container", () => {
     setup();
 
-    expect(screen.getByText(CHECKSUM)).toBeTruthy(); // overview
-    fireEvent.click(screen.getByRole("button", { name: "Containers (2)" }));
-    expect(screen.getAllByText(CHECKSUM)).toHaveLength(1);
-    expect(screen.getByText(`repo/web@sha256:${CHECKSUM}`)).toBeTruthy();
+    expect(screen.getByText(CHECKSUM)).toBeTruthy(); // overview, in full
+    fireEvent.click(screen.getByRole("tab", { name: "Containers (2)" }));
+    expect(screen.getByText(`${CHECKSUM.slice(0, 12)}…`)).toBeTruthy(); // grid shows the short form
     expect(screen.getByText("not available — the container has not started")).toBeTruthy(); // init-db
+    fireEvent.click(screen.getByRole("button", { name: "app" })); // expanded row has the full value and image ID
+    expect(screen.getByText(CHECKSUM)).toBeTruthy();
+    expect(screen.getByText(`repo/web@sha256:${CHECKSUM}`)).toBeTruthy();
   });
 
   it("expands a ConfigMap volume to its keys, values, and in-container file paths", () => {
     setup();
 
-    fireEvent.click(screen.getByRole("button", { name: "Volumes (2)" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Volumes (2)" }));
     expect(screen.getByText("app:/etc/app")).toBeTruthy(); // mounted-at column
     fireEvent.click(screen.getByRole("button", { name: "config" }));
 
@@ -313,7 +317,7 @@ describe("PodDetailModal", () => {
   it("lists Secret keys without revealing values", () => {
     setup();
 
-    fireEvent.click(screen.getByRole("button", { name: "Volumes (2)" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Volumes (2)" }));
     fireEvent.click(screen.getByRole("button", { name: "creds" }));
 
     expect(aksApi.useSecretDetail).toHaveBeenCalledWith(CLUSTER_ID, "apps", "aaf-cred", false, true);
@@ -325,7 +329,8 @@ describe("PodDetailModal", () => {
   it("jumps from a container mount to that volume's details", () => {
     setup();
 
-    fireEvent.click(screen.getByRole("button", { name: "Containers (2)" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Containers (2)" }));
+    fireEvent.click(screen.getByRole("button", { name: "app" })); // mounts are listed in the expanded row
     fireEvent.click(screen.getAllByTitle("View volume details")[0]); // app's /etc/app ← config
 
     expect(screen.getByRole("button", { name: "config" }).getAttribute("aria-expanded")).toBe("true");

@@ -32,7 +32,9 @@ import {
   useSearchPagination,
 } from "./aksGridShared";
 import { useAksLiveWatch } from "../../hooks/useAksLiveWatch";
-import { ModalShell } from "./K8sResourceModals";
+import { DetailGrid } from "./DetailGrid";
+import { EventsGrid, formatAge, KeyValueGrid } from "./detailShared";
+import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type AkvSyncTabProps = {
   cluster: AKSCluster;
@@ -320,7 +322,25 @@ export const AkvSyncTab: React.FC<AkvSyncTabProps> = ({
   );
 };
 
-function AkvsDetailModal({
+type AkvsSection = "overview" | "keys" | "events" | "metadata";
+
+const STATUS_NOTICE: Record<AkvsStatus, string> = {
+  Synced: "border-green-200 bg-green-50 text-green-800",
+  Failed: "border-red-200 bg-red-50 text-red-800",
+  Degraded: "border-amber-200 bg-amber-50 text-amber-800",
+  Pending: "border-blue-200 bg-blue-50 text-blue-800",
+  EnvInjector: "border-indigo-200 bg-indigo-50 text-indigo-800",
+};
+
+const STATUS_TONE: Record<AkvsStatus, "green" | "red" | "amber" | "blue" | "indigo"> = {
+  Synced: "green",
+  Failed: "red",
+  Degraded: "amber",
+  Pending: "blue",
+  EnvInjector: "indigo",
+};
+
+export function AkvsDetailModal({
   clusterId,
   namespace,
   name,
@@ -338,7 +358,8 @@ function AkvsDetailModal({
   const { data: item, isLoading, isError } = useAkvsDetail(clusterId, namespace, name);
   const vaultCheckMut = useAkvsVaultCheck();
   const [vaultCheck, setVaultCheck] = useState<AkvsVaultCheck | null>(null);
-  const fmt = (v: string | null | undefined) => (v ? formatDate(v) : "—");
+  const [section, setSection] = useState<AkvsSection>("overview");
+  const fmt = (v: string | null | undefined) => (v ? formatDate(v) : null);
 
   const runVaultCheck = () =>
     vaultCheckMut.mutate(
@@ -349,135 +370,182 @@ function AkvsDetailModal({
       }
     );
 
-  const kv = (label: string, value: React.ReactNode) => (
-    <div key={label} className="flex justify-between gap-4 border-b border-att-100 py-1.5">
-      <span className="text-gray-500">{label}</span>
-      <span className="text-right font-medium text-gray-800 break-all">{value ?? "—"}</span>
-    </div>
-  );
+  const hasOutputKeys = !!item && item.output_kind !== "env-injection";
+  const keyRows = useMemo(() => {
+    if (!item) return [];
+    const rows = item.output_keys.map((key) => ({ key, role: key === item.output_data_key ? "synced" : "other" }));
+    if (item.output_data_key && !item.output_keys.includes(item.output_data_key)) {
+      rows.push({ key: item.output_data_key, role: "missing" });
+    }
+    return rows;
+  }, [item]);
+  const warnings = (item?.events ?? []).filter((e) => e.type === "Warning").length;
+  const outputKind = item?.output_kind === "configmap" ? "ConfigMap" : "Secret";
 
   return (
-    <ModalShell title={`AzureKeyVaultSecret: ${namespace}/${name}`} onClose={onClose} wide>
-      {isLoading && <p className="text-sm text-gray-500">Loading…</p>}
-      {isError && <p className="text-sm text-red-600">Failed to load sync details.</p>}
-      {item && (
-        <div className="space-y-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusPill status={item.status} />
-            <span className="text-sm text-gray-600 break-all">{item.status_reason}</span>
-          </div>
-
-          <div className="grid grid-cols-1 gap-x-6 text-sm md:grid-cols-2">
-            <div>
-              {kv("Key Vault", item.vault_name)}
-              {kv("Object", item.object_name)}
-              {kv("Object Type", item.object_type)}
-              {kv("Version", item.object_version ?? "latest")}
-              {item.content_type && kv("Content Type", item.content_type)}
-              {kv("Last Azure Sync", fmt(item.last_azure_update))}
+    <ResourceDetailShell
+      kind="AzureKeyVaultSecret"
+      name={name}
+      namespace={namespace}
+      icon={ResourceKindIcons.keyvault}
+      status={item && <StatusPill status={item.status} />}
+      meta={
+        item && (
+          <>
+            <span>
+              Key Vault <span className="font-mono text-slate-700">{item.vault_name ?? "—"}</span> / <span className="font-mono text-slate-700">{item.object_name ?? "—"}</span>
+            </span>
+            <span>→ {outputLabel(item)}</span>
+          </>
+        )
+      }
+      tabs={[
+        { key: "overview", label: "Overview" },
+        ...(hasOutputKeys ? [{ key: "keys" as const, label: "Output Keys", count: keyRows.length, attention: keyRows.some((r) => r.role === "missing") }] : []),
+        { key: "events", label: "Controller Events", count: item?.events.length, attention: warnings > 0 },
+        { key: "metadata", label: "Metadata" },
+      ]}
+      activeTab={section}
+      onTabChange={setSection}
+      isLoading={isLoading}
+      error={isError && !item ? "Failed to load sync details." : null}
+      onClose={onClose}
+    >
+      {item && section === "overview" && (
+        <>
+          {item.status_reason && (
+            <div className={`rounded-xl border px-4 py-3 text-sm break-words ${STATUS_NOTICE[item.status] ?? "border-slate-200 bg-slate-50 text-slate-700"}`}>
+              {item.status_reason}
             </div>
-            <div>
-              {kv("Output", outputLabel(item))}
-              {item.output_type && kv("Output Type", item.output_type)}
-              {kv("Transforms", item.transforms.length ? item.transforms.join(", ") : "—")}
-              {kv(
-                "Output Exists",
-                item.output_exists == null ? "n/a" : item.output_exists ? "Yes" : <span className="text-red-600">No</span>
-              )}
-              {kv("Content Hash", <span className="font-mono text-xs">{item.secret_hash ?? "—"}</span>)}
-              {kv("Created", fmt(item.created_at))}
-            </div>
-          </div>
-
-          {item.output_kind !== "env-injection" && (
-            <section>
-              <h4 className={gridStyles.sectionTitle}>
-                Keys in {item.output_kind === "configmap" ? "ConfigMap" : "Secret"} {item.output_name}
-              </h4>
-              <div className="mt-2 flex flex-wrap gap-1">
-                {item.output_keys.length === 0 && <span className="text-sm text-gray-400">No keys found.</span>}
-                {item.output_keys.map((k) => (
-                  <span
-                    key={k}
-                    className={`rounded px-1.5 py-0.5 text-xs ${k === item.output_data_key ? "bg-green-100 text-green-700 font-semibold" : "bg-att-50 text-att-700"}`}
-                  >
-                    {k}
-                  </span>
-                ))}
-                {item.output_data_key && !item.output_keys.includes(item.output_data_key) && (
-                  <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-700">{item.output_data_key} (missing)</span>
-                )}
-              </div>
-            </section>
           )}
+          <KpiRow>
+            <MetricCard title="Sync Status" value={STATUS_LABELS[item.status] ?? item.status} subtitle={item.last_event?.reason ?? "No recent controller event"} icon={MetricCardIcons.activity()} tone={STATUS_TONE[item.status] ?? "slate"} valueClassName="text-xl" />
+            <MetricCard
+              title="Output"
+              value={item.output_kind === "env-injection" ? "Env" : item.output_exists == null ? "n/a" : item.output_exists ? "Present" : "Missing"}
+              subtitle={item.output_kind === "env-injection" ? "Injected into pod environment" : `${outputKind} ${item.output_name ?? ""}`}
+              icon={MetricCardIcons.shield()}
+              tone={item.output_exists === false ? "red" : "att"}
+              valueClassName="text-xl"
+            />
+            <MetricCard
+              title="Output Keys"
+              value={hasOutputKeys ? item.output_keys.length : "—"}
+              subtitle={item.output_data_key ? `Data key ${item.output_data_key}${item.key_present === false ? " (missing)" : ""}` : "All keys from the object"}
+              icon={MetricCardIcons.layers()}
+              tone={item.key_present === false ? "red" : "indigo"}
+            />
+            <MetricCard
+              title="Last Azure Sync"
+              value={formatAge(item.last_azure_update)}
+              subtitle={fmt(item.last_azure_update) ?? "Never synced"}
+              icon={MetricCardIcons.calendar()}
+              tone={item.last_azure_update ? "att" : "amber"}
+            />
+          </KpiRow>
 
-          <section>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h4 className={gridStyles.sectionTitle}>Key Vault Comparison</h4>
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <DetailCard title="Azure Key Vault Source">
+              <PropertyList
+                items={[
+                  { label: "Key Vault", value: item.vault_name, mono: true },
+                  { label: "Object", value: item.object_name, mono: true },
+                  { label: "Object Type", value: item.object_type },
+                  { label: "Version", value: item.object_version ?? "latest", mono: true },
+                  item.content_type && { label: "Content Type", value: item.content_type },
+                  { label: "Last Azure Sync", value: fmt(item.last_azure_update) },
+                ]}
+              />
+            </DetailCard>
+            <DetailCard title="Kubernetes Target">
+              <PropertyList
+                items={[
+                  { label: "Output", value: outputLabel(item), wide: true },
+                  item.output_type && { label: "Output Type", value: item.output_type },
+                  {
+                    label: "Output Exists",
+                    value: item.output_exists == null ? "n/a" : item.output_exists ? "Yes" : <span className="font-semibold text-red-600">No</span>,
+                  },
+                  { label: "Transforms", value: item.transforms.length ? item.transforms.join(", ") : null },
+                  { label: "Content Hash", value: item.secret_hash, mono: true, wide: true },
+                  { label: "Created", value: fmt(item.created_at) },
+                ]}
+              />
+            </DetailCard>
+          </div>
+
+          <DetailCard
+            title="Key Vault Comparison"
+            subtitle="Checks whether Key Vault has a newer version than the one akv2k8s last synced."
+            actions={
               <button
                 type="button"
                 onClick={runVaultCheck}
                 disabled={vaultCheckMut.isPending}
-                className="px-3 py-1.5 bg-att-500 text-white rounded-lg text-sm hover:bg-att-600 disabled:opacity-50"
+                className="rounded-lg bg-att-500 px-3 py-1.5 text-sm text-white hover:bg-att-600 disabled:opacity-50"
               >
                 {vaultCheckMut.isPending ? "Checking Key Vault..." : "Compare with Key Vault"}
               </button>
-            </div>
-            {!vaultCheck && (
-              <p className="mt-2 text-sm text-gray-500">
-                Checks whether Key Vault has a newer version than the last time akv2k8s synced this object.
-              </p>
-            )}
-            {vaultCheck && (vaultCheck.error || !vaultCheck.checked) && (
-              <p className="mt-2 text-sm text-amber-700 break-all">{vaultCheck.error}</p>
-            )}
+            }
+          >
+            {!vaultCheck && <p className="text-sm text-slate-500">Not checked yet.</p>}
+            {vaultCheck && (vaultCheck.error || !vaultCheck.checked) && <p className="text-sm text-amber-700 break-all">{vaultCheck.error}</p>}
             {vaultCheck?.checked && vaultCheck.latest_version && (
-              <div className="mt-2 grid grid-cols-1 gap-x-6 text-sm md:grid-cols-2">
-                <div>
-                  {kv("Newest Version", <span className="font-mono text-xs">{vaultCheck.latest_version}</span>)}
-                  {kv("Version Created", fmt(vaultCheck.latest_version_created))}
-                  {kv("Version Expires", fmt(vaultCheck.latest_version_expires))}
-                </div>
-                <div>
-                  {kv("Last Azure Sync", fmt(item.last_azure_update))}
-                  {kv(
-                    "In Sync",
-                    vaultCheck.in_sync === true ? (
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-700">Yes</span>
-                    ) : vaultCheck.in_sync === false ? (
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-red-100 text-red-700">Newer version not synced</span>
-                    ) : (
-                      <span className="text-xs text-gray-500">{vaultCheck.pinned_version ? "Pinned version" : "Unknown"}</span>
-                    )
-                  )}
-                  {kv("Checked", fmt(vaultCheck.checked_at))}
-                </div>
-              </div>
+              <PropertyList
+                items={[
+                  {
+                    label: "In Sync",
+                    value:
+                      vaultCheck.in_sync === true ? (
+                        <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">Yes</span>
+                      ) : vaultCheck.in_sync === false ? (
+                        <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700">Newer version not synced</span>
+                      ) : (
+                        <span className="text-xs text-slate-500">{vaultCheck.pinned_version ? "Pinned version" : "Unknown"}</span>
+                      ),
+                  },
+                  { label: "Checked", value: fmt(vaultCheck.checked_at) },
+                  { label: "Newest Version", value: vaultCheck.latest_version, mono: true, wide: true },
+                  { label: "Version Created", value: fmt(vaultCheck.latest_version_created) },
+                  { label: "Version Expires", value: fmt(vaultCheck.latest_version_expires) },
+                ]}
+              />
             )}
-          </section>
-
-          <section>
-            <h4 className={gridStyles.sectionTitle}>Controller Events</h4>
-            <ul className="mt-2 space-y-2">
-              {item.events.length === 0 && <li className="text-sm text-gray-400">No recent events (Kubernetes keeps events for about an hour).</li>}
-              {item.events.map((ev, i) => (
-                <li key={i} className={`rounded-lg border px-3 py-2 text-sm ${ev.type === "Warning" ? "border-red-200 bg-red-50" : "border-att-100"}`}>
-                  <div className="flex justify-between gap-2">
-                    <span className={`font-medium ${ev.type === "Warning" ? "text-red-800" : "text-gray-800"}`}>
-                      {ev.reason}
-                      {ev.count > 1 && <span className="text-gray-500"> ×{ev.count}</span>}
-                    </span>
-                    <span className="text-xs text-gray-500">{fmt(ev.last_seen)}</span>
-                  </div>
-                  <p className="text-gray-700 break-all">{ev.message}</p>
-                </li>
-              ))}
-            </ul>
-          </section>
-        </div>
+          </DetailCard>
+        </>
       )}
-    </ModalShell>
+
+      {item && section === "keys" && (
+        <DetailGrid
+          title={`Keys in ${outputKind} ${item.output_name ?? ""}`}
+          rows={keyRows}
+          columns={[
+            { key: "key", header: "Key", sortValue: (r) => r.key, render: (r) => <span className="font-mono text-xs text-slate-800">{r.key}</span> },
+            {
+              key: "role",
+              header: "Synced From Key Vault",
+              sortValue: (r) => r.role,
+              render: (r) =>
+                r.role === "synced" ? (
+                  <span className="rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-semibold text-green-700">Yes — {item.object_name}</span>
+                ) : r.role === "missing" ? (
+                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">Missing from output</span>
+                ) : (
+                  <span className="text-xs text-slate-400">Other key</span>
+                ),
+            },
+          ]}
+          rowKey={(r) => `${r.role}:${r.key}`}
+          searchText={(r) => r.key}
+          searchPlaceholder="Search keys…"
+          emptyText="No keys found."
+          initialSort={{ key: "key", direction: "asc" }}
+        />
+      )}
+
+      {item && section === "events" && <EventsGrid title="Controller Events" events={item.events} formatDate={formatDate} />}
+
+      {item && section === "metadata" && <KeyValueGrid title="Labels" entries={item.labels} />}
+    </ResourceDetailShell>
   );
 }
-
-export default AkvSyncTab;
