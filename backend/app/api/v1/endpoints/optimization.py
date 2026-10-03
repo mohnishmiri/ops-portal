@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
+from app.core.authz import require_capability
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.models.database import AuditLog
@@ -205,7 +206,9 @@ async def update_recommendation_status(
 async def delete_unattached_disk_endpoint(
     body: DiskCleanupRequest = Body(...),
     request: Request = None,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    # Capability default-granted to write (the page offers this delete to write users);
+    # revocable per role in the Permissions UI like infra_vm_power.
+    user: UserContext = Depends(require_capability("cost_resource_cleanup")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete an unattached disk for cost savings."""
@@ -273,7 +276,9 @@ async def delete_unattached_disk_endpoint(
 async def delete_disconnected_private_endpoint_endpoint(
     body: PrivateEndpointCleanupRequest = Body(...),
     request: Request = None,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    # Capability default-granted to write (the page offers this delete to write users);
+    # revocable per role in the Permissions UI like infra_vm_power.
+    user: UserContext = Depends(require_capability("cost_resource_cleanup")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete a disconnected private endpoint for cost savings."""

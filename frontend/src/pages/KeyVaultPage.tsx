@@ -1911,7 +1911,8 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
                 <td className={`${gridStyles.cell} text-xs`}>{fmt(s.expires)}</td>
                 <td className={gridStyles.centerCell}>
                   <div className="flex justify-center gap-1">
-                    <GridIconButton onClick={() => setViewingSecret(s.name)} title="View secret" tone="blue">{Icons.eye()}</GridIconButton>
+                    {/* Reading a secret's value requires write, like the API (GET /keyvault/secrets/{name}). */}
+                    {canWrite && <GridIconButton onClick={() => setViewingSecret(s.name)} title="View secret" tone="blue">{Icons.eye()}</GridIconButton>}
                     {canWrite && <GridIconButton onClick={() => setEditingSecret(s)} title="Update secret" tone="blue">{Icons.edit()}</GridIconButton>}
                     {canWrite && <GridIconButton onClick={() => setConfirmDelete(s.name)} title="Delete secret" tone="red">{Icons.trash()}</GridIconButton>}
                   </div>

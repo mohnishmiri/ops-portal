@@ -1,5 +1,5 @@
 /**
- * Revoke Certificate modal — destructive action gated to ADMIN callers.
+ * Revoke Certificate modal — destructive action for write-role callers (the API requires WRITE).
  *
  * Requires an explicit RFC 5280 reason and a typed confirmation before the
  * revoke button is enabled.

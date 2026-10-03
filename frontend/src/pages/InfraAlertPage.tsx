@@ -12,6 +12,7 @@
 
 import React, { useState, useMemo, useCallback } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import { usePermissions } from "../contexts/PermissionsContext";
 import { useSubscriptionScope } from "../contexts/SubscriptionContext";
 import Toast, { type ToastState } from "../components/Toast";
 import { AutoRefreshIndicator, gridStyles, type SortState, nextSortState, SortableHeader } from "../components/gridStyles";
@@ -567,6 +568,9 @@ const TablePagination: React.FC<{
 
 const InfraAlertPage: React.FC = () => {
   const { canWrite } = useAuth();
+  // Deleting a disk is a capability (cost_resource_cleanup, default-granted to write) like VM power.
+  const { hasCapability } = usePermissions();
+  const canCleanupResources = canWrite && hasCapability("COST_RESOURCE_CLEANUP");
   const { timezone, formatDate } = usePortalTimezone();
   const { availableSubscriptions, effectiveSubscriptionIds } = useSubscriptionScope();
   const scopedSubscriptions = useMemo(
@@ -1192,6 +1196,7 @@ const InfraAlertPage: React.FC = () => {
             onChange={(v) => setTblSearch("pgAlerts", v)}
             placeholder="Search PG alerts..."
           />
+          {canWrite && (
           <button
             onClick={() => checkPGAlerts.mutate(undefined, {
               onSuccess: () => showToast("PG alert check completed"),
@@ -1202,6 +1207,7 @@ const InfraAlertPage: React.FC = () => {
           >
             {Icons.play()} {checkPGAlerts.isPending ? "Checking..." : "Run PG Check"}
           </button>
+          )}
         </div>
         <span className="text-sm text-gray-500">
           {totalPGAlerts} alerts found
@@ -1321,6 +1327,7 @@ const InfraAlertPage: React.FC = () => {
             placeholder="Search expiry alerts..."
           />
         </div>
+        {canWrite && (
         <button
           onClick={() => checkExpiry.mutate(undefined, {
             onSuccess: () => showToast("Expiry alert check completed"),
@@ -1332,6 +1339,7 @@ const InfraAlertPage: React.FC = () => {
           {Icons.refresh(checkExpiry.isPending ? "animate-spin" : "")}
           Check Expiry Alerts
         </button>
+        )}
       </div>
 
       {/* Alerts Table */}
@@ -3414,7 +3422,7 @@ const InfraAlertPage: React.FC = () => {
                         </td>
                         {canWrite && (
                           <td className={gridStyles.centerCell}>
-                            {disk.disk_state === "Unattached" && (
+                            {disk.disk_state === "Unattached" && canCleanupResources && (
                               <GridActionButton
                                 onClick={() => {
                                   setConfirmDialog({

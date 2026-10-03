@@ -28,6 +28,8 @@ interface Props {
   onDelete: (id: number) => Promise<void>;
   onRunNow: (id: number) => Promise<EnvironmentScaleResult>;
   isLoading: boolean;
+  /** Write role: create, edit, enable/disable, run, and delete. Read-only users only view. */
+  canWrite: boolean;
 }
 
 type ScheduleField = "job_name" | "namespace" | "operation" | "schedule_type" | "is_enabled" | "last_run_status";
@@ -65,6 +67,7 @@ function describeCron(expr: string): string {
 }
 
 const ScheduleManagement: React.FC<Props> = ({
+  canWrite,
   schedules,
   sequences,
   clusterId,
@@ -508,7 +511,7 @@ const ScheduleManagement: React.FC<Props> = ({
             <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} className="rounded-lg border border-att-200 bg-white px-2 py-2 text-sm text-gray-700">
               {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} / page</option>)}
             </select>
-            <button onClick={() => { setEditingId(null); setForm(defaultForm); setShowForm(!showForm); }} className="rounded-lg bg-att-500 px-4 py-2 text-sm font-medium text-white hover:bg-att-600">+ Create Schedule</button>
+            {canWrite && <button onClick={() => { setEditingId(null); setForm(defaultForm); setShowForm(!showForm); }} className="rounded-lg bg-att-500 px-4 py-2 text-sm font-medium text-white hover:bg-att-600">+ Create Schedule</button>}
           </div>
         </div>
         <table className={gridStyles.table}>
@@ -543,9 +546,15 @@ const ScheduleManagement: React.FC<Props> = ({
                 <td className={gridStyles.cell}>{s.schedule_type.replace(/_/g, " ")}</td>
                 <td className={gridStyles.centerCell}>{s.replica_count}</td>
                 <td className={gridStyles.centerCell}>
-                  <button onClick={() => handleToggle(s)} className={`relative inline-flex h-6 w-11 rounded-full transition ${s.is_enabled ? "bg-green-500" : "bg-gray-300"}`}>
-                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${s.is_enabled ? "translate-x-5" : "translate-x-0.5"} mt-0.5`} />
-                  </button>
+                  {canWrite ? (
+                    <button onClick={() => handleToggle(s)} className={`relative inline-flex h-6 w-11 rounded-full transition ${s.is_enabled ? "bg-green-500" : "bg-gray-300"}`}>
+                      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${s.is_enabled ? "translate-x-5" : "translate-x-0.5"} mt-0.5`} />
+                    </button>
+                  ) : (
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${s.is_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>
+                      {s.is_enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  )}
                 </td>
                 <td className={gridStyles.cell}>
                   {s.last_run_at ? (
@@ -563,6 +572,7 @@ const ScheduleManagement: React.FC<Props> = ({
                   {s.next_run_at ? <span className="text-xs">{new Date(s.next_run_at).toLocaleString()}</span> : <span className="text-xs text-gray-400">-</span>}
                 </td>
                 <td className={gridStyles.centerCell}>
+                  {!canWrite ? <span className="text-xs text-gray-400">—</span> : (
                   <div className="flex items-center justify-center gap-1">
                     <button onClick={() => handleRunWithTracking(s)} disabled={isLoading || execRunning} className="rounded bg-green-500 px-2 py-1 text-xs font-medium text-white hover:bg-green-600 disabled:opacity-50" title="Run Now">
                       <svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
@@ -574,6 +584,7 @@ const ScheduleManagement: React.FC<Props> = ({
                       <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
                     </button>
                   </div>
+                  )}
                 </td>
               </tr>
               );

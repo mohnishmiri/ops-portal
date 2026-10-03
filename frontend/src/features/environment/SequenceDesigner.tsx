@@ -35,6 +35,8 @@ interface Props {
   onExecuteStart: (sequenceId: number, replicaCount: number, dryRun: boolean) => Promise<EnvironmentScaleResult>;
   onExecuteStop: (sequenceId: number, dryRun: boolean) => Promise<EnvironmentScaleResult>;
   isLoading: boolean;
+  /** Write role: create, edit, run, and delete. Read-only users only view. */
+  canWrite: boolean;
 }
 
 const PAGE_SIZES = [10, 20, 50];
@@ -47,6 +49,7 @@ const WAIT_CONDITIONS: { value: SequenceStep["wait_condition"]; label: string }[
 ];
 
 const SequenceDesigner: React.FC<Props> = ({
+  canWrite,
   sequences,
   deployments,
   clusterId,
@@ -504,7 +507,7 @@ const SequenceDesigner: React.FC<Props> = ({
             <select value={gridPageSize} onChange={(e) => { setGridPageSize(Number(e.target.value)); setGridPage(1); }} className="rounded-lg border border-att-200 bg-white px-2 py-2 text-sm text-gray-700">
               {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} / page</option>)}
             </select>
-            <button onClick={() => { setEditingId(null); setShowBuilder(!showBuilder); setSteps([]); setSeqName(""); }} className="rounded-lg bg-att-500 px-4 py-2 text-sm font-medium text-white hover:bg-att-600">+ Create Sequence</button>
+            {canWrite && <button onClick={() => { setEditingId(null); setShowBuilder(!showBuilder); setSteps([]); setSeqName(""); }} className="rounded-lg bg-att-500 px-4 py-2 text-sm font-medium text-white hover:bg-att-600">+ Create Sequence</button>}
           </div>
         </div>
         <table className={gridStyles.table}>
@@ -541,6 +544,7 @@ const SequenceDesigner: React.FC<Props> = ({
                   </td>
                   <td className={gridStyles.cell}>{seq.created_at ? new Date(seq.created_at).toLocaleDateString() : "-"}</td>
                   <td className={gridStyles.centerCell}>
+                    {!canWrite ? <span className="text-xs text-gray-400">—</span> : (
                     <div className="flex items-center justify-center gap-1">
                       {seq.sequence_type === "startup" ? (
                         <button onClick={() => startExecution(seq, "start")} disabled={isLoading || execRunning} className="rounded bg-green-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-green-600 disabled:opacity-50" title="Run Startup Sequence">Start</button>
@@ -554,6 +558,7 @@ const SequenceDesigner: React.FC<Props> = ({
                         <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
                       </button>
                     </div>
+                    )}
                   </td>
                 </tr>
                 {expandedSeq === seq.id && (

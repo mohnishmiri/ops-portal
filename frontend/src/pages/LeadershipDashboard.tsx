@@ -38,6 +38,7 @@ import {
   WastageDetailItem,
 } from "../services/costApi";
 import { useAuth } from "../contexts/AuthContext";
+import { usePermissions } from "../contexts/PermissionsContext";
 import type {
   LeadershipDashboard as LeadershipDashboardData,
   OptimizationSummary,
@@ -350,6 +351,9 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
   totalAnnualSavings,
 }) => {
   const { canWrite } = useAuth();
+  // Deleting wastage resources is a capability (cost_resource_cleanup, default-granted to write).
+  const { hasCapability } = usePermissions();
+  const canCleanupResources = canWrite && hasCapability("COST_RESOURCE_CLEANUP");
   const deleteDiskMut = useDeleteUnattachedDisk();
   const deletePeMut = useDeleteDisconnectedPrivateEndpoint();
   const [expandedCat, setExpandedCat] = React.useState<string | null>(null);
@@ -706,7 +710,8 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
                                 </td>
                                 {canWrite && (
                                   <td className="py-1.5 text-center">
-                                    {DELETABLE_WASTAGE_CATEGORIES.has(detail.category) &&
+                                    {canCleanupResources &&
+                                      DELETABLE_WASTAGE_CATEGORIES.has(detail.category) &&
                                       res.resource_group &&
                                       res.subscription_id &&
                                       (res.resource_id || res.name) && (
@@ -1318,6 +1323,8 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
 // ── Main Dashboard Component ──────────────────────────────────────────
 
 const LeadershipDashboard: React.FC = () => {
+  // Refresh Data forces an Azure pull (a "leadership" sync job), which the API reserves for write.
+  const { canWrite } = useAuth();
   const { formatDate } = usePortalTimezone();
   const { data: dashboard, isLoading: dashLoading, error: dashError, refetch: refetchDashboard } = useLeadershipDashboard();
   const { data: optimization, isLoading: optLoading } = useOptimizationSummary();
@@ -1477,6 +1484,7 @@ const LeadershipDashboard: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {canWrite && (
           <button
             onClick={handleDashRefresh}
             disabled={dashRefreshing}
@@ -1495,6 +1503,7 @@ const LeadershipDashboard: React.FC = () => {
             </>
           )}
           </button>
+          )}
         </div>
       </div>
 

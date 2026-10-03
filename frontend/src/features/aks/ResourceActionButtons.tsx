@@ -95,7 +95,8 @@ export function ResourceActionButtons({
   onView,
   onEdit,
   onDelete,
-  canWrite = true,
+  // Fail closed: a caller that forgets to pass canWrite must not expose Edit/Delete.
+  canWrite = false,
   showEdit = true,
   showView = true,
 }: {

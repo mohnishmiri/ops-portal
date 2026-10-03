@@ -690,6 +690,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
         {selectedCluster && (
           <div className={activeTab === "schedules" ? "" : "hidden"}>
             <ScheduleManagement
+              canWrite={canWrite}
               schedules={schedules ?? []}
               sequences={sequences ?? []}
               clusterId={selectedCluster.id}
@@ -705,6 +706,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
 
         {activeTab === "sequences" && selectedCluster && (
           <SequenceDesigner
+            canWrite={canWrite}
             sequences={sequences ?? []}
             deployments={deploymentList}
             clusterId={selectedCluster.id}

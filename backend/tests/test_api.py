@@ -158,7 +158,7 @@ async def test_claim_startup_task_lock_returns_false_when_lock_exists(monkeypatc
 
 
 @pytest.mark.anyio
-async def test_delete_unattached_disk_requires_admin(reader_client, monkeypatch):
+async def test_delete_unattached_disk_denied_to_read_only(reader_client, monkeypatch):
     monkeypatch.setattr("app.auth._dev_auth_enabled", lambda: False)
 
     resp = await reader_client.post(

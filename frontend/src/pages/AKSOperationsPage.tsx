@@ -265,6 +265,11 @@ const AKSOperationsPage: React.FC = () => {
   // Capability checks hide actions the backend would reject anyway. Hiding is
   // UX only — every one of these operations is authorized server-side.
   const { hasCapability } = usePermissions();
+  // Each action is shown only when its API would accept it: write role plus,
+  // where the API checks one, the matching capability (default-granted to write).
+  const canScaleDeployments = canWrite && hasCapability("AKS_DEPLOYMENT_SCALE");
+  const canTriggerCronJobs = canWrite && hasCapability("AKS_CRONJOB_TRIGGER");
+  const canExecPods = canWrite && hasCapability("AKS_POD_EXEC");
   const [activeTab, setActiveTab] = useState<TabKey>("clusters");
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
@@ -1245,7 +1250,7 @@ const AKSOperationsPage: React.FC = () => {
           >
             {Icons.refresh(loadingClusters ? "w-4 h-4 animate-spin" : "w-4 h-4")} Refresh
           </button>
-          {canWrite && (
+          {/* Read-only refresh (aks_resource_sync is allowed for every role), like the other tabs' sync buttons */}
           <button
             onClick={() => clustersRefresh.start(true)}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
@@ -1253,7 +1258,6 @@ const AKSOperationsPage: React.FC = () => {
             {Icons.refresh(clustersRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
             Sync from Azure
           </button>
-          )}
         </div>
       </div>
 
@@ -1722,7 +1726,7 @@ const AKSOperationsPage: React.FC = () => {
                         label={`Deployment ${deployment.namespace}/${deployment.name}`}
                         podCount={deployment.replicas === 0 && deployment.ready_replicas === 0 ? 0 : undefined}
                       />
-                      {canWrite && (
+                      {canScaleDeployments && (
                       <>
                       <button
                         onClick={() => setScaleDialog({ deployment, replicas: deployment.replicas })}
@@ -1739,6 +1743,9 @@ const AKSOperationsPage: React.FC = () => {
                       >
                         {Icons.restart()}
                       </button>
+                      </>
+                      )}
+                      {canWrite && (
                       <button
                         onClick={() => {
                           setEditDeploymentDialog(deployment);
@@ -1756,6 +1763,8 @@ const AKSOperationsPage: React.FC = () => {
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                       </button>
+                      )}
+                      {canScaleDeployments && (
                       <button
                         onClick={() => setDeleteDeploymentConfirm(deployment)}
                         className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
@@ -1763,7 +1772,6 @@ const AKSOperationsPage: React.FC = () => {
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                       </button>
-                      </>
                       )}
                     </div>
                   </td>
@@ -2026,7 +2034,6 @@ const AKSOperationsPage: React.FC = () => {
                 })
               }
             />
-            {canWrite && (
             <button
               onClick={() => podMetricsRefresh.start(true)}
               disabled={podMetricsRefresh.isRunning}
@@ -2035,7 +2042,6 @@ const AKSOperationsPage: React.FC = () => {
               {Icons.refresh(podMetricsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
               Sync from Kubernetes
             </button>
-            )}
           </div>
         )}
       </div>
@@ -2184,9 +2190,11 @@ const AKSOperationsPage: React.FC = () => {
                         <button onClick={() => setPodLogDialog(pod)} title="View Logs" className="p-1 rounded hover:bg-blue-50 text-blue-600">
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
                         </button>
+                        {canExecPods && (
                         <button onClick={() => setPodExecDialog(pod)} title="Exec into Pod" className="p-1 rounded hover:bg-green-50 text-green-600">
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                         </button>
+                        )}
                         <button onClick={() => setPodMetricsDialog(pod)} title="Pod Metrics" className="p-1 rounded hover:bg-purple-50 text-purple-600">
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
                         </button>
@@ -2240,7 +2248,6 @@ const AKSOperationsPage: React.FC = () => {
                 <option key={ns} value={ns}>{ns}</option>
               ))}
             </select>
-            {canWrite && (
             <button
               onClick={() => cronJobsRefresh.start(true)}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
@@ -2248,7 +2255,6 @@ const AKSOperationsPage: React.FC = () => {
               {Icons.refresh(cronJobsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
               Sync from Kubernetes
             </button>
-            )}
             {canWrite && (
             <button
               onClick={() => setCreateCronJobDialog(true)}
@@ -2344,8 +2350,7 @@ const AKSOperationsPage: React.FC = () => {
                   </td>
                   <td className={gridStyles.centerCell}>
                     <div className="flex justify-center gap-1">
-                      {canWrite && (
-                      <>
+                      {canTriggerCronJobs && (
                       <button
                         onClick={() => handleTriggerCronJob(cronjob)}
                         disabled={triggerCronJobMutation.isPending}
@@ -2354,6 +2359,9 @@ const AKSOperationsPage: React.FC = () => {
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18}><polygon points="5 3 19 12 5 21 5 3"/></svg>
                       </button>
+                      )}
+                      {canWrite && (
+                      <>
                       <button
                         onClick={() => handleCronJobToggle(cronjob)}
                         disabled={suspendCronJobMutation.isPending}
@@ -2584,7 +2592,6 @@ const AKSOperationsPage: React.FC = () => {
         </h2>
         {selectedCluster && (
           <div className="flex items-center gap-2">
-            {canWrite && (
             <button
               onClick={() => nodePoolsRefresh.start(true)}
               className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
@@ -2592,7 +2599,6 @@ const AKSOperationsPage: React.FC = () => {
               {Icons.refresh(nodePoolsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
               Sync from Azure
             </button>
-            )}
           </div>
         )}
       </div>

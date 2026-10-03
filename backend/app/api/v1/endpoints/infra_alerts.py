@@ -241,10 +241,9 @@ async def get_alert_summary(
     description="Returns DB-backed infra alert schedule configurations used for scheduler planning",
 )
 async def list_alert_schedule_configs(
-    # Write, not admin: POST/PUT on this same collection are write-gated, so
-    # an admin-only list left write users able to create and edit schedule
-    # configurations they could never read back.
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    # Read: viewing is open to every role, like the sibling threshold/expiry
+    # config lists; creating, editing, and deleting require write.
+    user: UserContext = Depends(require_role(UserRole.READ)),
     service: InfraAlertService = Depends(_get_service),
 ) -> list[dict]:
     """List persisted infra alert schedule configurations."""
@@ -322,7 +321,7 @@ async def update_alert_schedule_config(
 )
 async def delete_alert_schedule_config(
     config_id: int = Path(..., description="Configuration ID"),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Delete a persisted infra alert schedule configuration."""
@@ -411,7 +410,7 @@ async def update_vm_threshold_config(
 )
 async def delete_vm_threshold_config(
     config_id: int = Path(..., description="Configuration ID"),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Delete a VM threshold alert configuration."""
@@ -591,7 +590,7 @@ async def update_expiry_config(
 )
 async def delete_expiry_config(
     config_id: int = Path(..., description="Configuration ID"),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Delete a custom expiry alert configuration."""
@@ -754,7 +753,7 @@ async def update_storage_alert_config(
 )
 async def delete_storage_alert_config(
     config_id: int = Path(..., description="Configuration ID"),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Delete a storage alert configuration."""
@@ -836,7 +835,7 @@ async def update_pg_flex_config(
 )
 async def delete_pg_flex_config(
     config_id: int = Path(..., description="Configuration ID"),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Delete a PG Flexible Server alert configuration."""
@@ -1422,7 +1421,7 @@ async def get_inventory_summary(
     description="Get current status of the background alert scheduler",
 )
 async def get_scheduler_status_endpoint(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.READ)),
 ) -> JSONResponse:
     """Get scheduler status."""
     try:
@@ -1446,7 +1445,9 @@ async def get_scheduler_status_endpoint(
     description="Start the background alert scheduler",
 )
 async def start_scheduler_endpoint(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    # Write, not admin: the Infrastructure Alerts page offers scheduler control and the
+    # manual checks to every user who can write, as it does for alert configs and power.
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> JSONResponse:
     """Start the background scheduler."""
     try:
@@ -1468,7 +1469,7 @@ async def start_scheduler_endpoint(
     description="Stop the background alert scheduler",
 )
 async def stop_scheduler_endpoint(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> JSONResponse:
     """Stop the background scheduler."""
     try:
@@ -1490,7 +1491,7 @@ async def stop_scheduler_endpoint(
     description="Manually trigger VM threshold check job",
 )
 async def trigger_vm_check(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> JSONResponse:
     """Trigger VM threshold check job."""
     try:
@@ -1509,7 +1510,7 @@ async def trigger_vm_check(
     description="Manually trigger expiry alert check job",
 )
 async def trigger_expiry_check(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> JSONResponse:
     """Trigger expiry check job."""
     try:
@@ -1528,7 +1529,7 @@ async def trigger_expiry_check(
     description="Manually trigger daily alert digest email",
 )
 async def trigger_daily_digest(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> JSONResponse:
     """Trigger daily digest job."""
     try:
@@ -1547,7 +1548,7 @@ async def trigger_daily_digest(
     description="Manually trigger Azure resource sync job",
 )
 async def trigger_resource_sync(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
 ) -> JSONResponse:
     """Trigger resource sync job."""
     try:
@@ -1566,7 +1567,7 @@ async def trigger_resource_sync(
     description="Manually trigger PG Flexible Server threshold check job",
 )
 async def trigger_pg_check(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> JSONResponse:
     """Trigger PG Flexible Server threshold check job."""
@@ -1641,7 +1642,7 @@ class TestNotificationRequest(BaseModel):
 )
 async def send_test_notification(
     request: TestNotificationRequest = Body(...),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Send a test notification."""

@@ -417,7 +417,7 @@ const ComplianceDashboard: React.FC<ComplianceDashboardProps> = ({ onShowToast }
           </button>
           )}
 
-          {canWrite && (
+          {/* Exporting is read-only (GET), so every role can download the report. */}
           <button
             onClick={handleExcelExport}
             disabled={exportLoading}
@@ -433,7 +433,6 @@ const ComplianceDashboard: React.FC<ComplianceDashboardProps> = ({ onShowToast }
             )}
             {exportLoading ? "Exporting..." : "Export Excel"}
           </button>
-          )}
 
           <button
             onClick={handleRefresh}

@@ -130,16 +130,17 @@ export function SecretViewModal({
   clusterId,
   namespace,
   name,
-  canWrite,
+  canReveal,
   onClose,
 }: {
   clusterId: string;
   namespace: string;
   name: string;
-  canWrite: boolean;
+  /** Request plaintext values (audited, needs aks_secret_view); otherwise the API returns them masked. */
+  canReveal: boolean;
   onClose: () => void;
 }) {
-  const { data, isLoading, isError } = useSecretDetail(clusterId, namespace, name, true, true);
+  const { data, isLoading, isError } = useSecretDetail(clusterId, namespace, name, canReveal, true);
   const [search, setSearch] = useState("");
 
   const entries = Object.entries((data as SecretDetail)?.data || {});
@@ -160,12 +161,17 @@ export function SecretViewModal({
             <span className="text-sm text-gray-600">Type: <strong className="text-gray-800">{(data as SecretDetail)?.type}</strong></span>
             <span className="text-sm text-gray-600">Keys: <strong className="text-gray-800">{entries.length}</strong></span>
           </div>
+          {!canReveal && (
+            <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Values are hidden. Revealing secret values requires write access and the "Reveal Kubernetes secret values" permission.
+            </p>
+          )}
           <div className="mb-3">
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search keys or values..."
+              placeholder={canReveal ? "Search keys or values..." : "Search keys..."}
               className="w-full border rounded-lg px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
             />
           </div>

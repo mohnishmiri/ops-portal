@@ -33,6 +33,27 @@ vi.mock("../services/certificatesApi", () => ({
   })),
   useTemplates: vi.fn(() => ({ data: [] })),
   useAuthorities: vi.fn(() => ({ data: [] })),
+  useAutoRenewalConfigs: vi.fn(() => ({
+    data: [{
+      id: 1, collection_id: 42, collection_name: "Test Collection", enabled: true, armed: false,
+      days_before_expiry: 60, notify_on_renewal: true, notification_emails: ["ops@att.com"],
+      certificates: [], created_at: null, created_by: "ops@att.com", last_run_at: null,
+    }],
+    isLoading: false,
+  })),
+  useCreateAutoRenewalConfig: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useDeleteAutoRenewalConfig: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useRunAutoRenewalConfig: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useAlertConfigs: vi.fn(() => ({
+    data: [{
+      id: 2, collection_id: 42, collection_name: "Test Collection", enabled: true,
+      warning_days: 60, critical_days: 30, notification_emails: [], created_by: "ops@att.com",
+    }],
+    isLoading: false,
+  })),
+  useCreateAlertConfig: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useDeleteAlertConfig: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useRunAlertConfig: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
   REVOCATION_REASONS: [
     "unspecified", "keyCompromise", "caCompromise", "affiliationChanged",
     "superseded", "cessationOfOperation", "certificateHold", "removeFromCRL",
@@ -97,8 +118,13 @@ function mockList(overrides: Record<string, unknown>, cert: certApi.Certificate 
   } as any);
 }
 
-function setRole(opts: { isAdmin: boolean; canEdit: boolean }) {
-  vi.mocked(useAuth).mockReturnValue({ isAdmin: opts.isAdmin } as any);
+/**
+ * `writeRole` is the Azure AD role (what the certificate APIs check); `canEdit` is the
+ * page permission an admin can narrow it with. By default a page editor holds the write role.
+ */
+function setRole(opts: { isAdmin: boolean; canEdit: boolean; writeRole?: boolean }) {
+  const canWrite = opts.writeRole ?? (opts.isAdmin || opts.canEdit);
+  vi.mocked(useAuth).mockReturnValue({ isAdmin: opts.isAdmin, canWrite } as any);
   vi.mocked(usePermissions).mockReturnValue({ canEditPage: () => opts.canEdit } as any);
 }
 
@@ -211,6 +237,47 @@ describe("CertificatesPage role gating", () => {
     expect(screen.getByRole("button", { name: /Renew Certificate/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+});
+
+describe("CertificatesPage role gating — role and page permission", () => {
+  it("a read-role user granted page edit still cannot change certificates (the API requires write)", () => {
+    setRole({ isAdmin: false, canEdit: true, writeRole: false });
+    mockList({});
+    renderPage();
+    expect(screen.queryByRole("button", { name: /Enroll Certificate/i })).not.toBeInTheDocument();
+    openRowActions();
+    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("read-only users can view auto-renewal schedules and alert rules but not change or run them", () => {
+    setRole({ isAdmin: false, canEdit: false });
+    mockList({});
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /Auto-Renewal/i }));
+    expect(screen.queryByRole("button", { name: /Add Schedule/i })).not.toBeInTheDocument();
+    expect(screen.getByTitle("View")).toBeInTheDocument();
+    for (const title of ["Run now", "Edit", "Delete"]) expect(screen.queryByTitle(title)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Expiry Alerts/i }));
+    expect(screen.queryByRole("button", { name: /Add Alert Rule/i })).not.toBeInTheDocument();
+    expect(screen.getByTitle("View")).toBeInTheDocument();
+    for (const title of ["Send report now", "Edit", "Delete"]) expect(screen.queryByTitle(title)).not.toBeInTheDocument();
+  });
+
+  it("write users can manage auto-renewal schedules and alert rules", () => {
+    setRole({ isAdmin: false, canEdit: true });
+    mockList({});
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /Auto-Renewal/i }));
+    expect(screen.getByRole("button", { name: /Add Schedule/i })).toBeInTheDocument();
+    for (const title of ["Run now", "Edit", "Delete"]) expect(screen.getByTitle(title)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Expiry Alerts/i }));
+    expect(screen.getByRole("button", { name: /Add Alert Rule/i })).toBeInTheDocument();
+    for (const title of ["Send report now", "Edit", "Delete"]) expect(screen.getByTitle(title)).toBeInTheDocument();
   });
 });
 

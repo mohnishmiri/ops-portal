@@ -1,5 +1,5 @@
 /**
- * Delete Certificate modal — destructive action gated to ADMIN callers.
+ * Delete Certificate modal — destructive action for write-role callers (the API requires WRITE).
  * Requires a typed confirmation before the delete button is enabled.
  */
 

@@ -843,7 +843,7 @@ const CertificateAuditHistoryPanel: React.FC = () => {
 };
 // ── Auto-Renewal Panel ────────────────────────────────────────────────
 
-const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void }> = ({ onToast }) => {
+const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void; canWrite: boolean }> = ({ onToast, canWrite }) => {
   const { data: configs, isLoading } = useAutoRenewalConfigs();
   const { data: collections, isLoading: collectionsLoading } = useCollections();
   const create = useCreateAutoRenewalConfig();
@@ -969,7 +969,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
         </div>
         <div className="flex items-center gap-2">
           <ExportCsvButton onClick={() => exportToCsv("certificate-auto-renewal", configs ?? [], AUTO_RENEWAL_CSV_COLUMNS)} disabled={!configs?.length} />
-          <button type="button" className="rounded-lg bg-att-600 px-4 py-2 text-sm font-medium text-white hover:bg-att-700" onClick={() => { resetForm(); setShowForm(true); }}>+ Add Schedule</button>
+          {canWrite && <button type="button" className="rounded-lg bg-att-600 px-4 py-2 text-sm font-medium text-white hover:bg-att-700" onClick={() => { resetForm(); setShowForm(true); }}>+ Add Schedule</button>}
         </div>
       </div>
 
@@ -1167,10 +1167,10 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
               <td className={`${gridStyles.cell} whitespace-nowrap text-xs`} title={c.last_run_summary || (c.last_run_at ? formatDateTime(c.last_run_at) : "Never triggered")}>{c.last_run_at ? formatDateTime(c.last_run_at) : "Never"}</td>
               <td className={gridStyles.centerCell}>
                 <div className="flex items-center justify-center gap-0.5">
-                  <ActionBtn title="Run now" tone="green" disabled={run.isPending} onClick={() => handleRun(c)}>{run.isPending && runningId === c.id ? SpinnerIcon : Icons.play}</ActionBtn>
+                  {canWrite && <ActionBtn title="Run now" tone="green" disabled={run.isPending} onClick={() => handleRun(c)}>{run.isPending && runningId === c.id ? SpinnerIcon : Icons.play}</ActionBtn>}
                   <ActionBtn title="View" tone="blue" onClick={() => setViewingConfig(c)}>{Icons.eye}</ActionBtn>
-                  <ActionBtn title="Edit" tone="blue" onClick={() => handleEdit(c)}>{Icons.edit}</ActionBtn>
-                  <ActionBtn title="Delete" tone="red" onClick={() => remove.mutate(c.id)}>{Icons.trash}</ActionBtn>
+                  {canWrite && <ActionBtn title="Edit" tone="blue" onClick={() => handleEdit(c)}>{Icons.edit}</ActionBtn>}
+                  {canWrite && <ActionBtn title="Delete" tone="red" onClick={() => remove.mutate(c.id)}>{Icons.trash}</ActionBtn>}
                 </div>
               </td>
             </tr>
@@ -1183,7 +1183,7 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
 
 // ── Alerts Panel ─────────────────────────────────────────────────────
 
-const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void }> = ({ onToast }) => {
+const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => void; canWrite: boolean }> = ({ onToast, canWrite }) => {
   const { data: configs, isLoading } = useAlertConfigs();
   const { data: collections, isLoading: collectionsLoading } = useCollections();
   const create = useCreateAlertConfig();
@@ -1266,7 +1266,7 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
         </div>
         <div className="flex items-center gap-2">
           <ExportCsvButton onClick={() => exportToCsv("certificate-alert-rules", configs ?? [], ALERT_CSV_COLUMNS)} disabled={!configs?.length} />
-          <button type="button" className="rounded-lg bg-att-600 px-4 py-2 text-sm font-medium text-white hover:bg-att-700" onClick={() => { resetForm(); setShowForm(true); }}>+ Add Alert Rule</button>
+          {canWrite && <button type="button" className="rounded-lg bg-att-600 px-4 py-2 text-sm font-medium text-white hover:bg-att-700" onClick={() => { resetForm(); setShowForm(true); }}>+ Add Alert Rule</button>}
         </div>
       </div>
 
@@ -1346,10 +1346,10 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
               <td className={`${gridStyles.cell} text-xs`}>{c.created_by}</td>
               <td className={gridStyles.centerCell}>
                 <div className="flex items-center justify-center gap-0.5">
-                  <ActionBtn title="Send report now" tone="green" disabled={runAlert.isPending} onClick={() => handleRunAlert(c)}>{runAlert.isPending && runningId === c.id ? SpinnerIcon : Icons.play}</ActionBtn>
+                  {canWrite && <ActionBtn title="Send report now" tone="green" disabled={runAlert.isPending} onClick={() => handleRunAlert(c)}>{runAlert.isPending && runningId === c.id ? SpinnerIcon : Icons.play}</ActionBtn>}
                   <ActionBtn title="View" tone="blue" onClick={() => setViewingConfig(c)}>{Icons.eye}</ActionBtn>
-                  <ActionBtn title="Edit" tone="blue" onClick={() => handleEdit(c)}>{Icons.edit}</ActionBtn>
-                  <ActionBtn title="Delete" tone="red" onClick={() => remove.mutate(c.id)}>{Icons.trash}</ActionBtn>
+                  {canWrite && <ActionBtn title="Edit" tone="blue" onClick={() => handleEdit(c)}>{Icons.edit}</ActionBtn>}
+                  {canWrite && <ActionBtn title="Delete" tone="red" onClick={() => remove.mutate(c.id)}>{Icons.trash}</ActionBtn>}
                 </div>
               </td>
             </tr>
@@ -1365,9 +1365,11 @@ const AlertsPanel: React.FC<{ onToast: (message: string, type?: ToastType) => vo
 type ModalKind = "enroll" | "view" | "renew" | "revoke" | "delete" | "metadata" | "download" | "load_to_akv" | null;
 
 const CertificatesPage: React.FC = () => {
-  const { isAdmin } = useAuth();
+  // The certificate APIs require the write role; the page permission lets an admin narrow that further.
+  // Requiring both means a control is only shown when its API call would succeed.
+  const { canWrite: hasWriteRole } = useAuth();
   const { canEditPage } = usePermissions();
-  const canWrite = isAdmin || canEditPage("certificates_main");
+  const canWrite = hasWriteRole && canEditPage("certificates_main");
 
   const [activeTab, setActiveTab] = useState<"certificates" | "auto-renewal" | "alerts" | "audit">("certificates");
 
@@ -1753,8 +1755,8 @@ const CertificatesPage: React.FC = () => {
       {modal === "load_to_akv" && selected && <LoadToAkvModal certificate={selected} collectionId={collectionId} onClose={closeModal} onSuccess={(m) => showToast(m, "success")} onError={(m) => showToast(m, "error")} />}
       </>)}
 
-      {activeTab === "auto-renewal" && <AutoRenewalPanel onToast={showToast} />}
-      {activeTab === "alerts" && <AlertsPanel onToast={showToast} />}
+      {activeTab === "auto-renewal" && <AutoRenewalPanel onToast={showToast} canWrite={canWrite} />}
+      {activeTab === "alerts" && <AlertsPanel onToast={showToast} canWrite={canWrite} />}
       {activeTab === "audit" && <CertificateAuditHistoryPanel />}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}

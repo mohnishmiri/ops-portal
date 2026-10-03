@@ -13,6 +13,12 @@ Authentication flow for the proxy:
 3. Frontend opens this URL in a new browser tab
 4. Proxy validates the session token, sets a HttpOnly cookie, and serves the dashboard
 5. Subsequent requests (assets, API calls) are authenticated via the cookie
+
+Authorization: the proxy injects the portal's own cluster token, so the
+Dashboard itself cannot tell users apart.  The launching user's write access is
+therefore signed into the session, and a read-only session may only send
+GET/HEAD/OPTIONS — every Dashboard change (edit, scale, delete, deploy, shell
+input) is a POST/PUT/PATCH/DELETE and is refused.
 """
 
 from __future__ import annotations
@@ -30,8 +36,9 @@ import structlog
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
 
-from app.auth import get_current_user
+from app.auth import effective_roles, get_current_user
 from app.core.config import settings
+from app.models.auth import UserRole
 from app.schemas.auth import TokenClaims
 from app.services.k8s_dashboard_service import K8sDashboardService, get_k8s_dashboard_service
 
@@ -48,6 +55,9 @@ SESSION_TTL = 8 * 3600  # 8 hours
 LAUNCH_TOKEN_TTL = 60  # 60 seconds
 
 COOKIE_NAME = "k8s_dash_session"
+
+# Methods a read-only session may send through the proxy.
+_READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def _base64url_encode(value: bytes) -> str:
@@ -112,7 +122,7 @@ def _verify_signed_token(token: str, expected_type: str, env_key: str) -> dict[s
     return payload
 
 
-def _create_launch_token(env_key: str, user_id: str, user_email: str) -> str:
+def _create_launch_token(env_key: str, user_id: str, user_email: str, can_write: bool = False) -> str:
     """Create a short-lived launch token that can be exchanged for a session."""
     return _sign_payload(
         {
@@ -120,6 +130,7 @@ def _create_launch_token(env_key: str, user_id: str, user_email: str) -> str:
             "env_key": env_key,
             "user_id": user_id,
             "user_email": user_email,
+            "can_write": can_write,
             "exp": int(time.time()) + LAUNCH_TOKEN_TTL,
             "nonce": secrets.token_urlsafe(16),
         }
@@ -138,6 +149,8 @@ def _exchange_launch_token(token: str, env_key: str) -> str | None:
             "env_key": env_key,
             "user_id": token_data["user_id"],
             "user_email": token_data["user_email"],
+            # Fail closed: tokens minted before this field existed are read-only.
+            "can_write": token_data.get("can_write") is True,
             "exp": int(time.time()) + SESSION_TTL,
             "nonce": secrets.token_urlsafe(16),
         }
@@ -155,6 +168,7 @@ def _validate_session(session_token: str | None, env_key: str) -> dict[str, Any]
         "env_key": env_key,
         "user_id": payload["user_id"],
         "user_email": payload["user_email"],
+        "can_write": payload.get("can_write") is True,
     }
 
 
@@ -206,14 +220,20 @@ async def launch_dashboard(
     if not env:
         raise HTTPException(status_code=404, detail=f"Environment '{env_key}' not found")
 
-    token = _create_launch_token(env_key, getattr(user, "sub", None) or user.email, user.email)
-    logger.info("k8s_dashboard_launch", env_key=env_key, user=user.email)
+    can_write = UserRole.WRITE in effective_roles(user)
+    token = _create_launch_token(env_key, getattr(user, "sub", None) or user.email, user.email, can_write)
+    logger.info("k8s_dashboard_launch", env_key=env_key, user=user.email, can_write=can_write)
 
     # Use a path token instead of a query token because some production gateways
     # normalize or strip leading-underscore query params on direct navigation.
     proxy_path = f"/api/v1/aks/dashboard/{env_key}/launch/{token}"
 
-    return {"proxy_url": proxy_path, "env_key": env_key, "display_name": env["display_name"]}
+    return {
+        "proxy_url": proxy_path,
+        "env_key": env_key,
+        "display_name": env["display_name"],
+        "read_only": not can_write,
+    }
 
 
 @router.get("/{env_key}/launch/{token}")
@@ -273,6 +293,24 @@ async def proxy_dashboard(
             session = _validate_session(new_session_id, env_key)
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated — launch from portal")
+
+    if request.method not in _READ_ONLY_METHODS:
+        if not session["can_write"]:
+            logger.warning(
+                "k8s_dashboard_write_blocked",
+                env_key=env_key,
+                user=session["user_email"],
+                method=request.method,
+                path=path,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Read-only access: your role can view the Kubernetes Dashboard but not change resources.",
+            )
+        # Dashboard changes bypass the portal's own audited endpoints, so log who made them.
+        logger.info(
+            "k8s_dashboard_write", env_key=env_key, user=session["user_email"], method=request.method, path=path
+        )
 
     # Read request body for forwarding
     body = await request.body()

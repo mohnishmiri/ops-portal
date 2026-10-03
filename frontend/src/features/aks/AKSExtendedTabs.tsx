@@ -39,6 +39,7 @@ import {
   useSearchPagination,
 } from "./aksGridShared";
 import { ResourceActionButtons } from "./ResourceActionButtons";
+import { usePermissions } from "../../contexts/PermissionsContext";
 import HelmManagement from "./HelmManagement";
 import {
   ConfigMapCreateModal,
@@ -203,6 +204,11 @@ function ExtendedResourceGrid<T extends { name: string; namespace?: string }>({
 export const SecretsTab: React.FC<TabProps> = ({
   cluster, namespace, namespaces, onNamespaceChange, canWrite, showToast, formatDate,
 }) => {
+  // Mirrors the API: plaintext values need aks_secret_view; create/update/delete need aks_secret_update.
+  // Everyone else can still open a secret to see its keys, with the values masked.
+  const { hasCapability } = usePermissions();
+  const canRevealValues = canWrite && hasCapability("AKS_SECRET_VIEW");
+  const canManageSecrets = canWrite && hasCapability("AKS_SECRET_UPDATE");
   const nsFilter = useNsFilter(namespace);
   const { data, isFetching, isPlaceholderData, isError } = useCachedSecrets(cluster.id, nsFilter);
   const isLoading = isFetching && isPlaceholderData;
@@ -241,7 +247,7 @@ export const SecretsTab: React.FC<TabProps> = ({
         namespace={namespace}
         namespaces={namespaces}
         onNamespaceChange={onNamespaceChange}
-        canWrite={canWrite}
+        canWrite={canManageSecrets}
         formatDate={formatDate}
         source={data?.source}
         lastSync={data?.last_sync}
@@ -272,9 +278,10 @@ export const SecretsTab: React.FC<TabProps> = ({
             <td className={gridStyles.cell}>{s.key_count ?? s.keys?.length ?? 0}</td>
             <td className={gridStyles.centerCell}>
               <ResourceActionButtons
-                canWrite={canWrite}
+                canWrite={canManageSecrets}
                 onView={() => setViewTarget({ namespace: s.namespace, name: s.name })}
-                onEdit={() => setEditTarget({ namespace: s.namespace, name: s.name })}
+                // Editing loads the current plaintext values, so it also needs reveal permission.
+                onEdit={canRevealValues ? () => setEditTarget({ namespace: s.namespace, name: s.name }) : undefined}
                 onDelete={() => setDeleteTarget({ namespace: s.namespace, name: s.name })}
               />
             </td>
@@ -286,7 +293,7 @@ export const SecretsTab: React.FC<TabProps> = ({
           clusterId={cluster.id}
           namespace={viewTarget.namespace}
           name={viewTarget.name}
-          canWrite={canWrite}
+          canReveal={canRevealValues}
           onClose={() => setViewTarget(null)}
         />
       )}

@@ -362,6 +362,16 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
         ("write",),
         "infra_alerts",
     ),
+    # Permanently deletes Azure resources from the cost-optimization views.  Previously
+    # admin-only while the Cost Forecast and Infrastructure Alerts pages offered the
+    # delete to every write user; granted to write for the same reason as power control.
+    (
+        "cost_resource_cleanup",
+        "Delete unattached managed disks and disconnected private endpoints",
+        "edit",
+        ("write",),
+        "cost_management",
+    ),
 ]
 
 # Expand the capability catalogue into resource + permission seed entries.
