@@ -445,7 +445,7 @@ async def get_cluster_details(
 )
 async def snapshot_clusters(
     subscription_ids: list[str] = Body(default=None, description="Subscription IDs to snapshot"),
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """Create cluster snapshots for compliance tracking."""
@@ -1986,7 +1986,7 @@ async def get_cache_stats(
     description="Flush all cached data. Requires ADMIN role.",
 )
 async def invalidate_cache(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
 ) -> dict:
     """Flush entire AKS cache. Admin only."""
     await data_cache.invalidate_all()

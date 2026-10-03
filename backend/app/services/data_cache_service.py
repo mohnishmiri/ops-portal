@@ -336,8 +336,11 @@ class DataCacheService:
         Called from lifespan handler — runs once, non-blocking.
         """
         try:
+            from app.core.subscription_resolver import get_monitored_subscription_ids
+
             clusters = await fetch_clusters_fn()
-            key = CacheKeys.cluster_list()
+            # The key an unrestricted caller computes (see list_clusters).
+            key = CacheKeys.cluster_list(await get_monitored_subscription_ids())
             payload = json.dumps(clusters, default=str)
             await cache_manager.set_cached(key, payload, ttl=TTL.CLUSTER_LIST)
             logger.info("cache_warmed", resource="clusters", count=len(clusters))

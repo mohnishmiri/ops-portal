@@ -884,7 +884,7 @@ async def get_enabled_collections(
 async def set_enabled_collections(
     payload: EnabledCollectionsRequest,
     request: Request,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Admin: Set which collections are visible in the certificate module."""

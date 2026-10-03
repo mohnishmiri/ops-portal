@@ -83,12 +83,16 @@ ignore = ["B904", "E501", "RET504", "SIM108", "UP042"]
 "app/auth/*.py" = ["B008"]
 "app/core/authz.py" = ["B008"]
 "app/core/subscription_scope.py" = ["B008"]
+"app/core/target_access.py" = ["B008"]
 "app/plugins/**/*.py" = ["B008"]
 "tests/*.py" = ["S101"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "real_access: resolve project/subscription grants from the test database instead of granting full access",
+]
 
 [tool.uv]
 native-tls = true

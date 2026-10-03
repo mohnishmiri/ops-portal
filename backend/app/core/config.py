@@ -284,6 +284,9 @@ class Settings(BaseSettings):
         return bool(self.CERT_KEY_ESCROW_ENABLED and self.cert_key_escrow_vault_uri)
 
     # ── RBAC Roles ────────────────────────────────────────────────────
+    # Super Admin manages every project. It is deliberately an Entra app role
+    # only — nothing in the portal can grant it.
+    ROLE_SUPER_ADMIN: str = "OpsPortal.SuperAdmin"
     ROLE_ADMIN: str = "OpsPortal.Admin"
     ROLE_WRITE: str = "OpsPortal.Write"
     ROLE_READ: str = "OpsPortal.Read"

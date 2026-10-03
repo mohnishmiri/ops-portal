@@ -35,10 +35,15 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import effective_roles, get_current_user
+from app.core.access_scope import access_denied, resolve_access_scope
 from app.core.config import settings
+from app.core.database import get_db
 from app.models.auth import UserRole
+from app.models.database import AzureResourceInventory
 from app.schemas.auth import TokenClaims
 from app.services.k8s_dashboard_service import K8sDashboardService, get_k8s_dashboard_service
 
@@ -179,29 +184,71 @@ def _get_service() -> K8sDashboardService:
     return get_k8s_dashboard_service()
 
 
+# ── Subscription access ────────────────────────────────────────────────
+#
+# Dashboard environments are configured by cluster name, not subscription,
+# so the cluster's subscription is looked up in the AKS inventory.  A cluster
+# the inventory does not know is refused for anyone short of Super Admin.
+
+
+async def _cluster_subscriptions(db: AsyncSession | None, cluster_name: str) -> set[str]:
+    if db is None or not cluster_name:
+        return set()
+    rows = await db.execute(
+        select(AzureResourceInventory.subscription_id).where(
+            AzureResourceInventory.resource_type == "aks_cluster",
+            func.lower(AzureResourceInventory.name) == cluster_name.lower(),
+        )
+    )
+    return {str(sub).lower() for (sub,) in rows.all() if sub}
+
+
+async def _environment_access(request: Request, user, db: AsyncSession | None, env: dict) -> tuple[bool, bool]:
+    """(may view, may change) the dashboard environment's cluster."""
+    scope = await resolve_access_scope(request, user, db)
+    if scope.unrestricted:
+        return True, True
+    subs = await _cluster_subscriptions(db, env.get("cluster_name", ""))
+    if not subs:
+        return False, False
+    return all(scope.can_read(s) for s in subs), all(scope.can_write(s) for s in subs)
+
+
 # ── Metadata Endpoints (require MSAL auth) ─────────────────────────────
 
 
 @router.get("/environments")
 async def list_dashboard_environments(
+    request: Request,
     user: TokenClaims = Depends(get_current_user),
     service: K8sDashboardService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    """List all configured K8s Dashboard environments."""
+    """List the K8s Dashboard environments whose cluster the user may view."""
     logger.info("k8s_dashboard_list", user=user.email)
-    return service.list_environments()
+    visible = []
+    for env in service.list_environments():
+        can_view, _ = await _environment_access(request, user, db, env)
+        if can_view:
+            visible.append(env)
+    return visible
 
 
 @router.get("/{env_key}/health")
 async def check_dashboard_health(
     env_key: str,
+    request: Request,
     user: TokenClaims = Depends(get_current_user),
     service: K8sDashboardService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Check health of a specific K8s Dashboard environment."""
     env = service.get_environment(env_key)
     if not env:
         raise HTTPException(status_code=404, detail=f"Environment '{env_key}' not found")
+    can_view, _ = await _environment_access(request, user, db, env)
+    if not can_view:
+        raise access_denied("read")
     return await service.check_health(env_key)
 
 
@@ -214,13 +261,24 @@ async def launch_dashboard(
     request: Request,
     user: TokenClaims = Depends(get_current_user),
     service: K8sDashboardService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Create a session and return the proxy URL for opening in a new tab."""
+    """Create a session and return the proxy URL for opening in a new tab.
+
+    The session is writable only when the user's role allows changes *and*
+    they have write access to the cluster's subscription — a Non-Prod-only
+    user gets no Prod dashboard at all.
+    """
     env = service.get_environment(env_key)
     if not env:
         raise HTTPException(status_code=404, detail=f"Environment '{env_key}' not found")
 
-    can_write = UserRole.WRITE in effective_roles(user)
+    can_view, can_change = await _environment_access(request, user, db, env)
+    if not can_view:
+        logger.warning("k8s_dashboard_launch_denied", env_key=env_key, user=user.email)
+        raise access_denied("read")
+
+    can_write = UserRole.WRITE in effective_roles(user) and can_change
     token = _create_launch_token(env_key, getattr(user, "sub", None) or user.email, user.email, can_write)
     logger.info("k8s_dashboard_launch", env_key=env_key, user=user.email, can_write=can_write)
 

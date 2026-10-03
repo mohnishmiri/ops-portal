@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.subscription_resolver import get_monitored_subscription_ids
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import AzureResourceInventory
 
@@ -1084,10 +1085,14 @@ class AzureResourceService:
             return
 
         try:
-            # Delete existing resources of this type
-            await self.db.execute(
-                delete(AzureResourceInventory).where(AzureResourceInventory.resource_type == resource_type)
-            )
+            # Replace existing resources of this type — but only in the
+            # subscriptions this sync covered.  A sync from a narrowed scope
+            # must not wipe the rest of the inventory.
+            stale = delete(AzureResourceInventory).where(AzureResourceInventory.resource_type == resource_type)
+            synced = await self._resolve_scoped_subscription_ids()
+            if set(synced) != set(await get_monitored_subscription_ids()):
+                stale = stale.where(AzureResourceInventory.subscription_id.in_(synced))
+            await self.db.execute(stale)
 
             # Insert new resources
             for res in resources:

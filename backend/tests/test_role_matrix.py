@@ -22,49 +22,18 @@ from app.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.resource_registry import CAPABILITY_SEEDS
+from app.core.route_policy import READ_PERMITTED_MUTATIONS
 from app.main import create_application
 from app.schemas.auth import UserContext, UserRole
 from app.services.k8s_dashboard_service import K8sDashboardService
 
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
-ADMIN_CONSOLE_PREFIXES = ("/api/v1/admin", "/api/v1/permissions")
+# Portal-wide consoles: Super Admin only.
+SUPER_ADMIN_CONSOLE_PREFIXES = ("/api/v1/admin", "/api/v1/permissions")
+# Every admin surface, including project access management, which Project
+# Admins (Entra Admin role) use for their own projects.
+ADMIN_CONSOLE_PREFIXES = (*SUPER_ADMIN_CONSOLE_PREFIXES, "/api/v1/access/admin")
 _SEEDED_ROLES = {name: set(roles) for name, _desc, _ptype, roles, _parent in CAPABILITY_SEEDS}
-
-# State-changing HTTP methods that a READ user may call, and why that is safe.
-READ_PERMITTED_MUTATIONS: dict[tuple[str, str], str] = {
-    **{
-        ("POST", f"/api/v1/{path}"): "refreshes the portal's cached copy from Azure/Kubernetes; changes nothing there"
-        for path in (
-            "aks/clusters/sync",
-            "aks/deployments/sync",
-            "aks/cronjobs/sync",
-            "aks/nodepools/sync",
-            "certificates/sync",
-            "infra-alerts/resources/sync",
-        )
-    },
-    (
-        "POST",
-        "/api/v1/sync-jobs",
-    ): "AKS cache refresh is open to every role; other job types check WRITE in the handler",
-    (
-        "POST",
-        "/api/v1/aks/dashboard/{env_key}/launch",
-    ): "issues a Dashboard session that carries the user's write access",
-    **{
-        (method, "/api/v1/aks/dashboard/{env_key}/proxy/{path:path}"): "proxy refuses changes from read-only sessions"
-        for method in ("POST", "PUT", "PATCH", "DELETE")
-    },
-    ("POST", "/api/v1/aks/helm/lint"): "lints a chart locally; nothing is applied to a cluster",
-    ("POST", "/api/v1/aks/helm/template"): "renders a chart locally; nothing is applied to a cluster",
-    ("POST", "/api/v1/aks/logs/archive"): "downloads pod logs (aks_pod_view)",
-    ("PUT", "/api/v1/auth/subscription-scope"): "the caller's own view preference",
-    ("POST", "/api/v1/certificates/{certificate_id}/download"): "public formats are reads; private keys check WRITE",
-    ("POST", "/api/v1/costs/query"): "read-only cost query",
-    ("POST", "/api/v1/dashboards/leadership/advisor"): "read-only AI summary of existing data",
-    ("POST", "/api/v1/dashboards/leadership/forecast"): "read-only forecast of existing data",
-    ("POST", "/api/v1/reports/generate"): "read-only report over existing data",
-}
 
 # Admin-only operations outside the Admin console.  None is offered in the UI to
 # non-admins; everything else that changes state is available to WRITE users.
@@ -90,7 +59,7 @@ def _checks(dependant, found: list[tuple[set[UserRole], str]]) -> list[tuple[set
         name = getattr(dep.call, "__qualname__", "")
         if name.endswith("_role_checker"):
             required = set(inspect.getclosurevars(dep.call).nonlocals["roles"])
-            admitted = {r for r in UserRole if r == UserRole.ADMIN or _implies(r) & required}
+            admitted = {r for r in UserRole if _implies(r) & required}
             found.append((admitted, f"role {sorted(r.value for r in required)}"))
         elif name.endswith("_capability_checker"):
             nonlocals = inspect.getclosurevars(dep.call).nonlocals
@@ -99,13 +68,14 @@ def _checks(dependant, found: list[tuple[set[UserRole], str]]) -> list[tuple[set
                 granted = {UserRole(r) for r in _SEEDED_ROLES[capability]}
             else:
                 granted = _implies_reverse(nonlocals["fallback_role"])
-            found.append((granted | {UserRole.ADMIN}, f"capability {capability}"))
+            found.append((granted | {UserRole.ADMIN, UserRole.SUPER_ADMIN}, f"capability {capability}"))
         _checks(dep, found)
     return found
 
 
 def _implies(role: UserRole) -> set[UserRole]:
     return {
+        UserRole.SUPER_ADMIN: {UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.WRITE, UserRole.READ},
         UserRole.ADMIN: {UserRole.ADMIN, UserRole.WRITE, UserRole.READ},
         UserRole.WRITE: {UserRole.WRITE, UserRole.READ},
         UserRole.READ: {UserRole.READ},
@@ -156,6 +126,25 @@ def test_admin_console_is_admin_only(routes):
     for r in routes:
         if r.path.startswith(ADMIN_CONSOLE_PREFIXES) and r.methods & MUTATING:
             assert not _admits(r, UserRole.WRITE), f"{sorted(r.methods)} {r.path} is open to WRITE"
+
+
+# Console routes every signed-in user may read, and why.
+PUBLIC_CONSOLE_READS: dict[str, str] = {
+    "/api/v1/admin/portal-timezone": "every page reads the portal's display timezone",
+}
+
+
+def test_portal_wide_console_is_super_admin_only(routes):
+    """Project Admins hold the Entra Admin role; they must not reach settings
+    that span every project (subscriptions, config, the permission matrix)."""
+    open_to_admin = [
+        f"{sorted(r.methods)} {r.path}"
+        for r in routes
+        if r.path.startswith(SUPER_ADMIN_CONSOLE_PREFIXES)
+        and _admits(r, UserRole.ADMIN)
+        and not (r.methods <= {"GET", "HEAD"} and r.path in PUBLIC_CONSOLE_READS)
+    ]
+    assert not open_to_admin, f"Portal-wide console routes open to project admins: {open_to_admin}"
 
 
 # ── Behaviour ───────────────────────────────────────────────────────

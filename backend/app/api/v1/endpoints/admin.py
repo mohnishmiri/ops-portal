@@ -65,7 +65,7 @@ def _get_admin_service(db: AsyncSession = Depends(get_db)) -> AdminService:
     summary="List all managed subscriptions",
 )
 async def list_subscriptions(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> list[dict]:
     """Return all subscriptions stored in the database."""
@@ -79,7 +79,7 @@ async def list_subscriptions(
 )
 async def add_subscription(
     body: AddSubscriptionRequest,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Register a new subscription for cost monitoring (persisted in DB)."""
@@ -107,7 +107,7 @@ async def add_subscription(
 async def toggle_subscription(
     subscription_id: str,
     body: ToggleSubscriptionRequest,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Enable or disable a subscription, or toggle its monitored flag."""
@@ -131,7 +131,7 @@ async def toggle_subscription(
 async def update_subscription(
     subscription_id: str,
     body: UpdateSubscriptionRequest,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Update name, environment, or notes of a subscription."""
@@ -155,7 +155,7 @@ async def update_subscription(
 )
 async def remove_subscription(
     subscription_id: str,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Remove a subscription from DB."""
@@ -172,7 +172,7 @@ async def remove_subscription(
     summary="Discover subscriptions from Azure",
 )
 async def discover_subscriptions(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Query Azure ARM for all subscriptions visible to the service principal
@@ -193,7 +193,7 @@ async def discover_subscriptions(
     summary="Sync existing subscriptions from Azure",
 )
 async def sync_subscriptions(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Re-sync existing subscriptions from Azure ARM.  Updates name and
@@ -217,7 +217,7 @@ async def sync_subscriptions(
     summary="System health overview",
 )
 async def system_health(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Check health of all system components."""
@@ -232,7 +232,7 @@ async def system_health(
     summary="List all admin config entries",
 )
 async def list_admin_config(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> list[dict]:
     """Return all admin configuration entries from the database."""
@@ -245,7 +245,7 @@ async def list_admin_config(
 )
 async def upsert_admin_config(
     body: UpsertConfigRequest,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -334,7 +334,7 @@ async def upsert_admin_config(
     summary="Release cached page and cost data",
 )
 async def release_cached_data(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Release Redis-backed page payload and cost query caches."""
@@ -362,7 +362,7 @@ async def get_portal_timezone(
     summary="Get non-sensitive portal information",
 )
 async def get_portal_info(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Return non-sensitive portal configuration (env, version, etc.)."""

@@ -1,11 +1,12 @@
 """Auth API — authenticated user context, roles, and effective permissions."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
+from app.core.access_scope import resolve_access_scope
 from app.core.authz import granted_capabilities
 from app.core.database import get_db
 from app.core.subscription_scope import resolve_effective_subscription_ids
@@ -36,6 +37,7 @@ async def get_me(user: UserContext = Depends(get_current_user)) -> dict:
         "email": user.email,
         "roles": [r.value for r in user.roles],
         "is_admin": user.is_admin,
+        "is_super_admin": user.is_super_admin,
         "can_write": user.can_write,
         "tenant_id": user.tenant_id,
     }
@@ -165,20 +167,31 @@ async def get_my_permissions(
     }
 
 
+async def _allowed(request: Request, user: UserContext, db: AsyncSession) -> frozenset[str] | None:
+    """Subscriptions the user may see (lower-case), or None when unrestricted."""
+    access = await resolve_access_scope(request, user, db)
+    return None if access.unrestricted else access.readable
+
+
 @router.get(
     "/available-subscriptions",
-    summary="List monitored subscriptions for the scope picker",
+    summary="List the subscriptions the caller may pick from",
 )
 async def list_available_subscriptions(
+    request: Request,
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    allowed = await _allowed(request, user, db)
     svc = UserPreferenceService(db)
-    available = await svc.list_available_subscriptions(user.user_id)
+    available = await svc.list_available_subscriptions(user.user_id, allowed=allowed)
     selected = await svc.get_selected_subscription_ids(user.user_id)
+    available_ids = {a["subscription_id"].lower() for a in available}
+    selected = [sub_id for sub_id in selected if sub_id.lower() in available_ids]
     effective = await resolve_effective_subscription_ids(
-        allowed_subscriptions=user.allowed_subscriptions or None,
+        allowed_subscriptions=allowed,
         selected_subscription_ids=selected or None,
+        strict_selection=False,
     )
     return {
         "subscriptions": available,
@@ -192,14 +205,19 @@ async def list_available_subscriptions(
     summary="Get current user subscription scope preference",
 )
 async def get_subscription_scope(
+    request: Request,
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    allowed = await _allowed(request, user, db)
     svc = UserPreferenceService(db)
     selected = await svc.get_selected_subscription_ids(user.user_id)
+    if allowed is not None:
+        selected = [sub_id for sub_id in selected if sub_id.lower() in allowed]
     effective = await resolve_effective_subscription_ids(
-        allowed_subscriptions=user.allowed_subscriptions or None,
+        allowed_subscriptions=allowed,
         selected_subscription_ids=selected or None,
+        strict_selection=False,
     )
     return {
         "selected_subscription_ids": selected,
@@ -212,15 +230,18 @@ async def get_subscription_scope(
     summary="Save per-user subscription scope preference",
 )
 async def save_subscription_scope(
+    request: Request,
     body: SubscriptionScopePreferenceRequest,
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    allowed = await _allowed(request, user, db)
     svc = UserPreferenceService(db)
     saved = await svc.save_selected_subscription_ids(user.user_id, body.selected_subscription_ids)
     effective = await resolve_effective_subscription_ids(
-        allowed_subscriptions=user.allowed_subscriptions or None,
+        allowed_subscriptions=allowed,
         selected_subscription_ids=saved or None,
+        strict_selection=False,
     )
     return {
         "selected_subscription_ids": saved,

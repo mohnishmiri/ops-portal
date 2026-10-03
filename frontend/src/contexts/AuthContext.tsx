@@ -14,7 +14,7 @@ import { isDevMode } from "../config/authConfig";
 
 // ── Role enum (mirrors backend UserRole) ──────────────────────────────
 
-export type UserRole = "admin" | "write" | "read";
+export type UserRole = "super_admin" | "admin" | "write" | "read";
 
 // ── Context shape ─────────────────────────────────────────────────────
 
@@ -43,6 +43,12 @@ const AuthContext = createContext<AuthCtx>(defaultCtx);
 // ── Role mapping (matches backend _map_roles) ─────────────────────────
 
 const ROLE_MAP: Record<string, UserRole> = {
+  // Super Admin is Entra-only and sits above Admin (backend _ROLE_IMPLIES), so
+  // it must satisfy every isAdmin / canWrite check below. Whether the user is
+  // a *Super* Admin is read from the backend session (useSession), not here.
+  "opsportal.superadmin": "super_admin",
+  superadmin: "super_admin",
+  super_admin: "super_admin",
   "opsportal.admin": "admin",
   admin: "admin",
   "opsportal.write": "write",
@@ -78,7 +84,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const rawRoles: string[] = Array.isArray(claims?.roles) ? (claims.roles as string[]) : [];
     const roles = mapRoles(rawRoles);
 
-    const isAdmin = roles.includes("admin");
+    const isAdmin = roles.includes("admin") || roles.includes("super_admin");
     const canWrite = isAdmin || roles.includes("write");
 
     return {

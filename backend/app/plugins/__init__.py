@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, FastAPI
 
 from app.core.authz import enforce_module_access
 from app.core.subscription_scope import bind_subscription_scope
+from app.core.target_access import enforce_target_access
 
 logger = structlog.get_logger(__name__)
 
@@ -96,6 +97,7 @@ class PluginRegistry:
                         dependencies=[
                             Depends(enforce_module_access),
                             Depends(bind_subscription_scope),
+                            Depends(enforce_target_access),
                         ],
                     )
 

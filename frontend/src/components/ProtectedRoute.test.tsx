@@ -1,8 +1,8 @@
 /**
  * Tests for ProtectedRoute component.
  *
- * ProtectedRoute depends on two contexts (AuthContext + PermissionsContext),
- * so both are mocked to control the scenario under test.
+ * ProtectedRoute depends on three contexts (AuthContext + PermissionsContext
+ * + SessionContext), so all are mocked to control the scenario under test.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -20,13 +20,31 @@ vi.mock("../contexts/PermissionsContext", () => ({
   usePermissions: vi.fn(),
 }));
 
+vi.mock("../contexts/SessionContext", () => ({
+  useSession: vi.fn(),
+}));
+
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
+import { useSession } from "../contexts/SessionContext";
 import ProtectedRoute from "./ProtectedRoute";
 
 const PAGE_CONTENT = "Protected Page Content";
 
-function setup(authOverrides = {}, permOverrides = {}) {
+function mockSession(overrides: { isSuperAdmin?: boolean; hasSubscriptionAccess?: boolean } = {}) {
+  vi.mocked(useSession).mockReturnValue({
+    session: null,
+    hasCapability: () => true,
+    isSuperAdmin: false,
+    hasSubscriptionAccess: true,
+    adminProjectIds: [],
+    refreshSession: vi.fn(),
+    ...overrides,
+  });
+}
+
+function setup(authOverrides = {}, permOverrides = {}, sessionOverrides = {}) {
+  mockSession(sessionOverrides);
   vi.mocked(useAuth).mockReturnValue({ isAdmin: false, ...authOverrides } as any);
   vi.mocked(usePermissions).mockReturnValue({
     isLoading: false,
@@ -89,8 +107,44 @@ describe("ProtectedRoute — access denied", () => {
   });
 });
 
+describe("ProtectedRoute — no subscription access", () => {
+  const NO_ACCESS = /You don.t have access to any subscription yet/i;
+
+  it("shows the request-access panel instead of loading the page", () => {
+    setup({}, {}, { hasSubscriptionAccess: false });
+    expect(screen.queryByText(PAGE_CONTENT)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: NO_ACCESS })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /request access/i })).toHaveAttribute("href", "/access");
+  });
+
+  it("applies to admins too — a Project Admin's access comes from projects, not the Entra role", () => {
+    setup({ isAdmin: true }, {}, { hasSubscriptionAccess: false });
+    expect(screen.queryByText(PAGE_CONTENT)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: NO_ACCESS })).toBeInTheDocument();
+  });
+
+  it("never blocks a Super Admin", () => {
+    setup({ isAdmin: true }, {}, { isSuperAdmin: true, hasSubscriptionAccess: false });
+    expect(screen.getByText(PAGE_CONTENT)).toBeInTheDocument();
+  });
+
+  it("keeps Access Denied for a page the user may not open at all", () => {
+    setup({}, { canViewModule: () => false }, { hasSubscriptionAccess: false });
+    expect(screen.getByRole("heading", { name: /access denied/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: NO_ACCESS })).not.toBeInTheDocument();
+  });
+
+  it("re-checks the session from the panel", () => {
+    const refreshSession = vi.fn();
+    setup({}, {}, { hasSubscriptionAccess: false, refreshSession });
+    screen.getByRole("button", { name: /check again/i }).click();
+    expect(refreshSession).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ProtectedRoute — no module or page specified", () => {
   it("renders children when no module/page guards are specified", () => {
+    mockSession({ hasSubscriptionAccess: false });
     vi.mocked(useAuth).mockReturnValue({ isAdmin: false } as any);
     vi.mocked(usePermissions).mockReturnValue({
       isLoading: false,

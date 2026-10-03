@@ -19,15 +19,26 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.auth import get_current_user
+from app.core import access_scope
 from app.core.database import get_db
 from app.main import create_application
 from app.models.database import (
+    AccessGrant,
+    AccessRequest,
+    AccessRequestItem,
+    AdminConfig,
+    AdminSubscription,
     CertificateCollectionSnapshot,
     CertificateKeyEscrow,
     Permission,
+    PortalUser,
+    Project,
+    ProjectAdmin,
+    ProjectApp,
     Resource,
     Team,
     TeamMembership,
+    UserSubscriptionPreference,
 )
 from app.schemas.auth import UserContext, UserRole
 
@@ -112,6 +123,30 @@ CREATE TABLE IF NOT EXISTS cert_enrollment_profiles (
 """
 
 
+# ── Project access ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _project_access(request, monkeypatch):
+    """Full subscription access for every user unless a test opts in.
+
+    Most tests exercise roles and module behaviour, not project grants; giving
+    them full access keeps them about what they test.  Tests of the access
+    model use ``@pytest.mark.real_access`` and get grants resolved from the
+    test database.  The topology cache is cleared either way, since each test
+    has a fresh database.
+    """
+    access_scope.invalidate_access_topology()
+    if request.node.get_closest_marker("real_access") is None:
+
+        async def _unrestricted(db, user):
+            return access_scope.UNRESTRICTED
+
+        monkeypatch.setattr(access_scope, "_scope_from_db", _unrestricted)
+    yield
+    access_scope.invalidate_access_topology()
+
+
 # ── In-memory SQLite engine ────────────────────────────────────────────────────
 
 
@@ -132,6 +167,20 @@ async def db_engine():
         await conn.run_sync(lambda c: CertificateKeyEscrow.__table__.create(c, checkfirst=True))
         # A collection sync writes the certificate count back here.
         await conn.run_sync(lambda c: CertificateCollectionSnapshot.__table__.create(c, checkfirst=True))
+        # Project / app / subscription access.  None of these hold JSONB.
+        for model in (
+            Project,
+            ProjectApp,
+            AdminSubscription,
+            AdminConfig,
+            ProjectAdmin,
+            PortalUser,
+            AccessGrant,
+            AccessRequest,
+            AccessRequestItem,
+            UserSubscriptionPreference,
+        ):
+            await conn.run_sync(lambda c, m=model: m.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))
         await conn.execute(text(_CERT_CERTIFICATES_SQLITE_DDL))
         await conn.execute(text(_CERT_ENROLLMENT_PROFILES_SQLITE_DDL))
@@ -152,13 +201,14 @@ async def db_session(db_engine):
 
 
 async def make_admin_user() -> UserContext:
+    """A Super Admin — the role the portal-wide Admin console requires."""
     return UserContext(
         user_id="test-admin",
         object_id="00000000-0000-0000-0000-000000000000",
         display_name="Test Admin",
         email="admin@example.com",
-        roles=[UserRole.ADMIN],
-        raw_roles=["admin"],
+        roles=[UserRole.SUPER_ADMIN],
+        raw_roles=["super_admin"],
         tenant_id="tenant-test",
         allowed_subscriptions=[],
     )

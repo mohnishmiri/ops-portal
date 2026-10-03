@@ -33,14 +33,14 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def _dev_user() -> UserContext:
-    """Return a synthetic admin user for local development."""
+    """Return a synthetic super-admin user for local development."""
     return UserContext(
         user_id="dev-user-00000000",
         object_id="00000000-0000-0000-0000-000000000000",
         display_name="Local Developer",
         email="dev@localhost",
-        roles=[UserRole.ADMIN],
-        raw_roles=["admin"],
+        roles=[UserRole.SUPER_ADMIN],
+        raw_roles=["super_admin"],
         tenant_id="development",
     )
 
@@ -152,6 +152,9 @@ def _map_roles(raw_roles: list[str]) -> list[UserRole]:
     Callers must treat an empty list as "no access" in non-dev mode.
     """
     role_mapping = {
+        settings.ROLE_SUPER_ADMIN: UserRole.SUPER_ADMIN,
+        "superadmin": UserRole.SUPER_ADMIN,
+        "super_admin": UserRole.SUPER_ADMIN,
         settings.ROLE_ADMIN: UserRole.ADMIN,
         "admin": UserRole.ADMIN,
         settings.ROLE_WRITE: UserRole.WRITE,
@@ -280,6 +283,7 @@ async def get_current_user(
 # ``require_role(UserRole.READ)`` would 403 that user for a read they are
 # plainly entitled to perform.
 _ROLE_IMPLIES: dict[UserRole, frozenset[UserRole]] = {
+    UserRole.SUPER_ADMIN: frozenset({UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.WRITE, UserRole.READ}),
     UserRole.ADMIN: frozenset({UserRole.ADMIN, UserRole.WRITE, UserRole.READ}),
     UserRole.WRITE: frozenset({UserRole.WRITE, UserRole.READ}),
     UserRole.READ: frozenset({UserRole.READ}),
@@ -314,9 +318,9 @@ def require_role(*roles: UserRole):  # noqa: ANN201
         # Local dev opt-in — skip role checks entirely
         if _dev_auth_enabled():
             return user
-        # ADMIN implicitly satisfies any role requirement
-        if user.is_admin:
-            return user
+        # The ladder decides: ADMIN satisfies WRITE and READ but not
+        # SUPER_ADMIN, which is what keeps project admins out of the
+        # portal-wide console.
         if not (effective_roles(user) & set(roles)):
             logger.warning(
                 "access_denied",

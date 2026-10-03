@@ -146,6 +146,9 @@ class AKSOperationsService(
         Returns:
             List of cluster details with node pool information
         """
+        # Key on the effective scope, never on "no filter": a shared entry would
+        # serve one user's clusters to everyone who sends no explicit filter.
+        subscription_ids = subscription_ids or await get_scoped_subscription_ids()
         cache_key = CacheKeys.cluster_list(subscription_ids)
 
         if not bypass_cache:
@@ -2908,6 +2911,7 @@ class AKSOperationsService(
 
         Uses Redis L1 cache (TTL 10 min — almost static).
         """
+        subscription_ids = subscription_ids or await get_scoped_subscription_ids()
         cache_key = CacheKeys.subscriptions(subscription_ids)
 
         async def _fetch_subs_live() -> list[dict[str, str]]:

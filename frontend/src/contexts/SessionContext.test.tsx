@@ -31,6 +31,7 @@ vi.mock("@azure/msal-react", () => ({
 }));
 
 import apiClient from "../services/apiClient";
+import { NO_SUBSCRIPTION_ACCESS_EVENT } from "../services/accessEvents";
 import { PortalAccessGate, useSession } from "./SessionContext";
 import { peekAccessDenial, clearAccessDenial } from "../config/accessDenial";
 
@@ -40,8 +41,10 @@ const AUTHORIZED = {
   user: { user_id: "u1", display_name: "Ops User", email: "ops@example.com" },
   roles: ["write"],
   is_admin: false,
+  is_super_admin: false,
   can_write: true,
   permissions: ["AKS_VIEW", "AKS_POD_DELETE"],
+  access: { has_subscription_access: true, admin_project_ids: [], readable_count: 4, writable_count: 2 },
 };
 
 const DENIED = {
@@ -50,17 +53,22 @@ const DENIED = {
   user: { user_id: "u2", display_name: "Outsider", email: "outsider@example.com" },
   roles: [],
   is_admin: false,
+  is_super_admin: false,
   can_write: false,
   permissions: [],
+  access: { has_subscription_access: false, admin_project_ids: [] },
 };
 
 /** Sentinel standing in for the authenticated application shell. */
 const Shell: React.FC = () => {
-  const { hasCapability } = useSession();
+  const { hasCapability, isSuperAdmin, hasSubscriptionAccess, adminProjectIds } = useSession();
   return (
     <div>
       <span>APP SHELL</span>
       <span>{hasCapability("AKS_POD_DELETE") ? "can-delete" : "cannot-delete"}</span>
+      <span>{isSuperAdmin ? "super-admin" : "not-super-admin"}</span>
+      <span>{hasSubscriptionAccess ? "has-subscriptions" : "no-subscriptions"}</span>
+      <span>admin-projects:{adminProjectIds.join(",")}</span>
     </div>
   );
 };
@@ -222,5 +230,82 @@ describe("PortalAccessGate", () => {
 
     resolve({ data: AUTHORIZED });
     await waitFor(() => expect(screen.getByText("APP SHELL")).toBeTruthy());
+  });
+
+  it("exposes subscription access and admin projects from the session", async () => {
+    (apiClient.get as any).mockResolvedValue({
+      data: { ...AUTHORIZED, is_admin: true, access: { has_subscription_access: true, admin_project_ids: [3, 7] } },
+    });
+    renderGate();
+    expect(await screen.findByText("has-subscriptions")).toBeTruthy();
+    expect(screen.getByText("not-super-admin")).toBeTruthy();
+    expect(screen.getByText("admin-projects:3,7")).toBeTruthy();
+  });
+
+  it("reports a user with no grant as having no subscription access", async () => {
+    (apiClient.get as any).mockResolvedValue({
+      data: { ...AUTHORIZED, access: { has_subscription_access: false, admin_project_ids: [] } },
+    });
+    renderGate();
+    expect(await screen.findByText("no-subscriptions")).toBeTruthy();
+  });
+
+  it("treats a Super Admin as unrestricted", async () => {
+    (apiClient.get as any).mockResolvedValue({
+      data: {
+        ...AUTHORIZED,
+        roles: ["super_admin"],
+        is_admin: true,
+        is_super_admin: true,
+        access: { has_subscription_access: true, admin_project_ids: [], readable_count: null, writable_count: null },
+      },
+    });
+    renderGate();
+    expect(await screen.findByText("super-admin")).toBeTruthy();
+    expect(screen.getByText("has-subscriptions")).toBeTruthy();
+  });
+
+  it("does not lock everyone out when an older backend omits the access block", async () => {
+    const { access: _omitted, is_super_admin: _alsoOmitted, ...legacy } = AUTHORIZED;
+    (apiClient.get as any).mockResolvedValue({ data: legacy });
+    renderGate();
+    expect(await screen.findByText("has-subscriptions")).toBeTruthy();
+    expect(screen.getByText("not-super-admin")).toBeTruthy();
+  });
+
+  it("re-reads the session when an API reports no subscription access", async () => {
+    (apiClient.get as any).mockResolvedValue({ data: AUTHORIZED });
+    renderGate();
+    await screen.findByText("has-subscriptions");
+    expect(apiClient.get).toHaveBeenCalledTimes(1);
+
+    // A grant was revoked mid-session; the next module call 403s.
+    (apiClient.get as any).mockResolvedValue({
+      data: { ...AUTHORIZED, access: { has_subscription_access: false, admin_project_ids: [] } },
+    });
+    act(() => {
+      window.dispatchEvent(new Event(NO_SUBSCRIPTION_ACCESS_EVENT));
+    });
+
+    expect(await screen.findByText("no-subscriptions")).toBeTruthy();
+    expect(apiClient.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the last known session when a background refresh fails", async () => {
+    (apiClient.get as any).mockResolvedValue({ data: AUTHORIZED });
+    renderGate();
+    await screen.findByText("APP SHELL");
+
+    (apiClient.get as any).mockRejectedValue(new Error("network blip"));
+    act(() => {
+      window.dispatchEvent(new Event(NO_SUBSCRIPTION_ACCESS_EVENT));
+    });
+
+    // Initial load, the refresh, and the gate's single retry — then it settles in error.
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalledTimes(3), { timeout: 5000 });
+    await act(async () => {});
+    // The portal must not be replaced by "Unable to verify access" for a blip.
+    expect(screen.getByText("APP SHELL")).toBeTruthy();
+    expect(screen.queryByText(/Unable to verify access/i)).toBeNull();
   });
 });

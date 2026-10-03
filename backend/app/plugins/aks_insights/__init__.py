@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 
 from app.auth import get_current_user
 from app.core.azure_auth import get_azure_credential
-from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.auth import UserContext
 from app.plugins import PluginBase, PluginMetadata
 
@@ -22,13 +22,13 @@ router = APIRouter()
 async def list_clusters(
     user: UserContext = Depends(get_current_user),
 ) -> list[dict]:
-    """List all AKS clusters across monitored subscriptions."""
+    """List AKS clusters across the caller's subscriptions."""
     from azure.mgmt.containerservice import ContainerServiceClient
 
     credential = get_azure_credential()
     clusters = []
 
-    for sub_id in await get_monitored_subscription_ids():
+    for sub_id in await get_scoped_subscription_ids():
         try:
             client = ContainerServiceClient(credential, sub_id)
             for cluster in client.managed_clusters.list():
@@ -61,8 +61,8 @@ async def get_node_pools(
     """Get node pool details for a specific AKS cluster."""
     from azure.mgmt.containerservice import ContainerServiceClient
 
-    monitored = await get_monitored_subscription_ids()
-    sub_id = subscription_id or (monitored[0] if monitored else "")
+    scoped = await get_scoped_subscription_ids()
+    sub_id = subscription_id or (scoped[0] if scoped else "")
     credential = get_azure_credential()
     client = ContainerServiceClient(credential, sub_id)
 

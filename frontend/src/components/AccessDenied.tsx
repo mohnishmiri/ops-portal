@@ -10,9 +10,14 @@ import { Link } from "react-router-dom";
 interface AccessDeniedProps {
   /** Which resource/page was denied (shown in the message). */
   resourceName?: string;
+  /**
+   * Why access was refused, when it is known (e.g. "only Super Admins…").
+   * Replaces the generic "contact your administrator" line.
+   */
+  reason?: React.ReactNode;
 }
 
-const AccessDenied: React.FC<AccessDeniedProps> = ({ resourceName }) => (
+const AccessDenied: React.FC<AccessDeniedProps> = ({ resourceName, reason }) => (
   <div className="flex items-center justify-center min-h-[60vh]">
     <div className="bg-white rounded-2xl shadow-md border border-red-100 p-10 max-w-md w-full text-center">
       <div className="flex justify-center mb-5">
@@ -43,7 +48,7 @@ const AccessDenied: React.FC<AccessDeniedProps> = ({ resourceName }) => (
         .
       </p>
       <p className="text-gray-400 text-xs mb-6">
-        Contact your administrator to request access.
+        {reason ?? "Contact your administrator to request access."}
       </p>
       <Link
         to="/"

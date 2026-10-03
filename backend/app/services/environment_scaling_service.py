@@ -17,6 +17,7 @@ from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.access_scope import arm_scope_clause, assert_resource_access
 from app.models.database import (
     AuditLog,
     EnvironmentExecutionHistory,
@@ -240,6 +241,7 @@ class EnvironmentScalingService:
         sequence = result.scalar_one_or_none()
         if not sequence:
             raise ValueError(f"Sequence {sequence_id} not found")
+        assert_resource_access(sequence.cluster_id, "write", context=f"execute_sequence {sequence_id}")
 
         steps = sequence.steps or []
         sorted_steps = sorted(steps, key=lambda s: s.get("order", 0))
@@ -508,10 +510,23 @@ class EnvironmentScalingService:
 
     # ── Schedule CRUD ─────────────────────────────────────────────────
 
+    async def _assert_linked_sequence_writable(self, sequence_id: int | None) -> None:
+        """A schedule runs its linked sequence with the portal's own authority
+        later, so the person linking it must be allowed to change that
+        sequence's cluster now."""
+        if not sequence_id:
+            return
+        seq = (
+            await self.db.execute(select(EnvironmentSequence).where(EnvironmentSequence.id == sequence_id))
+        ).scalar_one_or_none()
+        if seq is not None:
+            assert_resource_access(seq.cluster_id, "write", context=f"link sequence {sequence_id}")
+
     async def create_schedule(self, data: dict, user_id: str, user_email: str) -> dict:
         """Create a new environment schedule."""
         if not self.db:
             raise ValueError("Database required")
+        await self._assert_linked_sequence_writable(data.get("sequence_id"))
 
         schedule = EnvironmentSchedule(
             job_name=data["job_name"],
@@ -547,6 +562,9 @@ class EnvironmentScalingService:
         schedule = result.scalar_one_or_none()
         if not schedule:
             raise ValueError(f"Schedule {schedule_id} not found")
+        assert_resource_access(schedule.cluster_id, "write", context=f"update_schedule {schedule_id}")
+        if data.get("sequence_id") and data.get("sequence_id") != schedule.sequence_id:
+            await self._assert_linked_sequence_writable(data["sequence_id"])
 
         date_fields = {"start_date", "end_date"}
         for field in [
@@ -577,6 +595,11 @@ class EnvironmentScalingService:
         if not self.db:
             raise ValueError("Database required")
 
+        cluster = (
+            await self.db.execute(select(EnvironmentSchedule.cluster_id).where(EnvironmentSchedule.id == schedule_id))
+        ).scalar_one_or_none()
+        if cluster is not None:
+            assert_resource_access(cluster, "write", context=f"delete_schedule {schedule_id}")
         await self.db.execute(delete(EnvironmentSchedule).where(EnvironmentSchedule.id == schedule_id))
         await self.db.commit()
         return True
@@ -591,6 +614,9 @@ class EnvironmentScalingService:
             return []
 
         stmt = select(EnvironmentSchedule).order_by(desc(EnvironmentSchedule.created_at))
+        clause = arm_scope_clause(EnvironmentSchedule.cluster_id)
+        if clause is not None:
+            stmt = stmt.where(clause)
         if cluster_id:
             stmt = stmt.where(EnvironmentSchedule.cluster_id == cluster_id)
         if namespace:
@@ -606,6 +632,8 @@ class EnvironmentScalingService:
 
         result = await self.db.execute(select(EnvironmentSchedule).where(EnvironmentSchedule.id == schedule_id))
         schedule = result.scalar_one_or_none()
+        if schedule:
+            assert_resource_access(schedule.cluster_id, "read", context=f"get_schedule {schedule_id}")
         return self._schedule_to_dict(schedule) if schedule else None
 
     # ── Sequence CRUD ─────────────────────────────────────────────────
@@ -657,6 +685,7 @@ class EnvironmentScalingService:
         sequence = result.scalar_one_or_none()
         if not sequence:
             raise ValueError(f"Sequence {sequence_id} not found")
+        assert_resource_access(sequence.cluster_id, "write", context=f"update_sequence {sequence_id}")
 
         if "name" in data and data["name"] is not None:
             sequence.name = data["name"]
@@ -687,6 +716,11 @@ class EnvironmentScalingService:
         if not self.db:
             raise ValueError("Database required")
 
+        cluster = (
+            await self.db.execute(select(EnvironmentSequence.cluster_id).where(EnvironmentSequence.id == sequence_id))
+        ).scalar_one_or_none()
+        if cluster is not None:
+            assert_resource_access(cluster, "write", context=f"delete_sequence {sequence_id}")
         await self.db.execute(delete(EnvironmentSequence).where(EnvironmentSequence.id == sequence_id))
         await self.db.commit()
         return True
@@ -701,6 +735,9 @@ class EnvironmentScalingService:
             return []
 
         stmt = select(EnvironmentSequence).order_by(desc(EnvironmentSequence.created_at))
+        clause = arm_scope_clause(EnvironmentSequence.cluster_id)
+        if clause is not None:
+            stmt = stmt.where(clause)
         if cluster_id:
             stmt = stmt.where(EnvironmentSequence.cluster_id == cluster_id)
         if namespace:
@@ -716,6 +753,8 @@ class EnvironmentScalingService:
 
         result = await self.db.execute(select(EnvironmentSequence).where(EnvironmentSequence.id == sequence_id))
         seq = result.scalar_one_or_none()
+        if seq:
+            assert_resource_access(seq.cluster_id, "read", context=f"get_sequence {sequence_id}")
         return self._sequence_to_dict(seq) if seq else None
 
     # ── Execution History ─────────────────────────────────────────────
@@ -731,6 +770,9 @@ class EnvironmentScalingService:
             return []
 
         stmt = select(EnvironmentExecutionHistory).order_by(desc(EnvironmentExecutionHistory.started_at)).limit(limit)
+        clause = arm_scope_clause(EnvironmentExecutionHistory.cluster_id)
+        if clause is not None:
+            stmt = stmt.where(clause)
         if cluster_id:
             stmt = stmt.where(EnvironmentExecutionHistory.cluster_id == cluster_id)
         if namespace:
@@ -778,6 +820,8 @@ class EnvironmentScalingService:
         schedule = result.scalar_one_or_none()
         if not schedule:
             raise ValueError(f"Schedule {schedule_id} not found")
+        # "Run now" from the UI; the background scheduler has no request scope.
+        assert_resource_access(schedule.cluster_id, "write", context=f"run_schedule {schedule_id}")
 
         try:
             # If linked to a sequence, execute the sequence instead of plain scale

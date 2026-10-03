@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
 from app.core.database import get_db
+from app.core.subscription_scope import scope_is_full
 from app.models.auth import UserContext, UserRole
 from app.schemas.compliance import ExcelExportRequest, ModuleType
 from app.services.compliance_excel_service import ComplianceExcelService
@@ -507,7 +508,9 @@ async def get_compliance_dashboard(
     # Fast path: serve from pre-computed DB snapshot
     try:
         cached = await sync_svc.get_dashboard_from_db()
-        if cached and not subscription_ids:
+        # The snapshot covers every monitored subscription, so only a caller
+        # whose scope is just as wide may see it.
+        if cached and not subscription_ids and await scope_is_full():
             return cached
     except Exception as exc:
         logger.warning("compliance_dashboard_cache_read_failed", error=str(exc)[:200])
@@ -538,7 +541,7 @@ async def get_compliance_dashboard(
     description="Force a re-computation of the cached compliance dashboard data",
 )
 async def trigger_compliance_sync(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Trigger a manual sync of the compliance dashboard cache."""

@@ -38,6 +38,8 @@ class AdminService:
                 "enabled": row.enabled,
                 "monitored": row.monitored,
                 "environment": row.environment,
+                "app_id": row.app_id,
+                "tier": row.tier,
                 "notes": row.notes,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -78,6 +80,11 @@ class AdminService:
             updated_by=created_by,
         )
         self._db.add(row)
+        # Names carrying a known AppID (ACC-PROD-31599-ATTCC) are placed in
+        # that app straight away; anything else stays Super Admin only.
+        from app.services.access_service import AccessService
+
+        await AccessService(self._db).auto_place([row])
         await self._db.commit()
         await self._db.refresh(row)
 
@@ -186,6 +193,9 @@ class AdminService:
         await self._db.delete(row)
         await self._db.commit()
 
+        from app.core.access_scope import invalidate_access_topology
+
+        invalidate_access_topology()
         logger.info("subscription_removed", subscription_id=subscription_id)
         return {"subscription_id": subscription_id, "removed": True}
 
@@ -226,6 +236,7 @@ class AdminService:
         import urllib.request
 
         discovered: list[dict] = []
+        new_rows: list[AdminSubscription] = []
         new_count = 0
         updated_count = 0
         try:
@@ -279,6 +290,7 @@ class AdminService:
                         updated_by=created_by,
                     )
                     self._db.add(row)
+                    new_rows.append(row)
                     new_count += 1
                     discovered.append(
                         {
@@ -289,6 +301,10 @@ class AdminService:
                         }
                     )
 
+            if new_rows:
+                from app.services.access_service import AccessService
+
+                await AccessService(self._db).auto_place(new_rows)
             await self._db.commit()
             action = "sync" if sync_only else "discover"
             logger.info(

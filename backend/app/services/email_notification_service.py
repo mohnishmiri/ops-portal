@@ -1365,6 +1365,33 @@ For questions or to acknowledge findings, visit the Compliance Dashboard.
             "failed": sum(1 for r in results if r["status"] == "failed"),
         }
 
+    async def send_access_notification(
+        self,
+        recipient_emails: list[str],
+        subject: str,
+        heading: str,
+        lines: list[str],
+        portal_path: str = "/access",
+    ) -> dict[str, Any]:
+        """Plain notification about an access request or decision.
+
+        Best effort: failures are logged by ``_send_single_email`` and counted,
+        never raised — a mail outage must not undo an approval.
+        """
+        items = "".join(f"<li style='margin:4px 0'>{_html_escape(line)}</li>" for line in lines)
+        html_body = (
+            "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1f2937'>"
+            f"<h2 style='color:#3f9bca;font-size:18px'>{_html_escape(heading)}</h2>"
+            f"<ul style='padding-left:18px'>{items}</ul>"
+            f"<p><a href='{_html_escape(self.portal_base_url + portal_path)}'>Open the Ops Portal</a></p>"
+            "</div>"
+        )
+        sent = 0
+        for email in dict.fromkeys(e for e in recipient_emails if e):
+            result = await self._send_single_email(recipient=email, subject=subject, html_body=html_body)
+            sent += result["status"] == "sent"
+        return {"recipients": len(recipient_emails), "success": sent}
+
     async def get_notification_history(
         self,
         alert_type: str | None = None,

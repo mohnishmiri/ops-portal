@@ -226,6 +226,8 @@ async def require_page_permission(resource_name: str, perm: str = "view"):
 
 **Recommendation:** If multi-tenant or subscription-scoped access is needed, populate `allowed_subscriptions` during token processing (e.g., from a custom claim or a DB lookup) and filter cost/AKS/compliance queries accordingly.
 
+**Addressed (Oct 2026):** subscription access is now granted per project / app / tier from the portal — see [PROJECT_ACCESS.md](PROJECT_ACCESS.md). `allowed_subscriptions` is still unused; the resolved scope lives in `app/core/access_scope.py`.
+
 ### Gap 5 — No Audit Log for Permission Changes ℹ️
 
 **Current state:** Permission grants and revocations are logged to the structlog at INFO level but there is no dedicated audit trail queryable through the portal.

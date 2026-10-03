@@ -87,6 +87,9 @@ class AKSLiveSyncHub:
                     namespace=msg.get("namespace"),
                     resources={str(r) for r in (msg.get("resources") or [])},
                 )
+                if sub.cluster_id and not await self._may_watch(user, sub.cluster_id):
+                    await websocket.send_json({"type": "error", "detail": "No access to this cluster's subscription."})
+                    continue
                 self._clients[client_id].subscription = sub
                 await self._ensure_tasks(sub)
                 await websocket.send_json(
@@ -104,6 +107,24 @@ class AKSLiveSyncHub:
         finally:
             self._clients.pop(client_id, None)
             await self._cleanup_idle_tasks()
+
+    @staticmethod
+    async def _may_watch(user: UserContext, cluster_id: str) -> bool:
+        """WebSocket routes skip the HTTP router's checks, so the cluster's
+        subscription is checked here before anything is polled for it."""
+        if user.is_super_admin:
+            return True
+        from app.core.access_scope import compute_access_scope, subscription_of
+
+        sub = subscription_of(cluster_id)
+        if sub is None:
+            return False
+        try:
+            async for db in get_db_session():
+                return (await compute_access_scope(db, user)).can_read(sub)
+        except Exception as exc:
+            logger.warning("aks_live_ws_access_check_failed", error=str(exc)[:200])
+        return False
 
     async def _ensure_tasks(self, sub: LiveSubscription) -> None:
         if "clusters" in sub.resources:

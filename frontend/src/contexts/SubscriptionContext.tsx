@@ -14,13 +14,25 @@ import React, {
 import { useQueryClient } from "@tanstack/react-query";
 import apiClient, { setSubscriptionScopeParam } from "../services/apiClient";
 import { useAuth } from "./AuthContext";
+import { useSession } from "./SessionContext";
 
+/**
+ * A subscription the user may pick. The backend lists only subscriptions the
+ * user was granted; project / app / tier are null when the subscription has
+ * not been placed in an app yet (visible to Super Admins only).
+ */
 export interface AvailableSubscription {
   subscription_id: string;
   subscription_name: string;
   environment?: string | null;
   state?: string;
   selected?: boolean;
+  tier?: "prod" | "nonprod" | null;
+  app_id?: number | null;
+  app_name?: string | null;
+  app_code?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
 }
 
 interface SubscriptionContextValue {
@@ -39,7 +51,15 @@ const SubscriptionContext = createContext<SubscriptionContextValue | undefined>(
 
 export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { userId } = useAuth();
+  const { session } = useSession();
   const queryClient = useQueryClient();
+  // Changes when an approval or revocation changes what the user may see, so
+  // the picker reloads its list instead of offering stale subscriptions.
+  const accessKey = [
+    session?.access?.has_subscription_access ?? "",
+    session?.access?.readable_count ?? "",
+    session?.access?.writable_count ?? "",
+  ].join(":");
   const [availableSubscriptions, setAvailableSubscriptions] = useState<AvailableSubscription[]>([]);
   const [selectedSubscriptionIds, setSelectedSubscriptionIdsState] = useState<string[]>([]);
   const [effectiveSubscriptionIds, setEffectiveSubscriptionIds] = useState<string[]>([]);
@@ -70,7 +90,7 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   useEffect(() => {
     refreshScope();
-  }, [refreshScope]);
+  }, [refreshScope, accessKey]);
 
   const persistSelection = useCallback(
     async (ids: string[]) => {
@@ -99,7 +119,9 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const scopeLabel = useMemo(() => {
     if (isAllSelected) {
       const count = effectiveSubscriptionIds.length || availableSubscriptions.length;
-      return count > 0 ? `All monitored (${count})` : "No monitored subs";
+      // "All" is everything this user may see (their grants), not every
+      // monitored subscription — only a Super Admin sees all of those.
+      return count > 0 ? `All available (${count})` : "No subscriptions";
     }
     if (selectedSubscriptionIds.length === 1) {
       const match = availableSubscriptions.find(

@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import React from "react";
 
 // ── Mock the permissionsApi module ────────────────────────────────────────────
@@ -53,21 +54,24 @@ function makeQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
 
-function setup() {
+function setup(permissions: Array<Record<string, unknown>> = MOCK_PERMISSIONS) {
   const qc = makeQueryClient();
   const mutationStub = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, isError: false };
   vi.mocked(permApi.useResources).mockReturnValue({ data: MOCK_RESOURCES, isLoading: false } as any);
-  vi.mocked(permApi.usePermissions).mockReturnValue({ data: MOCK_PERMISSIONS, isLoading: false } as any);
+  vi.mocked(permApi.usePermissions).mockReturnValue({ data: permissions, isLoading: false } as any);
   vi.mocked(permApi.useTeams).mockReturnValue({ data: [], isLoading: false } as any);
   vi.mocked(permApi.useCreateResource).mockReturnValue(mutationStub as any);
   vi.mocked(permApi.useCreatePermission).mockReturnValue(mutationStub as any);
   vi.mocked(permApi.useDeleteResource).mockReturnValue(mutationStub as any);
   vi.mocked(permApi.useDeletePermission).mockReturnValue(mutationStub as any);
 
+  // The page links to Access Management, so it needs a router.
   render(
-    <QueryClientProvider client={qc}>
-      <PermissionsManagement />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <PermissionsManagement />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 }
 
@@ -162,5 +166,23 @@ describe("Permissions tab grant form", () => {
     expect(screen.getByText("Granted Permissions")).toBeInTheDocument();
     // "read" appears as a dropdown option AND as the subject_id in the granted table
     expect(screen.getAllByText("read").length).toBeGreaterThan(0);
+  });
+});
+
+// ── Environment scope (superseded by Prod / Non-Prod grants) ──────────────────
+
+describe("Permissions tab environment scope", () => {
+  it("no longer offers the unenforced environment-scope control", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Permissions" }));
+    expect(screen.queryByText("Environment Scope")).not.toBeInTheDocument();
+    expect(screen.queryByText("Production Only")).not.toBeInTheDocument();
+    expect(screen.queryByText("Env Scope")).not.toBeInTheDocument();
+  });
+
+  it("labels a legacy prod-scoped permission as not enforced", () => {
+    setup([{ ...MOCK_PERMISSIONS[0], id: 9, environment_scope: "prod" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Permissions" }));
+    expect(screen.getByText("legacy prod, not enforced")).toBeInTheDocument();
   });
 });

@@ -6,7 +6,15 @@
  *  2. Role check (AuthContext) — user must have at least one portal role.
  *  3. Module/page check (PermissionsContext + ProtectedRoute) — user or their
  *     role must have an explicit permission record for the page they visit.
- *     Admin role bypasses all checks.
+ *     Admin role bypasses this check.
+ *  4. Subscription access (SessionContext + ProtectedRoute) — module pages
+ *     need at least one project / app / subscription grant; without one the
+ *     user is pointed at /access to request it. Super Admins are unrestricted.
+ *
+ * Role-gated pages (RoleGuards):
+ *  • /admin, /admin/permissions — Super Admin only (portal-wide console).
+ *  • /access/manage             — Super Admins and Project Admins.
+ *  • /access                    — every signed-in user.
  *
  * Adding a new page:
  *  1. Import the page component.
@@ -25,6 +33,8 @@ import { peekAccessDenial, clearAccessDenial } from "./config/accessDenial";
 import LeadershipDashboard from "./pages/LeadershipDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
 import PermissionsManagement from "./features/admin/PermissionsManagement";
+import MyAccessPage from "./pages/MyAccessPage";
+import AccessManagementPage from "./pages/AccessManagementPage";
 import KeyVaultPage from "./pages/KeyVaultPage";
 import AKSOperationsPage from "./pages/AKSOperationsPage";
 import CompliancePage from "./pages/CompliancePage";
@@ -36,10 +46,10 @@ import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
 import { SubscriptionProvider } from "./contexts/SubscriptionContext";
-import { PortalAccessGate } from "./contexts/SessionContext";
+import { PortalAccessGate, useSession } from "./contexts/SessionContext";
 import SubscriptionScopePicker from "./components/SubscriptionScopePicker";
 import ProtectedRoute from "./components/ProtectedRoute";
-import AccessDenied from "./components/AccessDenied";
+import { AccessAdminRoute, SuperAdminRoute } from "./components/RoleGuards";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -71,8 +81,9 @@ const BrandMark: React.FC<{ sizeClassName?: string; imageClassName?: string }> =
  * Nav item definition.
  *
  * module/page strings map directly to resource_name values in the backend
- * resource registry.  Leave them undefined for the admin item which uses
- * the role-based isAdmin check instead.
+ * resource registry.  The access and admin entries are rendered separately
+ * because they are role-gated (session isSuperAdmin / adminProjectIds), not
+ * permission-record gated.
  */
 interface NavItem {
   to: string;
@@ -92,11 +103,18 @@ const ALL_NAV_ITEMS: NavItem[] = [
   { to: "/env-scheduler", label: "Env Scheduler",      module: "aks_operations",   page: "env_scheduler" },
 ];
 
+const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+  `px-3 py-2 rounded-md text-sm font-medium transition ${
+    isActive ? "bg-att-50 text-att-600" : "text-gray-600 hover:text-att-500 hover:bg-att-50"
+  }`;
+
 const Navigation: React.FC = () => {
   const msal = isDevMode ? null : useMsal();
   const activeAccount = msal?.instance.getActiveAccount() ?? msal?.accounts?.[0];
   const { isAdmin } = useAuth();
+  const { isSuperAdmin, adminProjectIds } = useSession();
   const { canViewModule, canViewPage, isLoading: permsLoading } = usePermissions();
+  const canManageAccess = isSuperAdmin || adminProjectIds.length > 0;
 
   // Filter nav items to only those the user can view.
   // While permissions are still loading we show all items (they'll be guarded at the route level).
@@ -122,30 +140,22 @@ const Navigation: React.FC = () => {
 
             <div className="hidden md:flex items-center gap-1">
               {visibleNavItems.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.to === "/"}
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${
-                      isActive
-                        ? "bg-att-50 text-att-600"
-                        : "text-gray-600 hover:text-att-500 hover:bg-att-50"
-                    }`
-                  }
-                >
+                <NavLink key={item.to} to={item.to} end={item.to === "/"} className={navLinkClass}>
                   {item.label}
                 </NavLink>
               ))}
-              {isAdmin && (
-                <NavLink
-                  to="/admin"
-                  className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition ${
-                      isActive ? "bg-att-50 text-att-600" : "text-gray-600 hover:text-att-500 hover:bg-att-50"
-                    }`
-                  }
-                >
+              {/* Every signed-in user: see and request project / app access. */}
+              <NavLink to="/access" end className={navLinkClass}>
+                My Access
+              </NavLink>
+              {canManageAccess && (
+                <NavLink to="/access/manage" className={navLinkClass}>
+                  Manage Access
+                </NavLink>
+              )}
+              {/* Portal-wide admin console: Super Admin only (backend-enforced). */}
+              {isSuperAdmin && (
+                <NavLink to="/admin" className={navLinkClass}>
                   Admin
                 </NavLink>
               )}
@@ -296,22 +306,6 @@ const Footer: React.FC = () => (
   </footer>
 );
 
-// ── Admin route guards ─────────────────────────────────────────────────���───────
-
-// Admin pages are role-gated, not permission-record gated, so they cannot go
-// through ProtectedRoute. They still say why access was refused: bouncing a
-// non-admin silently to the dashboard reads as a broken link rather than a
-// denial, and leaves the user retrying a route that will never open.
-const AdminRoute: React.FC = () => {
-  const { isAdmin } = useAuth();
-  return isAdmin ? <AdminDashboard /> : <AccessDenied resourceName="Admin Dashboard" />;
-};
-
-const AdminPermissionsRoute: React.FC = () => {
-  const { isAdmin } = useAuth();
-  return isAdmin ? <PermissionsManagement /> : <AccessDenied resourceName="Access Control" />;
-};
-
 // ── Main app content ───────────────────────────────────────────────────────────
 
 const MainContent: React.FC = () => (
@@ -400,9 +394,36 @@ const MainContent: React.FC = () => (
             }
           />
 
-          {/* Admin — role-gated (admin role only, no resource record needed) */}
-          <Route path="/admin" element={<AdminRoute />} />
-          <Route path="/admin/permissions" element={<AdminPermissionsRoute />} />
+          {/* Project / app / subscription access */}
+          <Route path="/access" element={<MyAccessPage />} />
+          <Route
+            path="/access/manage"
+            element={
+              <AccessAdminRoute label="Access Management">
+                <AccessManagementPage />
+              </AccessAdminRoute>
+            }
+          />
+          {/* Approver notification emails link here. */}
+          <Route path="/access/requests" element={<Navigate to="/access/manage?tab=requests" replace />} />
+
+          {/* Admin console — Super Admin only (role-gated, no resource record needed) */}
+          <Route
+            path="/admin"
+            element={
+              <SuperAdminRoute label="Admin Dashboard">
+                <AdminDashboard />
+              </SuperAdminRoute>
+            }
+          />
+          <Route
+            path="/admin/permissions"
+            element={
+              <SuperAdminRoute label="Access Control">
+                <PermissionsManagement />
+              </SuperAdminRoute>
+            }
+          />
 
           {/* Legacy redirect */}
           <Route path="/optimization" element={<Navigate to="/" replace />} />

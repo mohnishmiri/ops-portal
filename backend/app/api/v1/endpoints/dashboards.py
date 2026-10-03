@@ -187,7 +187,7 @@ async def leadership_dashboard(
     summary="Admin dashboard (subscriptions, users, roles)",
 )
 async def admin_dashboard(
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: DashboardService = Depends(_get_dashboard_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:

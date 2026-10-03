@@ -62,6 +62,8 @@ async def scale_environment(
             user_email=user.email,
         )
         return result
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("environment_scale_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
@@ -80,6 +82,8 @@ async def get_environment_status(
     """Get current deployment status for a namespace."""
     try:
         return await service.get_environment_status(cluster_id, namespace)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("environment_status_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
@@ -127,6 +131,8 @@ async def create_schedule(
             },
         )
         return result
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("schedule_create_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
@@ -155,6 +161,8 @@ async def update_schedule(
             details={"schedule_id": schedule_id, "updated_fields": list(body.model_dump(exclude_none=True).keys())},
         )
         return result
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -181,6 +189,8 @@ async def delete_schedule(
             details={"schedule_id": schedule_id},
         )
         return {"deleted": True}
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("schedule_delete_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
@@ -228,6 +238,8 @@ async def create_sequence(
             status_code=409,
             detail=f"A sequence named '{body.name}' already exists for this cluster/namespace.",
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("sequence_create_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
@@ -256,6 +268,8 @@ async def update_sequence(
             details={"sequence_id": sequence_id, "updated_fields": list(body.model_dump(exclude_none=True).keys())},
         )
         return result
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -282,6 +296,8 @@ async def delete_sequence(
             details={"sequence_id": sequence_id},
         )
         return {"deleted": True}
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("sequence_delete_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
@@ -321,6 +337,8 @@ async def start_sequence(
             },
         )
         return result
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -359,6 +377,8 @@ async def stop_sequence(
             },
         )
         return result
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -409,6 +429,8 @@ async def run_schedule_now(
             },
         )
         return result
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:

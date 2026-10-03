@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.subscription_resolver import get_monitored_subscription_ids
-from app.models.database import AdminSubscription, UserSubscriptionPreference
+from app.models.database import AdminSubscription, Project, ProjectApp, UserSubscriptionPreference
 
 logger = structlog.get_logger(__name__)
 
@@ -63,26 +63,42 @@ class UserPreferenceService:
         )
         return cleaned
 
-    async def list_available_subscriptions(self, user_id: str) -> list[dict]:
-        """Monitored subscriptions available for the picker."""
+    async def list_available_subscriptions(
+        self,
+        user_id: str,
+        *,
+        allowed: frozenset[str] | None = None,
+    ) -> list[dict]:
+        """Monitored subscriptions available for the picker.
+
+        ``allowed`` (lower-case IDs) limits the list to what the user has been
+        granted; ``None`` means unrestricted.  Each entry carries its project,
+        app and tier so the picker can group them.
+        """
         monitored = await get_monitored_subscription_ids()
         if not monitored:
             return []
+        if allowed is not None:
+            monitored = [sub_id for sub_id in monitored if sub_id.lower() in allowed]
+            if not monitored:
+                return []
 
         result = await self._db.execute(
-            select(AdminSubscription).where(
+            select(AdminSubscription, ProjectApp, Project)
+            .outerjoin(ProjectApp, AdminSubscription.app_id == ProjectApp.id)
+            .outerjoin(Project, ProjectApp.project_id == Project.id)
+            .where(
                 AdminSubscription.subscription_id.in_(monitored),
                 AdminSubscription.enabled.is_(True),
                 AdminSubscription.monitored.is_(True),
             )
         )
-        rows = result.scalars().all()
-        by_id = {row.subscription_id: row for row in rows}
+        by_id = {row.subscription_id: (row, app, project) for row, app, project in result.all()}
         selected = set(await self.get_selected_subscription_ids(user_id))
 
         available: list[dict] = []
         for sub_id in monitored:
-            row = by_id.get(sub_id)
+            row, app, project = by_id.get(sub_id, (None, None, None))
             available.append(
                 {
                     "subscription_id": sub_id,
@@ -90,6 +106,12 @@ class UserPreferenceService:
                     "environment": row.environment if row else None,
                     "state": row.state if row else "Unknown",
                     "selected": sub_id in selected if selected else True,
+                    "tier": (row.tier if row and row.tier in ("prod", "nonprod") else "prod") if row else None,
+                    "app_id": app.id if app else None,
+                    "app_name": app.name if app else None,
+                    "app_code": app.app_code if app else None,
+                    "project_id": project.id if project else None,
+                    "project_name": project.name if project else None,
                 }
             )
         return available

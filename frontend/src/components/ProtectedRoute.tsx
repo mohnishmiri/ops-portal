@@ -11,6 +11,13 @@
  *
  * Fallback (not admin, permission denied) → renders <AccessDenied />.
  *
+ * Subscription access: a module page shows data for the subscriptions the
+ * user was granted. With no grant at all every module API answers 403, so a
+ * user without subscription access (and not a Super Admin) gets the
+ * <NoSubscriptionAccess /> panel pointing at /access instead of a page that
+ * loads and fails. This applies to admins too — a Project Admin's access
+ * comes from their projects, not from the Entra role.
+ *
  * Extending:
  *  Add new module/page names to resource_registry.py on the backend.
  *  The ProtectedRoute checks whatever strings you pass in — no frontend
@@ -20,7 +27,9 @@
 import React, { ReactNode } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
+import { useSession } from "../contexts/SessionContext";
 import AccessDenied from "./AccessDenied";
+import NoSubscriptionAccess from "./NoSubscriptionAccess";
 
 interface ProtectedRouteProps {
   children: ReactNode;
@@ -40,9 +49,16 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
 }) => {
   const { isAdmin } = useAuth();
   const { isLoading, canViewModule, canViewPage } = usePermissions();
+  const { isSuperAdmin, hasSubscriptionAccess } = useSession();
 
-  // Admins always pass
-  if (isAdmin) return <>{children}</>;
+  // No grant yet → nothing to show on any module page. Checked after the
+  // permission check below, so a page the user may never open still says
+  // "Access Denied" rather than inviting a request that would not help.
+  const noSubscriptions = Boolean(module || page) && !isSuperAdmin && !hasSubscriptionAccess;
+  const noSubscriptionsPanel = <NoSubscriptionAccess resourceName={label ?? page ?? module} />;
+
+  // Admins always pass the module/page permission check
+  if (isAdmin) return noSubscriptions ? noSubscriptionsPanel : <>{children}</>;
 
   // While loading permissions, show a neutral spinner
   if (isLoading) {
@@ -60,6 +76,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   if (!moduleAllowed || !pageAllowed) {
     return <AccessDenied resourceName={label ?? page ?? module} />;
   }
+
+  if (noSubscriptions) return noSubscriptionsPanel;
 
   return <>{children}</>;
 };

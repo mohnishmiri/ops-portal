@@ -128,7 +128,7 @@ async def _write_audit(
 # ── Resource endpoints ────────────────────────────────────────────────────────
 
 
-@router.post("/resources", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.post("/resources", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def create_resource(
     request: Request,
     req: ResourceCreateRequest,
@@ -166,14 +166,14 @@ async def create_resource(
     return JSONResponse(content=jsonable_encoder(_resource_to_dict(resource)))
 
 
-@router.get("/resources", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.get("/resources", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def list_resources(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Resource).order_by(Resource.resource_type, Resource.resource_name))
     rows = result.scalars().all()
     return JSONResponse(content=jsonable_encoder([_resource_to_dict(r) for r in rows]))
 
 
-@router.get("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.get("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def get_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Resource).where(Resource.id == resource_id))
     resource = result.scalar_one_or_none()
@@ -182,7 +182,7 @@ async def get_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
     return JSONResponse(content=jsonable_encoder(_resource_to_dict(resource)))
 
 
-@router.patch("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.patch("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def update_resource(
     resource_id: int,
     request: Request,
@@ -214,7 +214,7 @@ async def update_resource(
     return JSONResponse(content=jsonable_encoder(_resource_to_dict(resource)))
 
 
-@router.delete("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.delete("/resources/{resource_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def delete_resource(
     resource_id: int,
     request: Request,
@@ -249,7 +249,7 @@ async def delete_resource(
 # ── Permission endpoints ──────────────────────────────────────────────────────
 
 
-@router.post("/permissions", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.post("/permissions", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def create_permission(
     request: Request,
     req: PermissionCreateRequest,
@@ -308,7 +308,7 @@ async def create_permission(
     return JSONResponse(content=jsonable_encoder(_permission_to_dict(perm)))
 
 
-@router.get("/permissions", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.get("/permissions", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def list_permissions(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Permission, Resource)
@@ -323,7 +323,7 @@ async def list_permissions(db: AsyncSession = Depends(get_db)):
     return JSONResponse(content=jsonable_encoder(output))
 
 
-@router.delete("/permissions/{permission_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.delete("/permissions/{permission_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def delete_permission(
     permission_id: int,
     request: Request,
@@ -388,7 +388,7 @@ def _audit_to_dict(entry: AuditLog) -> dict:
     }
 
 
-@router.get("/audit-log", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.get("/audit-log", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def list_audit_log(
     days: int = Query(default=30, ge=1, le=365, description="Days of history"),
     limit: int = Query(default=200, ge=1, le=1000, description="Max records"),
@@ -462,7 +462,7 @@ def _team_to_dict_raw(team_id, team_name, description, created_at, updated_at) -
     }
 
 
-@router.post("/teams", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.post("/teams", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def create_team(
     request: Request,
     req: TeamCreateRequest,
@@ -503,7 +503,7 @@ async def create_team(
     return JSONResponse(content=jsonable_encoder(response_data))
 
 
-@router.get("/teams", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.get("/teams", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def list_teams(db: AsyncSession = Depends(get_db)):
     """List all teams with their members."""
     from sqlalchemy.orm import selectinload
@@ -515,7 +515,7 @@ async def list_teams(db: AsyncSession = Depends(get_db)):
     return JSONResponse(content=jsonable_encoder([_team_to_dict(t, include_members=True) for t in teams]))
 
 
-@router.get("/teams/{team_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.get("/teams/{team_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def get_team(team_id: int, db: AsyncSession = Depends(get_db)):
     """Get a single team with members."""
     from sqlalchemy.orm import selectinload
@@ -529,7 +529,7 @@ async def get_team(team_id: int, db: AsyncSession = Depends(get_db)):
     return JSONResponse(content=jsonable_encoder(_team_to_dict(team, include_members=True)))
 
 
-@router.delete("/teams/{team_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.delete("/teams/{team_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def delete_team(
     team_id: int,
     request: Request,
@@ -559,7 +559,7 @@ async def delete_team(
     return JSONResponse(content={"deleted": True, "team_id": team_id})
 
 
-@router.post("/teams/{team_id}/members", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.post("/teams/{team_id}/members", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def add_team_member(
     team_id: int,
     request: Request,
@@ -612,7 +612,7 @@ async def add_team_member(
     )
 
 
-@router.delete("/teams/{team_id}/members/{member_user_id}", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.delete("/teams/{team_id}/members/{member_user_id}", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def remove_team_member(
     team_id: int,
     member_user_id: str,
@@ -655,7 +655,7 @@ async def remove_team_member(
 # ── Resource sync endpoint ─────────────────────────────────────────────────────
 
 
-@router.post("/resources/sync", dependencies=[Depends(require_role(UserRole.ADMIN))])
+@router.post("/resources/sync", dependencies=[Depends(require_role(UserRole.SUPER_ADMIN))])
 async def sync_resources(
     request: Request,
     db: AsyncSession = Depends(get_db),

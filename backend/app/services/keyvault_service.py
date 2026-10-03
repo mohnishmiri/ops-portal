@@ -290,8 +290,12 @@ class KeyVaultService:
     # ── Vault Discovery ────────────────────────────────────────────────
 
     async def list_vaults(self, *, refresh: bool = False) -> list[dict]:
-        """List all Key Vaults across monitored subscriptions. Handles pagination."""
-        cache_key = "kv:vaults:all"
+        """List all Key Vaults across the caller's subscriptions. Handles pagination."""
+        subscription_ids = await get_scoped_subscription_ids()
+        # The key carries the scope: one shared entry would hand the vaults of
+        # whoever filled it to every other user.
+        scope_hash = hashlib.sha256(",".join(sorted(s.lower() for s in subscription_ids)).encode()).hexdigest()[:16]
+        cache_key = f"kv:vaults:{scope_hash}"
         if refresh:
             await self._invalidate_cache(cache_key)
         else:
@@ -300,7 +304,7 @@ class KeyVaultService:
                 return cached
 
         vaults = []
-        for sub_id in await get_scoped_subscription_ids():
+        for sub_id in subscription_ids:
             try:
                 url: str | None = (
                     f"{ARM_API}/subscriptions/{sub_id}"

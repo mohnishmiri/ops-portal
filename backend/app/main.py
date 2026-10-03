@@ -249,6 +249,19 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("resource_seed_failed", error=str(exc)[:300])
 
+    # One-time move to the project access model: Commissions project, apps
+    # from subscription names, and the transition grant that keeps everyone's
+    # current access.  A no-op once done; the lock stops replicas racing.
+    try:
+        from app.core.database import get_db_session
+        from app.services.access_service import AccessService
+
+        if await _claim_startup_task_lock("access_bootstrap", ttl_seconds=120):
+            async for db in get_db_session():
+                await AccessService(db).bootstrap()
+    except Exception as exc:
+        logger.error("access_bootstrap_failed", error=str(exc)[:300])
+
     # When running tests, skip non-essential background startup tasks
     skip_background = settings.ENVIRONMENT == "test"
 

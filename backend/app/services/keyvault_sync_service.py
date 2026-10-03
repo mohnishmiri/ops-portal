@@ -19,7 +19,10 @@ import structlog
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.access_scope import subscription_scope_clause
 from app.core.database import get_db_session
+from app.core.subscription_resolver import get_monitored_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     KeyVaultCertSnapshot,
     KeyVaultKeySnapshot,
@@ -183,9 +186,14 @@ class KeyVaultSyncService:
             # Only if we have ALL vault URIs from discovery (no permanent failures)
             all_azure_uris = {v["vault_uri"] for v in vaults}
             if current_uris:
-                stale = await self.db.execute(
-                    select(KeyVaultSnapshot).where(KeyVaultSnapshot.vault_uri.notin_(all_azure_uris))
-                )
+                stale_stmt = select(KeyVaultSnapshot).where(KeyVaultSnapshot.vault_uri.notin_(all_azure_uris))
+                synced = await get_scoped_subscription_ids()
+                if set(synced) != set(await get_monitored_subscription_ids()):
+                    # A sync started from a narrowed scope (a restricted user,
+                    # or anyone with a picker selection) discovered only those
+                    # subscriptions; everyone else's vaults are not "gone".
+                    stale_stmt = stale_stmt.where(KeyVaultSnapshot.subscription_id.in_(synced))
+                stale = await self.db.execute(stale_stmt)
                 for row in stale.scalars().all():
                     await self.db.delete(row)
                 await self.db.commit()
@@ -672,8 +680,12 @@ class KeyVaultSyncService:
         }
 
     async def get_vaults_from_db(self) -> list[dict] | None:
-        """Return vault list from PG. Returns None if empty."""
-        result = await self.db.execute(select(KeyVaultSnapshot).order_by(KeyVaultSnapshot.name))
+        """Return the caller's vaults from PG. Returns None if empty."""
+        stmt = select(KeyVaultSnapshot).order_by(KeyVaultSnapshot.name)
+        clause = subscription_scope_clause(KeyVaultSnapshot.subscription_id)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        result = await self.db.execute(stmt)
         rows = result.scalars().all()
         if not rows:
             return None

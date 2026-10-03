@@ -13,6 +13,7 @@
  */
 
 import React, { useState } from "react";
+import { Link } from "react-router-dom";
 import {
   useResources,
   usePermissions,
@@ -308,7 +309,6 @@ const PermissionsTab: React.FC = () => {
   const [subjectId, setSubjectId] = useState("");
   const [resourceId, setResourceId] = useState<number | "">("");
   const [permType, setPermType] = useState("view");
-  const [envScope, setEnvScope] = useState("all");
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -318,7 +318,10 @@ const PermissionsTab: React.FC = () => {
       subject_id: subjectId.trim(),
       resource_id: Number(resourceId),
       permission_type: permType,
-      environment_scope: envScope,
+      // The per-permission environment scope was never enforced by the
+      // backend. Prod / Non-Prod is now controlled by subscription grants in
+      // Access Management, so every new permission applies to all tiers.
+      environment_scope: "all",
     });
     setSubjectId(""); setResourceId("");
   };
@@ -333,8 +336,13 @@ const PermissionsTab: React.FC = () => {
     <div className="space-y-6">
       {/* Grant permission form */}
       <div className="bg-white rounded-xl p-6 shadow-sm border">
-        <h2 className="text-base font-semibold text-gray-800 mb-4">Grant Permission</h2>
-        <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+        <h2 className="text-base font-semibold text-gray-800 mb-1">Grant Permission</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Permissions decide which pages and operations someone can use. Which subscriptions — and whether Prod or
+          Non-Prod — is decided by project / app grants in{" "}
+          <Link to="/access/manage" className="font-semibold text-att-600 hover:text-att-700">Access Management</Link>.
+        </p>
+        <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Subject Type</label>
             <select value={subjectType} onChange={(e) => { setSubjectType(e.target.value); setSubjectId(""); }}
@@ -400,16 +408,7 @@ const PermissionsTab: React.FC = () => {
               <option value="edit">View + Edit</option>
             </select>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Environment Scope</label>
-            <select value={envScope} onChange={(e) => setEnvScope(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-att-400">
-              <option value="all">All Environments</option>
-              <option value="prod">Production Only</option>
-              <option value="nonprod">Non-Production Only</option>
-            </select>
-          </div>
-          <div className="md:col-span-2 lg:col-span-5">
+          <div className="md:col-span-2 lg:col-span-4">
             <button type="submit" disabled={createPerm.isPending || !subjectId.trim() || !resourceId}
               className="px-5 py-2 bg-att-400 text-white rounded-lg text-sm font-semibold hover:bg-att-500 disabled:opacity-50 transition">
               {createPerm.isPending ? "Granting…" : "Grant Permission"}
@@ -434,15 +433,14 @@ const PermissionsTab: React.FC = () => {
                 <th className="py-2 px-3">Resource</th>
                 <th className="py-2 px-3">Resource Type</th>
                 <th className="py-2 px-3 text-center">Access</th>
-                <th className="py-2 px-3 text-center">Env Scope</th>
                 <th className="py-2 px-3 text-center">Revoke</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={6} className="py-4 text-center text-gray-400">Loading…</td></tr>
+                <tr><td colSpan={5} className="py-4 text-center text-gray-400">Loading…</td></tr>
               ) : permissions.length === 0 ? (
-                <tr><td colSpan={6} className="py-4 text-center text-gray-300">No permissions granted yet</td></tr>
+                <tr><td colSpan={5} className="py-4 text-center text-gray-300">No permissions granted yet</td></tr>
               ) : permissions.map((p) => (
                 <tr key={p.id} className="border-t hover:bg-gray-50">
                   <td className="py-2 px-3">
@@ -459,15 +457,16 @@ const PermissionsTab: React.FC = () => {
                   </td>
                   <td className="py-2 px-3 text-center">
                     <Badge variant={p.permission_type as any}>{p.permission_type}</Badge>
-                  </td>
-                  <td className="py-2 px-3 text-center">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
-                      p.environment_scope === "prod" ? "bg-red-100 text-red-700" :
-                      p.environment_scope === "nonprod" ? "bg-blue-100 text-blue-700" :
-                      "bg-gray-100 text-gray-600"
-                    }`}>
-                      {p.environment_scope ?? "all"}
-                    </span>
+                    {/* Rows created before the scope control was removed keep their
+                        value, but it never restricted anything — say so. */}
+                    {p.environment_scope && p.environment_scope !== "all" && (
+                      <span
+                        className="ml-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500"
+                        title={`Legacy "${p.environment_scope}" environment scope — never enforced. Use Prod / Non-Prod grants in Access Management.`}
+                      >
+                        legacy {p.environment_scope}, not enforced
+                      </span>
+                    )}
                   </td>
                   <td className="py-2 px-3 text-center">
                     <ConfirmButton
@@ -921,9 +920,11 @@ const PermissionsManagement: React.FC = () => {
   return (
     <div className="space-y-4 py-4">
       <div>
-        <h1 className="text-xl font-bold text-gray-900">Access Management</h1>
+        <h1 className="text-xl font-bold text-gray-900">Module &amp; Page Permissions</h1>
         <p className="text-sm text-gray-500">
-          Manage module and page-level permissions. Admin users always have full access.
+          Manage module and page-level permissions. Admin users always have full access. Subscription access
+          (projects, apps, Prod / Non-Prod) is managed in{" "}
+          <Link to="/access/manage" className="font-semibold text-att-600 hover:text-att-700">Access Management</Link>.
         </p>
       </div>
 

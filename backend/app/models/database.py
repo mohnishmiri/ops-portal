@@ -107,6 +107,162 @@ class TeamMembership(Base):
 
 
 # =============================================================================
+# PROJECT / APP / SUBSCRIPTION ACCESS
+# =============================================================================
+#
+# Roles say *what* a user may do; these tables say *where*.  The hierarchy is
+# Project (e.g. Commissions) → App (e.g. ATTCC) → Subscription (Prod or
+# Non-Prod).  Resolution and the rules live in app.core.access_scope.
+
+
+class Project(Base):
+    """A business portfolio of apps, e.g. Commissions or BDS."""
+
+    __tablename__ = "projects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_key = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_by = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String(255), nullable=True)
+
+
+class ProjectApp(Base):
+    """An application inside a project, e.g. ATTCC (31599).  Owns subscriptions."""
+
+    __tablename__ = "project_apps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    # The numeric AppID used in subscription names (ACC-PROD-31599-ATTCC).
+    app_code = Column(String(32), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_by = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String(255), nullable=True)
+
+
+class ProjectAdmin(Base):
+    """Assigns a user (who holds the Entra Admin role) to administer a project."""
+
+    __tablename__ = "project_admins"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    user_email = Column(String(255), nullable=True)
+    granted_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_admin_user"),)
+
+
+class PortalUser(Base):
+    """Every authorized user seen at sign-in, so admins can pick them for grants.
+
+    The portal's identity has no directory read permission, so this is the
+    only list of people an admin can choose from.
+    """
+
+    __tablename__ = "portal_users"
+
+    user_id = Column(String(255), primary_key=True)
+    object_id = Column(String(255), nullable=True, index=True)
+    email = Column(String(255), nullable=True, index=True)
+    display_name = Column(String(255), nullable=True)
+    # Comma-separated portal roles from the user's last sign-in.
+    roles = Column(String(255), nullable=True)
+    first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AccessGrant(Base):
+    """Gives a user read or write on a project, an app, or one subscription.
+
+    ``scope_type`` is ``project`` / ``app`` / ``subscription``.  Project and app
+    grants name a ``tier`` (``prod`` / ``nonprod``) and cover subscriptions added
+    to that project or app later.  ``project_id`` is always set so project
+    admins can list the grants they are responsible for.
+
+    ``subject_type`` ``everyone`` (subject_id ``*``) is the go-live transition
+    grant that keeps existing users' access until a Super Admin removes it.
+    """
+
+    __tablename__ = "access_grants"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    subject_type = Column(String(20), nullable=False, default="user")
+    subject_id = Column(String(255), nullable=False, index=True)
+    subject_email = Column(String(255), nullable=True)
+    scope_type = Column(String(20), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    app_id = Column(Integer, ForeignKey("project_apps.id", ondelete="CASCADE"), nullable=True, index=True)
+    subscription_id = Column(String(100), nullable=True, index=True)
+    tier = Column(String(10), nullable=True)
+    level = Column(String(10), nullable=False, default="read")
+    request_item_id = Column(Integer, nullable=True)
+    granted_by = Column(String(255), nullable=True)
+    granted_by_email = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (Index("ix_access_grants_subject", "subject_type", "subject_id"),)
+
+
+class AccessRequest(Base):
+    """A user's request for access; approved or rejected line by line."""
+
+    __tablename__ = "access_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    requester_id = Column(String(255), nullable=False, index=True)
+    requester_email = Column(String(255), nullable=True)
+    requester_name = Column(String(255), nullable=True)
+    justification = Column(Text, nullable=False)
+    # pending | approved | rejected | partially_approved | cancelled
+    status = Column(String(30), nullable=False, default="pending", index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    items = relationship(
+        "AccessRequestItem",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="AccessRequestItem.id",
+    )
+
+
+class AccessRequestItem(Base):
+    """One requested scope (project or app, tier, level) inside a request."""
+
+    __tablename__ = "access_request_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_id = Column(Integer, ForeignKey("access_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    scope_type = Column(String(20), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    app_id = Column(Integer, ForeignKey("project_apps.id", ondelete="CASCADE"), nullable=True)
+    tier = Column(String(10), nullable=False)
+    requested_level = Column(String(10), nullable=False)
+    # pending | approved | rejected | cancelled
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    granted_level = Column(String(10), nullable=True)
+    decided_by = Column(String(255), nullable=True)
+    decided_by_email = Column(String(255), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_comment = Column(Text, nullable=True)
+    grant_id = Column(Integer, nullable=True)
+
+    request = relationship("AccessRequest", back_populates="items")
+
+
+# =============================================================================
 # COMMON / SHARED MODELS
 # =============================================================================
 
@@ -1183,6 +1339,11 @@ class AdminSubscription(Base):
     enabled = Column(Boolean, nullable=False, default=True)
     monitored = Column(Boolean, nullable=False, default=True)
     environment = Column(String(50), nullable=True)  # dev, staging, prod, etc.
+    # Access placement: the app this subscription belongs to and its tier
+    # ('prod' / 'nonprod').  Unplaced subscriptions are visible to Super
+    # Admins only; an unset tier counts as prod.
+    app_id = Column(Integer, ForeignKey("project_apps.id"), nullable=True, index=True)
+    tier = Column(String(10), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

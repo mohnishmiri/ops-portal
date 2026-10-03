@@ -47,7 +47,7 @@ async def send_notification(
 async def send_budget_alert(
     subscription_id: str,
     threshold_pct: float,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: NotificationService = Depends(_get_notification_service),
 ) -> NotificationLog:
     """Send budget threshold exceeded alert."""
@@ -64,7 +64,7 @@ async def send_budget_alert(
 )
 async def get_notification_history(
     limit: int = 50,
-    user: UserContext = Depends(require_role(UserRole.ADMIN)),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: NotificationService = Depends(_get_notification_service),
 ) -> list[NotificationLog]:
     """List previously sent notifications."""

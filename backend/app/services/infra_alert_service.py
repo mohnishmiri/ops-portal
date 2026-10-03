@@ -16,6 +16,7 @@ from azure.mgmt.monitor import MonitorManagementClient
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.access_scope import assert_resource_access
 from app.core.azure_auth import get_azure_credential
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
@@ -99,6 +100,20 @@ class InfraAlertService:
 
         monitored_set = set(monitored_subscription_ids)
         return [subscription_id] if subscription_id in monitored_set else []
+
+    async def _assert_row_writable(self, config_model, *, config_id=None, alert_model=None, alert_id=None) -> None:
+        """403 unless the caller may change the subscription a config (or an
+        alert's config) belongs to.  These routes address rows by database ID,
+        so the request itself names no subscription to check."""
+        stmt = select(config_model.subscription_id)
+        if alert_model is not None:
+            stmt = stmt.join(alert_model, alert_model.config_id == config_model.id).where(alert_model.id == alert_id)
+        else:
+            stmt = stmt.where(config_model.id == config_id)
+        subscription_id = (await self.db.execute(stmt)).scalar_one_or_none()
+        if subscription_id is not None:
+            context = f"{(alert_model or config_model).__tablename__} {alert_id or config_id}"
+            assert_resource_access(subscription_id, "write", context=context)
 
     # =========================================================================
     # A. VM THRESHOLD ALERT CONFIGURATION
@@ -196,6 +211,7 @@ class InfraAlertService:
         """Update a VM threshold alert configuration."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(VMThresholdAlertConfig, config_id=config_id)
 
         result = await self.db.execute(select(VMThresholdAlertConfig).where(VMThresholdAlertConfig.id == config_id))
         config = result.scalar_one_or_none()
@@ -225,6 +241,7 @@ class InfraAlertService:
         """Delete a VM threshold alert configuration."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(VMThresholdAlertConfig, config_id=config_id)
 
         await self.db.execute(delete(VMThresholdAlertConfig).where(VMThresholdAlertConfig.id == config_id))
         await self._db_commit()
@@ -291,6 +308,7 @@ class InfraAlertService:
         """Acknowledge a VM threshold alert."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(VMThresholdAlertConfig, alert_model=VMThresholdAlert, alert_id=alert_id)
 
         result = await self.db.execute(select(VMThresholdAlert).where(VMThresholdAlert.id == alert_id))
         alert = result.scalar_one_or_none()
@@ -335,6 +353,7 @@ class InfraAlertService:
         """Resolve a VM threshold alert."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(VMThresholdAlertConfig, alert_model=VMThresholdAlert, alert_id=alert_id)
 
         result = await self.db.execute(select(VMThresholdAlert).where(VMThresholdAlert.id == alert_id))
         alert = result.scalar_one_or_none()
@@ -1150,6 +1169,7 @@ class InfraAlertService:
         """Update a storage alert configuration."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(StorageAlertConfig, config_id=config_id)
 
         result = await self.db.execute(select(StorageAlertConfig).where(StorageAlertConfig.id == config_id))
         config = result.scalar_one_or_none()
@@ -1179,6 +1199,7 @@ class InfraAlertService:
         """Delete a storage alert configuration."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(StorageAlertConfig, config_id=config_id)
 
         await self.db.execute(delete(StorageAlertConfig).where(StorageAlertConfig.id == config_id))
         await self._db_commit()
@@ -1281,6 +1302,7 @@ class InfraAlertService:
         """Update a PG Flexible Server alert configuration."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(PGFlexServerAlertConfig, config_id=config_id)
 
         result = await self.db.execute(select(PGFlexServerAlertConfig).where(PGFlexServerAlertConfig.id == config_id))
         config = result.scalar_one_or_none()
@@ -1310,6 +1332,7 @@ class InfraAlertService:
         """Delete a PG Flexible Server alert configuration."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(PGFlexServerAlertConfig, config_id=config_id)
 
         await self.db.execute(delete(PGFlexServerAlertConfig).where(PGFlexServerAlertConfig.id == config_id))
         await self._db_commit()
@@ -1377,6 +1400,7 @@ class InfraAlertService:
         """Acknowledge a PG Flexible Server alert."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(PGFlexServerAlertConfig, alert_model=PGFlexServerAlert, alert_id=alert_id)
 
         result = await self.db.execute(select(PGFlexServerAlert).where(PGFlexServerAlert.id == alert_id))
         alert = result.scalar_one_or_none()
@@ -1421,6 +1445,7 @@ class InfraAlertService:
         """Resolve a PG Flexible Server alert."""
         if self.db is None:
             return {"error": "Database unavailable"}
+        await self._assert_row_writable(PGFlexServerAlertConfig, alert_model=PGFlexServerAlert, alert_id=alert_id)
 
         result = await self.db.execute(select(PGFlexServerAlert).where(PGFlexServerAlert.id == alert_id))
         alert = result.scalar_one_or_none()

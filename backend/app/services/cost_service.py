@@ -16,7 +16,7 @@ from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -25,7 +25,7 @@ from app.core.azure_auth import get_azure_credential
 from app.core.azure_throttle import AZURE_API_SEMAPHORE, acquire_for_scope
 from app.core.config import settings
 from app.core.db_cache import cache_manager
-from app.core.subscription_scope import get_scoped_subscription_ids
+from app.core.subscription_scope import get_scoped_subscription_ids, scope_is_full
 from app.models.cost import (
     CostBreakdownResponse,
     CostByGroup,
@@ -763,7 +763,14 @@ class CostService:
             return None
 
         env_upper = environment.upper()
+        # Portal-wide totals for a full scope; a narrower scope gets its own
+        # figures and its own cache entry.
+        scoped_ids: list[str] | None = None
         cache_key = f"pagecache:env-breakdown:{env_upper}:{num_months}"
+        if not await scope_is_full():
+            scoped_ids = sorted(s.lower() for s in await get_scoped_subscription_ids())
+            scope_hash = hashlib.sha256(",".join(scoped_ids).encode()).hexdigest()[:16]
+            cache_key = f"{cache_key}:scope:{scope_hash}"
         cached = await cache_manager.get_cached(cache_key)
         if cached:
             try:
@@ -791,6 +798,8 @@ class CostService:
             AmortizedCostRecord.cost_date >= start_str,
             AmortizedCostRecord.cost_date <= end_str,
         )
+        if scoped_ids is not None:
+            stmt = stmt.where(func.lower(AmortizedCostRecord.subscription_id).in_(scoped_ids))
 
         result = await self._db.execute(stmt)
         records = result.all()
@@ -988,6 +997,15 @@ class CostService:
             .where(
                 AmortizedCostRecord.cost_date >= start.isoformat(),
                 AmortizedCostRecord.cost_date <= end.isoformat(),
+                *(
+                    []
+                    if await scope_is_full()
+                    else [
+                        _func.lower(AmortizedCostRecord.subscription_id).in_(
+                            [s.lower() for s in await get_scoped_subscription_ids()]
+                        )
+                    ]
+                ),
             )
             .group_by(
                 AmortizedCostRecord.cost_date,

@@ -22,46 +22,95 @@
  * server-side regardless of what this component renders.
  */
 
-import React, { createContext, useContext, ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { createContext, useCallback, useContext, useEffect, ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import apiClient from "../services/apiClient";
+import { NO_SUBSCRIPTION_ACCESS_EVENT } from "../services/accessEvents";
 import { isDevMode } from "../config/authConfig";
 import PortalAccessDenied from "../components/PortalAccessDenied";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Where the user may work: project / app / subscription access.
+ *
+ * Counts are null for a Super Admin, who is unrestricted.
+ */
+export interface PortalAccessSummary {
+  has_subscription_access: boolean;
+  /** Projects this user administers (Project Admin). Empty for a Super Admin. */
+  admin_project_ids: number[];
+  readable_count?: number | null;
+  writable_count?: number | null;
+}
 
 export interface PortalSession {
   authenticated: boolean;
   authorized: boolean;
   user?: { user_id: string; display_name: string; email: string };
   roles: string[];
+  /** True for both Admin (Project Admin) and Super Admin. */
   is_admin: boolean;
+  /** Entra-only role that manages every project and the admin console. */
+  is_super_admin?: boolean;
   can_write: boolean;
   /** Upper-cased capability names, e.g. "AKS_POD_DELETE". */
   permissions: string[];
+  access?: PortalAccessSummary;
 }
 
 interface SessionCtx {
   session: PortalSession | null;
   /** True when the backend granted the named capability. */
   hasCapability: (capability: string) => boolean;
+  /** Super Admin — the only role that may open the portal-wide admin console. */
+  isSuperAdmin: boolean;
+  /**
+   * False when the user holds no grant at all, so every module API would
+   * answer 403. Always true for a Super Admin.
+   */
+  hasSubscriptionAccess: boolean;
+  /** Projects the user administers as a Project Admin. */
+  adminProjectIds: number[];
+  /** Re-read /auth/session (after an approval, a revocation, or a "no subscription" 403). */
+  refreshSession: () => void;
 }
 
 const DEV_SESSION: PortalSession = {
   authenticated: true,
   authorized: true,
-  roles: ["admin"],
+  // Mirrors the backend's development bypass user, which is a Super Admin.
+  roles: ["super_admin"],
   is_admin: true,
+  is_super_admin: true,
   can_write: true,
   permissions: [],
+  access: { has_subscription_access: true, admin_project_ids: [], readable_count: null, writable_count: null },
 };
 
-const SessionContext = createContext<SessionCtx>({
+/** Derive the access helpers exposed on the context from a session payload. */
+export function sessionAccess(session: PortalSession): Pick<SessionCtx, "isSuperAdmin" | "hasSubscriptionAccess" | "adminProjectIds"> {
+  const isSuperAdmin = Boolean(session.is_super_admin);
+  return {
+    isSuperAdmin,
+    // A backend that predates project access sends no `access` block; fail
+    // open in the UI (the backend still enforces every call) rather than
+    // telling every user they have no access.
+    hasSubscriptionAccess: isSuperAdmin || (session.access ? Boolean(session.access.has_subscription_access) : true),
+    adminProjectIds: session.access?.admin_project_ids ?? [],
+  };
+}
+
+const DEV_CTX: SessionCtx = {
   session: DEV_SESSION,
   // Dev mode has no backend session to consult — grant everything, matching
   // the backend's development auth bypass.
   hasCapability: () => true,
-});
+  ...sessionAccess(DEV_SESSION),
+  refreshSession: () => {},
+};
+
+const SessionContext = createContext<SessionCtx>(DEV_CTX);
 
 // ── Gate ──────────────────────────────────────────────────────────────────────
 
@@ -72,7 +121,8 @@ const CenteredCard: React.FC<{ children: ReactNode }> = ({ children }) => (
 );
 
 export const PortalAccessGate: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const { data, isLoading, isError, refetch, isFetching } = useQuery<PortalSession>({
+  const queryClient = useQueryClient();
+  const { data, isLoading, refetch, isFetching } = useQuery<PortalSession>({
     queryKey: ["auth", "session"],
     queryFn: async () => (await apiClient.get<PortalSession>("/auth/session")).data,
     // A 401 is handled by the apiClient interceptor (silent refresh, then
@@ -83,12 +133,21 @@ export const PortalAccessGate: React.FC<{ children: ReactNode }> = ({ children }
     enabled: !isDevMode,
   });
 
+  const refreshSession = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["auth", "session"] });
+  }, [queryClient]);
+
+  // A module API refused the call for lack of any subscription: the cached
+  // session is stale (e.g. a grant was revoked), so re-read it and let the
+  // routes switch to the "request access" panel.
+  useEffect(() => {
+    if (isDevMode) return undefined;
+    window.addEventListener(NO_SUBSCRIPTION_ACCESS_EVENT, refreshSession);
+    return () => window.removeEventListener(NO_SUBSCRIPTION_ACCESS_EVENT, refreshSession);
+  }, [refreshSession]);
+
   if (isDevMode) {
-    return (
-      <SessionContext.Provider value={{ session: DEV_SESSION, hasCapability: () => true }}>
-        {children}
-      </SessionContext.Provider>
-    );
+    return <SessionContext.Provider value={DEV_CTX}>{children}</SessionContext.Provider>;
   }
 
   if (isLoading) {
@@ -104,8 +163,9 @@ export const PortalAccessGate: React.FC<{ children: ReactNode }> = ({ children }
 
   // Distinguish "we could not determine your access" from "you are denied".
   // Telling an entitled user they are unauthorized because of a transient
-  // backend error would be its own kind of outage.
-  if (isError || !data) {
+  // backend error would be its own kind of outage. A failed *background*
+  // refresh keeps the last known session rather than blanking the portal.
+  if (!data) {
     return (
       <CenteredCard>
         <div className="bg-white rounded-2xl shadow-xl border border-amber-100 p-10 max-w-md w-full text-center">
@@ -132,6 +192,8 @@ export const PortalAccessGate: React.FC<{ children: ReactNode }> = ({ children }
   const ctx: SessionCtx = {
     session: data,
     hasCapability: (capability) => data.permissions.includes(capability.toUpperCase()),
+    ...sessionAccess(data),
+    refreshSession,
   };
 
   return <SessionContext.Provider value={ctx}>{children}</SessionContext.Provider>;

@@ -9,8 +9,13 @@ from pydantic import BaseModel, Field
 
 
 class UserRole(str, Enum):
-    """RBAC roles for the Ops Portal."""
+    """RBAC roles for the Ops Portal.
 
+    ``SUPER_ADMIN`` manages every project; ``ADMIN`` administers only the
+    projects a Super Admin assigns to it (see ``app.core.access_scope``).
+    """
+
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     WRITE = "write"
     READ = "read"
@@ -55,12 +60,16 @@ class UserContext(BaseModel):
         return role in self.roles
 
     @property
+    def is_super_admin(self) -> bool:
+        return UserRole.SUPER_ADMIN in self.roles
+
+    @property
     def is_admin(self) -> bool:
-        return UserRole.ADMIN in self.roles
+        return self.is_super_admin or UserRole.ADMIN in self.roles
 
     @property
     def can_write(self) -> bool:
-        return UserRole.ADMIN in self.roles or UserRole.WRITE in self.roles
+        return self.is_admin or UserRole.WRITE in self.roles
 
 
 class AuditLogEntry(BaseModel):

@@ -21,9 +21,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_authenticated_identity
+from app.core.access_scope import compute_access_scope
 from app.core.authz import granted_capabilities
 from app.core.database import get_db
 from app.models.auth import UserContext
+from app.services.access_service import AccessService
 
 router = APIRouter()
 
@@ -43,9 +45,14 @@ async def get_session(
           "user": {"user_id": ..., "display_name": ..., "email": ...},
           "roles": ["write"],
           "is_admin": false,
+          "is_super_admin": false,
           "can_write": true,
-          "permissions": ["AKS_VIEW", "AKS_POD_DELETE", ...]
+          "permissions": ["AKS_VIEW", "AKS_POD_DELETE", ...],
+          "access": {"has_subscription_access": true, "admin_project_ids": [], ...}
         }
+
+    Each authorized sign-in is also recorded in ``portal_users`` — the list
+    admins pick from when granting access.
 
     ``permissions`` is upper-cased so the frontend contract reads as documented
     (``AKS_POD_DELETE``) while the database keeps the lower-case resource
@@ -70,11 +77,23 @@ async def get_session(
             },
             "roles": [],
             "is_admin": False,
+            "is_super_admin": False,
             "can_write": False,
             "permissions": [],
+            "access": {"has_subscription_access": False, "admin_project_ids": []},
         }
 
     capabilities = await granted_capabilities(db, identity)
+    access_summary: dict = {"has_subscription_access": identity.is_super_admin, "admin_project_ids": []}
+    if db is not None:
+        await AccessService(db).record_sign_in(identity)
+        scope = await compute_access_scope(db, identity)
+        access_summary = {
+            "has_subscription_access": scope.has_any_access,
+            "admin_project_ids": sorted(scope.admin_project_ids),
+            "readable_count": None if scope.unrestricted else len(scope.readable),
+            "writable_count": None if scope.unrestricted else len(scope.writable),
+        }
 
     return {
         "authenticated": True,
@@ -86,6 +105,8 @@ async def get_session(
         },
         "roles": [r.value for r in identity.roles],
         "is_admin": identity.is_admin,
+        "is_super_admin": identity.is_super_admin,
         "can_write": identity.can_write,
         "permissions": [c.upper() for c in capabilities],
+        "access": access_summary,
     }

@@ -5,6 +5,7 @@ API v1 Router — aggregates all endpoint routers.
 from fastapi import APIRouter, Depends
 
 from app.api.v1.endpoints import (
+    access,
     admin,
     aks_dashboard,
     aks_operations,
@@ -25,20 +26,27 @@ from app.api.v1.endpoints import (
 )
 from app.core.authz import enforce_module_access, enforce_portal_access
 from app.core.subscription_scope import bind_subscription_scope
+from app.core.target_access import enforce_target_access
 
 # Order matters. The portal gate rejects an unentitled identity, then the
 # module gate rejects a module the identity has no access to, and only then is
-# privileged per-request state (subscription scope) resolved for it.
+# privileged per-request state (subscription scope) resolved for it.  Last,
+# every subscription the request names (cluster ID, vault, subscription_id)
+# is checked against that scope — the scope alone only narrows lists.
 api_router = APIRouter(
     dependencies=[
         Depends(enforce_portal_access),
         Depends(enforce_module_access),
         Depends(bind_subscription_scope),
+        Depends(enforce_target_access),
     ]
 )
 
 # Auth — user context & role introspection
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+
+# Project / app / subscription access — grants, requests, approvals
+api_router.include_router(access.router, prefix="/access", tags=["access"])
 
 # Module 1: Cost Visibility & FinOps Intelligence
 api_router.include_router(costs.router, prefix="/costs", tags=["costs"])

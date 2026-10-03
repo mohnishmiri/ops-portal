@@ -15,6 +15,7 @@ import {
   PublicClientApplication,
 } from "@azure/msal-browser";
 import { apiConfig, isDevMode, loginRequest, msalConfig, silentRequest } from "../config/authConfig";
+import { isNoSubscriptionAccessError, notifyNoSubscriptionAccess } from "./accessEvents";
 
 // Create the MSAL instance (lightweight — no network calls yet).
 const msalInstance = new PublicClientApplication(msalConfig);
@@ -133,6 +134,12 @@ let isRedirecting = false;
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
+    // No grant (or a grant revoked mid-session): let the session gate re-read
+    // /auth/session so module pages show "request access" rather than a raw
+    // load error. The rejection still reaches the caller unchanged.
+    if (isNoSubscriptionAccessError(error)) {
+      notifyNoSubscriptionAccess();
+    }
     if (!isDevMode && error.response?.status === 401 && !isRedirecting) {
       const account = msalInstance.getActiveAccount();
       if (account) {
