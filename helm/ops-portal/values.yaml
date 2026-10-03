@@ -49,6 +49,15 @@ backend:
     # stays off unless both values are set — see docs/CERTIFICATE_MANAGEMENT.md.
     CERT_KEY_ESCROW_ENABLED: "false"
     CERT_KEY_ESCROW_VAULT: ""
+    # ── Portal URL for email links ──
+    # Access-request/approval emails, alert and certificate reports link here.
+    # Set per environment (values-dev.yaml / values-prod.yaml); left unset the
+    # backend falls back to http://localhost:5177.
+    # PORTAL_BASE_URL: "https://<portal-host>"
+    # ── Entra app role values ──
+    # Defaults match the app registration; override only if it differs. Super
+    # Admin is granted in Entra only (docs/PROJECT_ACCESS.md).
+    # ROLE_SUPER_ADMIN: "OpsPortal.SuperAdmin"
 
   azureKeyVaultSecrets:
     enabled: false

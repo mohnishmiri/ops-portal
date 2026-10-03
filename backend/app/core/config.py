@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     SMTP_FROM_ADDRESS: str = Field(default="m55663-ap@mta01.att-mail.com")
     SMTP_USE_TLS: bool = Field(default=True)
     NOTIFICATION_RECIPIENTS: list[str] = Field(default=["ARISTOS-AO-EUGENE-COMM-INFRA@accenture.com"])
+    # Base URL for links in emails (access requests, alerts, certificate
+    # reports).  Was read with getattr() but never declared, so every link
+    # pointed at the local dev server.
+    PORTAL_BASE_URL: str = Field(default="http://localhost:5177", description="Public URL of the portal UI")
 
     # ── LLM / Ollama Advisor ─────────────────────────────────────────
     # Override in backend/.env (OLLAMA_BASE_URL) or via deployment env vars.

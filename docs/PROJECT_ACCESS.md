@@ -75,6 +75,10 @@ Every grant, revocation, request, decision and placement change is written to
 
    > Without this step, nobody reaches the Admin console after deployment.
    > `/admin` and `/admin/permissions` now require Super Admin.
+3. **Set `PORTAL_BASE_URL`** in the Helm values for the environment
+   (`backend.env.PORTAL_BASE_URL`). Stage is already set in `values-dev.yaml`;
+   prod is a placeholder in `values-prod.yaml`. Without it, links in
+   access-request emails point at `http://localhost:5177`.
 
 ### On first start (automatic, runs once)
 

@@ -17,6 +17,8 @@ backend:
     # the backend identity needs secrets get/set/delete on it.
     CERT_KEY_ESCROW_ENABLED: "true"
     CERT_KEY_ESCROW_VAULT: "attcc-eastus2-stge-kv"
+    # Links in access-request and alert emails (same host as VITE_REDIRECT_URI).
+    PORTAL_BASE_URL: "https://attccopsportal.stage.att.com"
   resources:
     requests:
       cpu: 2

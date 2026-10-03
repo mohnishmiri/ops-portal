@@ -19,6 +19,10 @@ backend:
     #   CERT_KEY_ESCROW_ENABLED: "true"
     #   CERT_KEY_ESCROW_VAULT: "<escrow-vault-name>"
     CERT_KEY_ESCROW_ENABLED: "false"
+    # Links in access-request and alert emails. Set to the production portal
+    # host before go-live (or pass --set backend.env.PORTAL_BASE_URL=... in CI);
+    # unset, email links point at http://localhost:5177.
+    # PORTAL_BASE_URL: "https://<production-portal-host>"
   resources:
     requests:
       cpu: 500m
