@@ -342,6 +342,43 @@ async def test_bootstrap_places_every_subscription_and_keeps_current_access(db_s
     ]
 
 
+async def test_bootstrap_places_only_monitored_subscriptions(db_session):
+    """Discovery adds other projects' subscriptions too; the transition grant must not reach them."""
+    db_session.add(AdminSubscription(subscription_id=SUB["attcc_prod"], subscription_name="ACC-PROD-31599-ATTCC"))
+    db_session.add(
+        AdminSubscription(
+            subscription_id=SUB["bds_prod"],
+            subscription_name="ACC-PROD-2382-SCORE",
+            enabled=False,
+            monitored=False,
+        )
+    )
+    await db_session.commit()
+
+    summary = await AccessService(db_session).bootstrap()
+
+    assert summary["apps"] == {"31599": 1}
+    unmonitored = (
+        await db_session.execute(select(AdminSubscription).where(AdminSubscription.subscription_id == SUB["bds_prod"]))
+    ).scalar_one()
+    assert unmonitored.app_id is None
+    invalidate_access_topology()
+    scope = await compute_access_scope(db_session, make_user("anyone", UserRole.WRITE))
+    assert scope.writable == {SUB["attcc_prod"]}
+
+
+async def test_bootstrap_waits_until_a_subscription_is_monitored(db_session):
+    """A fresh database must not end up with an empty Commissions and the marker set."""
+    assert await AccessService(db_session).bootstrap() is None
+    assert (await db_session.execute(select(AdminConfig))).first() is None
+
+    db_session.add(AdminSubscription(subscription_id=SUB["dws_nprd"], subscription_name="ACC-NPRD-17805-DWS"))
+    await db_session.commit()
+
+    summary = await AccessService(db_session).bootstrap()
+    assert summary["apps"] == {"17805": 1}
+
+
 async def test_bootstrap_skips_when_projects_already_exist(db_session):
     await build_world(db_session)
     assert await AccessService(db_session).bootstrap() is None

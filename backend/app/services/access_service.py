@@ -1181,16 +1181,26 @@ class AccessService:
 
         Runs only when no project exists and the marker is absent:
 
-        1. creates the Commissions project (every monitored subscription
+        1. creates the Commissions project (every *monitored* subscription
            today belongs to a Commissions app);
-        2. creates an app per AppID found in subscription names
+        2. creates an app per AppID found in monitored subscription names
            (``ACC-PROD-31599-ATTCC`` → app 31599 "ATTCC") and places each
-           subscription with its tier; names without an AppID go to an
-           "Unclassified" app for a Super Admin to sort out;
+           with its tier; names without an AppID go to an "Unclassified" app
+           for a Super Admin to sort out;
         3. grants **everyone** write on Commissions Prod and Non-Prod, capped
            by each user's Entra role — exactly today's access, so nobody is
            locked out.  A Super Admin narrows access and then removes this
            transition grant.
+
+        Only enabled + monitored subscriptions are placed.  Discovery adds
+        every subscription the portal's identity can see — other projects'
+        included — and placing those in Commissions would hand them to
+        everyone through the transition grant.  They stay unplaced (Super
+        Admin only) until someone puts them in the right project.
+
+        With no monitored subscription row yet (fresh database) nothing is
+        done and the marker is not set, so a later start does the move once
+        there is something to place.
         """
         marker = (
             await self._db.execute(select(AdminConfig).where(AdminConfig.config_key == BOOTSTRAP_MARKER_KEY))
@@ -1210,6 +1220,22 @@ class AccessService:
             await self._db.commit()
             return None
 
+        subs = (
+            (
+                await self._db.execute(
+                    select(AdminSubscription).where(
+                        AdminSubscription.enabled.is_(True),
+                        AdminSubscription.monitored.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not subs:
+            logger.info("access_bootstrap_deferred", reason="no_monitored_subscriptions")
+            return None
+
         project = Project(
             project_key=DEFAULT_PROJECT_KEY,
             name=DEFAULT_PROJECT_NAME,
@@ -1221,7 +1247,6 @@ class AccessService:
         await self._db.flush()
 
         apps: dict[str, ProjectApp] = {}
-        subs = (await self._db.execute(select(AdminSubscription))).scalars().all()
         placed: dict[str, list[str]] = {}
         for sub in subs:
             c = classify_subscription(sub.subscription_name, sub.environment)
