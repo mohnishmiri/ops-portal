@@ -88,7 +88,8 @@ async def run_sql_migrations(conn: AsyncConnection) -> list[str]:
         if path.name in already_applied:
             continue
         try:
-            for statement in _split_statements(path.read_text()):
+            # Explicit UTF-8: on Windows the default is the locale code page.
+            for statement in _split_statements(path.read_text(encoding="utf-8")):
                 await conn.execute(text(statement))
             await conn.execute(
                 text("INSERT INTO schema_migrations (filename) VALUES (:f) ON CONFLICT DO NOTHING"),

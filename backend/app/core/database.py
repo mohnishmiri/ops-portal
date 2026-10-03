@@ -278,6 +278,33 @@ async def create_tables() -> None:
         logger.error("Failed to create database tables", error=str(e))
 
 
+# Columns the project-access layer reads on every request.  Added to an
+# existing database by migrations/add_project_access.sql.
+_ACCESS_COLUMNS = {"admin_subscriptions": ("app_id", "tier")}
+
+
+async def missing_access_columns() -> list[str]:
+    """``table.column`` entries the project-access layer needs but the database lacks.
+
+    Empty when everything is present, the database is not PostgreSQL, or there
+    is no database connection (that case is handled — and logged — elsewhere).
+    """
+    if _engine is None or not _db_connected:
+        return []
+    async with _engine.connect() as conn:
+        if conn.dialect.name != "postgresql":
+            return []
+        missing: list[str] = []
+        for table, columns in _ACCESS_COLUMNS.items():
+            rows = await conn.execute(
+                text("SELECT column_name FROM information_schema.columns WHERE table_name = :t"),
+                {"t": table},
+            )
+            present = {row[0] for row in rows}
+            missing += [f"{table}.{c}" for c in columns if c not in present]
+        return missing
+
+
 async def close_db() -> None:
     """Close database connection pool (called at shutdown)."""
     global _engine, _db_connected

@@ -80,6 +80,13 @@ Every grant, revocation, request, decision and placement change is written to
    prod is a placeholder in `values-prod.yaml`. Without it, links in
    access-request emails point at `http://localhost:5177`.
 
+4. **Make sure the database user owns `admin_subscriptions`.** The migration
+   `backend/migrations/add_project_access.sql` adds two columns to it at
+   startup. If it cannot, the backend refuses to start and logs
+   `access_schema_incomplete`; the reason is in the earlier
+   `sql_migration_failed` line. In that case, apply the file as the table owner
+   (`psql -f backend/migrations/add_project_access.sql`) and restart.
+
 ### On first start (automatic, runs once)
 
 The backend:

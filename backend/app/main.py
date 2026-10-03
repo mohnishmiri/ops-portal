@@ -82,6 +82,23 @@ async def _claim_startup_task_lock(task_name: str, ttl_seconds: int = 300) -> bo
         return True
 
 
+async def _release_startup_task_lock(task_name: str) -> None:
+    """Drop a startup lock early, e.g. after the task failed."""
+    from sqlalchemy import delete as _del
+
+    from app.core.database import _SessionLocal
+    from app.models.database import StartupTaskLock
+
+    if _SessionLocal is None:
+        return
+    try:
+        async with _SessionLocal() as session:
+            await session.execute(_del(StartupTaskLock).where(StartupTaskLock.task_name == task_name))
+            await session.commit()
+    except Exception as exc:
+        logger.warning("startup_task_lock_release_failed", task=task_name, error=str(exc)[:200])
+
+
 async def _startup_aks_cluster_sync() -> None:
     """Sync AKS cluster inventory to DB on startup."""
     try:
@@ -238,6 +255,23 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize database
     await init_db()
 
+    # Refuse to serve with the project-access columns missing: every request
+    # from a non-Super-Admin reads them, so the portal would answer 500
+    # everywhere.  Failing here keeps a rolling update on the old pods and
+    # puts the reason in the first log line anyone reads.
+    from app.core.database import missing_access_columns
+
+    missing = await missing_access_columns()
+    if missing:
+        logger.error("access_schema_incomplete", missing=missing)
+        raise RuntimeError(
+            f"Database is missing {', '.join(missing)}. The migration "
+            "backend/migrations/add_project_access.sql did not apply — look for "
+            "'sql_migration_failed' above for the reason (often: the database user "
+            "does not own admin_subscriptions). Apply that file as the table owner "
+            "(psql -f backend/migrations/add_project_access.sql) and restart."
+        )
+
     # Seed canonical module/page resources + default role permissions
     try:
         from app.core.database import get_db_session
@@ -257,8 +291,14 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.access_service import AccessService
 
         if await _claim_startup_task_lock("access_bootstrap", ttl_seconds=120):
-            async for db in get_db_session():
-                await AccessService(db).bootstrap()
+            try:
+                async for db in get_db_session():
+                    await AccessService(db).bootstrap()
+            except Exception:
+                # Let the next start retry straight away instead of waiting
+                # out the lock.
+                await _release_startup_task_lock("access_bootstrap")
+                raise
     except Exception as exc:
         logger.error("access_bootstrap_failed", error=str(exc)[:300])
 
