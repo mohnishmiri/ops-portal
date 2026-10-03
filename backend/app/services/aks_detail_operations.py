@@ -79,6 +79,38 @@ def _str_or_none(value: Any) -> str | None:
     return str(value) if value is not None else None
 
 
+def spec_dict(obj: Any) -> Any:
+    """Kubernetes client model → manifest-style dict (camelCase keys, unset fields dropped)."""
+    if obj is None or isinstance(obj, str | int | float | bool):
+        return obj
+    if isinstance(obj, list):
+        return [spec_dict(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: spec_dict(v) for k, v in obj.items() if v is not None}
+    attribute_map = getattr(obj, "attribute_map", None)
+    if not isinstance(attribute_map, dict):
+        return str(obj)
+    return {
+        key: spec_dict(value) for attr, key in attribute_map.items() if (value := getattr(obj, attr, None)) is not None
+    }
+
+
+def image_checksum(image_id: str | None) -> str | None:
+    """The 64-hex sha256 digest of the image a container is actually running.
+
+    Parsed from ``containerStatus.imageID`` exactly as Compliance → AKS Checksum
+    does (``ComplianceService._extract_image_shas``), so the values match.
+    Docker/CRI-O report ``repo@sha256:<hex>``; some containerd versions ``sha256:<hex>``.
+    """
+    if not image_id:
+        return None
+    if "@sha256:" in image_id:
+        return image_id.split("@sha256:", 1)[1]
+    if image_id.startswith("sha256:"):
+        return image_id[len("sha256:") :]
+    return None
+
+
 def probe_summary(probe: Any) -> str:
     """One-line ``kubectl describe``-style probe summary."""
     exec_action = getattr(probe, "_exec", None) or getattr(probe, "exec", None)
@@ -131,6 +163,7 @@ def serialize_container(container: Any, status: Any, *, init: bool) -> dict[str,
         "name": container.name,
         "image": container.image,
         "image_id": status.image_id if status else None,
+        "image_checksum": image_checksum(status.image_id) if status else None,
         "init": init,
         "sidecar": init and getattr(container, "restart_policy", None) == "Always",
         "ready": bool(status.ready) if status else False,
@@ -192,8 +225,27 @@ def serialize_volume(volume: Any) -> dict[str, Any]:
             detail = _projected_sources(source)
         else:
             detail = _str_or_none(getattr(source, name_attr, None)) if name_attr else None
-        return {"name": volume.name, "type": label, "source": detail}
-    return {"name": volume.name, "type": "Other", "source": None}
+        return {"name": volume.name, "type": label, "source": detail, "spec": spec_dict(source)}
+    spec = spec_dict(volume)
+    spec.pop("name", None)
+    return {"name": volume.name, "type": "Other", "source": None, "spec": spec}
+
+
+def serialize_claim(pvc: Any) -> dict[str, Any]:
+    spec, status = pvc.spec, pvc.status
+    requests = dict(spec.resources.requests or {}) if spec.resources else {}
+    capacity = dict(status.capacity or {}) if status else {}
+    return {
+        "name": pvc.metadata.name,
+        "phase": status.phase if status else None,
+        "capacity": capacity.get("storage"),
+        "requested": requests.get("storage"),
+        "access_modes": list(spec.access_modes or []),
+        "storage_class": spec.storage_class_name,
+        "volume_name": spec.volume_name,
+        "volume_mode": spec.volume_mode,
+        "created_at": _iso(pvc.metadata.creation_timestamp),
+    }
 
 
 def _toleration(t: Any) -> str:
@@ -217,6 +269,9 @@ def serialize_pod_detail(pod: Any) -> dict[str, Any]:
     ]
     owners = meta.owner_references or []
     owner = next((r for r in owners if r.controller), owners[0] if owners else None)
+    # Compliance fingerprints a pod by the first digest in status order (the kubelet sorts
+    # statuses by container name), so take it the same way for a value users can compare.
+    checksums = [image_checksum(cs.image_id) for cs in (status.container_statuses or [])]
     return {
         "name": meta.name,
         "namespace": meta.namespace,
@@ -227,6 +282,7 @@ def serialize_pod_detail(pod: Any) -> dict[str, Any]:
         "ready_containers": sum(1 for c in containers if c["ready"]),
         "total_containers": len(containers),
         "restarts": sum(c["restart_count"] for c in containers),
+        "image_checksum": next((c for c in checksums if c), None),
         "node": spec.node_name,
         "pod_ip": status.pod_ip,
         "pod_ips": [ip.ip for ip in (getattr(status, "pod_i_ps", None) or [])],
@@ -478,7 +534,23 @@ class AKSDetailOperationsMixin:
         apps_v1, core_v1, _ = await self._get_k8s_clients(cluster_id)  # type: ignore[attr-defined]
         pod = await asyncio.to_thread(core_v1.read_namespaced_pod, name, namespace)
         detail = serialize_pod_detail(pod)
-        detail["events"] = await self._workload_events(core_v1, namespace, "Pod", name)  # type: ignore[attr-defined]
+        claim_volumes = [v for v in detail["volumes"] if v["type"] == "PersistentVolumeClaim" and v["source"]]
+        events, *claims = await asyncio.gather(
+            self._workload_events(core_v1, namespace, "Pod", name),  # type: ignore[attr-defined]
+            *(
+                self._soft(
+                    asyncio.to_thread(core_v1.read_namespaced_persistent_volume_claim, v["source"], namespace),
+                    None,
+                    "pod_pvc_lookup_failed",
+                    namespace=namespace,
+                    claim=v["source"],
+                )
+                for v in claim_volumes
+            ),
+        )
+        detail["events"] = events
+        for volume, pvc in zip(claim_volumes, claims, strict=True):
+            volume["claim"] = serialize_claim(pvc) if pvc else None
 
         # A ReplicaSet owner is an implementation detail — surface the Deployment behind it.
         owner = detail["owner"]

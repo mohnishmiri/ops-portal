@@ -3577,6 +3577,8 @@ export interface PodContainerDetail {
   name: string;
   image: string;
   image_id: string | null;
+  /** 64-hex sha256 digest of the image actually running — the value Compliance → AKS Checksum reports. */
+  image_checksum: string | null;
   init: boolean;
   sidecar: boolean;
   ready: boolean;
@@ -3592,6 +3594,28 @@ export interface PodContainerDetail {
   volume_mounts: { name: string; mount_path: string; read_only: boolean; sub_path: string | null }[];
 }
 
+export interface PodVolumeClaim {
+  name: string;
+  phase: string | null;
+  capacity: string | null;
+  requested: string | null;
+  access_modes: string[];
+  storage_class: string | null;
+  volume_name: string | null;
+  volume_mode: string | null;
+  created_at: string | null;
+}
+
+export interface PodVolume {
+  name: string;
+  type: string;
+  source: string | null;
+  /** The volume source as it appears in the manifest (camelCase, unset fields omitted). */
+  spec: Record<string, unknown>;
+  /** PersistentVolumeClaim volumes only; null when the claim could not be read. */
+  claim?: PodVolumeClaim | null;
+}
+
 export interface PodDetail {
   name: string;
   namespace: string;
@@ -3602,6 +3626,8 @@ export interface PodDetail {
   ready_containers: number;
   total_containers: number;
   restarts: number;
+  /** Primary container's image digest, chosen the same way Compliance → AKS Checksum chooses it. */
+  image_checksum: string | null;
   node: string | null;
   pod_ip: string | null;
   pod_ips: string[];
@@ -3623,7 +3649,7 @@ export interface PodDetail {
   conditions: WorkloadCondition[];
   init_containers: PodContainerDetail[];
   containers: PodContainerDetail[];
-  volumes: { name: string; type: string; source: string | null }[];
+  volumes: PodVolume[];
   events: WorkloadEvent[];
   yaml: string;
 }

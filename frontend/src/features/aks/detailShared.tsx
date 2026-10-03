@@ -3,7 +3,7 @@
  * StatefulSet/DaemonSet) so every resource drills down the same way.
  */
 
-import React from "react";
+import React, { useState } from "react";
 import { gridStyles } from "../../components/gridStyles";
 import type { WorkloadCondition, WorkloadEvent, WorkloadPod, WorkloadStatus } from "../../services/aksApi";
 import { GridStateRow } from "./aksGridShared";
@@ -103,6 +103,28 @@ export function KeyValue({ label, value }: { label: string; value: React.ReactNo
       <span className="text-gray-500 shrink-0">{label}</span>
       <span className="text-right font-medium text-gray-800 break-all">{value ?? "—"}</span>
     </div>
+  );
+}
+
+export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard access denied (insecure context or browser policy) — the value stays selectable.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className="shrink-0 rounded border border-att-200 px-1.5 py-0.5 text-[11px] font-medium text-att-700 hover:bg-att-50"
+    >
+      {copied ? "Copied" : label}
+    </button>
   );
 }
 

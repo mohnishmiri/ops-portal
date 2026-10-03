@@ -1,7 +1,8 @@
 /**
  * Pod drill-down — the portal's `kubectl describe pod`: status, every
- * container's current and last state (OOMKilled, exit codes), probes, mounts,
- * volumes, events, and the live manifest.
+ * container's current and last state (OOMKilled, exit codes), the running
+ * image checksum, probes, mounts, volumes (expandable to their source),
+ * events, and the live manifest.
  */
 
 import React, { useState } from "react";
@@ -11,6 +12,7 @@ import { GridStateRow } from "./aksGridShared";
 import {
   apiErrorDetail,
   ConditionList,
+  CopyButton,
   DetailIcons,
   DetailTabs,
   EventList,
@@ -22,6 +24,7 @@ import {
 } from "./detailShared";
 import { ModalShell } from "./K8sResourceModals";
 import { DownloadLogsButton, LogArchiveDownload } from "./LogArchiveDownload";
+import { PodVolumeDetail, VolumeMountRef } from "./PodVolumeDetail";
 
 type Section = "overview" | "containers" | "events" | "volumes" | "yaml";
 
@@ -57,7 +60,25 @@ function stateTone(state: ContainerStateDetail | null): string {
   return "text-red-700";
 }
 
-function ContainerCard({ c, fmt }: { c: PodContainerDetail; fmt: (v: string | null | undefined) => string }) {
+function ImageChecksum({ value }: { value: string | null }) {
+  if (!value) return <span className="text-gray-400">not available — the container has not started</span>;
+  return (
+    <span className="inline-flex items-start gap-2">
+      <span className="font-mono text-xs text-gray-800 break-all">{value}</span>
+      <CopyButton value={value} />
+    </span>
+  );
+}
+
+function ContainerCard({
+  c,
+  fmt,
+  onOpenVolume,
+}: {
+  c: PodContainerDetail;
+  fmt: (v: string | null | undefined) => string;
+  onOpenVolume: (name: string) => void;
+}) {
   return (
     <div className="rounded-lg border border-att-100 p-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -73,6 +94,11 @@ function ContainerCard({ c, fmt }: { c: PodContainerDetail; fmt: (v: string | nu
         </span>
       </div>
       <p className="mt-1 font-mono text-xs text-gray-600 break-all">{c.image}</p>
+      <div className="mt-1 flex items-start gap-2 text-xs">
+        <span className="shrink-0 text-gray-500">Image checksum (sha256):</span>
+        <ImageChecksum value={c.image_checksum} />
+      </div>
+      {c.image_id && <p className="text-[11px] text-gray-400 break-all">Image ID: <span className="font-mono">{c.image_id}</span></p>}
       <div className="mt-2 space-y-0.5">
         <p className={stateTone(c.state)}><span className="text-gray-500">State: </span>{stateText(c.state, fmt)}</p>
         {c.last_state && (
@@ -95,7 +121,10 @@ function ContainerCard({ c, fmt }: { c: PodContainerDetail; fmt: (v: string | nu
         <ul className="mt-2 space-y-0.5 text-xs text-gray-600">
           {c.volume_mounts.map((m) => (
             <li key={`${m.name}:${m.mount_path}`}>
-              <span className="font-mono">{m.mount_path}</span> ← {m.name}
+              <span className="font-mono">{m.mount_path}</span> ←{" "}
+              <button type="button" onClick={() => onOpenVolume(m.name)} className="text-blue-600 hover:text-blue-800 hover:underline" title="View volume details">
+                {m.name}
+              </button>
               {m.sub_path && <span className="text-gray-500"> (subPath {m.sub_path})</span>}
               {m.read_only && <span className="ml-1 text-orange-600">read-only</span>}
             </li>
@@ -124,9 +153,16 @@ export function PodDetailModal({
   onClose: () => void;
 }) {
   const [section, setSection] = useState<Section>("overview");
+  const [expandedVolume, setExpandedVolume] = useState<string | null>(null);
   const { data: pod, isLoading, isError, error } = usePodDetail(clusterId, namespace, name);
   const fmt = (v: string | null | undefined) => (v ? formatDate(v) : "—");
   const allContainers = pod ? [...pod.init_containers, ...pod.containers] : [];
+  const mountsOf = (volume: string): VolumeMountRef[] =>
+    allContainers.flatMap((c) => c.volume_mounts.filter((m) => m.name === volume).map((m) => ({ container: c.name, ...m })));
+  const openVolume = (volume: string) => {
+    setExpandedVolume(volume);
+    setSection("volumes");
+  };
 
   const tabs: { key: Section; label: string }[] = [
     { key: "overview", label: "Overview" },
@@ -176,6 +212,7 @@ export function PodDetailModal({
             <div className="grid grid-cols-1 gap-x-6 md:grid-cols-2">
               <div>
                 <KeyValue label="Phase" value={pod.phase} />
+                <KeyValue label="Image checksum" value={<ImageChecksum value={pod.image_checksum} />} />
                 <KeyValue label="Controlled By" value={pod.workload ? `${pod.workload.kind}/${pod.workload.name}` : pod.owner ? `${pod.owner.kind}/${pod.owner.name}` : "None"} />
                 {pod.workload && pod.owner && pod.owner.kind !== pod.workload.kind && (
                   <KeyValue label={pod.owner.kind} value={pod.owner.name} />
@@ -216,7 +253,9 @@ export function PodDetailModal({
 
           {section === "containers" && (
             <div className="space-y-3">
-              {allContainers.map((c) => <ContainerCard key={`${c.init ? "init:" : ""}${c.name}`} c={c} fmt={fmt} />)}
+              {allContainers.map((c) => (
+                <ContainerCard key={`${c.init ? "init:" : ""}${c.name}`} c={c} fmt={fmt} onOpenVolume={openVolume} />
+              ))}
             </div>
           )}
 
@@ -236,16 +275,35 @@ export function PodDetailModal({
                 <tbody>
                   {pod.volumes.length === 0 && <GridStateRow colSpan={4} emptyText="No volumes" />}
                   {pod.volumes.map((v) => {
-                    const mounts = allContainers.flatMap((c) =>
-                      c.volume_mounts.filter((m) => m.name === v.name).map((m) => `${c.name}:${m.mount_path}`)
-                    );
+                    const mounts = mountsOf(v.name);
+                    const expanded = expandedVolume === v.name;
                     return (
-                      <tr key={v.name} className={gridStyles.row}>
-                        <td className={gridStyles.cell}>{v.name}</td>
-                        <td className={gridStyles.cell}>{v.type}</td>
-                        <td className={gridStyles.cell}><span className="font-mono text-xs break-all">{v.source ?? "—"}</span></td>
-                        <td className={gridStyles.cell}><span className="font-mono text-xs break-all">{mounts.join(", ") || "—"}</span></td>
-                      </tr>
+                      <React.Fragment key={v.name}>
+                        <tr
+                          className={`${gridStyles.row} cursor-pointer ${expanded ? gridStyles.selectedRow : ""}`}
+                          onClick={() => setExpandedVolume(expanded ? null : v.name)}
+                        >
+                          <td className={gridStyles.cell}>
+                            {/* The row handles the click; the button gives keyboard access. */}
+                            <button type="button" aria-expanded={expanded} className="inline-flex items-center gap-1 text-left text-blue-600 hover:text-blue-800 hover:underline">
+                              <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}><polyline points="9 18 15 12 9 6" /></svg>
+                              {v.name}
+                            </button>
+                          </td>
+                          <td className={gridStyles.cell}>{v.type}</td>
+                          <td className={gridStyles.cell}><span className="font-mono text-xs break-all">{v.source ?? "—"}</span></td>
+                          <td className={gridStyles.cell}>
+                            <span className="font-mono text-xs break-all">{mounts.map((m) => `${m.container}:${m.mount_path}`).join(", ") || "—"}</span>
+                          </td>
+                        </tr>
+                        {expanded && (
+                          <tr className="border-t border-att-100">
+                            <td colSpan={4} className="bg-att-50/40 px-4 pb-4 pt-1">
+                              <PodVolumeDetail clusterId={clusterId} namespace={namespace} volume={v} mounts={mounts} formatDate={formatDate} />
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     );
                   })}
                 </tbody>

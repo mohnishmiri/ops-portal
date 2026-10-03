@@ -15,6 +15,8 @@ vi.mock("../../services/aksApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../services/aksApi")>()),
   useDeploymentDetail: vi.fn(),
   usePodDetail: vi.fn(),
+  useConfigMapDetail: vi.fn(),
+  useSecretDetail: vi.fn(),
   downloadLogArchive: vi.fn(),
 }));
 
@@ -22,6 +24,7 @@ import * as aksApi from "../../services/aksApi";
 import { DeploymentDetailModal } from "./DeploymentDetailModal";
 import { useLogArchiveDownload } from "./LogArchiveDownload";
 import { PodDetailModal } from "./PodDetailModal";
+import { flattenSpec, projectedFilePaths } from "./PodVolumeDetail";
 
 const CLUSTER_ID =
   "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks-01";
@@ -166,10 +169,12 @@ describe("DeploymentDetailModal", () => {
 });
 
 describe("PodDetailModal", () => {
+  const CHECKSUM = "9dc0c284ac65" + "0".repeat(52);
   const oomContainer: aksApi.PodContainerDetail = {
     name: "app",
     image: "repo/web:1",
-    image_id: null,
+    image_id: `repo/web@sha256:${CHECKSUM}`,
+    image_checksum: CHECKSUM,
     init: false,
     sidecar: false,
     ready: true,
@@ -214,15 +219,49 @@ describe("PodDetailModal", () => {
     node_selector: {},
     tolerations: [],
     conditions: [],
-    init_containers: [{ ...oomContainer, name: "init-db", init: true, restart_count: 0, last_state: null, state: { state: "terminated", reason: "Completed", exit_code: 0 } }],
-    containers: [oomContainer],
-    volumes: [{ name: "config", type: "ConfigMap", source: "web-config" }],
+    image_checksum: CHECKSUM,
+    init_containers: [
+      {
+        ...oomContainer,
+        name: "init-db",
+        init: true,
+        image_checksum: null,
+        image_id: null,
+        restart_count: 0,
+        last_state: null,
+        state: { state: "terminated", reason: "Completed", exit_code: 0 },
+        volume_mounts: [],
+      },
+    ],
+    containers: [
+      {
+        ...oomContainer,
+        volume_mounts: [
+          { name: "config", mount_path: "/etc/app", read_only: true, sub_path: null },
+          { name: "creds", mount_path: "/opt/att/aaf", read_only: true, sub_path: null },
+        ],
+      },
+    ],
+    volumes: [
+      { name: "config", type: "ConfigMap", source: "web-config", spec: { name: "web-config", defaultMode: 420 } },
+      { name: "creds", type: "Secret", source: "aaf-cred", spec: { secretName: "aaf-cred", items: [{ key: "user", path: "user.txt" }] } },
+    ],
     events: [],
     yaml: "kind: Pod",
   };
 
   function setup() {
     (aksApi.usePodDetail as any).mockReturnValue({ data: podDetail, isLoading: false, isError: false });
+    (aksApi.useConfigMapDetail as any).mockReturnValue({
+      data: { name: "web-config", namespace: "apps", data: { "application.properties": "server.port=8080" }, binary_data_keys: [] },
+      isLoading: false,
+      isError: false,
+    });
+    (aksApi.useSecretDetail as any).mockReturnValue({
+      data: { name: "aaf-cred", namespace: "apps", type: "Opaque", keys: ["user", "password"], data: { user: "********", password: "********" } },
+      isLoading: false,
+      isError: false,
+    });
     const onViewLogs = vi.fn();
     render(
       <PodDetailModal
@@ -247,13 +286,50 @@ describe("PodDetailModal", () => {
     expect(screen.getByText("init")).toBeTruthy();
   });
 
-  it("maps volumes to the containers that mount them", () => {
+  it("shows the running image checksum in the overview and per container", () => {
     setup();
 
-    fireEvent.click(screen.getByRole("button", { name: "Volumes (1)" }));
+    expect(screen.getByText(CHECKSUM)).toBeTruthy(); // overview
+    fireEvent.click(screen.getByRole("button", { name: "Containers (2)" }));
+    expect(screen.getAllByText(CHECKSUM)).toHaveLength(1);
+    expect(screen.getByText(`repo/web@sha256:${CHECKSUM}`)).toBeTruthy();
+    expect(screen.getByText("not available — the container has not started")).toBeTruthy(); // init-db
+  });
 
-    expect(screen.getByText("web-config")).toBeTruthy();
-    expect(screen.getByText("init-db:/etc/app, app:/etc/app")).toBeTruthy();
+  it("expands a ConfigMap volume to its keys, values, and in-container file paths", () => {
+    setup();
+
+    fireEvent.click(screen.getByRole("button", { name: "Volumes (2)" }));
+    expect(screen.getByText("app:/etc/app")).toBeTruthy(); // mounted-at column
+    fireEvent.click(screen.getByRole("button", { name: "config" }));
+
+    expect(aksApi.useConfigMapDetail).toHaveBeenCalledWith(CLUSTER_ID, "apps", "web-config");
+    expect(screen.getByText("0644 (420)")).toBeTruthy();
+    expect(screen.getByText("app:/etc/app/application.properties")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /application\.properties/ }));
+    expect(screen.getByText("server.port=8080")).toBeTruthy();
+  });
+
+  it("lists Secret keys without revealing values", () => {
+    setup();
+
+    fireEvent.click(screen.getByRole("button", { name: "Volumes (2)" }));
+    fireEvent.click(screen.getByRole("button", { name: "creds" }));
+
+    expect(aksApi.useSecretDetail).toHaveBeenCalledWith(CLUSTER_ID, "apps", "aaf-cred", false, true);
+    expect(screen.getByText("app:/opt/att/aaf/user.txt")).toBeTruthy();
+    expect(screen.getByText("not projected (not listed in items)")).toBeTruthy(); // "password"
+    expect(screen.queryByText("********")).toBeNull();
+  });
+
+  it("jumps from a container mount to that volume's details", () => {
+    setup();
+
+    fireEvent.click(screen.getByRole("button", { name: "Containers (2)" }));
+    fireEvent.click(screen.getAllByTitle("View volume details")[0]); // app's /etc/app ← config
+
+    expect(screen.getByRole("button", { name: "config" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("app:/etc/app/application.properties")).toBeTruthy();
   });
 
   it("opens the log viewer with every container, init containers included", () => {
@@ -262,5 +338,36 @@ describe("PodDetailModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /View logs/ }));
 
     expect(onViewLogs).toHaveBeenCalledWith(expect.objectContaining({ pod_name: "web-7b9c-a", containers: ["init-db", "app"] }));
+  });
+});
+
+describe("volume helpers", () => {
+  const mounts = [
+    { container: "app", mount_path: "/etc/app/", read_only: true, sub_path: null },
+    { container: "sidecar", mount_path: "/config/log4j2.xml", read_only: true, sub_path: "log4j2.xml" },
+  ];
+
+  it("maps each key to the file it becomes in every mounting container", () => {
+    expect(projectedFilePaths("log4j2.xml", undefined, mounts)).toEqual([
+      "app:/etc/app/log4j2.xml",
+      "sidecar:/config/log4j2.xml", // subPath mounts the single file at mountPath
+    ]);
+    expect(projectedFilePaths("other.yaml", undefined, mounts)).toEqual(["app:/etc/app/other.yaml"]);
+  });
+
+  it("honours items remapping and drops unlisted keys", () => {
+    const items = [{ key: "log4j2.xml", path: "conf/log4j2.xml" }];
+    expect(projectedFilePaths("log4j2.xml", items, mounts)).toEqual(["app:/etc/app/conf/log4j2.xml"]);
+    expect(projectedFilePaths("other.yaml", items, mounts)).toEqual([]);
+  });
+
+  it("flattens nested specs and shows file modes in octal", () => {
+    expect(flattenSpec({ driver: "file.csi.azure.com", volumeAttributes: { shareName: "logs" }, items: [{ key: "a", mode: 384 }], defaultMode: 420 })).toEqual([
+      ["driver", "file.csi.azure.com"],
+      ["volumeAttributes.shareName", "logs"],
+      ["items[0].key", "a"],
+      ["items[0].mode", "0600 (384)"],
+      ["defaultMode", "0644 (420)"],
+    ]);
   });
 });

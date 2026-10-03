@@ -21,7 +21,7 @@ from app.core.database import get_db
 from app.models.database import Permission, Resource
 from app.schemas.auth import UserContext, UserRole
 from app.services import aks_log_archive as archive
-from app.services.aks_detail_operations import serialize_deployment, serialize_pod_detail
+from app.services.aks_detail_operations import image_checksum, serialize_deployment, serialize_pod_detail
 from app.services.aks_operations_service import AKSOperationsService
 from app.services.aks_workload_operations import pod_status_reason
 
@@ -218,11 +218,17 @@ class FakeApps:
 
 
 class FakeCore:
-    def __init__(self, pods=(), events=(), logs=None):
+    def __init__(self, pods=(), events=(), logs=None, claims=()):
         self.pods = list(pods)
         self.events = list(events)
         self.logs = logs or {}
+        self.claims = {c.metadata.name: c for c in claims}
         self.log_calls: list[tuple[str, str, bool]] = []
+
+    def read_namespaced_persistent_volume_claim(self, name, namespace):
+        if name not in self.claims:
+            raise _api_error(404, f'persistentvolumeclaims "{name}" not found')
+        return self.claims[name]
 
     def list_namespaced_pod(self, namespace, label_selector=None):
         return SimpleNamespace(items=[p for p in self.pods if p.metadata.namespace == namespace])
@@ -444,13 +450,116 @@ def test_pod_detail_surfaces_last_termination_probes_and_volumes():
     assert "period=5s" in app["probes"]["liveness"]
     assert app["probes"]["readiness"].startswith("exec [cat /tmp/ready]")
     assert app["volume_mounts"] == [{"name": "config", "mount_path": "/etc/app", "read_only": True, "sub_path": None}]
-    assert detail["volumes"] == [
-        {"name": "config", "type": "ConfigMap", "source": "app-config"},
-        {"name": "data", "type": "PersistentVolumeClaim", "source": "data-0"},
-        {"name": "kube-api-access", "type": "Projected", "source": "serviceAccountToken, configMap:kube-root-ca.crt"},
+    assert [(v["name"], v["type"], v["source"]) for v in detail["volumes"]] == [
+        ("config", "ConfigMap", "app-config"),
+        ("data", "PersistentVolumeClaim", "data-0"),
+        ("kube-api-access", "Projected", "serviceAccountToken, configMap:kube-root-ca.crt"),
     ]
     assert detail["restarts"] == 3
     assert detail["annotations"] == {"team": "ops"}
+
+
+@pytest.mark.parametrize(
+    ("image_id", "expected"),
+    [
+        ("artifact.it.att.com:22609/repo/app@sha256:" + "a" * 64, "a" * 64),
+        ("docker-pullable://repo/app@sha256:" + "b" * 64, "b" * 64),
+        ("sha256:" + "c" * 64, "c" * 64),  # containerd without the repository
+        ("", None),
+        (None, None),
+    ],
+)
+def test_image_checksum_matches_compliance_parsing(image_id, expected):
+    assert image_checksum(image_id) == expected
+
+
+def test_pod_image_checksum_uses_first_status_like_compliance():
+    pod = make_pod("web-1", containers=("app", "istio-proxy"))
+    pod.status.container_statuses[0].image_id = "repo/app@sha256:" + "1" * 64
+    pod.status.container_statuses[1].image_id = "repo/proxy@sha256:" + "2" * 64
+
+    detail = serialize_pod_detail(pod)
+
+    assert detail["image_checksum"] == "1" * 64
+    assert [c["image_checksum"] for c in detail["containers"]] == ["1" * 64, "2" * 64]
+
+
+def test_pod_without_started_containers_has_no_checksum():
+    pod = make_pod("pending", statuses=[])
+    detail = serialize_pod_detail(pod)
+    assert detail["image_checksum"] is None
+    assert detail["containers"][0]["image_checksum"] is None
+
+
+def test_volume_spec_is_manifest_shaped():
+    pod = make_pod("web-1")
+    pod.spec.volumes = [
+        k8s.V1Volume(
+            name="config",
+            config_map=k8s.V1ConfigMapVolumeSource(
+                name="app-config", default_mode=420, items=[k8s.V1KeyToPath(key="log4j2.xml", path="log4j2.xml")]
+            ),
+        ),
+        k8s.V1Volume(
+            name="attcc-volume",
+            csi=k8s.V1CSIVolumeSource(
+                driver="file.csi.azure.com",
+                volume_attributes={"shareName": "logs", "secretName": "azure-files"},
+            ),
+        ),
+    ]
+
+    config, csi = serialize_pod_detail(pod)["volumes"]
+
+    assert config["spec"] == {
+        "defaultMode": 420,
+        "items": [{"key": "log4j2.xml", "path": "log4j2.xml"}],
+        "name": "app-config",
+    }
+    assert csi["source"] == "file.csi.azure.com"
+    assert csi["spec"] == {
+        "driver": "file.csi.azure.com",
+        "volumeAttributes": {"shareName": "logs", "secretName": "azure-files"},
+    }
+
+
+async def test_pod_detail_attaches_bound_claims():
+    pod = make_pod("db-0")
+    pod.spec.volumes = [
+        k8s.V1Volume(
+            name="data", persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(claim_name="data-db-0")
+        ),
+        k8s.V1Volume(
+            name="gone", persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(claim_name="missing")
+        ),
+    ]
+    claim = k8s.V1PersistentVolumeClaim(
+        metadata=k8s.V1ObjectMeta(name="data-db-0", creation_timestamp=CREATED),
+        spec=k8s.V1PersistentVolumeClaimSpec(
+            access_modes=["ReadWriteOnce"],
+            storage_class_name="managed-csi",
+            volume_name="pvc-123",
+            resources=k8s.V1VolumeResourceRequirements(requests={"storage": "10Gi"}),
+        ),
+        status=k8s.V1PersistentVolumeClaimStatus(phase="Bound", capacity={"storage": "10Gi"}),
+    )
+    core = FakeCore(pods=[pod], claims=[claim])
+
+    detail = await build_service(FakeApps(), core).get_pod_detail(CLUSTER_ID, NS, "db-0")
+
+    data, gone = detail["volumes"]
+    assert data["claim"] == {
+        "name": "data-db-0",
+        "phase": "Bound",
+        "capacity": "10Gi",
+        "requested": "10Gi",
+        "access_modes": ["ReadWriteOnce"],
+        "storage_class": "managed-csi",
+        "volume_name": "pvc-123",
+        "volume_mode": None,
+        "created_at": CREATED.isoformat(),
+    }
+    assert gone["claim"] is None
 
 
 def test_serialize_deployment_fields():
