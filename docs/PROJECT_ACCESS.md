@@ -75,10 +75,11 @@ Every grant, revocation, request, decision and placement change is written to
 
    > Without this step, nobody reaches the Admin console after deployment.
    > `/admin` and `/admin/permissions` now require Super Admin.
-3. **Set `PORTAL_BASE_URL`** in the Helm values for the environment
-   (`backend.env.PORTAL_BASE_URL`). Stage is already set in `values-dev.yaml`;
-   prod is a placeholder in `values-prod.yaml`. Without it, links in
-   access-request emails point at `http://localhost:5177`.
+3. **Check `PORTAL_BASE_URL`** (links in access-request emails). The chart
+   defaults it to `https://<ingress host>`, which CI sets from
+   `DEV_HOSTNAME` / `PROD_HOSTNAME`; stage sets it explicitly in
+   `values-dev.yaml`. Override `backend.env.PORTAL_BASE_URL` only if the public
+   URL differs from the ingress host.
 
 4. **Make sure the database user owns `admin_subscriptions`.** The migration
    `backend/migrations/add_project_access.sql` adds two columns to it at

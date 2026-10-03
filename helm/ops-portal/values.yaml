@@ -49,15 +49,51 @@ backend:
     # stays off unless both values are set — see docs/CERTIFICATE_MANAGEMENT.md.
     CERT_KEY_ESCROW_ENABLED: "false"
     CERT_KEY_ESCROW_VAULT: ""
+    # Full escrow vault URI. Overrides CERT_KEY_ESCROW_VAULT; only needed when
+    # the vault is not at https://<name>.vault.azure.net (e.g. sovereign clouds).
+    CERT_KEY_ESCROW_VAULT_URI: ""
+
     # ── Portal URL for email links ──
     # Access-request/approval emails, alert and certificate reports link here.
-    # Set per environment (values-dev.yaml / values-prod.yaml); left unset the
-    # backend falls back to http://localhost:5177.
+    # Unset, the chart uses https://<first ingress host> — which CI sets per
+    # environment — see templates/backend-deployment.yaml. Set it only when the
+    # public URL differs from the ingress host.
     # PORTAL_BASE_URL: "https://<portal-host>"
+
     # ── Entra app role values ──
-    # Defaults match the app registration; override only if it differs. Super
-    # Admin is granted in Entra only (docs/PROJECT_ACCESS.md).
-    # ROLE_SUPER_ADMIN: "OpsPortal.SuperAdmin"
+    # Must match the App Role values in the app registration. Super Admin is
+    # granted in Entra only (docs/PROJECT_ACCESS.md).
+    ROLE_SUPER_ADMIN: "OpsPortal.SuperAdmin"
+    ROLE_ADMIN: "OpsPortal.Admin"
+    ROLE_WRITE: "OpsPortal.Write"
+    ROLE_READ: "OpsPortal.Read"
+
+    # ── Safety ──
+    # Never true in a deployed environment; the backend refuses to start with
+    # DEV_AUTH_BYPASS on outside ENVIRONMENT=development.
+    DEBUG: "false"
+    DEV_AUTH_BYPASS: "false"
+
+    # ── Notifications ──
+    # JSON list of addresses for budget / platform notifications.
+    NOTIFICATION_RECIPIENTS: '["ARISTOS-AO-EUGENE-COMM-INFRA@accenture.com"]'
+
+    # ── Tuning (values shown are the backend defaults) ──
+    # Connections per pod: DB_POOL_SIZE + DB_MAX_OVERFLOW. Multiply by the
+    # replica count and keep it under the PostgreSQL max_connections.
+    DB_POOL_SIZE: "100"
+    DB_MAX_OVERFLOW: "50"
+    DB_POOL_RECYCLE: "1800"
+    DB_POOL_TIMEOUT: "30"
+    CACHE_TTL_SECONDS: "3600"
+    REPORT_CACHE_TTL: "86400"
+    K8S_DASHBOARD_PROXY_TIMEOUT: "30"
+    KEYFACTOR_LIST_CACHE_TTL: "60"
+    AZURE_PRICING_API_URL: "https://prices.azure.com/api/retail/prices"
+    AZURE_PRICING_TIMEOUT_SECONDS: "10"
+    AZURE_PRICING_CURRENCY_CODE: "USD"
+    # Empty = https://login.microsoftonline.com/<AZURE_TENANT_ID>
+    AZURE_AUTHORITY: ""
 
   azureKeyVaultSecrets:
     enabled: false
@@ -134,6 +170,27 @@ backend:
         akvSecretName: opsportal-backend-ollama-auth-header-value
         kubernetesSecretName: ops-portal-backend-ollama-auth-header-value
         optional: true
+      # ── Agent assistant LLM (separate endpoint from the Leadership advisor) ──
+      - envName: AGENT_LLM_BASE_URL
+        akvSecretName: opsportal-backend-agent-llm-base-url
+        kubernetesSecretName: ops-portal-backend-agent-llm-base-url
+        optional: true
+      - envName: AGENT_LLM_MODEL
+        akvSecretName: opsportal-backend-agent-llm-model
+        kubernetesSecretName: ops-portal-backend-agent-llm-model
+        optional: true
+      - envName: AGENT_LLM_TIMEOUT_SECONDS
+        akvSecretName: opsportal-backend-agent-llm-timeout-seconds
+        kubernetesSecretName: ops-portal-backend-agent-llm-timeout-seconds
+        optional: true
+      - envName: AGENT_LLM_AUTH_HEADER_NAME
+        akvSecretName: opsportal-backend-agent-llm-auth-header-name
+        kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-name
+        optional: true
+      - envName: AGENT_LLM_AUTH_HEADER_VALUE
+        akvSecretName: opsportal-backend-agent-llm-auth-header-value
+        kubernetesSecretName: ops-portal-backend-agent-llm-auth-header-value
+        optional: true
       - envName: K8S_DASHBOARD_TOKEN_PROD
         akvSecretName: opsportal-backend-k8s-dashboard-token-prod
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-token-prod
@@ -206,6 +263,14 @@ backend:
       - envName: KEYFACTOR_ENROLLMENT_PATTERNS
         akvSecretName: opsportal-backend-keyfactor-enrollment-patterns
         kubernetesSecretName: ops-portal-backend-keyfactor-enrollment-patterns
+        optional: true
+      - envName: KEYFACTOR_TOKEN_URL
+        akvSecretName: opsportal-backend-keyfactor-token-url
+        kubernetesSecretName: ops-portal-backend-keyfactor-token-url
+        optional: true
+      - envName: KEYFACTOR_CA_BUNDLE
+        akvSecretName: opsportal-backend-keyfactor-ca-bundle
+        kubernetesSecretName: ops-portal-backend-keyfactor-ca-bundle
         optional: true
 
   # Legacy CSI-based sync path. Prefer AzureKeyVaultSecret below when akv2k8s is installed.

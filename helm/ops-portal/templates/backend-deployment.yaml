@@ -65,6 +65,13 @@ spec:
               value: {{ $val | quote }}
             {{- end }}
             {{- end }}
+            {{- if not (hasKey (.Values.backend.env | default dict) "PORTAL_BASE_URL") }}
+            {{- if and .Values.ingress.enabled .Values.ingress.hosts }}
+            # Links in emails default to the public host the ingress serves.
+            - name: PORTAL_BASE_URL
+              value: {{ printf "%s://%s" (ternary "https" "http" (not (empty .Values.ingress.tls))) (index .Values.ingress.hosts 0).host | quote }}
+            {{- end }}
+            {{- end }}
           {{- if .Values.backend.secretProvider.enabled }}
           volumeMounts:
             - name: secrets-store

@@ -19,10 +19,11 @@ backend:
     #   CERT_KEY_ESCROW_ENABLED: "true"
     #   CERT_KEY_ESCROW_VAULT: "<escrow-vault-name>"
     CERT_KEY_ESCROW_ENABLED: "false"
-    # Links in access-request and alert emails. Set to the production portal
-    # host before go-live (or pass --set backend.env.PORTAL_BASE_URL=... in CI);
-    # unset, email links point at http://localhost:5177.
-    # PORTAL_BASE_URL: "https://<production-portal-host>"
+    # PORTAL_BASE_URL (links in access-request and alert emails) defaults to
+    # https://<ingress host>, which CI sets from the PROD_HOSTNAME secret. Set
+    # it here only if the public URL differs from the ingress host.
+    # Escrow vault (when enabled): CERT_KEY_ESCROW_VAULT, or
+    # CERT_KEY_ESCROW_VAULT_URI for a non-standard vault URL.
   resources:
     requests:
       cpu: 500m
