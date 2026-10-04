@@ -34,6 +34,8 @@ _CACHE_TTL_DASHBOARD = 300  # 5 min — dashboard aggregation
 _CACHE_TTL_LIST = 180  # 3 min — secrets/keys/certs list
 _CACHE_TTL_DETAIL = 600  # 10 min — individual cert/key detail
 
+_VERSIONS_MAX_PAGES = 40  # 25 per page — 1,000 versions is far beyond any real rotation history
+
 # Value search reads every secret in the vault one GET at a time, so it is
 # bounded on all three axes and its results are never cached.
 _VALUE_SEARCH_CONCURRENCY = 32  # parallel secret reads
@@ -395,12 +397,17 @@ class KeyVaultService:
             return [s for s in secrets if search.lower() in s["name"].lower()]
         return secrets
 
-    async def get_secret_value(self, vault_uri: str, name: str) -> dict:
-        """Get a secret value (admin only)."""
-        url = f"{vault_uri}secrets/{name}?api-version=7.4"
+    async def get_secret_value(self, vault_uri: str, name: str, version: str | None = None) -> dict:
+        """Get a secret value — the current version, or ``version`` when given."""
+        url = (
+            f"{vault_uri}secrets/{name}/{version}?api-version=7.4"
+            if version
+            else f"{vault_uri}secrets/{name}?api-version=7.4"
+        )
         body = await self._vault_get(url)
         value = body.get("value", "")
         attrs = body.get("attributes", {})
+        secret_id = body.get("id", "")
 
         # Same tolerant decode the value search uses, so a secret the grid
         # flags as a Base64 match always shows its plaintext here too.
@@ -409,6 +416,8 @@ class KeyVaultService:
 
         return {
             "name": name,
+            "id": secret_id,
+            "version": secret_id.rstrip("/").rsplit("/", 1)[-1] if secret_id else version,
             "value": value,
             "content_type": body.get("contentType", ""),
             "is_base64": is_b64,
@@ -418,6 +427,12 @@ class KeyVaultService:
             "updated": _epoch_to_iso(attrs.get("updated")),
             "not_before": _epoch_to_iso(attrs.get("nbf")),
             "expires": _epoch_to_iso(attrs.get("exp")),
+            "recovery_level": attrs.get("recoveryLevel"),
+            "recoverable_days": attrs.get("recoverableDays"),
+            "tags": body.get("tags") or {},
+            # A certificate's backing secret: Azure refuses direct writes to it.
+            "managed": bool(body.get("managed", False)),
+            "kid": body.get("kid"),
         }
 
     async def _read_secret_value(
@@ -616,8 +631,13 @@ class KeyVaultService:
         encode_base64: bool = False,
         not_before: str | None = None,
         expires: str | None = None,
+        enabled: bool = True,
     ) -> dict:
         """Create or update a secret.
+
+        Every write creates a new version, and a new version carries only the
+        tags sent with it — callers updating an existing secret must pass its
+        current tags or they are dropped.
 
         If the secret was soft-deleted (409 Conflict), automatically
         recover it first, then update with the new value.
@@ -643,7 +663,7 @@ class KeyVaultService:
                 "contentType": content_type or "",
                 "tags": tags or {},
                 "attributes": {
-                    "enabled": True,
+                    "enabled": enabled,
                     "nbf": int(nbf_dt.timestamp()),
                     "exp": int(exp_dt.timestamp()),
                 },
@@ -844,8 +864,13 @@ class KeyVaultService:
         key_ops: list[str] | None = None,
         not_before: str | None = None,
         expires: str | None = None,
+        crv: str | None = None,
+        tags: dict | None = None,
     ) -> dict:
         """Create or update a key.
+
+        Creating an existing name adds a new version, which carries only the
+        tags and curve sent with it — pass the current ones to keep them.
 
         ``kty``: RSA, EC, oct, RSA-HSM, EC-HSM, oct-HSM.
         ``not_before`` / ``expires`` are ISO-8601 date strings.
@@ -871,6 +896,10 @@ class KeyVaultService:
             body_payload["key_size"] = key_size
         if key_ops:
             body_payload["key_ops"] = key_ops
+        if crv and kty.upper().startswith("EC"):
+            body_payload["crv"] = crv
+        if tags:
+            body_payload["tags"] = tags
 
         payload = _json.dumps(body_payload).encode("utf-8")
 
@@ -1133,16 +1162,7 @@ class KeyVaultService:
                     name = c.get("id", "").rsplit("/", 1)[-1]
 
                     # x5t is base64url-encoded SHA-1 thumbprint from list API
-                    x5t = c.get("x5t", "")
-                    thumbprint = ""
-                    if x5t:
-                        try:
-                            # base64url → bytes → hex uppercase
-                            padded = x5t + "=" * (-len(x5t) % 4)
-                            raw = base64.urlsafe_b64decode(padded)
-                            thumbprint = raw.hex().upper()
-                        except Exception:
-                            pass
+                    thumbprint = _x5t_to_hex(c.get("x5t"))
 
                     # Derive CN from cert name convention (dashes → dots)
                     cn_name = name.replace("-", ".") if name else ""
@@ -1337,6 +1357,51 @@ class KeyVaultService:
             "recovery_id": body.get("recoveryId", ""),
         }
 
+    # ── Item versions & vault detail ───────────────────────────────────
+
+    async def list_item_versions(self, vault_uri: str, item_type: str, name: str) -> list[dict]:
+        """Every version of a secret, key, or certificate — metadata only, newest first.
+
+        ``item_type`` is the URL collection: ``secrets``, ``keys`` or ``certificates``.
+        The newest-created version is the current one (what an unversioned GET returns).
+        """
+        token = await self._get_vault_token()
+        url: str | None = f"{vault_uri}{item_type}/{name}/versions?api-version=7.4&maxresults=25"
+        versions: list[dict] = []
+        pages = 0
+        while url and pages < _VERSIONS_MAX_PAGES:
+            body = await self._vault_get(url, token=token)
+            for v in body.get("value", []):
+                attrs = v.get("attributes") or {}
+                ident = v.get("id") or v.get("kid") or ""
+                versions.append(
+                    {
+                        "version": ident.rstrip("/").rsplit("/", 1)[-1],
+                        "id": ident,
+                        "enabled": attrs.get("enabled", True),
+                        "created": _epoch_to_iso(attrs.get("created")),
+                        "updated": _epoch_to_iso(attrs.get("updated")),
+                        "not_before": _epoch_to_iso(attrs.get("nbf")),
+                        "expires": _epoch_to_iso(attrs.get("exp")),
+                        "recovery_level": attrs.get("recoveryLevel"),
+                        "content_type": v.get("contentType"),
+                        "managed": bool(v.get("managed", False)),
+                        "thumbprint": _x5t_to_hex(v.get("x5t")),
+                        "tags": v.get("tags") or {},
+                    }
+                )
+            url = body.get("nextLink")
+            pages += 1
+
+        versions.sort(key=lambda v: v["created"] or "", reverse=True)
+        for index, v in enumerate(versions):
+            v["is_current"] = index == 0
+        return versions
+
+    async def get_vault_resource(self, resource_id: str) -> dict:
+        """The vault's full ARM resource: network rules, access policies, private endpoints."""
+        return await self._arm_get(f"{ARM_API}{resource_id}?api-version=2023-07-01")
+
     # ── Dashboard Summary ──────────────────────────────────────────────
 
     async def get_dashboard_summary(self, *, refresh: bool = False) -> dict:
@@ -1430,9 +1495,7 @@ class KeyVaultService:
             "total_secrets": total_secrets,
             "total_keys": total_keys,
             "total_certificates": total_certs,
-            "expiring_within_30_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 30]),
-            "expiring_within_90_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 90]),
-            "expiring_within_360_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 360]),
+            **expiry_counts(expiring_soon),
             "expiring_items": expiring_soon,
             "vault_summaries": vault_summaries,
             "generated_at": datetime.utcnow().isoformat(),
@@ -1550,24 +1613,133 @@ def _jwk_to_public_pem(key_data: dict) -> str | None:
         return None
 
 
-def _check_expiry(expiring_list: list, item: dict, vault_name: str, item_type: str) -> None:
-    """Check if an item is expiring within 360 days and add to list."""
-    expires = item.get("expires")
-    if not expires:
-        return
+def _x5t_to_hex(x5t: str | None) -> str:
+    """Certificate x5t (base64url SHA-1 thumbprint) → upper-case hex."""
+    if not x5t:
+        return ""
     try:
-        exp_date = datetime.fromisoformat(expires)
-        days_remaining = (exp_date - datetime.utcnow()).days
-        if 0 <= days_remaining <= 360:
-            expiring_list.append(
-                {
-                    "name": item["name"],
-                    "vault_name": vault_name,
-                    "type": item_type,
-                    "expires": expires,
-                    "days_remaining": days_remaining,
-                    "enabled": item.get("enabled", True),
-                }
-            )
+        return base64.urlsafe_b64decode(x5t + "=" * (-len(x5t) % 4)).hex().upper()
     except (ValueError, TypeError):
-        pass
+        return ""
+
+
+def summarize_vault_resource(body: dict) -> dict:
+    """Flatten a vault's ARM resource into the fields the detail view shows."""
+    props = body.get("properties") or {}
+    acls = props.get("networkAcls") or {}
+    system = body.get("systemData") or {}
+
+    private_endpoints = []
+    for conn in props.get("privateEndpointConnections") or []:
+        conn_props = conn.get("properties") or {}
+        state = conn_props.get("privateLinkServiceConnectionState") or {}
+        endpoint_id = (conn_props.get("privateEndpoint") or {}).get("id") or ""
+        private_endpoints.append(
+            {
+                "name": endpoint_id.rstrip("/").rsplit("/", 1)[-1] or (conn.get("id") or "").rsplit("/", 1)[-1],
+                "private_endpoint_id": endpoint_id,
+                "status": state.get("status"),
+                "description": state.get("description"),
+                "provisioning_state": conn_props.get("provisioningState"),
+            }
+        )
+
+    access_policies = []
+    for policy in props.get("accessPolicies") or []:
+        perms = policy.get("permissions") or {}
+        access_policies.append(
+            {
+                "object_id": policy.get("objectId"),
+                "tenant_id": policy.get("tenantId"),
+                "application_id": policy.get("applicationId"),
+                "secrets": perms.get("secrets") or [],
+                "keys": perms.get("keys") or [],
+                "certificates": perms.get("certificates") or [],
+                "storage": perms.get("storage") or [],
+            }
+        )
+
+    return {
+        "sku": (props.get("sku") or {}).get("name"),
+        "sku_family": (props.get("sku") or {}).get("family"),
+        "tenant_id": props.get("tenantId"),
+        "provisioning_state": props.get("provisioningState"),
+        "soft_delete_enabled": props.get("enableSoftDelete"),
+        "soft_delete_retention_days": props.get("softDeleteRetentionInDays"),
+        "purge_protection_enabled": bool(props.get("enablePurgeProtection")),
+        "rbac_enabled": bool(props.get("enableRbacAuthorization")),
+        "enabled_for_deployment": bool(props.get("enabledForDeployment")),
+        "enabled_for_disk_encryption": bool(props.get("enabledForDiskEncryption")),
+        "enabled_for_template_deployment": bool(props.get("enabledForTemplateDeployment")),
+        "public_network_access": props.get("publicNetworkAccess"),
+        "network_default_action": acls.get("defaultAction"),
+        "network_bypass": acls.get("bypass"),
+        "ip_rules": [r.get("value") for r in acls.get("ipRules") or [] if r.get("value")],
+        "virtual_network_rules": [r.get("id") for r in acls.get("virtualNetworkRules") or [] if r.get("id")],
+        "private_endpoints": private_endpoints,
+        "access_policies": access_policies,
+        "created_at": system.get("createdAt"),
+        "created_by": system.get("createdBy"),
+        "last_modified_at": system.get("lastModifiedAt"),
+        "last_modified_by": system.get("lastModifiedBy"),
+    }
+
+
+def expiry_entry(
+    name: str,
+    vault_name: str,
+    item_type: str,
+    expires: str | None,
+    *,
+    enabled: bool,
+    managed: bool = False,
+) -> dict | None:
+    """Dashboard row for an item that expired or expires within 360 days, else None.
+
+    A certificate's backing secret and key are skipped: they expire with the
+    certificate, which already has its own row, and Azure refuses direct
+    writes to them — so listing them triple-counts one certificate and offers
+    a "Fix" that can only fail. Expired items are kept only while enabled; a
+    disabled, expired item has been retired and needs no action.
+    """
+    if not expires or managed:
+        return None
+    try:
+        days_remaining = (datetime.fromisoformat(expires) - datetime.utcnow()).days
+    except (ValueError, TypeError):
+        return None
+    if days_remaining > 360 or (days_remaining < 0 and not enabled):
+        return None
+    return {
+        "name": name,
+        "vault_name": vault_name,
+        "type": item_type,
+        "expires": expires,
+        "days_remaining": days_remaining,
+        "enabled": enabled,
+    }
+
+
+def expiry_counts(items: list[dict]) -> dict:
+    """Dashboard tile counts. The "expiring" windows exclude what has already expired."""
+    days = [e.get("days_remaining", 999) for e in items]
+    return {
+        "expired_count": sum(1 for d in days if d < 0),
+        "expiring_within_30_days": sum(1 for d in days if 0 <= d <= 30),
+        "expiring_within_90_days": sum(1 for d in days if 0 <= d <= 90),
+        "expiring_within_360_days": sum(1 for d in days if 0 <= d <= 360),
+    }
+
+
+def _check_expiry(expiring_list: list, item: dict, vault_name: str, item_type: str) -> None:
+    """Add the item to the dashboard list when it expired or expires within 360 days."""
+    entry = expiry_entry(
+        item["name"],
+        vault_name,
+        item_type,
+        item.get("expires"),
+        enabled=item.get("enabled", True),
+        managed=bool(item.get("managed")),
+    )
+    if entry:
+        expiring_list.append(entry)

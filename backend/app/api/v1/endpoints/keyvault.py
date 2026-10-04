@@ -9,21 +9,25 @@ Data is kept in sync via periodic background jobs and immediate
 post-mutation updates.
 """
 
+import contextlib
 import hashlib
+import json
+import re
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
+from app.core.access_scope import subscription_scope_clause
 from app.core.database import get_db
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.auth import UserContext, UserRole
-from app.models.database import AuditLog
+from app.models.database import AuditLog, AzureResourceInventory
 from app.services.keyvault_bulk_service import (
     BULK_SECRET_MAX_COUNT,
     parse_bulk_secrets_file,
@@ -33,11 +37,55 @@ from app.services.keyvault_service import (
     VALUE_SEARCH_MIN_QUERY,
     KeyVaultService,
     _normalize_vault_uri,
+    summarize_vault_resource,
 )
 from app.services.keyvault_sync_service import KeyVaultSyncService
 
 logger = structlog.get_logger(__name__)
-router = APIRouter()
+
+# The service sends its Key Vault bearer token to whatever vault_uri a request
+# names, and the target-access check resolves a vault by the first DNS label
+# only — so https://<known-vault>.example.com/ would pass it and receive the
+# token. Only genuine Key Vault endpoints are accepted.
+_VAULT_URI_RE = re.compile(
+    r"^https://[a-z0-9-]{3,24}\.vault\.(azure\.net|azure\.cn|usgovcloudapi\.net|microsoftazure\.de)/?$",
+    re.IGNORECASE,
+)
+# Object names and versions end up in Key Vault URL paths.
+_OBJECT_NAME_RE = re.compile(r"^[0-9a-zA-Z-]{1,127}$")
+_VERSION_PATTERN = r"^[0-9a-zA-Z]{1,64}$"
+
+
+def _collect_vault_uris(payload: Any, found: list[str]) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key == "vault_uri" and isinstance(value, str):
+                found.append(value)
+            else:
+                _collect_vault_uris(value, found)
+    elif isinstance(payload, list):
+        for value in payload:
+            _collect_vault_uris(value, found)
+
+
+async def require_azure_vault_uris(request: Request) -> None:
+    """Router dependency: reject any vault_uri (query or JSON body) that is not a Key Vault endpoint."""
+    uris = list(request.query_params.getlist("vault_uri"))
+    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and request.headers.get(
+        "content-type", ""
+    ).lower().startswith("application/json"):
+        raw = await request.body()  # cached by Starlette; the route still reads it
+        if raw:
+            with contextlib.suppress(ValueError, UnicodeDecodeError):
+                _collect_vault_uris(json.loads(raw), uris)
+    if any(not _VAULT_URI_RE.match(uri.strip()) for uri in uris):
+        raise HTTPException(
+            status_code=400,
+            detail="vault_uri must be an Azure Key Vault URI, e.g. https://<vault-name>.vault.azure.net/",
+        )
+
+
+router = APIRouter(dependencies=[Depends(require_azure_vault_uris)])
 
 
 def _get_kv_service() -> KeyVaultService:
@@ -69,6 +117,7 @@ def _audit_summary(action: str, resource_type: str, resource_name: str) -> str:
         "delete_certificate": "Deleted",
         "bulk_create_secrets": "Bulk uploaded",
         "search_secret_values": "Searched",
+        "view_secret_value": "Viewed value of",
     }.get(action, "Changed")
     if action == "bulk_create_secrets":
         return f"{verb} secrets ({resource_name})"
@@ -160,6 +209,19 @@ async def _write_keyvault_audit_log(
         )
 
 
+def _refuse_managed_secret(current: dict) -> None:
+    """A certificate's backing secret cannot be written; its expiry follows the certificate."""
+    if current.get("managed"):
+        certificate = (current.get("kid") or "").rstrip("/").split("/keys/")[-1].split("/")[0]
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This secret belongs to certificate '{certificate or current.get('name')}' and expires with it. "
+                "Renew the certificate instead."
+            ),
+        )
+
+
 async def _item_exists_in_cache(
     sync_service: KeyVaultSyncService,
     vault_uri: str,
@@ -212,19 +274,21 @@ class CreateKeyRequest(BaseModel):
     kty: str = "RSA"  # RSA, EC, oct, RSA-HSM, EC-HSM
     key_size: int | None = None  # 2048, 3072, 4096 for RSA
     key_ops: list[str] | None = None  # encrypt, decrypt, sign, verify, wrapKey, unwrapKey
+    crv: Literal["P-256", "P-384", "P-521", "P-256K"] | None = None  # EC keys only
+    tags: dict[str, str] = Field(default_factory=dict)
     not_before: str | None = None  # ISO-8601 date (defaults to now)
     expires: str | None = None  # ISO-8601 date (defaults to now + 360 days)
 
 
 class ExtendSecretExpiryRequest(BaseModel):
-    """Extend a single secret's expiry by 360 days from its current expiry."""
+    """Set a secret's expiry to today + 360 days (writes a new version with the same value)."""
 
     vault_uri: str
     name: str
 
 
 class BulkExtendSecretExpiryRequest(BaseModel):
-    """Extend expiry for multiple secrets (each +360 days from current expiry)."""
+    """Set the expiry of several secrets to today + 360 days."""
 
     secrets: list[ExtendSecretExpiryRequest]
 
@@ -458,16 +522,48 @@ async def search_secrets(
 )
 async def get_secret(
     name: str,
+    http_request: Request,
     vault_uri: str = Query(description="Key Vault URI"),
+    version: str | None = Query(
+        default=None, pattern=_VERSION_PATTERN, description="A specific version; default current"
+    ),
     user: UserContext = Depends(require_role(UserRole.ADMIN, UserRole.WRITE)),
     service: KeyVaultService = Depends(_get_kv_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Get a secret value. Requires Admin or Write role."""
+    """Get a secret value. Requires Admin or Write role; every read is audited."""
+    if not _OBJECT_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid secret name.")
+    vault_uri = _normalize_vault_uri(vault_uri)
+    target = f"{name} (version {version})" if version else name
     try:
-        return await service.get_secret_value(vault_uri, name)
+        result = await service.get_secret_value(vault_uri, name, version)
     except Exception as e:
         logger.warning("get_secret_error", vault_uri=vault_uri, name=name, error=str(e))
+        await _write_keyvault_audit_log(
+            db,
+            request=http_request,
+            user=user,
+            action="view_secret_value",
+            resource_type="secret",
+            resource_name=name,
+            vault_uri=vault_uri,
+            status="failed",
+            details={"summary": f"Failed to read secret value {target}", "version": version, "error": str(e)[:300]},
+        )
         raise HTTPException(status_code=502, detail=f"Cannot retrieve secret: {_friendly_error(e)}")
+    await _write_keyvault_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="view_secret_value",
+        resource_type="secret",
+        resource_name=name,
+        vault_uri=vault_uri,
+        status="success",
+        details={"summary": f"Viewed secret value {target}", "version": result.get("version")},
+    )
+    return result
 
 
 @router.post(
@@ -591,7 +687,7 @@ async def delete_secret(
 
 @router.post(
     "/secrets/extend-expiry",
-    summary="Extend a secret's expiry by 360 days (Write)",
+    summary="Set a secret's expiry to today + 360 days (Write)",
 )
 async def extend_secret_expiry(
     request: ExtendSecretExpiryRequest,
@@ -602,9 +698,10 @@ async def extend_secret_expiry(
     sync_service: KeyVaultSyncService = Depends(_get_sync_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Fetch current secret value and update its expiry to today + 360 days."""
+    """Write a new version of the secret — same value, tags and status — expiring today + 360 days."""
     try:
         current = await service.get_secret_value(request.vault_uri, request.name)
+        _refuse_managed_secret(current)
         current_expires = current.get("expires")
         new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
 
@@ -613,6 +710,8 @@ async def extend_secret_expiry(
             name=request.name,
             value=current["value"],
             content_type=current.get("content_type") or None,
+            tags=current.get("tags") or {},
+            enabled=current.get("enabled", True),
             expires=new_expiry,
         )
         await _write_keyvault_audit_log(
@@ -628,6 +727,8 @@ async def extend_secret_expiry(
         )
         background_tasks.add_task(sync_service.sync_vault, request.vault_uri, triggered_by="mutation")
         return {**result, "new_expiry": new_expiry, "previous_expiry": current_expires}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning("extend_secret_expiry_error", vault_uri=request.vault_uri, name=request.name, error=str(e))
         raise HTTPException(status_code=502, detail=f"Cannot extend secret expiry: {_friendly_error(e)}")
@@ -635,7 +736,7 @@ async def extend_secret_expiry(
 
 @router.post(
     "/secrets/bulk-extend-expiry",
-    summary="Extend expiry for multiple secrets by 360 days (Write)",
+    summary="Set several secrets' expiry to today + 360 days (Write)",
 )
 async def bulk_extend_secret_expiry(
     request: BulkExtendSecretExpiryRequest,
@@ -646,13 +747,14 @@ async def bulk_extend_secret_expiry(
     sync_service: KeyVaultSyncService = Depends(_get_sync_service),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Extend expiry for multiple secrets by 360 days each. Returns success/failure per secret."""
+    """Set each secret's expiry to today + 360 days. Returns success/failure per secret."""
     results = []
     vaults_touched: set[str] = set()
 
     for item in request.secrets:
         try:
             current = await service.get_secret_value(item.vault_uri, item.name)
+            _refuse_managed_secret(current)
             current_expires = current.get("expires")
             new_expiry = (datetime.now(UTC) + timedelta(days=360)).isoformat()
 
@@ -661,6 +763,8 @@ async def bulk_extend_secret_expiry(
                 name=item.name,
                 value=current["value"],
                 content_type=current.get("content_type") or None,
+                tags=current.get("tags") or {},
+                enabled=current.get("enabled", True),
                 expires=new_expiry,
             )
             await _write_keyvault_audit_log(
@@ -680,9 +784,8 @@ async def bulk_extend_secret_expiry(
             )
         except Exception as e:
             logger.warning("bulk_extend_secret_error", vault_uri=item.vault_uri, name=item.name, error=str(e))
-            results.append(
-                {"name": item.name, "vault_uri": item.vault_uri, "status": "failed", "error": _friendly_error(e)}
-            )
+            error = e.detail if isinstance(e, HTTPException) else _friendly_error(e)
+            results.append({"name": item.name, "vault_uri": item.vault_uri, "status": "failed", "error": error})
 
     for vault_uri in vaults_touched:
         background_tasks.add_task(sync_service.sync_vault, vault_uri, triggered_by="mutation")
@@ -923,6 +1026,8 @@ async def create_key(
             key_ops=request.key_ops,
             not_before=request.not_before,
             expires=request.expires,
+            crv=request.crv,
+            tags=request.tags,
         )
         await _write_keyvault_audit_log(
             db,
@@ -1200,17 +1305,24 @@ async def delete_certificate(
 
 @router.get(
     "/history",
-    summary="Get Key Vault CRUD audit history",
-    description="Returns create, update, and delete history for Key Vault secrets, keys, and certificates.",
+    summary="Get Key Vault audit history",
+    description=(
+        "Returns create, update, and delete history for Key Vault secrets, keys, and certificates, "
+        "plus reads of secret values (single views and value searches)."
+    ),
 )
 async def get_audit_history(
     vault_uri: str | None = Query(default=None, description="Filter by Key Vault URI"),
+    resource_type: Annotated[
+        Literal["secret", "key", "certificate"] | None, Query(description="Only this item type")
+    ] = None,
+    resource_name: Annotated[str | None, Query(max_length=127, description="Only this item (case-insensitive)")] = None,
     days: int = Query(default=90, ge=1, le=365, description="Number of days of history to return"),
     limit: int = Query(default=200, ge=1, le=1000, description="Maximum records to return"),
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Get Key Vault create, update, and delete history for audit review."""
+    """Get Key Vault changes and secret-value reads for audit review."""
     if db is None:
         return {"history": [], "count": 0}
 
@@ -1225,6 +1337,8 @@ async def get_audit_history(
         "create_certificate",
         "update_certificate",
         "delete_certificate",
+        "view_secret_value",
+        "search_secret_values",
     )
     since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
 
@@ -1237,6 +1351,10 @@ async def get_audit_history(
     )
     if vault_uri:
         statement = statement.where(AuditLog.details["vault_uri"].astext == vault_uri)
+    if resource_type:
+        statement = statement.where(AuditLog.resource_type == resource_type)
+    if resource_name:
+        statement = statement.where(func.lower(AuditLog.resource_id) == resource_name.lower())
 
     result = await db.execute(statement)
     history = [_serialize_audit_entry(entry) for entry in result.scalars().all()]
@@ -1244,6 +1362,153 @@ async def get_audit_history(
         "history": history,
         "count": len(history),
     }
+
+
+# ── Drill-down: vault detail, item versions, AKS references ────────────
+
+
+@router.get(
+    "/vaults/detail",
+    summary="One vault's properties, network rules, private endpoints and access policies",
+)
+async def get_vault_detail(
+    vault_uri: str = Query(description="Key Vault URI"),
+    user: UserContext = Depends(get_current_user),
+    service: KeyVaultService = Depends(_get_kv_service),
+    sync_service: KeyVaultSyncService = Depends(_get_sync_service),
+) -> dict:
+    """The synced vault record plus its live ARM resource.
+
+    The ARM resource ID always comes from the portal's own (scoped) inventory,
+    never from the caller. If ARM cannot be read, the synced record is still
+    returned with ``arm_error`` explaining why.
+    """
+    vault_uri = _normalize_vault_uri(vault_uri)
+    vault: dict | None = None
+    try:
+        vault = await sync_service.get_vault_from_db(vault_uri)
+    except Exception as e:
+        logger.warning("vault_detail_db_lookup_failed", vault_uri=vault_uri, error=str(e))
+    if vault is None:
+        # Not synced yet: the live discovery is scoped to the caller's subscriptions too.
+        try:
+            live = await service.list_vaults()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Cannot load Key Vault: {_friendly_error(e)}")
+        vault = next(
+            (v for v in live if _normalize_vault_uri(v.get("vault_uri", "")).lower() == vault_uri.lower()), None
+        )
+    if vault is None:
+        raise HTTPException(status_code=404, detail="This Key Vault is not in the portal inventory.")
+
+    properties = arm = arm_error = None
+    resource_id = vault.get("id") or ""
+    if (
+        resource_id.lower().startswith("/subscriptions/")
+        and "/providers/microsoft.keyvault/vaults/" in resource_id.lower()
+    ):
+        try:
+            arm = await service.get_vault_resource(resource_id)
+            properties = summarize_vault_resource(arm)
+        except Exception as e:
+            logger.warning("vault_detail_arm_failed", vault=vault.get("name"), error=str(e)[:300])
+            arm_error = _friendly_error(e)
+    else:
+        arm_error = "The vault's Azure resource ID is not known yet — run a sync."
+    return {"vault": vault, "properties": properties, "arm": arm, "arm_error": arm_error}
+
+
+@router.get(
+    "/{item_type}/{name}/versions",
+    summary="Every version of a secret, key, or certificate (metadata only)",
+)
+async def list_item_versions(
+    item_type: Literal["secrets", "keys", "certificates"],
+    name: str,
+    vault_uri: str = Query(description="Key Vault URI"),
+    user: UserContext = Depends(get_current_user),
+    service: KeyVaultService = Depends(_get_kv_service),
+) -> dict:
+    """Version history, newest first. Never includes secret values."""
+    if not _OBJECT_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid object name.")
+    vault_uri = _normalize_vault_uri(vault_uri)
+    try:
+        versions = await service.list_item_versions(vault_uri, item_type, name)
+    except Exception as e:
+        logger.warning("list_item_versions_error", vault_uri=vault_uri, item_type=item_type, name=name, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot list versions: {_friendly_error(e)}")
+    return {"name": name, "item_type": item_type, "versions": versions, "count": len(versions)}
+
+
+# akv2k8s object types → the Key Vault collection they read.
+_AKVS_OBJECT_KINDS = {
+    "secret": "secret",
+    "multi-key-value-secret": "secret",
+    "certificate": "certificate",
+    "key": "key",
+}
+
+
+@router.get(
+    "/aks-references",
+    summary="AKS AzureKeyVaultSecret objects that sync from this vault",
+)
+async def list_aks_references(
+    vault_uri: str = Query(description="Key Vault URI"),
+    name: str | None = Query(default=None, description="Only references to this object"),
+    object_type: Literal["secret", "key", "certificate"] | None = Query(default=None),
+    user: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """akv2k8s references from the AKS inventory (refreshed by the AKS AKV Sync tab).
+
+    Limited to clusters in subscriptions the caller can read.
+    """
+    if db is None:
+        return {"references": [], "count": 0}
+    vault_name = _vault_name_from_uri(_normalize_vault_uri(vault_uri)).lower()
+    details = AzureResourceInventory.resource_details
+    stmt = select(AzureResourceInventory).where(
+        AzureResourceInventory.resource_type == "aks_akvs",
+        func.lower(details["vault_name"].astext) == vault_name,
+    )
+    if name:
+        stmt = stmt.where(func.lower(details["object_name"].astext) == name.lower())
+    clause = subscription_scope_clause(AzureResourceInventory.subscription_id)
+    if clause is not None:
+        stmt = stmt.where(clause)
+
+    references = []
+    for row in (await db.execute(stmt)).scalars().all():
+        item = row.resource_details or {}
+        kind = _AKVS_OBJECT_KINDS.get((item.get("object_type") or "secret").lower(), item.get("object_type"))
+        if object_type and kind != object_type:
+            continue
+        cluster_id = item.get("_cluster_id") or row.resource_id.split("/akvs/", 1)[0]
+        references.append(
+            {
+                "cluster_id": cluster_id,
+                "cluster_name": cluster_id.rstrip("/").rsplit("/", 1)[-1],
+                "resource_group": row.resource_group,
+                "subscription_id": row.subscription_id,
+                "namespace": item.get("namespace"),
+                "name": item.get("name"),
+                "object_name": item.get("object_name"),
+                "object_type": item.get("object_type"),
+                "object_kind": kind,
+                "object_version": item.get("object_version"),
+                "output_kind": item.get("output_kind"),
+                "output_name": item.get("output_name"),
+                "output_data_key": item.get("output_data_key"),
+                "status": item.get("status"),
+                "status_reason": item.get("status_reason"),
+                "last_azure_update": item.get("last_azure_update"),
+                "inventory_synced_at": row.last_sync.isoformat() if row.last_sync else None,
+            }
+        )
+    references.sort(key=lambda r: (r["cluster_name"] or "", r["namespace"] or "", r["name"] or ""))
+    return {"references": references, "count": len(references)}
 
 
 # ── Sync Endpoints ─────────────────────────────────────────────────────

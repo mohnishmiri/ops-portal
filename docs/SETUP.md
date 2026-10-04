@@ -523,20 +523,29 @@ Frontend `VITE_*` values are exposed to the browser by design. They can be store
 
 ### Key Vault Operations
 
-| Method | Endpoint                              | Description                       |
-|--------|---------------------------------------|-----------------------------------|
-| GET    | `/api/v1/keyvault/dashboard`          | Dashboard summary (KPIs)          |
-| GET    | `/api/v1/keyvault/vaults`             | List all discovered vaults        |
-| GET    | `/api/v1/keyvault/secrets`            | List secrets in a vault           |
-| GET    | `/api/v1/keyvault/secret-value`       | Get secret value                  |
-| POST   | `/api/v1/keyvault/secrets`            | Create/update a secret            |
-| DELETE | `/api/v1/keyvault/secrets`            | Delete a secret                   |
-| GET    | `/api/v1/keyvault/keys`               | List keys in a vault              |
-| GET    | `/api/v1/keyvault/key`                | Get key details                   |
-| POST   | `/api/v1/keyvault/keys`               | Create/update a key               |
-| DELETE | `/api/v1/keyvault/keys`               | Delete a key                      |
-| GET    | `/api/v1/keyvault/certificates`       | List certificates in a vault      |
-| GET    | `/api/v1/keyvault/certificate`        | Get certificate details           |
+Every route that takes a `vault_uri` (query or JSON body) only accepts a real Key Vault
+endpoint (`https://<name>.vault.azure.net/`); anything else is rejected with 400, because the
+backend sends its vault bearer token to that URI.
+
+| Method | Endpoint                                           | Description                                                        |
+|--------|----------------------------------------------------|--------------------------------------------------------------------|
+| GET    | `/api/v1/keyvault/dashboard`                       | Dashboard summary (KPIs, expired + expiring items)                 |
+| GET    | `/api/v1/keyvault/vaults`                          | List all discovered vaults                                         |
+| GET    | `/api/v1/keyvault/vaults/detail`                   | One vault: network rules, private endpoints, access policies, ARM  |
+| GET    | `/api/v1/keyvault/secrets`                         | List secrets in a vault (metadata only)                            |
+| GET    | `/api/v1/keyvault/secrets/{name}`                  | Secret value, optionally `?version=` (Write; every read is audited) |
+| POST   | `/api/v1/keyvault/secrets`                         | Create a secret / new version (Write)                              |
+| DELETE | `/api/v1/keyvault/secrets/{name}`                  | Delete a secret (Write)                                            |
+| POST   | `/api/v1/keyvault/secrets/extend-expiry`           | New version expiring today + 360 days, same value and tags (Write) |
+| GET    | `/api/v1/keyvault/{secrets\|keys\|certificates}/{name}/versions` | Version history (metadata only)                     |
+| GET    | `/api/v1/keyvault/keys`                            | List keys in a vault                                               |
+| GET    | `/api/v1/keyvault/keys/{name}`                     | Key details and public key                                         |
+| POST   | `/api/v1/keyvault/keys`                            | Create a key / new version (Write)                                 |
+| DELETE | `/api/v1/keyvault/keys/{name}`                     | Delete a key (Write)                                               |
+| GET    | `/api/v1/keyvault/certificates`                    | List certificates in a vault                                       |
+| GET    | `/api/v1/keyvault/certificates/{name}`             | Certificate details (CN, SAN, thumbprints, policy)                 |
+| GET    | `/api/v1/keyvault/aks-references`                  | AKS AzureKeyVaultSecret objects that sync from a vault / object    |
+| GET    | `/api/v1/keyvault/history`                         | Audit trail (changes and secret-value reads)                       |
 
 ### AKS Insights
 

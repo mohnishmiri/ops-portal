@@ -1065,9 +1065,12 @@ export interface KeyVaultDashboard {
   total_secrets: number;
   total_keys: number;
   total_certificates: number;
+  /** Enabled items already past their expiry (older backends omit it). */
+  expired_count?: number;
   expiring_within_30_days: number;
   expiring_within_90_days: number;
   expiring_within_360_days: number;
+  /** Expired (negative days_remaining) and expiring-within-360-days items. */
   expiring_items: ExpiringItem[];
   vault_summaries: VaultSummary[];
   generated_at: string;
@@ -1263,6 +1266,9 @@ export interface CreateKeyPayload {
   kty?: string;
   key_size?: number;
   key_ops?: string[];
+  /** EC curve; omit for RSA / oct. */
+  crv?: string;
+  tags?: Record<string, string>;
   not_before?: string;
   expires?: string;
 }
@@ -1277,6 +1283,7 @@ export function useCreateKey() {
     onSettled: async (_d, _e, vars) => {
       await syncKeyVaultListAfterMutation(qc, "keys", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "key-detail"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
@@ -1295,6 +1302,7 @@ export function useDeleteKey() {
     onSettled: async (_d, _e, vars) => {
       await syncKeyVaultListAfterMutation(qc, "keys", vars.vaultUri);
       qc.invalidateQueries({ queryKey: ["keyvault", "key-detail"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
@@ -1397,6 +1405,7 @@ export function useDeleteCertificate() {
     onSettled: async (_d, _e, vars) => {
       await syncKeyVaultListAfterMutation(qc, "certificates", vars.vaultUri);
       qc.invalidateQueries({ queryKey: ["keyvault", "cert-detail"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
@@ -1407,6 +1416,8 @@ export function useDeleteCertificate() {
 
 export interface SecretValueResponse {
   name: string;
+  id?: string;
+  version?: string | null;
   value: string;
   content_type: string;
   is_base64: boolean;
@@ -1416,15 +1427,22 @@ export interface SecretValueResponse {
   updated: string | null;
   not_before: string | null;
   expires: string | null;
+  recovery_level?: string | null;
+  recoverable_days?: number | null;
+  tags?: Record<string, string>;
+  /** Backs a certificate (kid names its key); Azure refuses direct writes. */
+  managed?: boolean;
+  kid?: string | null;
 }
 
-export function useSecretValue(vaultUri: string | null, name: string | null) {
+/** Read a secret's value — the current version, or `version`. Every read is audited server-side. */
+export function useSecretValue(vaultUri: string | null, name: string | null, version?: string | null) {
   return useQuery<SecretValueResponse>({
-    queryKey: ["keyvault", "secret-value", vaultUri, name],
+    queryKey: ["keyvault", "secret-value", vaultUri, name, version ?? null],
     queryFn: async () => {
-      const { data } = await apiClient.get(
-        `/keyvault/secrets/${name}?vault_uri=${encodeURIComponent(vaultUri!)}`
-      );
+      const { data } = await apiClient.get(`/keyvault/secrets/${encodeURIComponent(name!)}`, {
+        params: { vault_uri: vaultUri, ...(version ? { version } : {}) },
+      });
       return data;
     },
     enabled: !!vaultUri && !!name,
@@ -1456,6 +1474,7 @@ export function useCreateSecret() {
     onSettled: async (_d, _e, vars) => {
       await syncKeyVaultListAfterMutation(qc, "secrets", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
@@ -1476,6 +1495,7 @@ export function useDeleteSecret() {
     onSettled: async (_d, _e, vars) => {
       await syncKeyVaultListAfterMutation(qc, "secrets", vars.vaultUri);
       qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
@@ -1493,6 +1513,9 @@ export function useExtendSecretExpiry() {
       await new Promise((r) => setTimeout(r, 600));
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "secrets"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
     },
   });
 }
@@ -1508,6 +1531,9 @@ export function useBulkExtendSecretExpiry() {
       await new Promise((r) => setTimeout(r, 600));
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "secrets"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "secret-value"] });
     },
   });
 }
@@ -1620,15 +1646,22 @@ export function useCreateCertificate() {
     onSettled: async (_d, _e, vars) => {
       await syncKeyVaultListAfterMutation(qc, "certificates", vars.vault_uri);
       qc.invalidateQueries({ queryKey: ["keyvault", "cert-detail"] });
+      qc.invalidateQueries({ queryKey: ["keyvault", "versions"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "dashboard"] });
       qc.invalidateQueries({ queryKey: ["keyvault", "history"] });
     },
   });
 }
 
-export function useKeyVaultAuditHistory(vaultUri: string | null, limit: number = 200, days: number = 90) {
+export function useKeyVaultAuditHistory(
+  vaultUri: string | null,
+  limit: number = 200,
+  days: number = 90,
+  /** Narrow to one secret / key / certificate (matched server-side, case-insensitive). */
+  item?: { type: "secret" | "key" | "certificate"; name: string },
+) {
   return useQuery<KeyVaultAuditHistoryResponse>({
-    queryKey: ["keyvault", "history", vaultUri, limit, days],
+    queryKey: ["keyvault", "history", vaultUri, limit, days, item?.type ?? null, item?.name ?? null],
     queryFn: async () => {
       const params = new URLSearchParams({
         limit: String(limit),
@@ -1637,6 +1670,10 @@ export function useKeyVaultAuditHistory(vaultUri: string | null, limit: number =
       if (vaultUri) {
         params.set("vault_uri", vaultUri);
       }
+      if (item) {
+        params.set("resource_type", item.type);
+        params.set("resource_name", item.name);
+      }
 
       const { data } = await apiClient.get(`/keyvault/history?${params.toString()}`);
       return data;
@@ -1644,6 +1681,159 @@ export function useKeyVaultAuditHistory(vaultUri: string | null, limit: number =
     enabled: !!vaultUri,
     staleTime: 30 * 1000,
     refetchInterval: GRID_POLL_INTERVAL,
+  });
+}
+
+// ── Drill-down: versions, vault detail, AKS references ────────────────
+
+export type KeyVaultItemType = "secret" | "key" | "certificate";
+
+const ITEM_COLLECTIONS: Record<KeyVaultItemType, string> = {
+  secret: "secrets",
+  key: "keys",
+  certificate: "certificates",
+};
+
+export interface KeyVaultItemVersion {
+  version: string;
+  id: string;
+  enabled: boolean;
+  created: string | null;
+  updated: string | null;
+  not_before: string | null;
+  expires: string | null;
+  recovery_level: string | null;
+  content_type: string | null;
+  managed: boolean;
+  /** Certificates only: SHA-1 thumbprint of that version. */
+  thumbprint: string;
+  tags: Record<string, string>;
+  /** The newest version — what an unversioned read returns. */
+  is_current: boolean;
+}
+
+/** Version history of a secret, key, or certificate (metadata only — never values). */
+export function useKeyVaultItemVersions(vaultUri: string | null, itemType: KeyVaultItemType, name: string | null) {
+  return useQuery<KeyVaultItemVersion[]>({
+    queryKey: ["keyvault", "versions", vaultUri, itemType, name],
+    queryFn: async () => {
+      const { data } = await apiClient.get(
+        `/keyvault/${ITEM_COLLECTIONS[itemType]}/${encodeURIComponent(name!)}/versions`,
+        { params: { vault_uri: vaultUri } },
+      );
+      return data.versions;
+    },
+    enabled: !!vaultUri && !!name,
+    staleTime: 60 * 1000,
+  });
+}
+
+export interface VaultPrivateEndpoint {
+  name: string;
+  private_endpoint_id: string;
+  status: string | null;
+  description: string | null;
+  provisioning_state: string | null;
+}
+
+export interface VaultAccessPolicy {
+  object_id: string | null;
+  tenant_id: string | null;
+  application_id: string | null;
+  secrets: string[];
+  keys: string[];
+  certificates: string[];
+  storage: string[];
+}
+
+export interface VaultProperties {
+  sku: string | null;
+  sku_family: string | null;
+  tenant_id: string | null;
+  provisioning_state: string | null;
+  soft_delete_enabled: boolean | null;
+  soft_delete_retention_days: number | null;
+  purge_protection_enabled: boolean;
+  rbac_enabled: boolean;
+  enabled_for_deployment: boolean;
+  enabled_for_disk_encryption: boolean;
+  enabled_for_template_deployment: boolean;
+  public_network_access: string | null;
+  network_default_action: string | null;
+  network_bypass: string | null;
+  ip_rules: string[];
+  virtual_network_rules: string[];
+  private_endpoints: VaultPrivateEndpoint[];
+  access_policies: VaultAccessPolicy[];
+  created_at: string | null;
+  created_by: string | null;
+  last_modified_at: string | null;
+  last_modified_by: string | null;
+}
+
+export interface VaultDetailResponse {
+  /** The synced inventory record. */
+  vault: KeyVaultInfo & {
+    secrets_count?: number;
+    keys_count?: number;
+    certificates_count?: number;
+    synced_at?: string | null;
+  };
+  /** Live from Azure Resource Manager; null when ARM could not be read (see arm_error). */
+  properties: VaultProperties | null;
+  arm: Record<string, unknown> | null;
+  arm_error: string | null;
+}
+
+export function useVaultDetail(vaultUri: string | null) {
+  return useQuery<VaultDetailResponse>({
+    queryKey: ["keyvault", "vault-detail", vaultUri],
+    queryFn: async () => {
+      const { data } = await apiClient.get("/keyvault/vaults/detail", { params: { vault_uri: vaultUri } });
+      return data;
+    },
+    enabled: !!vaultUri,
+    staleTime: 2 * 60 * 1000,
+  });
+}
+
+export interface KeyVaultAksReference {
+  cluster_id: string;
+  cluster_name: string;
+  resource_group: string;
+  subscription_id: string;
+  namespace: string | null;
+  /** The AzureKeyVaultSecret object's name. */
+  name: string | null;
+  object_name: string | null;
+  object_type: string | null;
+  object_kind: KeyVaultItemType | string | null;
+  /** Pinned version, or null when the latest is synced. */
+  object_version: string | null;
+  output_kind: "secret" | "configmap" | "env-injection" | null;
+  output_name: string | null;
+  output_data_key: string | null;
+  status: string | null;
+  status_reason: string | null;
+  last_azure_update: string | null;
+  inventory_synced_at: string | null;
+}
+
+/**
+ * akv2k8s AzureKeyVaultSecret objects that read from this vault (optionally one
+ * object), from the AKS inventory the AKS → AKV Sync tab refreshes.
+ */
+export function useKeyVaultAksReferences(vaultUri: string | null, name?: string | null, objectType?: KeyVaultItemType) {
+  return useQuery<KeyVaultAksReference[]>({
+    queryKey: ["keyvault", "aks-references", vaultUri, name ?? null, objectType ?? null],
+    queryFn: async () => {
+      const { data } = await apiClient.get("/keyvault/aks-references", {
+        params: { vault_uri: vaultUri, ...(name ? { name } : {}), ...(objectType ? { object_type: objectType } : {}) },
+      });
+      return data.references;
+    },
+    enabled: !!vaultUri,
+    staleTime: 2 * 60 * 1000,
   });
 }
 

@@ -1,16 +1,22 @@
 /**
  * Key Vault Management Page — Azure Key Vault discovery, secrets, keys, and certificates.
- * Supports viewing secret values, Base64 decode, create / update / delete secrets and keys,
- * and detailed certificate inspection (thumbprint, CN, SAN).
+ *
+ * KPI tiles filter the grids beneath them (state kept in the URL so a view can
+ * be linked). Vault, secret, key, and certificate names open full drill-down
+ * views like the AKS Deployment view. Secret values are only read on request
+ * (write roles) and every read is audited server-side.
  * All icons are inline SVG vector icons (no emojis).
  */
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Toast, { type ToastState } from "../components/Toast";
+import { MetricCard } from "../components/MetricCard";
 import { formatAxiosError } from "../services/apiErrors";
 import { AutoRefreshIndicator, gridStyles, type SortState, nextSortState, SortableHeader } from "../components/gridStyles";
+import { TileFilterNotice } from "../features/aks/aksGridShared";
 import {
   useKeyVaultDashboard,
   useKeyVaults,
@@ -18,13 +24,11 @@ import {
   useSecretValueSearch,
   useVaultKeys,
   useVaultCertificates,
-  useSecretValue,
   useCreateSecret,
   useDeleteSecret,
   useKeyDetail,
   useCreateKey,
   useDeleteKey,
-  useCertificateDetail,
   useDeleteCertificate,
   useKeyVaultAuditHistory,
   useKeyVaultSyncStatus,
@@ -54,132 +58,39 @@ import {
   ExpiringItem,
   VaultSummary,
   SecretValueResponse,
-  KeyDetailResponse,
-  CertificateDetailResponse,
-  SyncStatusInfo,
   KeyVaultAuditEntry,
+  type KeyVaultItemType,
 } from "../services/costApi";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
+import {
+  Badge,
+  CERTIFICATE_SEARCH_FIELDS,
+  type CertificateSearchField,
+  certificateMatchFields,
+  DaysLeftBadge,
+  decodeBase64Utf8,
+  fmtDate,
+  fmtDateTime,
+  Highlight,
+  Icons,
+  ItemTypeBadge,
+  nameLinkClass,
+  vaultNameFromUri,
+} from "../features/keyvault/kvShared";
+import {
+  auditActionBadge,
+  isReadAction,
+  type ItemDetailTab,
+  KeyVaultItemDetail,
+} from "../features/keyvault/KeyVaultItemDetail";
+import { VaultDetailModal } from "../features/keyvault/VaultDetailModal";
 
-// ── SVG Icons (inline vector) ─────────────────────────────────────────
-
-const Icon: React.FC<{ d: string; className?: string; size?: number }> = ({ d, className = "", size = 20 }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={size} height={size} className={className}>
-    <path d={d} />
-  </svg>
-);
-
-const Icons = {
-  vault: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
-    </svg>
-  ),
-  secret: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4" /><path d="m21 2-9.6 9.6" /><circle cx="7.5" cy="15.5" r="5.5" /><path d="m5.5 17.5 1-1" />
-    </svg>
-  ),
-  key: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
-    </svg>
-  ),
-  certificate: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /><path d="M12 4v1m0 14v1m8-8h-1M5 12H4m13.66-5.66-.71.71M6.34 17.66l-.71.71m12.73.01-.71-.71M6.34 6.34l-.71-.71" />
-      <rect x="2" y="2" width="20" height="20" rx="3" />
-    </svg>
-  ),
-  shield: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-    </svg>
-  ),
-  warning: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-    </svg>
-  ),
-  clipboard: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <rect x="9" y="2" width="6" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="M12 11h4" /><path d="M12 16h4" /><path d="M8 11h.01" /><path d="M8 16h.01" />
-    </svg>
-  ),
-  eye: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={cls}>
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
-    </svg>
-  ),
-  edit: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={cls}>
-      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-    </svg>
-  ),
-  trash: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={cls}>
-      <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-    </svg>
-  ),
-  plus: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={cls}>
-      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  ),
-  fingerprint: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4" /><path d="M5 19.5C5.5 18 6 15 6 12c0-.7.12-1.37.34-2" /><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" /><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" /><path d="M8.65 22c.21-.66.45-1.32.57-2" /><path d="M14 13.12c0 2.38 0 6.38-1 8.88" /><path d="M2 16h.01" /><path d="M21.8 16c.2-2 .131-5.354 0-6" /><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2" />
-    </svg>
-  ),
-  copy: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={cls}>
-      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  ),
-  refresh: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={cls}>
-      <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-    </svg>
-  ),
-  history: (cls = "") => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={cls}>
-      <path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /><path d="M12 7v5l3 3" />
-    </svg>
-  ),
-};
+/** Opens a secret / key / certificate drill-down from inside a vault's grids. */
+type OpenItem = (type: KeyVaultItemType, name: string, tab?: ItemDetailTab) => void;
 
 const KV_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 // ── Helpers ───────────────────────────────────────────────────────────
-
-const fmtDate = (iso: string | null, tz?: string) => {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleDateString("en-US", {
-      year: "numeric", month: "short", day: "numeric",
-      ...(tz ? { timeZone: tz } : {}),
-    });
-  } catch { return iso; }
-};
-
-const Badge: React.FC<{
-  label: string;
-  color: "green" | "red" | "yellow" | "blue" | "gray" | "purple";
-}> = ({ label, color }) => {
-  const colors: Record<string, string> = {
-    green: "bg-green-100 text-green-800",
-    red: "bg-red-100 text-red-800",
-    yellow: "bg-yellow-100 text-yellow-800",
-    blue: "bg-blue-100 text-blue-800",
-    gray: "bg-gray-100 text-gray-800",
-    purple: "bg-purple-100 text-purple-800",
-  };
-  return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[color]}`}>
-      {label}
-    </span>
-  );
-};
 
 const gridSelectStyles =
   "rounded-lg border border-att-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100";
@@ -367,60 +278,123 @@ const GridIconButton: React.FC<{
   );
 };
 
-// ── KPI Card ──────────────────────────────────────────────────────────
+// ── Modal Overlay ─────────────────────────────────────────────────────
 
-const KPICard: React.FC<{
-  title: string; value: number | string; icon: React.ReactNode; color: string;
-  subtitle?: string;
-}> = ({ title, value, icon, color, subtitle }) => (
-  <div className="relative overflow-hidden rounded-2xl border border-att-100 bg-gradient-to-br from-white via-white to-att-50/70 p-5 shadow-sm shadow-att-100/40">
-    <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-att-300 via-att-500 to-att-300" />
-    <div className="flex items-center gap-3">
-      <div className={`flex h-11 w-11 items-center justify-center rounded-xl ring-1 ring-white/60 ${color}`}>
-        {icon}
-      </div>
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">{title}</p>
-        <p className="text-2xl font-bold text-slate-900">{value}</p>
-        {subtitle && <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>}
+/** Dialog above everything else on the page, including the drill-down views (z-50). */
+const Modal: React.FC<{
+  title: string;
+  onClose: () => void;
+  wide?: boolean;
+  children: React.ReactNode;
+}> = ({ title, onClose, wide, children }) => {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={`bg-white rounded-2xl shadow-2xl ${wide ? "w-[720px]" : "w-[520px]"} max-w-[95vw] max-h-[85vh] overflow-auto`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-5 border-b border-gray-100">
+          <h2 className="text-lg font-semibold text-gray-800">{title}</h2>
+          <button onClick={onClose} aria-label="Close" className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+        <div className="p-5">{children}</div>
       </div>
     </div>
-  </div>
+  );
+};
+
+// ── Expired & Expiring Items ──────────────────────────────────────────
+
+/** Which slice of the expiry list a grid shows. "attention" = expired or within 90 days. */
+type ExpiryWindow = "attention" | "expired" | "30" | "90" | "360";
+
+const EXPIRY_WINDOWS: { value: ExpiryWindow; label: string; count: string; empty: string }[] = [
+  { value: "attention", label: "Expired or ≤ 90 days", count: "expired or expiring within 90 days", empty: "Nothing has expired or expires within 90 days" },
+  { value: "expired", label: "Expired", count: "expired", empty: "Nothing enabled has expired" },
+  { value: "30", label: "Expiring ≤ 30 days", count: "expiring within 30 days", empty: "Nothing expires within 30 days" },
+  { value: "90", label: "Expiring ≤ 90 days", count: "expiring within 90 days", empty: "Nothing expires within 90 days" },
+  { value: "360", label: "Expiring ≤ 360 days", count: "expiring within 360 days", empty: "Nothing expires within 360 days" },
+];
+
+const inExpiryWindow = (days: number, expiryWindow: ExpiryWindow) =>
+  expiryWindow === "expired" ? days < 0
+  : expiryWindow === "attention" ? days <= 90
+  : days >= 0 && days <= Number(expiryWindow);
+
+const expiringItemKey = (i: ExpiringItem) => `${i.vault_name}/${i.type}/${i.name}`;
+
+const Spinner: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+  <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none">
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+  </svg>
 );
 
-// ── Expiring Items Alert ──────────────────────────────────────────────
-
 const ExpiringItemsTable: React.FC<{
+  /** Every expired and expiring (≤ 360 days) item in scope. */
   items: ExpiringItem[];
-  totalCount?: number;
+  /** Controlled by the page's tiles; omit to let the grid keep its own. */
+  expiryWindow?: ExpiryWindow;
+  defaultWindow?: ExpiryWindow;
+  onWindowChange?: (window: ExpiryWindow) => void;
   onRefresh: () => void;
   refreshing: boolean;
   vaultUriByName: Record<string, string>;
   canWrite: boolean;
   onToast: (t: ToastState) => void;
-}> = ({ items, totalCount, onRefresh, refreshing, vaultUriByName, canWrite, onToast }) => {
+  onOpenItem: (vaultName: string, type: KeyVaultItemType, name: string) => void;
+  /** Vault names become links; omitted (and the column hidden) inside a vault's own view. */
+  onOpenVault?: (vaultName: string) => void;
+}> = ({
+  items,
+  expiryWindow: controlledWindow,
+  defaultWindow = "90",
+  onWindowChange,
+  onRefresh,
+  refreshing,
+  vaultUriByName,
+  canWrite,
+  onToast,
+  onOpenItem,
+  onOpenVault,
+}) => {
   const { timezone } = usePortalTimezone();
-  const fmt = (iso: string | null) => fmtDate(iso, timezone);
-  const [search, setSearch] = React.useState("");
-  const [page, setPage] = React.useState(1);
-  const [pageSize, setPageSize] = React.useState(20);
-  const [sort, setSort] = React.useState<SortState<"name" | "vault_name" | "type" | "expires" | "days_remaining">>({ key: "days_remaining", direction: "asc" });
-  const [fixingName, setFixingName] = React.useState<string | null>(null);
-  const [bulkFixing, setBulkFixing] = React.useState(false);
-  // Track individually fixed secrets so bulk count drops immediately without waiting for server refresh
-  const [fixedKeys, setFixedKeys] = React.useState<Set<string>>(new Set());
+  const [ownWindow, setOwnWindow] = useState<ExpiryWindow>(defaultWindow);
+  const expiryWindow = controlledWindow ?? ownWindow;
+  const showVault = !!onOpenVault;
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [sort, setSort] = useState<SortState<"name" | "vault_name" | "type" | "expires" | "days_remaining">>({ key: "days_remaining", direction: "asc" });
+  const [fixingKey, setFixingKey] = useState<string | null>(null);
+  const [bulkFixing, setBulkFixing] = useState(false);
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  // Fixed rows show "Updated" and leave the bulk count at once, before the dashboard re-syncs.
+  const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set());
 
   const extendMutation = useExtendSecretExpiry();
   const bulkExtendMutation = useBulkExtendSecretExpiry();
 
-  const _itemKey = (i: ExpiringItem) => `${i.vault_name}/${i.name}`;
+  useEffect(() => setPage(1), [expiryWindow]);
 
-  const filtered = items.filter(
-    (item) =>
-      (item.name || "").toLowerCase().includes(search.toLowerCase()) ||
-      (item.vault_name || "").toLowerCase().includes(search.toLowerCase()) ||
-      (item.type || "").toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items.filter(
+      (item) =>
+        inExpiryWindow(item.days_remaining, expiryWindow) &&
+        (!q || [item.name, item.vault_name, item.type].some((v) => (v || "").toLowerCase().includes(q))),
+    );
+  }, [items, expiryWindow, search]);
   const sorted = useMemo(() => sortCollection(filtered, sort.direction, (item) => {
     switch (sort.key) {
       case "name": return item.name?.toLowerCase();
@@ -434,10 +408,18 @@ const ExpiringItemsTable: React.FC<{
   const safePage = Math.min(page, totalPages);
   const paginated = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
 
-  // Exclude already-fixed items so the count drops immediately after each individual fix
-  const expiring90Secrets = items.filter(
-    (i) => i.type === "secret" && i.days_remaining <= 90 && !fixedKeys.has(_itemKey(i))
-  );
+  const isFixable = (i: ExpiringItem) => i.type === "secret" && !!vaultUriByName[i.vault_name] && !fixedKeys.has(expiringItemKey(i));
+  // Bulk fix acts on what the grid shows (window + search), never on hidden rows.
+  const bulkTargets = filtered.filter(isFixable);
+  const bulkVaults = Array.from(
+    bulkTargets.reduce((m, i) => m.set(i.vault_name, (m.get(i.vault_name) ?? 0) + 1), new Map<string, number>()),
+  ).sort((a, b) => b[1] - a[1]);
+  const newExpiry = fmtDate(new Date(Date.now() + 360 * 86_400_000).toISOString(), timezone);
+
+  const changeWindow = (next: ExpiryWindow) => {
+    if (onWindowChange) onWindowChange(next);
+    else setOwnWindow(next);
+  };
 
   const handleFix = async (item: ExpiringItem) => {
     const vault_uri = vaultUriByName[item.vault_name];
@@ -445,164 +427,232 @@ const ExpiringItemsTable: React.FC<{
       onToast({ type: "error", message: `Cannot find vault URI for ${item.vault_name}` });
       return;
     }
-    setFixingName(item.name);
+    const key = expiringItemKey(item);
+    setFixingKey(key);
     try {
       await extendMutation.mutateAsync({ vault_uri, name: item.name });
-      setFixedKeys((prev) => new Set(prev).add(_itemKey(item)));
-      onToast({ type: "success", message: `Extended expiry for ${item.name} to today + 360 days` });
+      setFixedKeys((prev) => new Set(prev).add(key));
+      onToast({ type: "success", message: `${item.name} now expires ${newExpiry} (today + 360 days)` });
       onRefresh();
     } catch (e: unknown) {
-      onToast({ type: "error", message: `Failed to extend ${item.name}: ${(e as Error).message}` });
+      onToast({ type: "error", message: `Failed to extend ${item.name}: ${formatAxiosError(e, (e as Error).message)}` });
     } finally {
-      setFixingName(null);
+      setFixingKey(null);
     }
   };
 
   const handleBulkFix = async () => {
-    if (!expiring90Secrets.length) return;
+    setConfirmBulk(false);
+    if (!bulkTargets.length) return;
     setBulkFixing(true);
     try {
-      const secrets = expiring90Secrets.map((i) => ({ vault_uri: vaultUriByName[i.vault_name] || "", name: i.name })).filter((s) => s.vault_uri);
-      const result = await bulkExtendMutation.mutateAsync(secrets);
-      // Mark all successfully fixed secrets so count drops to 0 immediately
-      const successNames = new Set(
-        result.results.filter((r) => r.status === "success").map((r) => {
-          const item = expiring90Secrets.find((i) => i.name === r.name);
-          return item ? _itemKey(item) : null;
-        }).filter(Boolean) as string[]
+      const result = await bulkExtendMutation.mutateAsync(
+        bulkTargets.map((i) => ({ vault_uri: vaultUriByName[i.vault_name], name: i.name })),
       );
-      setFixedKeys((prev) => new Set([...prev, ...successNames]));
+      // Match results by vault and name: the same secret name is common across vaults.
+      const byUri = new Map(bulkTargets.map((i) => [`${vaultUriByName[i.vault_name]}|${i.name}`, expiringItemKey(i)]));
+      const fixed = result.results
+        .filter((r) => r.status === "success")
+        .map((r) => byUri.get(`${r.vault_uri}|${r.name}`))
+        .filter((k): k is string => !!k);
+      setFixedKeys((prev) => new Set([...prev, ...fixed]));
       if (result.failed_count > 0) {
-        onToast({ type: "error", message: `Bulk fix: ${result.success_count} succeeded, ${result.failed_count} failed` });
+        const firstError = result.results.find((r) => r.status === "failed");
+        onToast({
+          type: "error",
+          message: `Bulk fix: ${result.success_count} succeeded, ${result.failed_count} failed${firstError ? ` (e.g. ${firstError.name}: ${firstError.error})` : ""}`,
+        });
       } else {
-        onToast({ type: "success", message: `Extended expiry for ${result.success_count} secret(s) to today + 360 days` });
+        onToast({ type: "success", message: `${result.success_count} secret(s) now expire ${newExpiry} (today + 360 days)` });
       }
       onRefresh();
     } catch (e: unknown) {
-      onToast({ type: "error", message: `Bulk fix failed: ${(e as Error).message}` });
+      onToast({ type: "error", message: `Bulk fix failed: ${formatAxiosError(e, (e as Error).message)}` });
     } finally {
       setBulkFixing(false);
     }
   };
 
-  if (!items.length) {
-    return (
-      <div className="rounded-2xl border border-att-100 bg-gradient-to-br from-white to-att-50/50 p-6 shadow-sm">
-        <h3 className="text-md font-semibold text-gray-700 mb-3">Expiring Items</h3>
-        <p className="text-sm text-green-600">No items expiring within 90 days</p>
-      </div>
-    );
-  }
+  const windowMeta = EXPIRY_WINDOWS.find((w) => w.value === expiryWindow) ?? EXPIRY_WINDOWS[0];
+  const columns = 5 + (showVault ? 1 : 0) + (canWrite ? 1 : 0);
+
   return (
     <div className={gridStyles.shell}>
-      <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-        <GridToolbar
-          search={search}
-          onSearch={(value) => { setSearch(value); setPage(1); }}
-          placeholder="Search expiring items..."
-          countLabel={`${search ? filtered.length : (totalCount ?? filtered.length)} expiring within 90 days`}
-          pageSize={pageSize}
-          onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
-          onRefresh={onRefresh}
-          refreshing={refreshing}
-        />
-        {canWrite && expiring90Secrets.length > 0 && (
-          <button
-            onClick={handleBulkFix}
-            disabled={bulkFixing}
-            className="shrink-0 rounded-lg bg-att-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-att-800 disabled:opacity-50 flex items-center gap-1.5"
+      <GridToolbar
+        search={search}
+        onSearch={(value) => { setSearch(value); setPage(1); }}
+        placeholder="Search expiring items..."
+        countLabel={`${filtered.length} ${windowMeta.count}`}
+        pageSize={pageSize}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
+        onRefresh={onRefresh}
+        refreshing={refreshing}
+        filters={
+          <select
+            value={expiryWindow}
+            onChange={(e) => changeWindow(e.target.value as ExpiryWindow)}
+            className={gridSelectStyles}
+            aria-label="Expiry window"
           >
-            {bulkFixing ? (
-              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
-            ) : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width={14} height={14}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            )}
-            {bulkFixing ? "Fixing…" : `Bulk Fix ${expiring90Secrets.length} Secret${expiring90Secrets.length !== 1 ? "s" : ""} (+360d)`}
+            {EXPIRY_WINDOWS.map((w) => (
+              <option key={w.value} value={w.value}>{w.label}</option>
+            ))}
+          </select>
+        }
+        primaryAction={canWrite && bulkTargets.length > 0 ? (
+          <button
+            onClick={() => setConfirmBulk(true)}
+            disabled={bulkFixing}
+            title="Set the expiry of every secret listed to today + 360 days"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-att-700 px-3 py-2 text-sm font-semibold text-white hover:bg-att-800 disabled:opacity-50"
+          >
+            {bulkFixing ? <Spinner /> : Icons.shield("h-4 w-4")}
+            {bulkFixing ? "Fixing…" : `Bulk Fix ${bulkTargets.length} Secret${bulkTargets.length !== 1 ? "s" : ""} (+360d)`}
           </button>
-        )}
-      </div>
-      <div className="overflow-auto max-h-64">
+        ) : undefined}
+      />
+      <div className="overflow-auto max-h-[500px]">
         <table className={gridStyles.table}>
-          <thead className={gridStyles.head}>
+          <thead className={gridStyles.stickyHead}>
             <tr>
               <th className={gridStyles.headerCell}><SortableHeader label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
-              <th className={gridStyles.headerCell}><SortableHeader label="Vault" active={sort.key === "vault_name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "vault_name"))} /></th>
+              {showVault && <th className={gridStyles.headerCell}><SortableHeader label="Vault" active={sort.key === "vault_name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "vault_name"))} /></th>}
               <th className={gridStyles.headerCell}><SortableHeader label="Type" active={sort.key === "type"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "type"))} /></th>
+              <th className={gridStyles.headerCell}>Status</th>
               <th className={gridStyles.headerCell}><SortableHeader label="Expires" active={sort.key === "expires"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "expires"))} /></th>
               <th className={gridStyles.headerCellCenter}><SortableHeader label="Days Left" active={sort.key === "days_remaining"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "days_remaining"))} align="center" /></th>
               {canWrite && <th className={gridStyles.headerCell}>Action</th>}
             </tr>
           </thead>
           <tbody>
-            {paginated.map((item, i) => {
-              const isFixable = item.type === "secret" && item.days_remaining <= 90 && !!vaultUriByName[item.vault_name];
-              const isFixin = fixingName === item.name;
+            {paginated.map((item) => {
+              const key = expiringItemKey(item);
+              const fixed = fixedKeys.has(key);
               return (
-                <tr key={i} className={gridStyles.row}>
-                  <td className={gridStyles.strongCell}>{item.name}</td>
-                  <td className={gridStyles.cell}>{item.vault_name}</td>
+                <tr key={key} className={gridStyles.row}>
+                  <td className={gridStyles.strongCell}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenItem(item.vault_name, item.type as KeyVaultItemType, item.name)}
+                      className={nameLinkClass}
+                      title={`Open ${item.type} details`}
+                    >
+                      {item.name}
+                    </button>
+                  </td>
+                  {showVault && (
+                    <td className={gridStyles.cell}>
+                      <button type="button" onClick={() => onOpenVault?.(item.vault_name)} className={nameLinkClass} title="Open vault details">
+                        {item.vault_name}
+                      </button>
+                    </td>
+                  )}
+                  <td className={gridStyles.cell}><ItemTypeBadge type={item.type} /></td>
                   <td className={gridStyles.cell}>
-                    <Badge
-                      label={item.type}
-                      color={item.type === "certificate" ? "purple" : item.type === "key" ? "blue" : "gray"}
-                    />
+                    <Badge label={item.enabled ? "Enabled" : "Disabled"} color={item.enabled ? "green" : "gray"} />
                   </td>
-                  <td className={gridStyles.cell}>{fmt(item.expires)}</td>
-                  <td className={gridStyles.centerCell}>
-                    <Badge
-                      label={`${item.days_remaining}d`}
-                      color={item.days_remaining <= 7 ? "red" : item.days_remaining <= 30 ? "yellow" : item.days_remaining <= 90 ? "blue" : "gray"}
-                    />
-                  </td>
+                  <td className={`${gridStyles.cell} whitespace-nowrap`}>{fmtDate(item.expires, timezone)}</td>
+                  <td className={gridStyles.centerCell}><DaysLeftBadge days={item.days_remaining} /></td>
                   {canWrite && (
                     <td className={gridStyles.cell}>
-                      {isFixable && (
+                      {fixed ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700" title="Expiry set to today + 360 days; the grid updates after the next vault sync">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" width={12} height={12}><path d="M20 6L9 17l-5-5" /></svg>
+                          Updated
+                        </span>
+                      ) : isFixable(item) ? (
                         <button
                           onClick={() => handleFix(item)}
-                          disabled={isFixin || bulkFixing}
-                          className="rounded px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 hover:bg-green-200 disabled:opacity-50 flex items-center gap-1"
-                          title="Update expiry to current expiry + 360 days"
+                          disabled={fixingKey === key || bulkFixing}
+                          className="flex items-center gap-1 whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 hover:bg-green-200 disabled:opacity-50"
+                          title="Write a new version with the same value, tags and status that expires today + 360 days"
                         >
-                          {isFixin ? (
-                            <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
-                          ) : null}
-                          {isFixin ? "Fixing…" : "Fix (+360d)"}
+                          {fixingKey === key && <Spinner className="w-3 h-3" />}
+                          {fixingKey === key ? "Fixing…" : "Fix (+360d)"}
                         </button>
-                      )}
+                      ) : null}
                     </td>
                   )}
                 </tr>
               );
             })}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={columns} className="py-6 text-center text-sm text-slate-400">
+                  {search ? `No items match “${search}”` : windowMeta.empty}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
       <GridPagination page={safePage} totalPages={totalPages} totalItems={filtered.length} pageSize={pageSize} onPageChange={setPage} />
+
+      {confirmBulk && (
+        <Modal title="Confirm bulk expiry fix" onClose={() => setConfirmBulk(false)}>
+          <p className="text-sm text-gray-700">
+            Set the expiry of <span className="font-semibold">{bulkTargets.length} secret{bulkTargets.length !== 1 ? "s" : ""}</span> in{" "}
+            {bulkVaults.length} vault{bulkVaults.length !== 1 ? "s" : ""} to <span className="font-semibold">{newExpiry}</span> (today + 360 days)?
+          </p>
+          <p className="mt-2 text-xs text-gray-500">
+            Each secret gets a new version with the same value, content type, tags and enabled state. Applications pinned to a specific version keep reading the old one.
+          </p>
+          <ul className="mt-3 max-h-40 overflow-auto rounded-lg border border-att-100 text-xs">
+            {bulkVaults.map(([vault, count]) => (
+              <li key={vault} className="flex justify-between border-t border-att-100 px-3 py-1.5 first:border-t-0">
+                <span className="font-medium text-gray-700">{vault}</span>
+                <span className="text-gray-500">{count} secret{count !== 1 ? "s" : ""}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-4 flex justify-end gap-2">
+            <button onClick={() => setConfirmBulk(false)} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200">Cancel</button>
+            <button onClick={() => void handleBulkFix()} className="px-4 py-2 text-sm text-white bg-att-700 rounded-lg hover:bg-att-800">
+              Fix {bulkTargets.length} secret{bulkTargets.length !== 1 ? "s" : ""}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 };
 
-// ── Vault Summary Cards ───────────────────────────────────────────────
+// ── Vault Inventory ───────────────────────────────────────────────────
+
+type VaultTypeFilter = "secrets" | "keys" | "certificates";
 
 const VaultSummaryTable: React.FC<{
   vaults: VaultSummary[];
   onSelect: (name: string) => void;
+  onOpenVault: (name: string) => void;
   selectedVault: string | null;
+  /** Set by the Secrets / Keys / Certificates tiles: only vaults holding that type, most first. */
+  typeFilter: VaultTypeFilter | null;
   onRefresh: () => void;
   refreshing: boolean;
   canWrite: boolean;
   onSyncVault?: (vaultName: string, vaultUri: string) => void;
   syncingVault?: string | null;
-}> = ({ vaults, onSelect, selectedVault, onRefresh, refreshing, canWrite, onSyncVault, syncingVault }) => {
-  const [search, setSearch] = React.useState("");
-  const [page, setPage] = React.useState(1);
-  const [pageSize, setPageSize] = React.useState(20);
-  const [sort, setSort] = React.useState<SortState<"name" | "location" | "secrets_count" | "keys_count" | "certificates_count">>({ key: "name", direction: "asc" });
-  const filtered = vaults.filter(
-    (v) =>
-      (v.name || "").toLowerCase().includes(search.toLowerCase()) ||
-      (v.location || "").toLowerCase().includes(search.toLowerCase())
-  );
+}> = ({ vaults, onSelect, onOpenVault, selectedVault, typeFilter, onRefresh, refreshing, canWrite, onSyncVault, syncingVault }) => {
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [sort, setSort] = useState<SortState<"name" | "location" | "secrets_count" | "keys_count" | "certificates_count">>({ key: "name", direction: "asc" });
+
+  // A type tile ranks vaults by that count; the headers can re-sort afterwards.
+  useEffect(() => {
+    setSort(typeFilter ? { key: `${typeFilter}_count`, direction: "desc" } : { key: "name", direction: "asc" });
+    setPage(1);
+  }, [typeFilter]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return vaults.filter(
+      (v) =>
+        (!typeFilter || (v[`${typeFilter}_count`] ?? 0) > 0) &&
+        (!q || (v.name || "").toLowerCase().includes(q) || (v.location || "").toLowerCase().includes(q)),
+    );
+  }, [vaults, search, typeFilter]);
   const sorted = useMemo(() => sortCollection(filtered, sort.direction, (vault) => {
     switch (sort.key) {
       case "name": return vault.name?.toLowerCase();
@@ -628,9 +678,9 @@ const VaultSummaryTable: React.FC<{
       onRefresh={onRefresh}
       refreshing={refreshing}
     />
-    <div className="overflow-auto max-h-64">
+    <div className="overflow-auto max-h-[500px]">
       <table className={gridStyles.table}>
-        <thead className={gridStyles.head}>
+        <thead className={gridStyles.stickyHead}>
           <tr>
             <th className={gridStyles.headerCell}><SortableHeader label="Vault" active={sort.key === "name"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "name"))} /></th>
             <th className={gridStyles.headerCell}><SortableHeader label="Location" active={sort.key === "location"} direction={sort.direction} onClick={() => setSort(nextSortState(sort, "location"))} /></th>
@@ -646,17 +696,25 @@ const VaultSummaryTable: React.FC<{
             <tr
               key={v.name}
               onClick={() => onSelect(v.name)}
+              title="Manage this vault's secrets, keys and certificates below"
               className={`${gridStyles.row} cursor-pointer transition ${
                 selectedVault === v.name ? gridStyles.selectedRow : ""
               }`}
             >
               <td className={gridStyles.strongCell}>
-                <span className="font-medium text-att-700">{v.name}</span>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onOpenVault(v.name); }}
+                  className={nameLinkClass}
+                  title="Open vault details"
+                >
+                  {v.name}
+                </button>
               </td>
               <td className={gridStyles.cell}>{v.location}</td>
-              <td className={gridStyles.centerCell}><span className="font-mono">{v.secrets_count}</span></td>
-              <td className={gridStyles.centerCell}><span className="font-mono">{v.keys_count}</span></td>
-              <td className={gridStyles.centerCell}><span className="font-mono">{v.certificates_count}</span></td>
+              <td className={gridStyles.centerCell}><span className={`font-mono ${typeFilter === "secrets" ? "font-semibold text-att-700" : ""}`}>{v.secrets_count}</span></td>
+              <td className={gridStyles.centerCell}><span className={`font-mono ${typeFilter === "keys" ? "font-semibold text-att-700" : ""}`}>{v.keys_count}</span></td>
+              <td className={gridStyles.centerCell}><span className={`font-mono ${typeFilter === "certificates" ? "font-semibold text-att-700" : ""}`}>{v.certificates_count}</span></td>
               <td className={gridStyles.cell}>
                 <div className="flex gap-1 flex-wrap">
                   {v.soft_delete && <Badge label="Soft Delete" color="green" />}
@@ -671,190 +729,28 @@ const VaultSummaryTable: React.FC<{
                       onClick={(e) => { e.stopPropagation(); onSyncVault?.(v.name, v.vault_uri); }}
                       disabled={syncingVault === v.name}
                       className="p-2 text-att-600 hover:bg-att-50 rounded-lg disabled:opacity-50"
-                      title={`Sync ${v.name}`}
+                      title={`Sync ${v.name} from Azure`}
+                      aria-label={`Sync ${v.name}`}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={18} height={18} className={syncingVault === v.name ? "animate-spin" : ""}>
-                        <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                      </svg>
+                      <span className={syncingVault === v.name ? "inline-block animate-spin" : "inline-block"}>{Icons.refresh()}</span>
                     </button>
                   </div>
                 </td>
               )}
             </tr>
           ))}
+          {filtered.length === 0 && (
+            <tr>
+              <td colSpan={canWrite ? 7 : 6} className="py-6 text-center text-sm text-slate-400">
+                {search ? `No vaults match “${search}”` : typeFilter ? `No vaults hold ${typeFilter}` : "No vaults in the selected subscriptions"}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
     <GridPagination page={safePage} totalPages={totalPages} totalItems={filtered.length} pageSize={pageSize} onPageChange={setPage} />
   </div>
-  );
-};
-
-// ── Modal Overlay ─────────────────────────────────────────────────────
-
-const Modal: React.FC<{
-  title: string;
-  onClose: () => void;
-  wide?: boolean;
-  children: React.ReactNode;
-}> = ({ title, onClose, wide, children }) => (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-    <div
-      className={`bg-white rounded-2xl shadow-2xl ${wide ? "w-[720px]" : "w-[520px]"} max-h-[85vh] overflow-auto`}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div className="flex items-center justify-between p-5 border-b border-gray-100">
-        <h2 className="text-lg font-semibold text-gray-800">{title}</h2>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
-      </div>
-      <div className="p-5">{children}</div>
-    </div>
-  </div>
-);
-
-// ── Secret Value Viewer (read-only with decode) ───────────────────────
-
-const SecretValueViewer: React.FC<{
-  vaultUri: string;
-  secretName: string;
-  onClose: () => void;
-}> = ({ vaultUri, secretName, onClose }) => {
-  const { timezone } = usePortalTimezone();
-  const fmt = (iso: string | null) => fmtDate(iso, timezone);
-  const { data, isLoading, isError, error } = useSecretValue(vaultUri, secretName);
-  const [showDecoded, setShowDecoded] = useState(false);
-  const [copied, setCopied] = useState<string | null>(null);
-
-  const copyToClipboard = useCallback((text: string, label: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(label);
-      setTimeout(() => setCopied(null), 2000);
-    });
-  }, []);
-
-  // Try manual Base64 decode for display
-  const manualDecode = useMemo(() => {
-    if (!data?.value) return null;
-    try {
-      return atob(data.value);
-    } catch {
-      return null;
-    }
-  }, [data?.value]);
-
-  const manualEncode = useMemo(() => {
-    if (!data?.value) return null;
-    try {
-      return btoa(data.value);
-    } catch {
-      return null;
-    }
-  }, [data?.value]);
-
-  return (
-    <Modal title={`Secret: ${secretName}`} onClose={onClose} wide>
-      {isLoading && <p className="text-gray-500 text-sm">Loading secret value...</p>}
-      {isError && (
-        <p className="text-red-500 text-sm">
-          Failed to load secret value: {(error as any)?.response?.data?.detail || "Unknown error"}
-        </p>
-      )}
-      {data && (
-        <div className="space-y-4">
-          {/* Metadata row */}
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div><span className="text-gray-500">Content Type:</span> <span className="font-medium">{data.content_type || "—"}</span></div>
-            <div><span className="text-gray-500">Status:</span> <Badge label={data.enabled ? "Enabled" : "Disabled"} color={data.enabled ? "green" : "red"} /></div>
-            <div><span className="text-gray-500">Created:</span> <span className="font-medium">{fmt(data.created)}</span></div>
-            <div><span className="text-gray-500">Updated:</span> <span className="font-medium">{fmt(data.updated)}</span></div>
-            <div><span className="text-gray-500">Not Before:</span> <span className="font-medium">{fmt(data.not_before)}</span></div>
-            <div><span className="text-gray-500">Expires:</span> <span className="font-medium">{fmt(data.expires)}</span></div>
-            <div><span className="text-gray-500">Auto-detected Base64:</span> <Badge label={data.is_base64 ? "Yes" : "No"} color={data.is_base64 ? "blue" : "gray"} /></div>
-          </div>
-
-          {/* Raw value */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm font-medium text-gray-700">Raw Value</label>
-              <button
-                onClick={() => copyToClipboard(data.value, "raw")}
-                className="text-xs text-blue-600 hover:text-blue-800"
-              >
-                {copied === "raw" ? "✓ Copied!" : "Copy"}
-              </button>
-            </div>
-            <textarea
-              readOnly
-              value={data.value}
-              rows={3}
-              className="w-full border border-gray-200 rounded-lg p-3 text-xs font-mono bg-gray-50 resize-y focus:outline-none"
-            />
-          </div>
-
-          {/* Decode / Encode toggle */}
-          <div className="flex gap-2 flex-wrap">
-            {manualDecode && (
-              <button
-                onClick={() => setShowDecoded(true)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition ${
-                  showDecoded
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : "bg-white text-blue-700 border-blue-300 hover:bg-blue-50"
-                }`}
-              >
-                Decode Base64
-              </button>
-            )}
-            <button
-              onClick={() => setShowDecoded(false)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition ${
-                !showDecoded
-                  ? "bg-blue-600 text-white border-blue-600"
-                  : "bg-white text-blue-700 border-blue-300 hover:bg-blue-50"
-              }`}
-            >
-              Raw
-            </button>
-            {manualEncode && !data.is_base64 && (
-              <button
-                onClick={() => copyToClipboard(manualEncode, "encoded")}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg border bg-white text-purple-700 border-purple-300 hover:bg-purple-50 transition"
-              >
-                {copied === "encoded" ? "✓ Copied Base64!" : "Copy as Base64"}
-              </button>
-            )}
-          </div>
-
-          {/* Decoded value (if Base64) */}
-          {showDecoded && manualDecode && (
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-sm font-medium text-gray-700">Decoded (Base64 → UTF-8)</label>
-                <button
-                  onClick={() => copyToClipboard(manualDecode, "decoded")}
-                  className="text-xs text-blue-600 hover:text-blue-800"
-                >
-                  {copied === "decoded" ? "✓ Copied!" : "Copy"}
-                </button>
-              </div>
-              <textarea
-                readOnly
-                value={manualDecode}
-                rows={4}
-                className="w-full border border-blue-200 rounded-lg p-3 text-xs font-mono bg-blue-50 resize-y focus:outline-none"
-              />
-            </div>
-          )}
-
-          {/* Server-side decoded value (Python) */}
-          {data.is_base64 && data.decoded_value && !showDecoded && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-              <p className="text-xs text-blue-600 mb-1">This value is Base64-encoded. Click "Decode Base64" to see the decoded content.</p>
-            </div>
-          )}
-        </div>
-      )}
-    </Modal>
   );
 };
 
@@ -934,20 +830,14 @@ const SecretFormDialog: React.FC<{
   // Live Base64 decode preview
   const handleValueChange = useCallback((v: string) => {
     setValue(v);
-    if (decodeInput) {
-      try {
-        setDecodedPreview(atob(v));
-      } catch {
-        setDecodedPreview(null);
-      }
-    }
+    if (decodeInput) setDecodedPreview(decodeBase64Utf8(v));
   }, [decodeInput]);
 
   const toggleDecodeInput = useCallback(() => {
     setDecodeInput((prev) => {
       const next = !prev;
       if (next) {
-        try { setDecodedPreview(atob(value)); } catch { setDecodedPreview(null); }
+        setDecodedPreview(decodeBase64Utf8(value));
       } else {
         setDecodedPreview(null);
       }
@@ -1022,6 +912,8 @@ const SecretFormDialog: React.FC<{
         name: name.trim(),
         value: value.trim(),
         content_type: contentType.trim() || undefined,
+        // Every save is a new version, which keeps only the tags sent with it.
+        tags: isEdit ? editSecret.tags : undefined,
         // File uploads are already Base64; manual input respects the checkbox
         encode_base64: valueSource === "file" ? false : encodeBase64,
         not_before: notBefore || undefined,
@@ -1041,8 +933,14 @@ const SecretFormDialog: React.FC<{
   };
 
   return (
-    <Modal title={isEdit ? `Update Secret: ${editSecret.name}` : "Create New Secret"} onClose={onClose}>
+    <Modal title={isEdit ? `New Version: ${editSecret.name}` : "Create New Secret"} onClose={onClose}>
       <div className="space-y-4">
+        {isEdit && (
+          <p className="rounded-lg border border-att-100 bg-att-50/60 px-3 py-2 text-xs text-slate-600">
+            Saving creates a new version of this secret; earlier versions stay available.
+            {Object.keys(editSecret.tags || {}).length > 0 && ` Its ${Object.keys(editSecret.tags).length} tag(s) are carried over.`}
+          </p>
+        )}
         {/* Name */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Secret Name</label>
@@ -1074,7 +972,7 @@ const SecretFormDialog: React.FC<{
                     : "bg-white text-gray-500 hover:bg-gray-50"
                 }`}
               >
-                ✏️ Manual
+                Manual
               </button>
               <button
                 type="button"
@@ -1085,7 +983,7 @@ const SecretFormDialog: React.FC<{
                     : "bg-white text-gray-500 hover:bg-gray-50"
                 }`}
               >
-                📎 Upload File
+                Upload File
               </button>
             </div>
           </div>
@@ -1103,7 +1001,7 @@ const SecretFormDialog: React.FC<{
                       : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"
                   }`}
                 >
-                  {decodeInput ? "✓ Decoding Preview" : "Preview Base64 Decode"}
+                  {decodeInput ? "Hide Base64 Decode" : "Preview Base64 Decode"}
                 </button>
               </div>
               <textarea
@@ -1129,7 +1027,7 @@ const SecretFormDialog: React.FC<{
                       : "border-gray-300 bg-gray-50 hover:border-blue-300 hover:bg-blue-50"
                   }`}
                 >
-                  <span className="text-3xl select-none">📂</span>
+                  <svg className="h-8 w-8 text-att-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
                   <p className="text-sm font-medium text-gray-700">
                     Drop a file here, or <span className="text-blue-600 underline">browse</span>
                   </p>
@@ -1150,7 +1048,7 @@ const SecretFormDialog: React.FC<{
               ) : (
                 /* Uploaded file badge */
                 <div className="flex items-start gap-3 border border-green-200 bg-green-50 rounded-lg p-3">
-                  <span className="text-2xl">✅</span>
+                  <svg className="mt-0.5 h-5 w-5 shrink-0 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-gray-800 truncate">{uploadedFile.name}</p>
                     <p className="text-xs text-gray-500 mt-0.5">
@@ -1165,12 +1063,12 @@ const SecretFormDialog: React.FC<{
                     onClick={clearFile}
                     className="text-xs text-red-500 hover:text-red-700 whitespace-nowrap mt-0.5"
                   >
-                    ✕ Remove
+                    Remove
                   </button>
                 </div>
               )}
               {fileError && (
-                <p className="text-xs text-red-500 mt-1">⚠ {fileError}</p>
+                <p className="text-xs text-red-500 mt-1">{fileError}</p>
               )}
               {/* Read-only Base64 preview when file loaded */}
               {uploadedFile && value && (
@@ -1218,7 +1116,7 @@ const SecretFormDialog: React.FC<{
         )}
         {valueSource === "file" && (
           <p className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded px-3 py-1.5">
-            ℹ File content is already stored as Base64 — no additional encoding applied.
+            File content is already stored as Base64 — no additional encoding applied.
           </p>
         )}
 
@@ -1261,7 +1159,7 @@ const SecretFormDialog: React.FC<{
         {createMutation.isError && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3">
             <p className="text-sm text-red-700">
-              {(createMutation.error as any)?.response?.data?.detail || "Failed to save secret"}
+              {formatAxiosError(createMutation.error, "Failed to save secret")}
             </p>
           </div>
         )}
@@ -1294,7 +1192,7 @@ const SecretFormDialog: React.FC<{
               disabled={!name.trim() || !value.trim() || createMutation.isPending}
               className="px-4 py-2 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
             >
-              {createMutation.isPending ? "Saving..." : isEdit ? "Update Secret" : "Create Secret"}
+              {createMutation.isPending ? "Saving..." : isEdit ? "Save New Version" : "Create Secret"}
             </button>
           </div>
         </div>
@@ -1625,10 +1523,6 @@ const BulkSecretUploadDialog: React.FC<{
 
 // ── Secrets Tab ───────────────────────────────────────────────────────
 
-/** "https://my-kv.vault.azure.net/" -> "my-kv" */
-const vaultNameFromUri = (uri: string | null) =>
-  (uri || "").replace(/^https?:\/\//, "").split(".")[0] || "this vault";
-
 /**
  * Warning strip for value search. Deliberately silent unless the user has to
  * act: the search failed, or the app can list the vault but not read it. Any
@@ -1678,7 +1572,7 @@ const ValueSearchStatus: React.FC<{
   return null;
 };
 
-const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
+const SecretsTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = ({ vaultUri, onOpenItem }) => {
   const { timezone } = usePortalTimezone();
   const { canWrite } = useAuth();
   const fmt = (iso: string | null) => fmtDate(iso, timezone);
@@ -1688,7 +1582,6 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const [search, setSearch] = useState("");
   const [searchScope, setSearchScope] = useState<SecretSearchScope>("name");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [viewingSecret, setViewingSecret] = useState<string | null>(null);
   const [editingSecret, setEditingSecret] = useState<SecretInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
@@ -1888,7 +1781,10 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
               <tr key={s.name} className={gridStyles.row}>
                 <td className={`${gridStyles.strongCell} font-mono text-xs`}>
                   <span className="inline-flex items-center gap-2">
-                    {s.name}
+                    <button type="button" onClick={() => onOpenItem("secret", s.name)} className={nameLinkClass} title="Open secret details">
+                      <Highlight text={s.name} term={term} />
+                    </button>
+                    {s.managed && <Badge label="certificate" color="purple" title="Backs a certificate of the same name" />}
                     {valueSearchActive && valueMatches.has(s.name) && (
                       valueMatches.get(s.name) === "value_base64" ? (
                         <span title="The search term appears in this secret's value once it is Base64-decoded">
@@ -1912,9 +1808,10 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
                 <td className={gridStyles.centerCell}>
                   <div className="flex justify-center gap-1">
                     {/* Reading a secret's value requires write, like the API (GET /keyvault/secrets/{name}). */}
-                    {canWrite && <GridIconButton onClick={() => setViewingSecret(s.name)} title="View secret" tone="blue">{Icons.eye()}</GridIconButton>}
-                    {canWrite && <GridIconButton onClick={() => setEditingSecret(s)} title="Update secret" tone="blue">{Icons.edit()}</GridIconButton>}
-                    {canWrite && <GridIconButton onClick={() => setConfirmDelete(s.name)} title="Delete secret" tone="red">{Icons.trash()}</GridIconButton>}
+                    <GridIconButton onClick={() => onOpenItem("secret", s.name, canWrite ? "value" : "overview")} title={canWrite ? "View secret value" : "View secret details"} tone="blue">{Icons.eye()}</GridIconButton>
+                    {/* A certificate's backing secret cannot be written or deleted directly. */}
+                    {canWrite && !s.managed && <GridIconButton onClick={() => setEditingSecret(s)} title="New secret version" tone="blue">{Icons.edit()}</GridIconButton>}
+                    {canWrite && !s.managed && <GridIconButton onClick={() => setConfirmDelete(s.name)} title="Delete secret" tone="red">{Icons.trash()}</GridIconButton>}
                   </div>
                 </td>
               </tr>
@@ -1930,15 +1827,6 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
         </table>
       </div>
       <GridPagination page={safePage} totalPages={totalPages} totalItems={filtered.length} pageSize={pageSize} onPageChange={setPage} />
-
-      {/* View Secret Modal */}
-      {viewingSecret && vaultUri && (
-        <SecretValueViewer
-          vaultUri={vaultUri}
-          secretName={viewingSecret}
-          onClose={() => setViewingSecret(null)}
-        />
-      )}
 
       {/* Create Secret Modal */}
       {showCreate && vaultUri && (
@@ -2003,172 +1891,6 @@ const SecretsTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   );
 };
 
-// ── Key Value Viewer (read-only detail) ───────────────────────────────
-
-/** Trigger a browser download of a PEM string. */
-function downloadPem(pem: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([pem], { type: "application/x-pem-file" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-/** One base64url JWK component with truncated display and copy-to-clipboard. */
-const JwkField: React.FC<{
-  label: string;
-  value: string;
-  copied: string | null;
-  onCopy: (text: string, label: string) => void;
-}> = ({ label, value, copied, onCopy }) => (
-  <div className="flex items-start gap-2">
-    <span className="text-xs text-gray-500 w-28 shrink-0 pt-1">{label}</span>
-    <code className="flex-1 min-w-0 text-xs font-mono bg-gray-50 border border-gray-200 rounded px-2 py-1 truncate">
-      {value}
-    </code>
-    <button
-      onClick={() => onCopy(value, label)}
-      className="text-xs text-blue-600 hover:text-blue-800 shrink-0 pt-1"
-    >
-      {copied === label ? "Copied!" : "Copy"}
-    </button>
-  </div>
-);
-
-const KeyValueViewer: React.FC<{
-  vaultUri: string;
-  keyName: string;
-  onClose: () => void;
-}> = ({ vaultUri, keyName, onClose }) => {
-  const { timezone } = usePortalTimezone();
-  const fmt = (iso: string | null) => fmtDate(iso, timezone);
-  const { data, isLoading, isError, error } = useKeyDetail(vaultUri, keyName);
-  const [copied, setCopied] = useState<string | null>(null);
-
-  const copyToClipboard = useCallback((text: string, label: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(label);
-      setTimeout(() => setCopied(null), 2000);
-    });
-  }, []);
-
-  return (
-    <Modal title={`Key: ${keyName}`} onClose={onClose} wide>
-      {isLoading && <p className="text-gray-500 text-sm">Loading key details...</p>}
-      {isError && (
-        <p className="text-red-500 text-sm">
-          Failed to load key: {(error as any)?.response?.data?.detail || "Unknown error"}
-        </p>
-      )}
-      {data && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div><span className="text-gray-500">Key Type:</span> <span className="font-medium font-mono">{data.kty || "—"}</span></div>
-            <div><span className="text-gray-500">Status:</span> <Badge label={data.enabled ? "Enabled" : "Disabled"} color={data.enabled ? "green" : "red"} /></div>
-            <div><span className="text-gray-500">Created:</span> <span className="font-medium">{fmt(data.created)}</span></div>
-            <div><span className="text-gray-500">Updated:</span> <span className="font-medium">{fmt(data.updated)}</span></div>
-            <div><span className="text-gray-500">Not Before:</span> <span className="font-medium">{fmt(data.not_before)}</span></div>
-            <div><span className="text-gray-500">Expires:</span> <span className="font-medium">{fmt(data.expires)}</span></div>
-            {data.key_size && <div><span className="text-gray-500">Key Size:</span> <span className="font-medium">{data.key_size} bits</span></div>}
-            {data.crv && <div><span className="text-gray-500">Curve:</span> <span className="font-medium">{data.crv}</span></div>}
-            <div><span className="text-gray-500">Recovery Level:</span> <span className="font-medium">{data.recovery_level || "—"}</span></div>
-          </div>
-
-          {/* Key Operations */}
-          {data.key_ops && data.key_ops.length > 0 && (
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-1 block">Allowed Operations</label>
-              <div className="flex gap-1 flex-wrap">
-                {data.key_ops.map((op) => (
-                  <Badge key={op} label={op} color="blue" />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Public Key */}
-          {(data.public_key_pem || data.n || data.x) && (
-            <div className="border-t border-gray-100 pt-4">
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-sm font-medium text-gray-700">Public Key</label>
-                {data.public_key_pem && (
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => copyToClipboard(data.public_key_pem!, "pem")}
-                      className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
-                    >
-                      {Icons.copy()} {copied === "pem" ? "Copied!" : "Copy PEM"}
-                    </button>
-                    <button
-                      onClick={() => downloadPem(data.public_key_pem!, `${keyName}.pub.pem`)}
-                      className="text-xs text-blue-600 hover:text-blue-800"
-                    >
-                      ⭳ Download .pem
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* JWK components */}
-              <div className="space-y-2 mb-3">
-                {data.e && <JwkField label="Exponent (e)" value={data.e} onCopy={copyToClipboard} copied={copied} />}
-                {data.n && <JwkField label="Modulus (n)" value={data.n} onCopy={copyToClipboard} copied={copied} />}
-                {data.x && <JwkField label="X coordinate" value={data.x} onCopy={copyToClipboard} copied={copied} />}
-                {data.y && <JwkField label="Y coordinate" value={data.y} onCopy={copyToClipboard} copied={copied} />}
-              </div>
-
-              {/* PEM block */}
-              {data.public_key_pem && (
-                <pre className="w-full border border-gray-200 rounded-lg p-3 text-xs font-mono bg-gray-50 whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
-                  {data.public_key_pem}
-                </pre>
-              )}
-            </div>
-          )}
-
-          {/* Private key notice */}
-          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-            <span className="text-sm leading-none mt-0.5">🔒</span>
-            <p className="text-xs text-amber-800">
-              Private key material is never returned by Azure Key Vault and cannot be displayed or
-              exported. Signing and decryption must be performed by the vault.
-            </p>
-          </div>
-
-          {/* Key ID */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm font-medium text-gray-700">Key ID</label>
-              <button
-                onClick={() => copyToClipboard(data.kid, "kid")}
-                className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
-              >
-                {Icons.copy()} {copied === "kid" ? "Copied!" : "Copy"}
-              </button>
-            </div>
-            <div className="w-full border border-gray-200 rounded-lg p-3 text-xs font-mono bg-gray-50 break-all">
-              {data.kid}
-            </div>
-          </div>
-
-          {/* Tags */}
-          {data.tags && Object.keys(data.tags).length > 0 && (
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-1 block">Tags</label>
-              <div className="flex gap-1 flex-wrap">
-                {Object.entries(data.tags).map(([k, v]) => (
-                  <span key={k} className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">{k}: {v}</span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </Modal>
-  );
-};
-
 // ── Create / Update Key Dialog ────────────────────────────────────────
 
 const KeyFormDialog: React.FC<{
@@ -2182,7 +1904,20 @@ const KeyFormDialog: React.FC<{
   const [name, setName] = useState(editKey?.name || "");
   const [kty, setKty] = useState("RSA");
   const [keySize, setKeySize] = useState("2048");
+  const [crv, setCrv] = useState("P-256");
   const isEdit = !!editKey;
+  // A new version is created from what is sent, so start from the current
+  // version's type, size, curve and operations rather than the create defaults.
+  const { data: current, isLoading: loadingCurrent } = useKeyDetail(isEdit ? vaultUri : null, editKey?.name ?? null);
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (!current || prefilled.current) return;
+    prefilled.current = true;
+    if (current.kty) setKty(current.kty);
+    if (current.key_size) setKeySize(String(current.key_size));
+    if (current.crv) setCrv(current.crv);
+    if (current.key_ops?.length) setKeyOps(current.key_ops);
+  }, [current]);
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const defaultExpiry = new Date(Date.now() + 360 * 86400000).toISOString().slice(0, 10);
@@ -2203,7 +1938,10 @@ const KeyFormDialog: React.FC<{
         name: name.trim(),
         kty,
         key_size: kty.startsWith("RSA") ? parseInt(keySize) : undefined,
+        crv: kty.startsWith("EC") ? crv : undefined,
         key_ops: keyOps.length > 0 ? keyOps : undefined,
+        // Every save is a new version, which keeps only the tags sent with it.
+        tags: isEdit ? editKey.tags : undefined,
         not_before: notBefore || undefined,
         expires: expiresDate || undefined,
       },
@@ -2217,8 +1955,15 @@ const KeyFormDialog: React.FC<{
   };
 
   return (
-    <Modal title={isEdit ? `Update Key: ${editKey.name}` : "Create New Key"} onClose={onClose}>
+    <Modal title={isEdit ? `New Version: ${editKey.name}` : "Create New Key"} onClose={onClose}>
       <div className="space-y-4">
+        {isEdit && (
+          <p className="rounded-lg border border-att-100 bg-att-50/60 px-3 py-2 text-xs text-slate-600">
+            {loadingCurrent
+              ? "Reading the current version…"
+              : "Saving creates a new version (a key rotation) with these settings; earlier versions stay available for decrypt and verify."}
+          </p>
+        )}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Key Name</label>
           <input
@@ -2243,6 +1988,17 @@ const KeyFormDialog: React.FC<{
               <option value="oct-HSM">oct-HSM</option>
             </select>
           </div>
+          {kty.startsWith("EC") && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Curve</label>
+              <select value={crv} onChange={(e) => setCrv(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="P-256">P-256</option>
+                <option value="P-384">P-384</option>
+                <option value="P-521">P-521</option>
+                <option value="P-256K">P-256K</option>
+              </select>
+            </div>
+          )}
           {kty.startsWith("RSA") && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Key Size</label>
@@ -2281,7 +2037,7 @@ const KeyFormDialog: React.FC<{
 
         {createMutation.isError && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-            <p className="text-sm text-red-700">{(createMutation.error as any)?.response?.data?.detail || "Failed to create key"}</p>
+            <p className="text-sm text-red-700">{formatAxiosError(createMutation.error, "Failed to save key")}</p>
           </div>
         )}
 
@@ -2289,10 +2045,10 @@ const KeyFormDialog: React.FC<{
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition">Cancel</button>
           <button
             onClick={handleSubmit}
-            disabled={!name.trim() || createMutation.isPending}
+            disabled={!name.trim() || createMutation.isPending || (isEdit && loadingCurrent)}
             className="px-4 py-2 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
-            {createMutation.isPending ? "Creating..." : isEdit ? "Update Key" : "Create Key"}
+            {createMutation.isPending ? "Saving..." : isEdit ? "Save New Version" : "Create Key"}
           </button>
         </div>
       </div>
@@ -2302,7 +2058,7 @@ const KeyFormDialog: React.FC<{
 
 // ── Keys Tab ──────────────────────────────────────────────────────────
 
-const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
+const KeysTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = ({ vaultUri, onOpenItem }) => {
   const { timezone } = usePortalTimezone();
   const { canWrite } = useAuth();
   const fmt = (iso: string | null) => fmtDate(iso, timezone);
@@ -2310,7 +2066,6 @@ const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   const { data: keys, isLoading, isError, error } = useVaultKeys(vaultUri);
   const deleteMutation = useDeleteKey();
   const [search, setSearch] = useState("");
-  const [viewingKey, setViewingKey] = useState<string | null>(null);
   const [editingKey, setEditingKey] = useState<KeyInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -2441,7 +2196,11 @@ const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
           <tbody>
             {paginated.map((k: KeyInfo) => (
               <tr key={k.name} className={gridStyles.row}>
-                <td className={`${gridStyles.strongCell} font-mono text-xs`}>{k.name}</td>
+                <td className={`${gridStyles.strongCell} font-mono text-xs`}>
+                  <button type="button" onClick={() => onOpenItem("key", k.name)} className={nameLinkClass} title="Open key details">
+                    <Highlight text={k.name} term={search} />
+                  </button>
+                </td>
                 <td className={gridStyles.cell}>
                   <Badge label={k.enabled ? "Enabled" : "Disabled"} color={k.enabled ? "green" : "red"} />
                 </td>
@@ -2451,9 +2210,10 @@ const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
                 <td className={gridStyles.centerCell}>{k.managed ? "Yes" : "—"}</td>
                 <td className={gridStyles.centerCell}>
                   <div className="flex justify-center gap-1">
-                    <GridIconButton onClick={() => setViewingKey(k.name)} title="View key" tone="blue">{Icons.eye()}</GridIconButton>
-                    {canWrite && <GridIconButton onClick={() => setEditingKey(k)} title="Update key" tone="blue">{Icons.edit()}</GridIconButton>}
-                    {canWrite && <GridIconButton onClick={() => setConfirmDelete(k.name)} title="Delete key" tone="red">{Icons.trash()}</GridIconButton>}
+                    <GridIconButton onClick={() => onOpenItem("key", k.name)} title="View key details" tone="blue">{Icons.eye()}</GridIconButton>
+                    {/* A certificate's backing key cannot be rotated or deleted directly. */}
+                    {canWrite && !k.managed && <GridIconButton onClick={() => setEditingKey(k)} title="New key version" tone="blue">{Icons.edit()}</GridIconButton>}
+                    {canWrite && !k.managed && <GridIconButton onClick={() => setConfirmDelete(k.name)} title="Delete key" tone="red">{Icons.trash()}</GridIconButton>}
                   </div>
                 </td>
               </tr>
@@ -2466,7 +2226,6 @@ const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
       </div>
       <GridPagination page={safePage} totalPages={totalPages} totalItems={filtered.length} pageSize={pageSize} onPageChange={setPage} />
 
-      {viewingKey && vaultUri && <KeyValueViewer vaultUri={vaultUri} keyName={viewingKey} onClose={() => setViewingKey(null)} />}
       {showCreate && vaultUri && <KeyFormDialog vaultUri={vaultUri} onClose={() => setShowCreate(false)} onSuccess={() => showToast("Key created successfully")} />}
       {editingKey && vaultUri && <KeyFormDialog vaultUri={vaultUri} editKey={editingKey} onClose={() => setEditingKey(null)} onSuccess={() => showToast("Key updated successfully")} />}
 
@@ -2498,139 +2257,12 @@ const KeysTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
   );
 };
 
-// ── Certificate Detail Viewer ─────────────────────────────────────────
-
-const CertificateDetailViewer: React.FC<{
-  vaultUri: string;
-  certName: string;
-  onClose: () => void;
-}> = ({ vaultUri, certName, onClose }) => {
-  const { timezone } = usePortalTimezone();
-  const fmt = (iso: string | null) => fmtDate(iso, timezone);
-  const { data, isLoading, isError, error } = useCertificateDetail(vaultUri, certName);
-  const [copied, setCopied] = useState<string | null>(null);
-
-  const copyToClipboard = useCallback((text: string, label: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(label);
-      setTimeout(() => setCopied(null), 2000);
-    });
-  }, []);
-
-  return (
-    <Modal title={`Certificate: ${certName}`} onClose={onClose} wide>
-      {isLoading && <p className="text-gray-500 text-sm">Loading certificate details...</p>}
-      {isError && (
-        <p className="text-red-500 text-sm">
-          Failed to load certificate: {(error as any)?.response?.data?.detail || "Unknown error"}
-        </p>
-      )}
-      {data && (
-        <div className="space-y-4">
-          {/* Identity Section */}
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <h4 className="text-sm font-semibold text-blue-800 mb-2 flex items-center gap-2">{Icons.fingerprint("text-blue-600")} Certificate Identity</h4>
-            <div className="grid grid-cols-1 gap-2 text-sm">
-              <div>
-                <span className="text-blue-600 font-medium">Common Name (CN):</span>
-                <span className="ml-2 font-mono font-bold text-gray-900">{data.cn_name || "—"}</span>
-              </div>
-              <div>
-                <span className="text-blue-600 font-medium">Subject:</span>
-                <span className="ml-2 font-mono text-gray-800 text-xs">{data.subject || "—"}</span>
-              </div>
-              {data.san && data.san.length > 0 && (
-                <div>
-                  <span className="text-blue-600 font-medium">Subject Alternative Names (SAN):</span>
-                  <div className="mt-1 flex gap-1 flex-wrap">
-                    {data.san.map((s, i) => (
-                      <span key={i} className="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-800 font-mono">{s}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Thumbprint Section */}
-          <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-            <h4 className="text-sm font-semibold text-purple-800 mb-2 flex items-center gap-2">{Icons.shield("text-purple-600")} Thumbprint</h4>
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-purple-600 font-medium">SHA-1:</span>
-                  <span className="ml-2 font-mono text-xs text-gray-800 break-all">{data.thumbprint || "—"}</span>
-                </div>
-                {data.thumbprint && (
-                  <button onClick={() => copyToClipboard(data.thumbprint, "sha1")} className="text-xs text-purple-600 hover:text-purple-800 flex items-center gap-1 ml-2 shrink-0">
-                    {Icons.copy()} {copied === "sha1" ? "Copied!" : "Copy"}
-                  </button>
-                )}
-              </div>
-              {data.thumbprint_sha256 && (
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-purple-600 font-medium">SHA-256:</span>
-                    <span className="ml-2 font-mono text-xs text-gray-800 break-all">{data.thumbprint_sha256}</span>
-                  </div>
-                  <button onClick={() => copyToClipboard(data.thumbprint_sha256!, "sha256")} className="text-xs text-purple-600 hover:text-purple-800 flex items-center gap-1 ml-2 shrink-0">
-                    {Icons.copy()} {copied === "sha256" ? "Copied!" : "Copy"}
-                  </button>
-                </div>
-              )}
-              {data.serial_number && (
-                <div>
-                  <span className="text-purple-600 font-medium">Serial Number:</span>
-                  <span className="ml-2 font-mono text-xs text-gray-800">{data.serial_number}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Metadata Grid */}
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div><span className="text-gray-500">Status:</span> <Badge label={data.enabled ? "Enabled" : "Disabled"} color={data.enabled ? "green" : "red"} /></div>
-            <div><span className="text-gray-500">Issuer:</span> <span className="font-medium">{data.issuer_cn || data.issuer_name || "—"}</span></div>
-            <div><span className="text-gray-500">Created:</span> <span className="font-medium">{fmt(data.created)}</span></div>
-            <div><span className="text-gray-500">Updated:</span> <span className="font-medium">{fmt(data.updated)}</span></div>
-            <div><span className="text-gray-500">Not Before:</span> <span className="font-medium">{fmt(data.not_before)}</span></div>
-            <div><span className="text-gray-500">Expires:</span> <span className="font-medium font-mono">{fmt(data.expires)}</span></div>
-            {data.validity_months && <div><span className="text-gray-500">Validity:</span> <span className="font-medium">{data.validity_months} months</span></div>}
-            <div><span className="text-gray-500">Auto-Renew:</span> <Badge label={data.auto_renew ? "Yes" : "No"} color={data.auto_renew ? "green" : "gray"} /></div>
-            {data.key_type && <div><span className="text-gray-500">Key Type:</span> <span className="font-medium">{data.key_type}</span></div>}
-            {data.key_size && <div><span className="text-gray-500">Key Size:</span> <span className="font-medium">{data.key_size} bits</span></div>}
-          </div>
-
-          {/* Key Usage */}
-          {data.key_usage && data.key_usage.length > 0 && (
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-1 block">Key Usage</label>
-              <div className="flex gap-1 flex-wrap">
-                {data.key_usage.map((u) => <Badge key={u} label={u} color="blue" />)}
-              </div>
-            </div>
-          )}
-
-          {/* Tags */}
-          {data.tags && Object.keys(data.tags).length > 0 && (
-            <div>
-              <label className="text-sm font-medium text-gray-700 mb-1 block">Tags</label>
-              <div className="flex gap-1 flex-wrap">
-                {Object.entries(data.tags).map(([k, v]) => (
-                  <span key={k} className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">{k}: {v}</span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </Modal>
-  );
-};
-
 // ── Certificates Tab ──────────────────────────────────────────────────
 
-const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) => {
+/** SAN chips shown before "+N more"; matching SANs are always shown first. */
+const SAN_PREVIEW = 2;
+
+const CertificatesTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = ({ vaultUri, onOpenItem }) => {
   const { timezone } = usePortalTimezone();
   const { canWrite } = useAuth();
   const fmt = (iso: string | null) => fmtDate(iso, timezone);
@@ -2638,7 +2270,7 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
   const { data: certs, isLoading, isError, error } = useVaultCertificates(vaultUri);
   const deleteMutation = useDeleteCertificate();
   const [search, setSearch] = useState("");
-  const [viewingCert, setViewingCert] = useState<string | null>(null);
+  const [searchField, setSearchField] = useState<CertificateSearchField>("all");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -2647,8 +2279,17 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [sort, setSort] = useState<SortState<"name" | "cn_name" | "san" | "serial_number" | "enabled" | "expires">>({ key: "expires", direction: "asc" });
-  const filtered = (certs || []).filter(
-    (c: CertificateInfo) => !search || c.name.toLowerCase().includes(search.toLowerCase())
+  const term = search.trim();
+  // Which fields each certificate matched in, so hidden matches (a SAN past
+  // "+N more", the thumbprint, a tag) can be called out on the row.
+  const matches = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof certificateMatchFields>>();
+    if (term) (certs || []).forEach((c) => map.set(c.name, certificateMatchFields(c, term, searchField)));
+    return map;
+  }, [certs, term, searchField]);
+  const filtered = useMemo(
+    () => (certs || []).filter((c: CertificateInfo) => !term || (matches.get(c.name)?.length ?? 0) > 0),
+    [certs, term, matches],
   );
   const sorted = useMemo(() => sortCollection(filtered, sort.direction, (certificate) => {
     switch (sort.key) {
@@ -2736,8 +2377,23 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
       <GridToolbar
         search={search}
         onSearch={(value) => { setSearch(value); setPage(1); }}
-        placeholder="Search certificates..."
-        countLabel={`${filtered.length} certificates`}
+        placeholder={
+          searchField === "all" ? "Search name, CN, SAN, serial, thumbprint…" : `Search by ${CERTIFICATE_SEARCH_FIELDS.find((f) => f.value === searchField)?.label.replace("Search: ", "")}…`
+        }
+        countLabel={term ? `${filtered.length} of ${(certs || []).length} certificates` : `${filtered.length} certificates`}
+        filters={
+          <select
+            value={searchField}
+            onChange={(e) => { setSearchField(e.target.value as CertificateSearchField); setPage(1); }}
+            className={gridSelectStyles}
+            title="Choose which certificate fields the search term is matched against"
+            aria-label="Certificate search field"
+          >
+            {CERTIFICATE_SEARCH_FIELDS.map((f) => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        }
         pageSize={pageSize}
         onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
         onRefresh={handleRefresh}
@@ -2766,46 +2422,75 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
             </tr>
           </thead>
           <tbody>
-            {paginated.map((c: CertificateInfo) => (
+            {paginated.map((c: CertificateInfo) => {
+              const matched = matches.get(c.name) ?? [];
+              const sanTerm = matched.includes("san") ? term.toLowerCase() : "";
+              const sans = c.san || [];
+              // Matching SANs first so a hit never hides behind "+N more".
+              const sanHits = sanTerm ? sans.filter((s) => s.toLowerCase().includes(sanTerm)) : [];
+              const shownSans = sanHits.length ? sanHits.slice(0, 5) : sans.slice(0, SAN_PREVIEW);
+              const hiddenSans = sans.length - shownSans.length;
+              const hidden = matched.filter((f) => f === "thumbprint" || f === "tags");
+              return (
               <tr key={c.name} className={gridStyles.row}>
-                <td className={`${gridStyles.strongCell} font-mono text-xs`}>{c.name}</td>
-                <td className={`${gridStyles.cell} max-w-[180px] truncate font-mono text-xs`} title={c.cn_name || ""}>{c.cn_name || "—"}</td>
-                <td className={`${gridStyles.cell} max-w-[200px] text-xs`}>
-                  {c.san && c.san.length > 0 ? (
-                    <div className="flex gap-1 flex-wrap">
-                      {c.san.slice(0, 2).map((s, i) => (
-                        <span key={i} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-mono text-[10px]">{s}</span>
+                <td className={`${gridStyles.strongCell} font-mono text-xs`}>
+                  <button type="button" onClick={() => onOpenItem("certificate", c.name)} className={nameLinkClass} title="Open certificate details">
+                    <Highlight text={c.name} term={matched.includes("name") ? term : ""} />
+                  </button>
+                  {hidden.length > 0 && (
+                    <span className="ml-2 inline-flex gap-1 align-middle">
+                      {hidden.map((f) => <Badge key={f} label={`${f === "tags" ? "tag" : f} match`} color="blue" />)}
+                    </span>
+                  )}
+                </td>
+                <td className={`${gridStyles.cell} max-w-[180px] truncate font-mono text-xs`} title={c.cn_name || ""}>
+                  {c.cn_name ? <Highlight text={c.cn_name} term={matched.includes("cn") ? term : ""} /> : "—"}
+                </td>
+                <td className={`${gridStyles.cell} max-w-[220px] text-xs`}>
+                  {sans.length > 0 ? (
+                    <div className="flex gap-1 flex-wrap" title={sans.join("\n")}>
+                      {shownSans.map((s) => (
+                        <span key={s} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-mono text-[10px]">
+                          <Highlight text={s} term={sanTerm} />
+                        </span>
                       ))}
-                      {c.san.length > 2 && (
-                        <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 text-[10px]">+{c.san.length - 2} more</span>
+                      {hiddenSans > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenItem("certificate", c.name)}
+                          className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 text-[10px] hover:bg-gray-200"
+                          title="Show every SAN in the certificate details"
+                        >
+                          +{hiddenSans} more
+                        </button>
                       )}
                     </div>
                   ) : <span className="text-gray-400">—</span>}
                 </td>
-                <td className={`${gridStyles.cell} max-w-[140px] truncate font-mono text-xs`} title={c.serial_number || ""}>{c.serial_number || "—"}</td>
+                <td className={`${gridStyles.cell} max-w-[140px] truncate font-mono text-xs`} title={c.serial_number || ""}>
+                  {/* Serials are matched without colons or spaces, so highlight the bare hex. */}
+                  {c.serial_number ? <Highlight text={c.serial_number} term={matched.includes("serial") ? term.replace(/[\s:]/g, "") : ""} /> : "—"}
+                </td>
                 <td className={gridStyles.cell}>
                   <Badge label={c.enabled ? "Enabled" : "Disabled"} color={c.enabled ? "green" : "red"} />
                 </td>
-                <td className={`${gridStyles.cell} text-xs`}>{fmt(c.expires)}</td>
+                <td className={`${gridStyles.cell} text-xs whitespace-nowrap`}>{fmt(c.expires)}</td>
                 <td className={gridStyles.centerCell}>
                   <div className="flex justify-center gap-1">
-                    <GridIconButton onClick={() => setViewingCert(c.name)} title="View certificate" tone="blue">{Icons.eye()}</GridIconButton>
+                    <GridIconButton onClick={() => onOpenItem("certificate", c.name)} title="View certificate details" tone="blue">{Icons.eye()}</GridIconButton>
                     {canWrite && <GridIconButton onClick={() => setConfirmDelete(c.name)} title="Delete certificate" tone="red">{Icons.trash()}</GridIconButton>}
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
             {filtered.length === 0 && (
-              <tr><td colSpan={7} className="py-6 text-center text-sm text-slate-400">No certificates found</td></tr>
+              <tr><td colSpan={7} className="py-6 text-center text-sm text-slate-400">{term ? `No certificates match “${term}”` : "No certificates found"}</td></tr>
             )}
           </tbody>
         </table>
       </div>
       <GridPagination page={safePage} totalPages={totalPages} totalItems={filtered.length} pageSize={pageSize} onPageChange={setPage} />
-
-      {viewingCert && vaultUri && (
-        <CertificateDetailViewer vaultUri={vaultUri} certName={viewingCert} onClose={() => setViewingCert(null)} />
-      )}
 
       {showCreate && vaultUri && (
         <CertificateFormDialog
@@ -2844,27 +2529,21 @@ const CertificatesTab: React.FC<{ vaultUri: string | null }> = ({ vaultUri }) =>
   );
 };
 
-const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | null }> = ({ vaultUri, vaultName }) => {
+type AuditResource = "secret" | "key" | "certificate";
+const AUDIT_RESOURCE_BADGE: Record<string, { label: string; color: "blue" | "purple" | "gray" }> = {
+  secret: { label: "Secret", color: "blue" },
+  key: { label: "Key", color: "purple" },
+  certificate: { label: "Certificate", color: "gray" },
+};
+
+const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | null; onOpenItem?: OpenItem }> = ({ vaultUri, vaultName, onOpenItem }) => {
   const { timezone } = usePortalTimezone();
-  const fmt = (iso: string | null) => {
-    if (!iso) return "—";
-    try {
-      return new Date(iso).toLocaleString("en-US", {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        ...(timezone ? { timeZone: timezone } : {}),
-      });
-    } catch {
-      return iso;
-    }
-  };
+  const fmt = (iso: string | null) => fmtDateTime(iso, timezone);
   const { data, isLoading, isError, error, refetch, isFetching } = useKeyVaultAuditHistory(vaultUri);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "success" | "failed">("all");
-  const [resourceFilter, setResourceFilter] = useState<"all" | "secret" | "key">("all");
+  const [resourceFilter, setResourceFilter] = useState<"all" | AuditResource>("all");
+  const [activityFilter, setActivityFilter] = useState<"all" | "changes" | "reads">("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [sort, setSort] = useState<SortState<"timestamp" | "action" | "resource_type" | "resource_name" | "status" | "user_email">>({ key: "timestamp", direction: "desc" });
@@ -2883,9 +2562,10 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
       ].some((value) => value.toLowerCase().includes(query));
       const matchesStatus = statusFilter === "all" || entry.status === statusFilter;
       const matchesResource = resourceFilter === "all" || entry.resource_type === resourceFilter;
-      return matchesSearch && matchesStatus && matchesResource;
+      const matchesActivity = activityFilter === "all" || (activityFilter === "reads") === isReadAction(entry.action);
+      return matchesSearch && matchesStatus && matchesResource && matchesActivity;
     });
-  }, [entries, resourceFilter, search, statusFilter]);
+  }, [entries, resourceFilter, search, statusFilter, activityFilter]);
   const sorted = useMemo(() => sortCollection(filtered, sort.direction, (entry) => {
     switch (sort.key) {
       case "timestamp": return entry.timestamp || "";
@@ -2900,12 +2580,6 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
   const safePage = Math.min(page, totalPages);
   const paginated = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
 
-  const actionBadge = (action: string) => {
-    if (action.startsWith("create")) return <Badge label="Create" color="green" />;
-    if (action.startsWith("update")) return <Badge label="Update" color="blue" />;
-    if (action.startsWith("delete")) return <Badge label="Delete" color="red" />;
-    return <Badge label={action} color="gray" />;
-  };
 
   if (!vaultUri) {
     return <p className="text-sm text-slate-500 py-4">Select a vault to review its audit trail.</p>;
@@ -2934,7 +2608,7 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
       <div className={`${gridStyles.panelHeader} border-b-att-100/80`}>
         <div className="flex flex-col gap-1">
           <span className="text-sm font-semibold text-slate-800">Audit history for {vaultName || "selected vault"}</span>
-          <span className="text-xs text-slate-500">Tracks create, update, and delete operations for secrets and keys via the shared audit log.</span>
+          <span className="text-xs text-slate-500">Portal changes to secrets, keys and certificates, and every read of a secret value, from the shared audit log.</span>
         </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
           <span className={gridStyles.countBadge}>{filtered.length} events</span>
@@ -2955,16 +2629,31 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
             className={gridStyles.toolbarInput}
           />
           <select
-            value={resourceFilter}
+            value={activityFilter}
             onChange={(event) => {
-              setResourceFilter(event.target.value as "all" | "secret" | "key");
+              setActivityFilter(event.target.value as "all" | "changes" | "reads");
               setPage(1);
             }}
             className={gridSelectStyles}
+            aria-label="Activity type"
+          >
+            <option value="all">Changes & reads</option>
+            <option value="changes">Changes only</option>
+            <option value="reads">Value reads only</option>
+          </select>
+          <select
+            value={resourceFilter}
+            onChange={(event) => {
+              setResourceFilter(event.target.value as "all" | AuditResource);
+              setPage(1);
+            }}
+            className={gridSelectStyles}
+            aria-label="Resource type"
           >
             <option value="all">All resources</option>
             <option value="secret">Secrets</option>
             <option value="key">Keys</option>
+            <option value="certificate">Certificates</option>
           </select>
           <select
             value={statusFilter}
@@ -3018,11 +2707,23 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
             {paginated.map((entry: KeyVaultAuditEntry) => (
               <tr key={entry.id} className={gridStyles.row}>
                 <td className={`${gridStyles.cell} text-xs whitespace-nowrap`}>{fmt(entry.timestamp)}</td>
-                <td className={gridStyles.cell}>{actionBadge(entry.action)}</td>
+                <td className={gridStyles.cell}>{auditActionBadge(entry.action)}</td>
                 <td className={gridStyles.cell}>
-                  <Badge label={entry.resource_type === "secret" ? "Secret" : "Key"} color={entry.resource_type === "secret" ? "blue" : "purple"} />
+                  <Badge
+                    label={AUDIT_RESOURCE_BADGE[entry.resource_type]?.label ?? entry.resource_type}
+                    color={AUDIT_RESOURCE_BADGE[entry.resource_type]?.color ?? "gray"}
+                  />
                 </td>
-                <td className={`${gridStyles.strongCell} font-mono text-xs`}>{entry.resource_name}</td>
+                <td className={`${gridStyles.strongCell} font-mono text-xs`}>
+                  {/* A value search names the vault, not an item; deleted items have no detail to open. */}
+                  {onOpenItem && entry.resource_type in AUDIT_RESOURCE_BADGE && entry.action !== "search_secret_values" && !entry.action.startsWith("delete") && !entry.action.startsWith("bulk") ? (
+                    <button type="button" onClick={() => onOpenItem(entry.resource_type as KeyVaultItemType, entry.resource_name)} className={nameLinkClass}>
+                      {entry.resource_name}
+                    </button>
+                  ) : (
+                    entry.resource_name
+                  )}
+                </td>
                 <td className={gridStyles.cell}>
                   <Badge label={entry.status === "success" ? "Success" : "Failed"} color={entry.status === "success" ? "green" : "red"} />
                 </td>
@@ -3032,7 +2733,7 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={7} className="py-8 text-center text-sm text-slate-400">No CRUD audit entries found for this vault.</td>
+                <td colSpan={7} className="py-8 text-center text-sm text-slate-400">No audit entries found for this vault.</td>
               </tr>
             )}
           </tbody>
@@ -3047,28 +2748,132 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
 // ── Main Page ─────────────────────────────────────────────────────────
 
 type TabKey = "secrets" | "keys" | "certificates" | "audit";
+const TAB_KEYS: TabKey[] = ["secrets", "keys", "certificates", "audit"];
+
+/**
+ * KPI tiles filter the grid beneath them; each grid's filter lives in the URL
+ * so the view can be linked: `?inventory=` (vault grid) and `?expiry=`
+ * (expiring grid, default 90 days). The Vaults and Expiring (90d) tiles reset them.
+ */
+const VAULT_TYPE_FILTERS: VaultTypeFilter[] = ["secrets", "keys", "certificates"];
+const EXPIRY_WINDOW_KEYS: ExpiryWindow[] = ["attention", "expired", "30", "90", "360"];
+const INVENTORY_LABELS: Record<VaultTypeFilter, string> = {
+  secrets: "Vaults with secrets",
+  keys: "Vaults with keys",
+  certificates: "Vaults with certificates",
+};
+const EXPIRY_LABELS: Partial<Record<ExpiryWindow, string>> = {
+  attention: "Expired or expiring within 90 days",
+  expired: "Expired items",
+  "30": "Expiring within 30 days",
+  "360": "Expiring within 360 days",
+};
+
+interface ItemDetailTarget {
+  vaultName: string;
+  vaultUri: string;
+  type: KeyVaultItemType;
+  name: string;
+  tab?: ItemDetailTab;
+}
+
+/** "Failed vaults (2): a, b | Vaults preserved from cache … (22): x, y" → its parts. */
+const syncMessageParts = (message: string) => message.split(" | ").map((part) => part.trim()).filter(Boolean);
 
 const KeyVaultPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { canWrite } = useAuth();
+  const { timezone } = usePortalTimezone();
   const { data: dashboard, isPending, isError, error } = useKeyVaultDashboard();
   const { data: vaults } = useKeyVaults();
   const { data: syncStatuses } = useKeyVaultSyncStatus(1);
   const syncMutation = useKeyVaultSync();
   const vaultSyncMutation = useKeyVaultSyncVault();
-  const [selectedVault, setSelectedVault] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<TabKey>("secrets");
+  const [params, setParams] = useSearchParams();
   const [refreshingDashboard, setRefreshingDashboard] = useState(false);
   const [syncingVault, setSyncingVault] = useState<string | null>(null);
+  const [showSyncDetails, setShowSyncDetails] = useState(false);
+  const [vaultDetail, setVaultDetail] = useState<string | null>(null);
+  const [itemDetail, setItemDetail] = useState<ItemDetailTarget | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const showToast = useCallback((message: string, type: ToastState["type"] = "success") => setToast({ message, type }), []);
+  const expiringRef = useRef<HTMLDivElement>(null);
+  const inventoryRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
+  // ── URL state: selected vault, its tab, and the active tile ──
+  const selectedVault = params.get("vault");
+  const requestedTab = params.get("tab") as TabKey | null;
+  const activeTab: TabKey = requestedTab && TAB_KEYS.includes(requestedTab) ? requestedTab : "secrets";
+  const requestedInventory = params.get("inventory") as VaultTypeFilter | null;
+  const vaultTypeFilter = requestedInventory && VAULT_TYPE_FILTERS.includes(requestedInventory) ? requestedInventory : null;
+  const requestedExpiry = params.get("expiry") as ExpiryWindow | null;
+  const expiryWindow: ExpiryWindow = requestedExpiry && EXPIRY_WINDOW_KEYS.includes(requestedExpiry) ? requestedExpiry : "90";
+
+  const updateParams = useCallback(
+    (changes: Record<string, string | null>) =>
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          Object.entries(changes).forEach(([key, value]) => (value === null ? next.delete(key) : next.set(key, value)));
+          return next;
+        },
+        { replace: true },
+      ),
+    [setParams],
+  );
+  const scrollTo = (ref: React.RefObject<HTMLDivElement>) =>
+    // After the filter re-renders the grid, so the scroll lands on its new height.
+    window.requestAnimationFrame(() => ref.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }));
+  /** A tile sets its grid's filter; clicking the active tile again clears it. */
+  const toggleInventory = (filter: VaultTypeFilter | null) => {
+    updateParams({ inventory: filter === null || vaultTypeFilter === filter ? null : filter });
+    scrollTo(inventoryRef);
+  };
+  const toggleExpiry = (next: ExpiryWindow) => {
+    updateParams({ expiry: next === "90" || expiryWindow === next ? null : next });
+    scrollTo(expiringRef);
+  };
+
+  // ── Sync status ──
   const latestSync = syncStatuses?.[0] ?? null;
   const isSyncing = latestSync?.status === "running" || syncMutation.isPending;
+  // A sync started elsewhere (scheduler, another user) finishing: show its data.
+  const previousSyncStatus = useRef(latestSync?.status);
+  useEffect(() => {
+    if (previousSyncStatus.current === "running" && latestSync && latestSync.status !== "running") {
+      void queryClient.invalidateQueries({ queryKey: ["keyvault"] });
+    }
+    previousSyncStatus.current = latestSync?.status;
+  }, [latestSync, queryClient]);
 
+  const vaultUriByName = useMemo(() => {
+    const map: Record<string, string> = {};
+    (vaults || []).forEach((v: KeyVaultInfo) => { if (v.vault_uri) map[v.name] = v.vault_uri; });
+    // The dashboard rows are scoped like the page, so they win.
+    (dashboard?.vault_summaries || []).forEach((v) => { if (v.vault_uri) map[v.name] = v.vault_uri; });
+    return map;
+  }, [vaults, dashboard]);
+  const selectedVaultUri = selectedVault ? vaultUriByName[selectedVault] ?? null : null;
+  const expiringItems = dashboard?.expiring_items ?? [];
 
-  // Derive vault_uri from selected vault name
-  const selectedVaultUri = vaults?.find((v: KeyVaultInfo) => v.name === selectedVault)?.vault_uri || null;
+  // Bring the vault panel into view when a vault is picked (or opened from a link).
+  useEffect(() => {
+    if (selectedVault && selectedVaultUri) scrollTo(panelRef);
+  }, [selectedVault, selectedVaultUri]);
+
+  const openVault = useCallback((name: string) => setVaultDetail(name), []);
+  const openItem = useCallback(
+    (vaultName: string, type: KeyVaultItemType, name: string, tab?: ItemDetailTab) => {
+      const vaultUri = vaultUriByName[vaultName];
+      if (!vaultUri) {
+        showToast(`Vault ${vaultName} is not in the current inventory`, "error");
+        return;
+      }
+      setItemDetail({ vaultName, vaultUri, type, name, tab });
+    },
+    [vaultUriByName, showToast],
+  );
 
   const handleDashboardRefresh = async () => {
     setRefreshingDashboard(true);
@@ -3077,29 +2882,46 @@ const KeyVaultPage: React.FC = () => {
       // Key includes the active subscription scope — update whichever variant
       // is currently mounted rather than the bare (now-unused) static key.
       queryClient.setQueriesData({ queryKey: ["keyvault", "dashboard"] }, fresh);
-    } catch { /* ignore */ }
+    } catch (e) {
+      showToast(formatAxiosError(e, "Could not refresh the dashboard"), "error");
+    }
     setRefreshingDashboard(false);
   };
+
+  const handleSyncAll = () =>
+    syncMutation.mutate(undefined, {
+      onSuccess: (result: { status?: string; vaults_synced?: number; vaults_preserved?: number; vaults_failed?: number }) => {
+        const kept = (result.vaults_preserved ?? 0) + (result.vaults_failed ?? 0);
+        showToast(
+          kept > 0
+            ? `Synced ${result.vaults_synced ?? 0} vaults; ${kept} could not be read and kept their last synced data`
+            : `Synced ${result.vaults_synced ?? 0} vaults from Azure`,
+          kept > 0 ? "warning" : "success",
+        );
+      },
+      onError: (e: unknown) => showToast(formatAxiosError(e, "Sync failed"), "error"),
+    });
 
   const handleSyncVault = (vaultName: string, vaultUri: string) => {
     setSyncingVault(vaultName);
     vaultSyncMutation.mutate(
       { vaultName, vaultUri },
       {
-        onSuccess: () => {
-          showToast(`Vault "${vaultName}" synced successfully`);
+        onSuccess: (result: { status?: string; item_failures?: string[] }) => {
+          if (result?.status === "partial") {
+            showToast(`Vault "${vaultName}" synced partially — could not list: ${(result.item_failures || []).join(", ")}`, "warning");
+          } else {
+            showToast(`Vault "${vaultName}" synced successfully`);
+          }
           setSyncingVault(null);
         },
         onError: (e: unknown) => {
-          const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "Vault sync failed";
-          showToast(detail, "error");
+          showToast(formatAxiosError(e, "Vault sync failed"), "error");
           setSyncingVault(null);
         },
       },
     );
   };
-
-
 
   if (isPending) {
     return (
@@ -3114,7 +2936,7 @@ const KeyVaultPage: React.FC = () => {
     return (
       <div className="p-6">
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
-          Failed to load Key Vault data: {(error as Error)?.message || "Unknown error"}
+          Failed to load Key Vault data: {formatAxiosError(error, (error as Error)?.message || "Unknown error")}
         </div>
       </div>
     );
@@ -3131,12 +2953,25 @@ const KeyVaultPage: React.FC = () => {
   }
 
   const d = dashboard;
+  const expiredCount = d.expired_count ?? expiringItems.filter((i) => i.days_remaining < 0).length;
   const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     { key: "secrets", label: "Secrets", icon: Icons.secret("text-green-600") },
     { key: "keys", label: "Keys", icon: Icons.key("text-purple-600") },
     { key: "certificates", label: "Certificates", icon: Icons.certificate("text-indigo-600") },
     { key: "audit", label: "Audit History", icon: Icons.history("text-att-700") },
   ];
+  const syncParts = latestSync?.error_message ? syncMessageParts(latestSync.error_message) : [];
+  const vaultSummary = (name: string | null) => d.vault_summaries.find((v) => v.name === name);
+  const panelVaultKnown = !!selectedVault && !!selectedVaultUri;
+  const vaultTabs = (vaultName: string, vaultUri: string): Record<TabKey, React.ReactNode> => {
+    const onOpenItem: OpenItem = (type, name, tab) => openItem(vaultName, type, name, tab);
+    return {
+      secrets: <SecretsTab key={vaultUri} vaultUri={vaultUri} onOpenItem={onOpenItem} />,
+      keys: <KeysTab key={vaultUri} vaultUri={vaultUri} onOpenItem={onOpenItem} />,
+      certificates: <CertificatesTab key={vaultUri} vaultUri={vaultUri} onOpenItem={onOpenItem} />,
+      audit: <AuditHistoryTab key={vaultUri} vaultUri={vaultUri} vaultName={vaultName} onOpenItem={onOpenItem} />,
+    };
+  };
 
   return (
     <div className="py-6 space-y-6">
@@ -3156,12 +2991,12 @@ const KeyVaultPage: React.FC = () => {
           {latestSync && (
             <div className="text-right text-xs text-gray-500">
               {isSyncing ? (
-                <span className="flex items-center gap-1 text-blue-600">
+                <span className="flex items-center justify-end gap-1 text-blue-600">
                   <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
-                  Syncing…
+                  Syncing from Azure…
                 </span>
               ) : (
-                <span className="flex items-center gap-1">
+                <span className="flex items-center justify-end gap-1" title={latestSync.started_at ? `Started ${fmtDateTime(latestSync.started_at, timezone)} · ${latestSync.triggered_by}` : undefined}>
                   {latestSync.status === "completed" ? (
                     <svg className="h-3.5 w-3.5 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 6L9 17l-5-5" /></svg>
                   ) : latestSync.status === "partial" ? (
@@ -3169,29 +3004,33 @@ const KeyVaultPage: React.FC = () => {
                   ) : latestSync.status === "failed" ? (
                     <svg className="h-3.5 w-3.5 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
                   ) : null}
-                  Last synced: {latestSync.completed_at
-                    ? new Date(latestSync.completed_at).toLocaleTimeString()
-                    : "never"}
+                  {latestSync.status === "failed" ? "Last sync failed: " : "Last synced: "}
+                  {latestSync.completed_at ? fmtDateTime(latestSync.completed_at, timezone) : "never"}
                 </span>
               )}
               {(latestSync.status === "completed" || latestSync.status === "partial") && (
-                <span className="block text-gray-400 mt-0.5">
-                  {latestSync.vaults_synced}V · {latestSync.secrets_synced}S · {latestSync.keys_synced}K · {latestSync.certificates_synced}C
-                  {latestSync.error_message && (
-                    <span className="block text-amber-500 text-[10px]" title={latestSync.error_message}>
-                      {latestSync.error_message.length > 60 ? latestSync.error_message.slice(0, 60) + "…" : latestSync.error_message}
-                    </span>
-                  )}
+                <span className="block text-gray-400 mt-0.5" title="Vaults · secrets · keys · certificates synced across all monitored subscriptions">
+                  {latestSync.vaults_synced} vaults · {latestSync.secrets_synced} secrets · {latestSync.keys_synced} keys · {latestSync.certificates_synced} certs
                 </span>
+              )}
+              {syncParts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowSyncDetails((v) => !v)}
+                  aria-expanded={showSyncDetails}
+                  className={`mt-0.5 text-[11px] font-medium underline-offset-2 hover:underline ${latestSync.status === "failed" ? "text-red-600" : "text-amber-600"}`}
+                >
+                  {showSyncDetails ? "Hide sync warnings" : `Sync warnings (${syncParts.length}) — details`}
+                </button>
               )}
             </div>
           )}
           {canWrite && (
           <button
-            onClick={() => syncMutation.mutate()}
+            onClick={handleSyncAll}
             disabled={isSyncing}
             className="inline-flex items-center gap-1.5 rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-sm font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
-            title="Sync all vault data from Azure to local database"
+            title="Sync all vault data from Azure to the portal database"
           >
             <svg className={`h-4 w-4 ${isSyncing ? "animate-spin" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -3205,76 +3044,159 @@ const KeyVaultPage: React.FC = () => {
         </div>
       </div>
 
-      {/* KPI Row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-        <KPICard title="Vaults" value={d.total_vaults} icon={Icons.vault("text-blue-600")} color="bg-blue-50" />
-        <KPICard title="Secrets" value={d.total_secrets} icon={Icons.secret("text-green-600")} color="bg-green-50" />
-        <KPICard title="Keys" value={d.total_keys} icon={Icons.key("text-purple-600")} color="bg-purple-50" />
-        <KPICard title="Certificates" value={d.total_certificates} icon={Icons.certificate("text-indigo-600")} color="bg-indigo-50" />
-        <KPICard
+      {showSyncDetails && syncParts.length > 0 && (
+        <div className={`rounded-xl border px-4 py-3 text-sm ${latestSync?.status === "failed" ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+          <p className="font-semibold">Last sync could not read every vault</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            {syncParts.map((part) => <li key={part} className="break-words">{part}</li>)}
+          </ul>
+          <p className="mt-2 text-xs">
+            Vaults listed as preserved from cache could be discovered but their secrets or keys could not be listed — usually the vault firewall or a
+            private endpoint blocks the portal's network, or its identity lacks List permission. Their last synced items are still shown. Use a vault's
+            sync button (or its Azure portal link in the vault details) to check it.
+          </p>
+        </div>
+      )}
+
+      {/* KPI tiles — each filters the grid beneath it, like AKS Operations */}
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-7">
+        <MetricCard
+          title="Vaults"
+          value={d.total_vaults}
+          icon={Icons.vault("h-5 w-5")}
+          tone="blue"
+          onClick={() => toggleInventory(null)}
+          actionLabel="Show all vaults"
+        />
+        <MetricCard
+          title="Secrets"
+          value={d.total_secrets}
+          icon={Icons.secret("h-5 w-5")}
+          tone="green"
+          onClick={() => toggleInventory("secrets")}
+          active={vaultTypeFilter === "secrets"}
+          actionLabel="Show the vaults that hold secrets, most first"
+        />
+        <MetricCard
+          title="Keys"
+          value={d.total_keys}
+          icon={Icons.key("h-5 w-5")}
+          tone="purple"
+          onClick={() => toggleInventory("keys")}
+          active={vaultTypeFilter === "keys"}
+          actionLabel="Show the vaults that hold keys, most first"
+        />
+        <MetricCard
+          title="Certificates"
+          value={d.total_certificates}
+          icon={Icons.certificate("h-5 w-5")}
+          tone="indigo"
+          onClick={() => toggleInventory("certificates")}
+          active={vaultTypeFilter === "certificates"}
+          actionLabel="Show the vaults that hold certificates, most first"
+        />
+        <MetricCard
+          title="Expired"
+          value={expiredCount}
+          subtitle="enabled, past expiry"
+          icon={Icons.expired("h-5 w-5")}
+          tone={expiredCount > 0 ? "red" : "slate"}
+          onClick={() => toggleExpiry("expired")}
+          active={expiryWindow === "expired"}
+          actionLabel="Show expired items"
+        />
+        <MetricCard
           title="Expiring (30d)"
           value={d.expiring_within_30_days}
-          icon={Icons.warning("text-red-600")}
-          color={d.expiring_within_30_days > 0 ? "bg-red-50" : "bg-gray-50"}
           subtitle="within 30 days"
+          icon={Icons.warning("h-5 w-5")}
+          tone={d.expiring_within_30_days > 0 ? "amber" : "slate"}
+          onClick={() => toggleExpiry("30")}
+          active={expiryWindow === "30"}
+          actionLabel="Show items expiring within 30 days"
         />
-        <KPICard
+        <MetricCard
           title="Expiring (90d)"
           value={d.expiring_within_90_days}
-          icon={Icons.clipboard("text-yellow-600")}
-          color={d.expiring_within_90_days > 0 ? "bg-yellow-50" : "bg-gray-50"}
           subtitle="within 90 days"
+          icon={Icons.clipboard("h-5 w-5")}
+          tone={d.expiring_within_90_days > 0 ? "orange" : "slate"}
+          onClick={() => toggleExpiry("90")}
+          actionLabel="Show items expiring within 90 days"
         />
       </div>
 
-      {/* Expiring Items Alert */}
-      <ExpiringItemsTable
-        items={(d.expiring_items || []).filter((i) => i.days_remaining <= 90)}
-        totalCount={d.expiring_within_90_days}
-        onRefresh={handleDashboardRefresh}
-        refreshing={refreshingDashboard}
-        vaultUriByName={Object.fromEntries((d.vault_summaries || []).map((v) => [v.name, v.vault_uri]))}
-        canWrite={canWrite}
-        onToast={setToast}
-      />
+      {/* Expired & expiring items */}
+      <div ref={expiringRef} className="scroll-mt-4 space-y-2">
+        <TileFilterNotice label={EXPIRY_LABELS[expiryWindow] ?? null} onClear={() => updateParams({ expiry: null })} />
+        <ExpiringItemsTable
+          items={expiringItems}
+          expiryWindow={expiryWindow}
+          onWindowChange={(next) => updateParams({ expiry: next === "90" ? null : next })}
+          onRefresh={handleDashboardRefresh}
+          refreshing={refreshingDashboard}
+          vaultUriByName={vaultUriByName}
+          canWrite={canWrite}
+          onToast={setToast}
+          onOpenItem={(vaultName, type, name) => openItem(vaultName, type, name)}
+          onOpenVault={openVault}
+        />
+      </div>
 
       {/* Vault Inventory */}
-      <VaultSummaryTable
-        vaults={d.vault_summaries}
-        onSelect={setSelectedVault}
-        selectedVault={selectedVault}
-        onRefresh={handleDashboardRefresh}
-        refreshing={refreshingDashboard}
-        canWrite={canWrite}
-        onSyncVault={handleSyncVault}
-        syncingVault={syncingVault}
-      />
+      <div ref={inventoryRef} className="scroll-mt-4 space-y-2">
+        <TileFilterNotice label={vaultTypeFilter ? INVENTORY_LABELS[vaultTypeFilter] : null} onClear={() => updateParams({ inventory: null })} />
+        <VaultSummaryTable
+          vaults={d.vault_summaries}
+          onSelect={(name) => updateParams({ vault: name })}
+          onOpenVault={openVault}
+          selectedVault={selectedVault}
+          typeFilter={vaultTypeFilter}
+          onRefresh={handleDashboardRefresh}
+          refreshing={refreshingDashboard}
+          canWrite={canWrite}
+          onSyncVault={handleSyncVault}
+          syncingVault={syncingVault}
+        />
+      </div>
 
       {/* Vault Details — Tabs */}
-      {selectedVault && (
-        <div className="rounded-3xl border border-att-100 bg-gradient-to-br from-white to-att-50/60 p-6 shadow-sm shadow-att-100/40">
+      {panelVaultKnown && (
+        <div ref={panelRef} className="scroll-mt-4 rounded-3xl border border-att-100 bg-gradient-to-br from-white to-att-50/60 p-6 shadow-sm shadow-att-100/40">
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <h3 className="text-lg font-semibold text-slate-800">
-              <span className="text-att-700">{selectedVault}</span>
+              <button type="button" onClick={() => openVault(selectedVault!)} className="text-att-700 hover:underline" title="Open vault details">
+                {selectedVault}
+              </button>
               <span className="ml-2 font-mono text-sm font-normal text-slate-400">
                 {selectedVaultUri}
               </span>
             </h3>
-            <button
-              onClick={() => setSelectedVault(null)}
-              className="text-sm font-medium text-slate-400 transition hover:text-slate-600"
-            >
-              Close
-            </button>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => openVault(selectedVault!)}
+                className="text-sm font-medium text-att-700 transition hover:text-att-900"
+              >
+                Vault details
+              </button>
+              <button
+                onClick={() => updateParams({ vault: null, tab: null })}
+                className="text-sm font-medium text-slate-400 transition hover:text-slate-600"
+              >
+                Close
+              </button>
+            </div>
           </div>
 
           {/* Tab bar */}
           <div className="mb-4 border-b border-att-100">
-            <nav className="flex flex-wrap gap-3">
+            <nav className="flex flex-wrap gap-3" role="tablist">
             {tabs.map((tab) => (
               <button
                 key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
+                role="tab"
+                aria-selected={activeTab === tab.key}
+                onClick={() => updateParams({ tab: tab.key === "secrets" ? null : tab.key })}
                 className={`inline-flex items-center gap-2 rounded-t-xl border-b-2 px-3 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${
                   activeTab === tab.key
                     ? "border-att-500 bg-white/80 text-att-700"
@@ -3287,12 +3209,78 @@ const KeyVaultPage: React.FC = () => {
             </nav>
           </div>
 
-          {/* Tab content */}
-          {activeTab === "secrets" && <SecretsTab vaultUri={selectedVaultUri} />}
-          {activeTab === "keys" && <KeysTab vaultUri={selectedVaultUri} />}
-          {activeTab === "certificates" && <CertificatesTab vaultUri={selectedVaultUri} />}
-          {activeTab === "audit" && <AuditHistoryTab vaultUri={selectedVaultUri} vaultName={selectedVault} />}
+          {/* Tab content — keyed by vault so search, paging and sort reset on a vault switch */}
+          {vaultTabs(selectedVault!, selectedVaultUri!)[activeTab]}
         </div>
+      )}
+
+      {vaultDetail && vaultUriByName[vaultDetail] && (() => {
+        const uri = vaultUriByName[vaultDetail];
+        const sections = vaultTabs(vaultDetail, uri);
+        return (
+          <VaultDetailModal
+            vaultName={vaultDetail}
+            vaultUri={uri}
+            summary={vaultSummary(vaultDetail)}
+            expiring={expiringItems.filter((i) => i.vault_name === vaultDetail)}
+            sections={{
+              secrets: sections.secrets,
+              keys: sections.keys,
+              certificates: sections.certificates,
+              activity: sections.audit,
+              expiring: (
+                <ExpiringItemsTable
+                  items={expiringItems.filter((i) => i.vault_name === vaultDetail)}
+                  defaultWindow="attention"
+                  onRefresh={handleDashboardRefresh}
+                  refreshing={refreshingDashboard}
+                  vaultUriByName={vaultUriByName}
+                  canWrite={canWrite}
+                  onToast={setToast}
+                  onOpenItem={(vaultName, type, name) => openItem(vaultName, type, name)}
+                />
+              ),
+            }}
+            actions={
+              canWrite ? (
+                <button
+                  type="button"
+                  onClick={() => handleSyncVault(vaultDetail, uri)}
+                  disabled={syncingVault === vaultDetail}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-att-200 bg-white px-3 py-1.5 text-sm font-medium text-att-700 hover:bg-att-50 disabled:opacity-50"
+                >
+                  <span className={syncingVault === vaultDetail ? "inline-block animate-spin" : "inline-block"}>{Icons.refresh("h-4 w-4")}</span>
+                  {syncingVault === vaultDetail ? "Syncing…" : "Sync vault"}
+                </button>
+              ) : undefined
+            }
+            onOpenItem={(type, name) => openItem(vaultDetail, type, name)}
+            onClose={() => setVaultDetail(null)}
+          />
+        );
+      })()}
+
+      {itemDetail && (
+        <KeyVaultItemDetail
+          key={`${itemDetail.vaultUri}/${itemDetail.type}/${itemDetail.name}/${itemDetail.tab ?? ""}`}
+          vaultUri={itemDetail.vaultUri}
+          vaultName={itemDetail.vaultName}
+          itemType={itemDetail.type}
+          name={itemDetail.name}
+          initialTab={itemDetail.tab}
+          canWrite={canWrite}
+          onClose={() => setItemDetail(null)}
+          onOpenVault={vaultDetail === itemDetail.vaultName ? undefined : () => { setVaultDetail(itemDetail.vaultName); setItemDetail(null); }}
+          renderSecretEditor={(secret, close) => (
+            <SecretFormDialog
+              vaultUri={itemDetail.vaultUri}
+              editSecret={secret}
+              onClose={close}
+              onSuccess={() => showToast(`New version of ${secret.name} saved`)}
+            />
+          )}
+          onDeleted={(message) => showToast(message)}
+        />
       )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}

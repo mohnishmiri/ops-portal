@@ -30,7 +30,7 @@ from app.models.database import (
     KeyVaultSnapshot,
     KeyVaultSyncStatus,
 )
-from app.services.keyvault_service import KeyVaultService
+from app.services.keyvault_service import KeyVaultService, expiry_counts, expiry_entry
 
 logger = structlog.get_logger(__name__)
 
@@ -616,6 +616,7 @@ class KeyVaultSyncService:
                 "secret",
                 secret.expires,
                 secret.enabled,
+                managed=bool(secret.managed),
             )
 
         # Keys expiring within 90 days
@@ -630,7 +631,9 @@ class KeyVaultSyncService:
         for row in keys_result:
             key = row[0]
             vault_name = row[1]
-            _check_expiry_from_db(expiring_soon, key.name, vault_name, "key", key.expires, key.enabled)
+            _check_expiry_from_db(
+                expiring_soon, key.name, vault_name, "key", key.expires, key.enabled, managed=bool(key.managed)
+            )
 
         # Certs expiring within 90 days
         certs_stmt = (
@@ -669,9 +672,7 @@ class KeyVaultSyncService:
             "total_secrets": total_secrets,
             "total_keys": total_keys,
             "total_certificates": total_certs,
-            "expiring_within_30_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 30]),
-            "expiring_within_90_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 90]),
-            "expiring_within_360_days": len([e for e in expiring_soon if e.get("days_remaining", 999) <= 360]),
+            **expiry_counts(expiring_soon),
             "expiring_items": expiring_soon,
             "vault_summaries": vault_summaries,
             "generated_at": datetime.utcnow().isoformat(),
@@ -708,6 +709,36 @@ class KeyVaultSyncService:
             }
             for v in rows
         ]
+
+    async def get_vault_from_db(self, vault_uri: str) -> dict | None:
+        """One of the caller's vaults by URI, with its synced item counts; None if unknown."""
+        normalized = vault_uri.strip().rstrip("/").lower()
+        stmt = select(KeyVaultSnapshot).where(func.lower(func.rtrim(KeyVaultSnapshot.vault_uri, "/")) == normalized)
+        clause = subscription_scope_clause(KeyVaultSnapshot.subscription_id)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        v = (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
+        if v is None:
+            return None
+        return {
+            "name": v.name,
+            "vault_uri": v.vault_uri,
+            "id": v.resource_id or "",
+            "location": v.location,
+            "resource_group": v.resource_group,
+            "subscription_id": v.subscription_id,
+            "sku": v.sku or "",
+            "tenant_id": v.tenant_id,
+            "soft_delete_enabled": v.soft_delete_enabled,
+            "purge_protection_enabled": v.purge_protection_enabled,
+            "rbac_enabled": v.rbac_enabled,
+            "provisioning_state": v.provisioning_state,
+            "tags": v.tags or {},
+            "secrets_count": v.secrets_count,
+            "keys_count": v.keys_count,
+            "certificates_count": v.certificates_count,
+            "synced_at": v.synced_at.isoformat() if v.synced_at else None,
+        }
 
     async def get_secrets_from_db(self, vault_uri: str, search: str | None = None) -> list[dict] | None:
         """Return secrets for a vault from PG."""
@@ -842,23 +873,10 @@ def _check_expiry_from_db(
     item_type: str,
     expires_str: str | None,
     enabled: bool,
+    *,
+    managed: bool = False,
 ) -> None:
-    """Check if an item is expiring within 360 days (from DB string)."""
-    if not expires_str:
-        return
-    try:
-        exp_date = datetime.fromisoformat(expires_str)
-        days_remaining = (exp_date - datetime.utcnow()).days
-        if 0 <= days_remaining <= 360:
-            expiring_list.append(
-                {
-                    "name": name,
-                    "vault_name": vault_name,
-                    "type": item_type,
-                    "expires": expires_str,
-                    "days_remaining": days_remaining,
-                    "enabled": enabled,
-                }
-            )
-    except (ValueError, TypeError):
-        pass
+    """Add the item to the dashboard list when it expired or expires within 360 days."""
+    entry = expiry_entry(name, vault_name, item_type, expires_str, enabled=enabled, managed=managed)
+    if entry:
+        expiring_list.append(entry)
