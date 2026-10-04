@@ -87,6 +87,12 @@ export interface MetricCardProps {
   active?: boolean;
   /** Accessible name / tooltip for a clickable card, e.g. "Show unplaced subscriptions". */
   actionLabel?: string;
+  /**
+   * Narrow layout for long single-row KPI strips (~160px tiles): the title
+   * spans the card and a small icon sits beside the value, so titles such as
+   * "Certificates" are not clipped by a large icon column.
+   */
+  compact?: boolean;
 }
 
 export const MetricCard: React.FC<MetricCardProps> = ({
@@ -101,6 +107,7 @@ export const MetricCard: React.FC<MetricCardProps> = ({
   onClick,
   active = false,
   actionLabel,
+  compact = false,
 }) => {
   const styles = toneStyles[tone];
   // A div with role="button" rather than a <button>: the card's <p> content is
@@ -127,12 +134,34 @@ export const MetricCard: React.FC<MetricCardProps> = ({
       }`
     : "";
 
+  const accent = <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${styles.accent}`} />;
+  const surface = `relative overflow-hidden rounded-2xl border border-att-100 bg-gradient-to-br from-white via-white to-att-50/70 shadow-sm shadow-att-100/40 ${interactiveClass} ${className}`;
+
+  if (compact) {
+    return (
+      <div {...interactive} className={`${surface} px-4 pb-3.5 pt-4`}>
+        {accent}
+        {/* A clickable card's own tooltip (actionLabel) must not be shadowed. */}
+        <p className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500" title={onClick ? undefined : title}>
+          {title}
+        </p>
+        <div className="mt-2 flex items-center gap-2.5">
+          <div
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-white/60 [&>svg]:h-4 [&>svg]:w-4 ${styles.iconSurface}`}
+          >
+            {icon}
+          </div>
+          <p className={`text-2xl font-bold leading-none ${styles.value} ${valueClassName}`}>{value}</p>
+          {meta}
+        </div>
+        {subtitle ? <p className="mt-1.5 truncate text-xs text-slate-400">{subtitle}</p> : null}
+      </div>
+    );
+  }
+
   return (
-    <div
-      {...interactive}
-      className={`relative overflow-hidden rounded-2xl border border-att-100 bg-gradient-to-br from-white via-white to-att-50/70 p-5 shadow-sm shadow-att-100/40 ${interactiveClass} ${className}`}
-    >
-      <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${styles.accent}`} />
+    <div {...interactive} className={`${surface} p-5`}>
+      {accent}
       <div className="flex items-start gap-3">
         <div
           className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ring-1 ring-white/60 ${styles.iconSurface}`}
