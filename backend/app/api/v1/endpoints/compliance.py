@@ -8,7 +8,7 @@ Full management interface for compliance monitoring:
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -21,12 +21,14 @@ from app.core.database import get_db
 from app.core.subscription_scope import scope_is_full
 from app.models.auth import UserContext, UserRole
 from app.schemas.compliance import ExcelExportRequest, ModuleType
-from app.services.compliance_excel_service import ComplianceExcelService
+from app.services.compliance_excel_service import ComplianceExcelService, ExportScope
 from app.services.compliance_service import ComplianceService, get_compliance_service
 from app.services.compliance_sync_service import ComplianceSyncService
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
+
+DEFAULT_EXPORT_DAYS = 90
 
 
 def _get_service(db: AsyncSession = Depends(get_db)) -> ComplianceService:
@@ -505,13 +507,17 @@ async def get_compliance_dashboard(
             triggered_by=f"refresh:{user.display_name}",
         )
 
-    # Fast path: serve from pre-computed DB snapshot
+    # Fast path: serve from pre-computed DB snapshot.  The snapshot covers every
+    # monitored subscription, so only a caller whose effective scope is just as
+    # wide may see it.  The UI sends its picker selection as subscription_ids on
+    # every request; scope_is_full() already reflects that selection.
+    full_scope = False
     try:
-        cached = await sync_svc.get_dashboard_from_db()
-        # The snapshot covers every monitored subscription, so only a caller
-        # whose scope is just as wide may see it.
-        if cached and not subscription_ids and await scope_is_full():
-            return cached
+        full_scope = await scope_is_full()
+        if full_scope:
+            cached = await sync_svc.get_dashboard_from_db()
+            if cached:
+                return cached
     except Exception as exc:
         logger.warning("compliance_dashboard_cache_read_failed", error=str(exc)[:200])
 
@@ -529,7 +535,7 @@ async def get_compliance_dashboard(
         ) from exc
 
     # Schedule background sync so next request is instant
-    if not subscription_ids and not await sync_svc.is_sync_running():
+    if full_scope and not await sync_svc.is_sync_running():
         ComplianceSyncService.schedule_background_sync(triggered_by="auto:cache_miss")
 
     return data
@@ -913,7 +919,8 @@ async def get_checksum_metrics(
     Reads from pre-computed snapshot when using default params (30 days, no filter).
     """
     try:
-        if days == 30 and module_type is None:
+        # The snapshot covers every monitored subscription; narrower scopes compute live.
+        if days == 30 and module_type is None and await scope_is_full():
             sync_svc = ComplianceSyncService(db)
             cached = await sync_svc.get_metrics_from_db()
             if cached is not None:
@@ -989,10 +996,9 @@ async def export_compliance_excel(
     include_checksum_runs: bool = Query(True, description="Include Checksum Runs sheet"),
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(get_current_user),
+    service: ComplianceService = Depends(_get_service),
 ):
     """Generate and download an audit-ready Excel compliance report."""
-    from datetime import datetime as dt
-
     logger.info(
         "excel_export_requested",
         user=user.email,
@@ -1000,25 +1006,30 @@ async def export_compliance_excel(
         system=system,
     )
 
-    # Build the export request from query params
-    parsed_date_from = None
-    parsed_date_to = None
-    if date_from:
+    def _parse(value: str, name: str, *, end_of_day: bool = False) -> datetime:
         try:
-            parsed_date_from = dt.fromisoformat(date_from)
+            parsed = datetime.fromisoformat(value)
         except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid dateFrom format: {date_from}. Use ISO 8601.",
-            )
-    if date_to:
-        try:
-            parsed_date_to = dt.fromisoformat(date_to)
-        except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid dateTo format: {date_to}. Use ISO 8601.",
-            )
+            raise HTTPException(status_code=422, detail=f"Invalid {name} format: {value}. Use ISO 8601.")
+        # DB columns hold naive UTC.
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+        if end_of_day and len(value) == 10:
+            parsed += timedelta(days=1, microseconds=-1)
+        return parsed
+
+    parsed_date_to = _parse(date_to, "dateTo", end_of_day=True) if date_to else None
+    parsed_date_from = (
+        _parse(date_from, "dateFrom")
+        if date_from
+        else (parsed_date_to or datetime.utcnow()) - timedelta(days=DEFAULT_EXPORT_DAYS)
+    )
+
+    scope = ExportScope(
+        subscription_ids=frozenset(await service._resolve_scoped_subscription_ids()),
+        workspace_names=frozenset(await service._get_allowed_synapse_workspace_names()),
+        cluster_names=frozenset(await service._get_allowed_aks_cluster_names()),
+    )
 
     request = ExcelExportRequest(
         module_type=module_type,
@@ -1033,7 +1044,7 @@ async def export_compliance_excel(
 
     try:
         excel_service = ComplianceExcelService()
-        buf, metadata = await excel_service.generate_export(db, request)
+        buf, metadata = await excel_service.generate_export(db, request, scope)
 
         logger.info(
             "excel_export_generated",

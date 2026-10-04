@@ -15,8 +15,10 @@ Features:
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,7 +28,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -192,12 +194,26 @@ def _fmt_date(dt: datetime | str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ExportScope:
+    """What the requesting user may see: their subscriptions and the workspaces/clusters in them."""
+
+    subscription_ids: frozenset[str]
+    workspace_names: frozenset[str]
+    cluster_names: frozenset[str]
+
+
 async def _fetch_synapse_drifts(
     db: AsyncSession,
     request: ExcelExportRequest,
+    scope: ExportScope,
 ) -> Sequence[SynapsePipelineDrift]:
     """Query SynapsePipelineDrift with request filters."""
-    stmt = select(SynapsePipelineDrift).order_by(SynapsePipelineDrift.detection_date.desc())
+    stmt = (
+        select(SynapsePipelineDrift)
+        .where(SynapsePipelineDrift.workspace_name.in_(sorted(scope.workspace_names)))
+        .order_by(SynapsePipelineDrift.detection_date.desc())
+    )
     if request.date_from:
         stmt = stmt.where(SynapsePipelineDrift.detection_date >= request.date_from)
     if request.date_to:
@@ -211,9 +227,14 @@ async def _fetch_synapse_drifts(
 async def _fetch_aks_drifts(
     db: AsyncSession,
     request: ExcelExportRequest,
+    scope: ExportScope,
 ) -> Sequence[AKSPodDrift]:
     """Query AKSPodDrift with request filters."""
-    stmt = select(AKSPodDrift).order_by(AKSPodDrift.detection_date.desc())
+    stmt = (
+        select(AKSPodDrift)
+        .where(AKSPodDrift.cluster_name.in_(sorted(scope.cluster_names)))
+        .order_by(AKSPodDrift.detection_date.desc())
+    )
     if request.date_from:
         stmt = stmt.where(AKSPodDrift.detection_date >= request.date_from)
     if request.date_to:
@@ -229,9 +250,14 @@ async def _fetch_aks_drifts(
 async def _fetch_compliance_scores(
     db: AsyncSession,
     request: ExcelExportRequest,
+    scope: ExportScope,
 ) -> Sequence[ComplianceScore]:
     """Query ComplianceScore with request filters."""
-    stmt = select(ComplianceScore).order_by(ComplianceScore.score_date.desc())
+    stmt = (
+        select(ComplianceScore)
+        .where(ComplianceScore.subscription_id.in_(sorted(scope.subscription_ids)))
+        .order_by(ComplianceScore.score_date.desc())
+    )
     if request.date_from:
         stmt = stmt.where(ComplianceScore.score_date >= request.date_from)
     if request.date_to:
@@ -243,9 +269,22 @@ async def _fetch_compliance_scores(
 async def _fetch_checksum_runs(
     db: AsyncSession,
     request: ExcelExportRequest,
+    scope: ExportScope,
 ) -> Sequence[ChecksumRun]:
     """Query ChecksumRun (with results) matching request filters."""
-    stmt = select(ChecksumRun).options(selectinload(ChecksumRun.results)).order_by(ChecksumRun.created_at.desc())
+    stmt = (
+        select(ChecksumRun)
+        .options(selectinload(ChecksumRun.results))
+        .where(
+            or_(
+                and_(
+                    ChecksumRun.module_type == "synapse", ChecksumRun.workspace_name.in_(sorted(scope.workspace_names))
+                ),
+                and_(ChecksumRun.module_type == "aks", ChecksumRun.workspace_name.in_(sorted(scope.cluster_names))),
+            )
+        )
+        .order_by(ChecksumRun.created_at.desc())
+    )
     if request.module_type:
         stmt = stmt.where(ChecksumRun.module_type == request.module_type.value)
     if request.system:
@@ -608,6 +647,36 @@ def _write_checksum_runs_sheet(
     return total_rows
 
 
+def _build_workbook(
+    synapse_drifts: Sequence[SynapsePipelineDrift] | None,
+    aks_drifts: Sequence[AKSPodDrift] | None,
+    scores: Sequence[ComplianceScore] | None,
+    runs: Sequence[ChecksumRun] | None,
+    generated_at: datetime,
+) -> tuple[io.BytesIO, int, list[str]]:
+    wb = Workbook()
+    wb.remove(wb.active)  # type: ignore[arg-type]
+
+    total_rows = 0
+    if synapse_drifts is not None:
+        total_rows += _write_synapse_sheet(wb, synapse_drifts, generated_at)
+    if aks_drifts is not None:
+        total_rows += _write_aks_sheet(wb, aks_drifts, generated_at)
+    if scores is not None:
+        total_rows += _write_scores_sheet(wb, scores, generated_at)
+    if runs is not None:
+        total_rows += _write_checksum_runs_sheet(wb, runs, generated_at)
+
+    if len(wb.sheetnames) == 0:
+        ws = wb.create_sheet("Info")
+        ws.cell(row=1, column=1, value="No data matched the selected filters.")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf, total_rows, list(wb.sheetnames)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -620,68 +689,27 @@ class ComplianceExcelService:
     async def generate_export(
         db: AsyncSession,
         request: ExcelExportRequest,
+        scope: ExportScope,
     ) -> tuple[io.BytesIO, ExportMetadata]:
-        """Build a multi-sheet workbook filtered by *request* and return it
-        as an in-memory buffer alongside export metadata.
+        """Build a multi-sheet workbook filtered by *request* and *scope*.
 
-        Sheets included depend on ``request.module_type``:
-          - ``synapse``  → Synapse Drift + Scores + Checksum Runs
-          - ``aks``      → AKS Pod Drift + Scores + Checksum Runs
-          - ``None``     → All sheets
-
-        Pass ``include_scores=False`` / ``include_checksum_runs=False``
-        to omit those sheets.
+        Sheets: Synapse Drift and/or AKS Pod Drift per ``request.module_type``,
+        plus Scores / Checksum Runs unless excluded.
         """
         generated_at = datetime.now(UTC)
-        wb = Workbook()
-        # Remove the default sheet created by openpyxl
-        wb.remove(wb.active)  # type: ignore[arg-type]
-
-        total_rows = 0
         include_synapse = request.module_type in (None, ModuleType.SYNAPSE)
         include_aks = request.module_type in (None, ModuleType.AKS)
+        logger.info("excel_export.fetch", date_from=request.date_from, date_to=request.date_to)
 
-        # -- Synapse Drift sheet
-        if include_synapse:
-            logger.info(
-                "excel_export.synapse_drift",
-                date_from=request.date_from,
-                date_to=request.date_to,
-            )
-            synapse_drifts = await _fetch_synapse_drifts(db, request)
-            total_rows += _write_synapse_sheet(wb, synapse_drifts, generated_at)
+        synapse_drifts = await _fetch_synapse_drifts(db, request, scope) if include_synapse else None
+        aks_drifts = await _fetch_aks_drifts(db, request, scope) if include_aks else None
+        scores = await _fetch_compliance_scores(db, request, scope) if request.include_scores else None
+        runs = await _fetch_checksum_runs(db, request, scope) if request.include_checksum_runs else None
 
-        # -- AKS Pod Drift sheet
-        if include_aks:
-            logger.info(
-                "excel_export.aks_drift",
-                date_from=request.date_from,
-                date_to=request.date_to,
-            )
-            aks_drifts = await _fetch_aks_drifts(db, request)
-            total_rows += _write_aks_sheet(wb, aks_drifts, generated_at)
-
-        # -- Compliance Scores sheet
-        if request.include_scores:
-            logger.info("excel_export.compliance_scores")
-            scores = await _fetch_compliance_scores(db, request)
-            total_rows += _write_scores_sheet(wb, scores, generated_at)
-
-        # -- Checksum Runs sheet
-        if request.include_checksum_runs:
-            logger.info("excel_export.checksum_runs")
-            runs = await _fetch_checksum_runs(db, request)
-            total_rows += _write_checksum_runs_sheet(wb, runs, generated_at)
-
-        # -- Fallback: if all sheets were excluded, add a placeholder
-        if len(wb.sheetnames) == 0:
-            ws = wb.create_sheet("Info")
-            ws.cell(row=1, column=1, value="No data matched the selected filters.")
-
-        # Serialise to BytesIO
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+        # openpyxl is CPU-bound; building on the event loop would stall every request on this replica.
+        buf, total_rows, sheet_names = await asyncio.to_thread(
+            _build_workbook, synapse_drifts, aks_drifts, scores, runs, generated_at
+        )
 
         # Build filename
         parts = ["compliance_report"]
@@ -711,7 +739,7 @@ class ComplianceExcelService:
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             total_rows=total_rows,
             file_size_bytes=buf.getbuffer().nbytes,
-            sheet_names=list(wb.sheetnames),
+            sheet_names=sheet_names,
             generated_at=generated_at,
             filters_applied=filters_applied,
         )
@@ -720,6 +748,6 @@ class ComplianceExcelService:
             "excel_export.complete",
             filename=filename,
             total_rows=total_rows,
-            sheets=wb.sheetnames,
+            sheets=sheet_names,
         )
         return buf, metadata

@@ -15,12 +15,12 @@ import { useAuth } from "../../contexts/AuthContext";
 import {
   useAKSNamespaces,
   useAKSChecksumRuns,
-  useAKSChecksumMetrics,
   useRunAKSChecksumFull,
   useDownloadAKSChecksumCsv,
   useEmailAKSChecksumResults,
   useChecksumResults,
   refreshChecksumResults,
+  summarizeChecksumRun,
   type ChecksumResultItem,
   type ChecksumRun,
 } from "../../services/complianceApi";
@@ -117,19 +117,25 @@ const AKSChecksumTab: React.FC<AKSChecksumTabProps> = ({ onShowToast, onNavigate
   });
 
   // ── Queries ────────────────────────────────────────────────────────
-  const { data: clusterData, isLoading: loadingClusters } = useCachedClusters();
+  // The cluster list only feeds a dropdown; the default 5-second polling isn't needed here.
+  const { data: clusterData, isLoading: loadingClusters } = useCachedClusters(undefined, false);
   const clusters = clusterData?.clusters ?? [];
+  const selectedCluster = useMemo(
+    () => clusters.find((c) => c.id === selectedClusterId),
+    [clusters, selectedClusterId],
+  );
 
   const { data: nsData, isLoading: loadingNamespaces } = useAKSNamespaces(selectedClusterId || undefined);
   const namespaces = nsData?.namespaces ?? [];
 
   const { data: aksRuns } = useAKSChecksumRuns({ days: dateRangeDays });
-  const _aksMetrics = useAKSChecksumMetrics(dateRangeDays);
-  void _aksMetrics; // reserved for future use
 
-  const { data: checksumResults, isLoading: loadingResults } = useChecksumResults(
-    { days: dateRangeDays, module_type: "aks" } as any,
-  );
+  // AKS runs store the cluster name in workspace_name.
+  const { data: checksumResults, isLoading: loadingResults } = useChecksumResults({
+    days: dateRangeDays,
+    module_type: "aks",
+    ...(selectedCluster ? { workspace_name: selectedCluster.name } : {}),
+  });
 
   // ── Mutations ──────────────────────────────────────────────────────
   const runAKSMutation = useRunAKSChecksumFull();
@@ -137,10 +143,6 @@ const AKSChecksumTab: React.FC<AKSChecksumTabProps> = ({ onShowToast, onNavigate
   const emailMutation = useEmailAKSChecksumResults();
 
   // ── Handlers ───────────────────────────────────────────────────────
-  const selectedCluster = useMemo(
-    () => clusters.find((c) => c.id === selectedClusterId),
-    [clusters, selectedClusterId],
-  );
 
   const handleRunVerification = useCallback(async () => {
     try {
@@ -151,13 +153,9 @@ const AKSChecksumTab: React.FC<AKSChecksumTabProps> = ({ onShowToast, onNavigate
         namespaces: selectedNamespaces.length > 0 ? selectedNamespaces : undefined,
         ...(emailAddr ? { notification_emails: [emailAddr] } : {}),
       });
-      setLastRunId(result.run_id);
-      const hasErrors = (result.failed ?? 0) > 0;
-      const emailNote = emailAddr ? ` — report emailed to ${emailAddr}` : "";
-      onShowToast(
-        `AKS checksum verification complete: ${result.passed ?? 0} PASS, ${result.failed ?? 0} FAIL${emailNote}`,
-        hasErrors ? "error" : "success",
-      );
+      const summary = summarizeChecksumRun(result, emailAddr);
+      setLastRunId(summary.runId);
+      onShowToast(`AKS ${summary.message}`, summary.type);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "AKS checksum verification failed";
       onShowToast(msg, "error");
@@ -370,6 +368,7 @@ const AKSChecksumTab: React.FC<AKSChecksumTabProps> = ({ onShowToast, onNavigate
             onChange={(e) => {
               setSelectedClusterId(e.target.value);
               setSelectedNamespaces([]);
+              setLastRunId(null);
               setPodPage(0);
             }}
             className="min-w-[280px] rounded-lg border border-att-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100"

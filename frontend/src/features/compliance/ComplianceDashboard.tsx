@@ -31,6 +31,7 @@ import apiClient from "../../services/apiClient";
 import { MetricCard, MetricCardIcons } from "../../components/MetricCard";
 import { AutoRefreshIndicator, gridStyles, nextSortState, SortableHeader, type SortState } from "../../components/gridStyles";
 import { usePortalTimezone } from "../../contexts/TimezoneContext";
+import { isDateOnly, parseApiDate } from "../../utils/dateFormat";
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -113,9 +114,15 @@ export function getSeverityColor(severity: string): string {
   return map[severity?.toLowerCase()] ?? "bg-gray-100 text-gray-800";
 }
 
+// Date-only values ("2026-10-05") are calendar days; shifting them into the
+// portal timezone would show the previous day west of UTC.
 function formatDate(value: string | undefined, timezone: string): string {
-  if (!value) return "N/A";
-  return new Date(value).toLocaleDateString("en-US", {
+  const parsed = parseApiDate(value);
+  if (!parsed) return "N/A";
+  if (isDateOnly(value)) {
+    return parsed.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+  }
+  return parsed.toLocaleDateString("en-US", {
     timeZone: timezone,
     month: "short",
     day: "numeric",
@@ -127,8 +134,10 @@ function formatDate(value: string | undefined, timezone: string): string {
 }
 
 function formatShortDate(value: string, timezone: string): string {
-  return new Date(value).toLocaleDateString("en-US", {
-    timeZone: timezone,
+  const parsed = parseApiDate(value);
+  if (!parsed) return value;
+  return parsed.toLocaleDateString("en-US", {
+    timeZone: isDateOnly(value) ? "UTC" : timezone,
     month: "short",
     day: "numeric",
   });
@@ -236,7 +245,13 @@ const ComplianceDashboard: React.FC<ComplianceDashboardProps> = ({ onShowToast }
   });
 
   // ── Data hooks ───────
-  const { data: dashboardData, isLoading: dashboardLoading } = useComplianceDashboard();
+  const {
+    data: dashboardData,
+    isLoading: dashboardLoading,
+    isError: dashboardError,
+    isFetching: dashboardFetching,
+    refetch: refetchDashboard,
+  } = useComplianceDashboard();
   const calculateScoreMutation = useCalculateComplianceScore();
 
   // ── Derived data ─────
@@ -325,15 +340,7 @@ const ComplianceDashboard: React.FC<ComplianceDashboardProps> = ({ onShowToast }
   const handleExcelExport = useCallback(async () => {
     setExportLoading(true);
     try {
-      const response = await apiClient.get("/compliance/export/excel", {
-        responseType: "blob",
-        params: {
-          include_synapse_drift: true,
-          include_aks_drift: true,
-          include_scores: true,
-          include_checksums: true,
-        },
-      });
+      const response = await apiClient.get("/compliance/export/excel", { responseType: "blob" });
       const blob = new Blob([response.data], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
@@ -359,6 +366,39 @@ const ComplianceDashboard: React.FC<ComplianceDashboardProps> = ({ onShowToast }
 
   // ── Loading ──────────
   if (dashboardLoading) return <DashboardSkeleton />;
+
+  // ── Error state (a failed background poll keeps the last good data on screen) ──
+  if (dashboardError && !dashboardData) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+        {Icons.alert("w-16 h-16 mb-4 text-red-400")}
+        <p className="text-lg font-medium mb-2 text-gray-700">Failed to load compliance dashboard</p>
+        <p className="text-sm mb-6 text-center max-w-sm">
+          The dashboard could not be retrieved. The backend may be busy computing scores or temporarily unavailable.
+        </p>
+        <div className="flex gap-3">
+          <button
+            onClick={() => refetchDashboard()}
+            disabled={dashboardFetching}
+            className="flex items-center gap-2 rounded-lg bg-att-400 px-4 py-2 text-white hover:bg-att-500 disabled:opacity-50"
+          >
+            {Icons.refresh(`w-4 h-4 ${dashboardFetching ? "animate-spin" : ""}`)}
+            {dashboardFetching ? "Retrying..." : "Retry"}
+          </button>
+          {canWrite && (
+            <button
+              onClick={handleRecalculate}
+              disabled={calculateScoreMutation.isPending}
+              className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {Icons.calculator("w-4 h-4")}
+              Calculate Scores
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // ── Empty state — no data OR backend returned zero resources ──────
   const hasData = dashboardData && dashboardData.total_resources > 0;

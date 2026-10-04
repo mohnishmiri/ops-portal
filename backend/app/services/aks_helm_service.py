@@ -64,6 +64,9 @@ class AKSHelmService:
     async def _kubeconfig_path(self, cluster_id: str) -> str:
         _, core_v1, _ = await self._aks._get_k8s_clients(cluster_id)
         config = core_v1.api_client.configuration
+        # Through the client's refresh hook, so Helm never gets a token that expired
+        # while the client sat in the cache (it would fail with 401 Unauthorized).
+        bearer = await asyncio.to_thread(config.get_api_key_with_prefix, "authorization")
         kube_dict = {
             "apiVersion": "v1",
             "kind": "Config",
@@ -73,7 +76,7 @@ class AKSHelmService:
             "users": [
                 {
                     "name": "aks",
-                    "user": {"token": config.api_key.get("authorization", "").replace("Bearer ", "")},
+                    "user": {"token": (bearer or "").removeprefix("Bearer ")},
                 }
             ],
         }

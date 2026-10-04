@@ -11,6 +11,7 @@ Follows the same pattern as ``LeadershipSyncService``.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from datetime import datetime, timedelta
 
@@ -34,6 +35,8 @@ RUNNING_SYNC_TIMEOUT_MINUTES = 30
 COMPLIANCE_DASHBOARD_CACHE_KEY = "pagecache:compliance:dashboard:all"
 COMPLIANCE_METRICS_CACHE_KEY = "pagecache:compliance:metrics:all"
 SNAPSHOT_RETENTION_DAYS = 30
+
+_background_tasks: set[asyncio.Task] = set()
 
 
 class ComplianceSyncService:
@@ -106,7 +109,14 @@ class ComplianceSyncService:
     @classmethod
     def schedule_background_sync(cls, triggered_by: str = "request") -> None:
         """Fire-and-forget background sync using a fresh DB session."""
-        asyncio.create_task(cls._run_background_sync(triggered_by=triggered_by))
+        # An empty context keeps the triggering request's subscription/access
+        # scope (contextvars) out of the portal-wide snapshot.
+        task = asyncio.create_task(
+            cls._run_background_sync(triggered_by=triggered_by),
+            context=contextvars.Context(),
+        )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     @classmethod
     async def _run_background_sync(cls, triggered_by: str = "request") -> None:

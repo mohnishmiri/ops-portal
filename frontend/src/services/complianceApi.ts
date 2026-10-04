@@ -606,6 +606,34 @@ export interface ChecksumRunResponse {
   cluster_results?: Record<string, unknown>[];
 }
 
+/**
+ * Toast text for a verification response, plus the run to show afterwards.
+ * Batch runs have no persisted run_id, so there is nothing to select, download or email.
+ */
+export function summarizeChecksumRun(
+  result: ChecksumRunResponse,
+  emailAddr?: string,
+): { runId: string | null; message: string; type: "success" | "warning" | "error" } {
+  if (result.status === "failed") {
+    return { runId: null, message: result.error || "Checksum verification failed", type: "error" };
+  }
+  const counts = `${result.passed ?? 0} PASS, ${result.failed ?? 0} FAIL`;
+  const driftType = (result.failed ?? 0) > 0 ? "warning" : "success";
+  if (result.mode === "batch") {
+    const noun = result.module_type === "aks" ? "cluster" : "workspace";
+    const processed = result.workspaces_processed ?? result.clusters_processed ?? 0;
+    const unreachable = result.workspaces_failed ?? result.clusters_failed ?? 0;
+    const unreachableNote = unreachable > 0 ? ` — ${unreachable} ${noun}(s) could not be verified` : "";
+    return {
+      runId: null,
+      message: `Verification complete across ${processed} ${noun}(s): ${counts}${unreachableNote}`,
+      type: unreachable > 0 ? "warning" : driftType,
+    };
+  }
+  const emailNote = emailAddr ? ` — report emailed to ${emailAddr}` : "";
+  return { runId: result.run_id, message: `Verification complete: ${counts}${emailNote}`, type: driftType };
+}
+
 export interface ChecksumResultsResponse {
   results: ChecksumResultItem[];
   total: number;
@@ -860,6 +888,8 @@ export function refreshChecksumResults(queryClient: ReturnType<typeof useQueryCl
   queryClient.invalidateQueries({ queryKey: ["checksum-results"] });
   queryClient.invalidateQueries({ queryKey: ["checksum-runs"] });
   queryClient.invalidateQueries({ queryKey: ["checksum-metrics"] });
+  queryClient.invalidateQueries({ queryKey: ["aks-checksum-runs"] });
+  queryClient.invalidateQueries({ queryKey: ["aks-checksum-metrics"] });
 }
 
 

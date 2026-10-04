@@ -22,13 +22,13 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from apscheduler.triggers.cron import CronTrigger
 from azure.mgmt.synapse import SynapseManagementClient
 from kubernetes.client.rest import ApiException
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.azure_auth import get_azure_credential
+from app.core.cron import cron_trigger_from_crontab
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.database import (
     AKSPodChecksum,
@@ -210,18 +210,16 @@ class ComplianceService:
         if self.db is None:
             return set()
 
-        # Serve from class-level cache if fresh
-        now = time.monotonic()
-        if (
-            ComplianceService._aks_cluster_cache
-            and (now - ComplianceService._aks_cluster_cache_ts) < self._AKS_CLUSTER_CACHE_TTL
-            and subscription_ids is None
-        ):
-            return set(ComplianceService._aks_cluster_cache)
-
         scoped_subscription_ids = await self._resolve_scoped_subscription_ids(subscription_ids)
         if not scoped_subscription_ids:
             return set()
+
+        # The scope differs per caller, so the cache is keyed by it.
+        cache_key = frozenset(sub_id.lower() for sub_id in scoped_subscription_ids)
+        now = time.monotonic()
+        cached = ComplianceService._aks_cluster_cache.get(cache_key)
+        if cached and (now - cached[0]) < self._AKS_CLUSTER_CACHE_TTL:
+            return set(cached[1])
 
         allowed_clusters: set[str] = set()
 
@@ -245,10 +243,8 @@ class ComplianceService:
             if cluster_name and self._cluster_matches_subscription_scope(cluster_id, scoped_subscription_ids):
                 allowed_clusters.add(cluster_name)
 
-        # Update class-level cache for default scope queries
-        if subscription_ids is None and allowed_clusters:
-            ComplianceService._aks_cluster_cache = allowed_clusters
-            ComplianceService._aks_cluster_cache_ts = now
+        if allowed_clusters:
+            ComplianceService._aks_cluster_cache[cache_key] = (now, frozenset(allowed_clusters))
 
         return allowed_clusters
 
@@ -1336,119 +1332,6 @@ class ComplianceService:
         )
         return await self.db.scalar(stmt)
 
-    async def _get_dashboard_synapse_summary(
-        self,
-        subscription_ids: list[str] | None,
-    ) -> dict[str, Any]:
-        summary: dict[str, Any] = {
-            "total_pipelines": 0,
-            "compliant_pipelines": 0,
-            "drifted_pipelines": 0,
-        }
-        if not subscription_ids:
-            return summary
-
-        latest_snapshot_stmt = select(func.max(SynapsePipelineChecksum.snapshot_date)).where(
-            SynapsePipelineChecksum.subscription_id.in_(subscription_ids)
-        )
-        latest_snapshot = await self.db.scalar(latest_snapshot_stmt)
-        if latest_snapshot is None:
-            return summary
-
-        snapshot_stmt = select(
-            SynapsePipelineChecksum.workspace_name,
-            SynapsePipelineChecksum.pipeline_name,
-        ).where(
-            SynapsePipelineChecksum.snapshot_date == latest_snapshot,
-            SynapsePipelineChecksum.subscription_id.in_(subscription_ids),
-        )
-        snapshot_result = await self.db.execute(snapshot_stmt)
-        snapshot_rows = [
-            (workspace_name, pipeline_name)
-            for workspace_name, pipeline_name in snapshot_result.all()
-            if workspace_name and pipeline_name
-        ]
-        if not snapshot_rows:
-            return summary
-
-        allowed_workspaces = {workspace_name for workspace_name, _ in snapshot_rows}
-        summary["total_pipelines"] = len(snapshot_rows)
-
-        latest_drift_stmt = select(func.max(SynapsePipelineDrift.detection_date)).where(
-            SynapsePipelineDrift.workspace_name.in_(allowed_workspaces)
-        )
-        latest_drift_date = await self.db.scalar(latest_drift_stmt)
-
-        if latest_drift_date is not None:
-            drift_stmt = select(
-                SynapsePipelineDrift.workspace_name,
-                SynapsePipelineDrift.pipeline_name,
-            ).where(
-                SynapsePipelineDrift.detection_date == latest_drift_date,
-                SynapsePipelineDrift.workspace_name.in_(allowed_workspaces),
-                SynapsePipelineDrift.acknowledged == False,  # noqa: E712
-            )
-            drift_result = await self.db.execute(drift_stmt)
-            drifted_pipelines = {
-                (workspace_name, pipeline_name)
-                for workspace_name, pipeline_name in drift_result.all()
-                if workspace_name and pipeline_name
-            }
-            summary["drifted_pipelines"] = len(drifted_pipelines)
-
-        summary["compliant_pipelines"] = max(
-            summary["total_pipelines"] - summary["drifted_pipelines"],
-            0,
-        )
-        return summary
-
-    async def _get_dashboard_aks_summary(
-        self,
-        subscription_ids: list[str] | None,
-    ) -> dict[str, Any]:
-        summary: dict[str, Any] = {
-            "clusters": 0,
-            "total_pods": 0,
-            "compliant_clusters": 0,
-            "drifted_clusters": 0,
-            "drifted_pods": 0,
-        }
-        if not subscription_ids:
-            return summary
-
-        latest_snapshot = await self._get_latest_scoped_aks_snapshot_date(subscription_ids)
-        if latest_snapshot is None:
-            return summary
-
-        pod_stmt = select(AKSPodChecksum).where(
-            AKSPodChecksum.snapshot_date == latest_snapshot,
-            self._aks_subscription_scope_clause(AKSPodChecksum.cluster_id, subscription_ids),
-        )
-        pod_result = await self.db.execute(pod_stmt)
-        pods = pod_result.scalars().all()
-        if not pods:
-            return summary
-
-        cluster_set = {pod.cluster_id for pod in pods}
-        summary["total_pods"] = len(pods)
-        summary["clusters"] = len(cluster_set)
-
-        latest_drift_date = await self._get_latest_scoped_aks_drift_date(subscription_ids)
-        if latest_drift_date is not None:
-            drift_stmt = select(AKSPodDrift).where(
-                AKSPodDrift.detection_date == latest_drift_date,
-                AKSPodDrift.acknowledged == False,  # noqa: E712
-                self._aks_subscription_scope_clause(AKSPodDrift.cluster_id, subscription_ids),
-            )
-            drift_result = await self.db.execute(drift_stmt)
-            drifts = drift_result.scalars().all()
-            summary["drifted_pods"] = len(drifts)
-            drifted_clusters = {drift.cluster_id for drift in drifts}
-            summary["drifted_clusters"] = len(drifted_clusters)
-
-        summary["compliant_clusters"] = max(summary["clusters"] - summary["drifted_clusters"], 0)
-        return summary
-
     def _build_dashboard_from_scores(
         self,
         scores: list[ComplianceScore],
@@ -1510,7 +1393,7 @@ class ComplianceService:
                     "grade": self._score_to_grade(score.overall_score),
                     "critical_issues": score.critical_issues,
                 }
-                for score in sorted(scores, key=lambda item: item.overall_score)[:10]
+                for score in sorted(scores, key=lambda item: item.overall_score)
             ],
         }
 
@@ -1559,31 +1442,27 @@ class ComplianceService:
                 "message": "No monitored subscriptions configured",
             }
 
-        synapse_summary = await self._get_dashboard_synapse_summary(subscription_ids)
-        aks_summary = await self._get_dashboard_aks_summary(subscription_ids)
         thirty_days_ago = datetime.utcnow() - timedelta(days=30)
         snapshot_dashboard = await self._build_dashboard_from_checksum_snapshots(
             subscription_ids=subscription_ids,
             start_date=thirty_days_ago,
-            synapse_summary=synapse_summary,
-            aks_summary=aks_summary,
         )
         if snapshot_dashboard.get("total_resources", 0) > 0:
             return snapshot_dashboard
 
         scores = await self._get_latest_compliance_scores(subscription_ids)
-        calculated_at = await self._get_dashboard_calculated_at(subscription_ids=subscription_ids)
         if scores:
-            # Build 30-day score trend from ComplianceScore history
+            calculated_at = await self._get_dashboard_calculated_at(subscription_ids=subscription_ids)
             score_trend = await self._get_compliance_score_trend(
                 subscription_ids=subscription_ids,
                 days=30,
             )
+            # No checksum rows exist in scope here, so the snapshot summaries are all zeros.
             return self._build_dashboard_from_scores(
                 scores,
                 calculated_at=calculated_at,
-                synapse_summary=synapse_summary,
-                aks_summary=aks_summary,
+                synapse_summary=snapshot_dashboard["synapse_summary"],
+                aks_summary=snapshot_dashboard["aks_summary"],
                 score_trend=score_trend,
             )
 
@@ -1592,187 +1471,208 @@ class ComplianceService:
     async def _build_dashboard_from_checksum_snapshots(
         self,
         *,
-        subscription_ids: list[str] | None,
+        subscription_ids: list[str],
         start_date: datetime,
-        synapse_summary: dict[str, Any],
-        aks_summary: dict[str, Any],
     ) -> dict[str, Any]:
-        latest_synapse_snapshot_stmt = select(func.max(SynapsePipelineChecksum.snapshot_date))
-        latest_synapse_snapshot_stmt = latest_synapse_snapshot_stmt.where(
-            SynapsePipelineChecksum.subscription_id.in_(subscription_ids)
-        )
-        latest_synapse_snapshot = await self.db.scalar(latest_synapse_snapshot_stmt)
-
-        synapse_checksums: list[SynapsePipelineChecksum] = []
-        if latest_synapse_snapshot:
-            synapse_stmt = select(SynapsePipelineChecksum).where(
-                SynapsePipelineChecksum.snapshot_date == latest_synapse_snapshot
+        # Only narrow columns are selected: the checksum tables carry large JSONB
+        # payloads (pipeline definitions, pod specs) the dashboard never reads.
+        #
+        # Each verification run stamps its own snapshot_date, so "current state"
+        # is the latest snapshot per workspace / per cluster+namespace — not the
+        # single newest timestamp, which would only cover the last resource scanned.
+        synapse_latest = (
+            select(
+                SynapsePipelineChecksum.workspace_id.label("workspace_id"),
+                func.max(SynapsePipelineChecksum.snapshot_date).label("snapshot_date"),
             )
-            synapse_stmt = synapse_stmt.where(SynapsePipelineChecksum.subscription_id.in_(subscription_ids))
-            synapse_result = await self.db.execute(synapse_stmt)
-            synapse_checksums = synapse_result.scalars().all()
-
-        latest_aks_snapshot = await self._get_latest_scoped_aks_snapshot_date(subscription_ids)
-
-        aks_checksums: list[AKSPodChecksum] = []
-        if latest_aks_snapshot:
-            aks_stmt = select(AKSPodChecksum).where(
-                AKSPodChecksum.snapshot_date == latest_aks_snapshot,
-                self._aks_subscription_scope_clause(AKSPodChecksum.cluster_id, subscription_ids),
+            .where(SynapsePipelineChecksum.subscription_id.in_(subscription_ids))
+            .group_by(SynapsePipelineChecksum.workspace_id)
+            .subquery()
+        )
+        synapse_rows = (
+            await self.db.execute(
+                select(
+                    SynapsePipelineChecksum.workspace_name,
+                    SynapsePipelineChecksum.pipeline_name,
+                    SynapsePipelineChecksum.snapshot_date,
+                ).join(
+                    synapse_latest,
+                    and_(
+                        SynapsePipelineChecksum.workspace_id == synapse_latest.c.workspace_id,
+                        SynapsePipelineChecksum.snapshot_date == synapse_latest.c.snapshot_date,
+                    ),
+                )
             )
-            aks_result = await self.db.execute(aks_stmt)
-            aks_checksums = aks_result.scalars().all()
+        ).all()
 
-        synapse_drift_stmt = select(SynapsePipelineDrift).where(
-            SynapsePipelineDrift.detection_date >= start_date,
-            SynapsePipelineDrift.acknowledged == False,  # noqa: E712
+        aks_latest = (
+            select(
+                AKSPodChecksum.cluster_id.label("cluster_id"),
+                AKSPodChecksum.namespace.label("namespace"),
+                func.max(AKSPodChecksum.snapshot_date).label("snapshot_date"),
+            )
+            .where(self._aks_subscription_scope_clause(AKSPodChecksum.cluster_id, subscription_ids))
+            .group_by(AKSPodChecksum.cluster_id, AKSPodChecksum.namespace)
+            .subquery()
         )
-        synapse_workspace_stmt = select(SynapsePipelineChecksum.workspace_name).where(
-            SynapsePipelineChecksum.subscription_id.in_(subscription_ids)
-        )
-        synapse_workspace_result = await self.db.execute(synapse_workspace_stmt)
-        allowed_workspaces = {row[0] for row in synapse_workspace_result.all()}
-        if allowed_workspaces:
-            synapse_drift_stmt = synapse_drift_stmt.where(SynapsePipelineDrift.workspace_name.in_(allowed_workspaces))
-        else:
-            synapse_drift_stmt = synapse_drift_stmt.where(SynapsePipelineDrift.id.in_([]))
-        synapse_drift_result = await self.db.execute(synapse_drift_stmt)
-        synapse_drifts = synapse_drift_result.scalars().all()
+        aks_rows = (
+            await self.db.execute(
+                select(
+                    AKSPodChecksum.cluster_name,
+                    AKSPodChecksum.namespace,
+                    AKSPodChecksum.pod_name,
+                    AKSPodChecksum.snapshot_date,
+                ).join(
+                    aks_latest,
+                    and_(
+                        AKSPodChecksum.cluster_id == aks_latest.c.cluster_id,
+                        AKSPodChecksum.namespace == aks_latest.c.namespace,
+                        AKSPodChecksum.snapshot_date == aks_latest.c.snapshot_date,
+                    ),
+                )
+            )
+        ).all()
 
-        aks_drift_stmt = select(AKSPodDrift).where(
-            AKSPodDrift.detection_date >= start_date,
-            AKSPodDrift.acknowledged == False,  # noqa: E712
-            self._aks_subscription_scope_clause(AKSPodDrift.cluster_id, subscription_ids),
-        )
-        aks_drift_result = await self.db.execute(aks_drift_stmt)
-        aks_drifts = aks_drift_result.scalars().all()
+        synapse_pipelines_by_workspace: dict[str, set[str]] = {}
+        for workspace_name, pipeline_name, _ in synapse_rows:
+            synapse_pipelines_by_workspace.setdefault(workspace_name, set()).add(pipeline_name)
+
+        aks_pods_by_cluster: dict[str, set[tuple[str, str]]] = {}
+        for cluster_name, namespace, pod_name, _ in aks_rows:
+            aks_pods_by_cluster.setdefault(cluster_name, set()).add((namespace, pod_name))
+
+        synapse_drift_rows: list[Any] = []
+        if synapse_pipelines_by_workspace:
+            synapse_drift_rows = (
+                await self.db.execute(
+                    select(
+                        SynapsePipelineDrift.workspace_name,
+                        SynapsePipelineDrift.pipeline_name,
+                        SynapsePipelineDrift.drift_type,
+                        SynapsePipelineDrift.detection_date,
+                    ).where(
+                        SynapsePipelineDrift.detection_date >= start_date,
+                        SynapsePipelineDrift.acknowledged == False,  # noqa: E712
+                        SynapsePipelineDrift.workspace_name.in_(list(synapse_pipelines_by_workspace)),
+                    )
+                )
+            ).all()
+
+        aks_drift_rows = (
+            await self.db.execute(
+                select(
+                    AKSPodDrift.cluster_name,
+                    AKSPodDrift.namespace,
+                    AKSPodDrift.pod_name,
+                    AKSPodDrift.severity,
+                    AKSPodDrift.detection_date,
+                ).where(
+                    AKSPodDrift.detection_date >= start_date,
+                    AKSPodDrift.acknowledged == False,  # noqa: E712
+                    self._aks_subscription_scope_clause(AKSPodDrift.cluster_id, subscription_ids),
+                )
+            )
+        ).all()
 
         resources: list[dict[str, Any]] = []
         by_grade: dict[str, int] = {"A": 0, "B": 0, "C": 0, "D": 0, "F": 0}
         by_type: dict[str, dict[str, float | int]] = {}
-
-        synapse_drifted_by_workspace: dict[str, set[str]] = {}
         critical_issues = 0
         high_issues = 0
-        for drift in synapse_drifts:
-            synapse_drifted_by_workspace.setdefault(drift.workspace_name, set()).add(drift.pipeline_name)
-            severity = self._drift_type_to_severity(drift.drift_type)
+
+        def _add_resource(resource_id: str, resource_type: str, type_label: str, total: int, drifted: int) -> None:
+            score = min(max((total - drifted) / total * 100, 0.0), 100.0) if total > 0 else 0.0
+            grade = self._score_to_grade(score)
+            by_grade[grade] += 1
+            bucket = by_type.setdefault(type_label, {"count": 0, "avg_score": 0.0, "total_score": 0.0})
+            bucket["count"] += 1
+            bucket["total_score"] += score
+            resources.append(
+                {
+                    "id": resource_id,
+                    "name": resource_id,
+                    "type": resource_type,
+                    "score": round(score, 1),
+                    "grade": grade,
+                    "critical_issues": drifted,
+                }
+            )
+
+        synapse_drifted_by_workspace: dict[str, set[str]] = {}
+        for workspace_name, pipeline_name, drift_type, _ in synapse_drift_rows:
+            synapse_drifted_by_workspace.setdefault(workspace_name, set()).add(pipeline_name)
+            severity = self._drift_type_to_severity(drift_type)
             if severity == "critical":
                 critical_issues += 1
             elif severity == "high":
                 high_issues += 1
 
-        synapse_checksums_by_workspace: dict[str, list[SynapsePipelineChecksum]] = {}
-        for checksum in synapse_checksums:
-            synapse_checksums_by_workspace.setdefault(checksum.workspace_name, []).append(checksum)
-
-        for (
-            workspace_name,
-            workspace_checksums,
-        ) in synapse_checksums_by_workspace.items():
-            total = len(workspace_checksums)
+        for workspace_name, pipelines in synapse_pipelines_by_workspace.items():
             drifted = len(synapse_drifted_by_workspace.get(workspace_name, set()))
-            score = ((total - drifted) / total * 100) if total > 0 else 0
-            grade = self._score_to_grade(score)
-            by_grade[grade] += 1
-            by_type.setdefault("Synapse", {"count": 0, "avg_score": 0.0, "total_score": 0.0})
-            by_type["Synapse"]["count"] += 1
-            by_type["Synapse"]["total_score"] += score
-            resources.append(
-                {
-                    "id": workspace_name,
-                    "name": workspace_name,
-                    "type": "synapse_workspace",
-                    "score": round(score, 1),
-                    "grade": grade,
-                    "critical_issues": drifted,
-                }
-            )
+            _add_resource(workspace_name, "synapse_workspace", "Synapse", len(pipelines), drifted)
 
-        aks_drifted_by_cluster: dict[str, set[str]] = {}
-        for drift in aks_drifts:
-            aks_drifted_by_cluster.setdefault(drift.cluster_name, set()).add(drift.pod_name)
-            if drift.severity == "critical":
+        aks_drifted_by_cluster: dict[str, set[tuple[str, str]]] = {}
+        for cluster_name, namespace, pod_name, severity, _ in aks_drift_rows:
+            aks_drifted_by_cluster.setdefault(cluster_name, set()).add((namespace, pod_name))
+            if severity == "critical":
                 critical_issues += 1
-            elif drift.severity == "high":
+            elif severity == "high":
                 high_issues += 1
 
-        aks_checksums_by_cluster: dict[str, list[AKSPodChecksum]] = {}
-        for checksum in aks_checksums:
-            aks_checksums_by_cluster.setdefault(checksum.cluster_name, []).append(checksum)
-
-        for cluster_name, cluster_checksums in aks_checksums_by_cluster.items():
-            total = len(cluster_checksums)
+        for cluster_name, pods in aks_pods_by_cluster.items():
             drifted = len(aks_drifted_by_cluster.get(cluster_name, set()))
-            score = ((total - drifted) / total * 100) if total > 0 else 0
-            grade = self._score_to_grade(score)
-            by_grade[grade] += 1
-            by_type.setdefault("AKS", {"count": 0, "avg_score": 0.0, "total_score": 0.0})
-            by_type["AKS"]["count"] += 1
-            by_type["AKS"]["total_score"] += score
-            resources.append(
-                {
-                    "id": cluster_name,
-                    "name": cluster_name,
-                    "type": "aks_cluster",
-                    "score": round(score, 1),
-                    "grade": grade,
-                    "critical_issues": drifted,
-                }
+            _add_resource(cluster_name, "aks_cluster", "AKS", len(pods), drifted)
+
+        for bucket in by_type.values():
+            total_score = bucket.pop("total_score")
+            bucket["avg_score"] = round(float(total_score) / max(int(bucket["count"]), 1), 1)
+
+        # 30-day trend: distinct resources seen per day, against drifts detected that day.
+        synapse_day = func.date(SynapsePipelineChecksum.snapshot_date)
+        synapse_trend_rows = (
+            await self.db.execute(
+                select(synapse_day, SynapsePipelineChecksum.workspace_name, SynapsePipelineChecksum.pipeline_name)
+                .where(
+                    SynapsePipelineChecksum.snapshot_date >= start_date,
+                    SynapsePipelineChecksum.subscription_id.in_(subscription_ids),
+                )
+                .distinct()
+            )
+        ).all()
+
+        aks_day = func.date(AKSPodChecksum.snapshot_date)
+        aks_trend_rows = (
+            await self.db.execute(
+                select(aks_day, AKSPodChecksum.cluster_name, AKSPodChecksum.namespace, AKSPodChecksum.pod_name)
+                .where(
+                    AKSPodChecksum.snapshot_date >= start_date,
+                    self._aks_subscription_scope_clause(AKSPodChecksum.cluster_id, subscription_ids),
+                )
+                .distinct()
+            )
+        ).all()
+
+        daily_totals: dict[str, int] = {}
+        for day, *_ in [*synapse_trend_rows, *aks_trend_rows]:
+            date_key = str(day)[:10]
+            daily_totals[date_key] = daily_totals.get(date_key, 0) + 1
+
+        daily_drifts: dict[str, set[tuple[str, ...]]] = {}
+        for workspace_name, pipeline_name, _, detected in synapse_drift_rows:
+            daily_drifts.setdefault(detected.strftime("%Y-%m-%d"), set()).add(
+                ("synapse", workspace_name, pipeline_name)
+            )
+        for cluster_name, namespace, pod_name, _, detected in aks_drift_rows:
+            daily_drifts.setdefault(detected.strftime("%Y-%m-%d"), set()).add(
+                ("aks", cluster_name, namespace, pod_name)
             )
 
-        for resource_type in list(by_type):
-            count = by_type[resource_type]["count"]
-            total_score = by_type[resource_type].pop("total_score")
-            by_type[resource_type]["avg_score"] = round(float(total_score) / max(int(count), 1), 1)
-
-        # ── Fetch ALL checksums within 30-day window for score trend ──
-        # The latest-snapshot queries above are used for *current* scores.
-        # For the 30-day trend we need every snapshot date in the window.
-        synapse_trend_checksums: list[SynapsePipelineChecksum] = []
-        synapse_trend_stmt = select(SynapsePipelineChecksum).where(
-            SynapsePipelineChecksum.snapshot_date >= start_date,
-            SynapsePipelineChecksum.subscription_id.in_(subscription_ids),
-        )
-        synapse_trend_result = await self.db.execute(synapse_trend_stmt)
-        synapse_trend_checksums = synapse_trend_result.scalars().all()
-
-        aks_trend_stmt = select(AKSPodChecksum).where(
-            AKSPodChecksum.snapshot_date >= start_date,
-            self._aks_subscription_scope_clause(AKSPodChecksum.cluster_id, subscription_ids),
-        )
-        aks_trend_result = await self.db.execute(aks_trend_stmt)
-        aks_trend_checksums = aks_trend_result.scalars().all()
-
-        synapse_daily_totals: dict[str, set[tuple[str, str]]] = {}
-        for checksum in synapse_trend_checksums:
-            date_key = checksum.snapshot_date.strftime("%Y-%m-%d")
-            synapse_daily_totals.setdefault(date_key, set()).add((checksum.workspace_name, checksum.pipeline_name))
-
-        aks_daily_totals: dict[str, set[tuple[str, str]]] = {}
-        for checksum in aks_trend_checksums:
-            date_key = checksum.snapshot_date.strftime("%Y-%m-%d")
-            aks_daily_totals.setdefault(date_key, set()).add((checksum.cluster_name, checksum.pod_name))
-
-        synapse_daily_drifts: dict[str, set[tuple[str, str]]] = {}
-        for drift in synapse_drifts:
-            date_key = drift.detection_date.strftime("%Y-%m-%d")
-            synapse_daily_drifts.setdefault(date_key, set()).add((drift.workspace_name, drift.pipeline_name))
-
-        aks_daily_drifts: dict[str, set[tuple[str, str]]] = {}
-        for drift in aks_drifts:
-            date_key = drift.detection_date.strftime("%Y-%m-%d")
-            aks_daily_drifts.setdefault(date_key, set()).add((drift.cluster_name, drift.pod_name))
-
         score_trend: list[dict[str, Any]] = []
-        all_dates = sorted(
-            set(synapse_daily_totals) | set(aks_daily_totals) | set(synapse_daily_drifts) | set(aks_daily_drifts)
-        )
-        for date_key in all_dates:
-            total_items = len(synapse_daily_totals.get(date_key, set())) + len(aks_daily_totals.get(date_key, set()))
-            drift_items = len(synapse_daily_drifts.get(date_key, set())) + len(aks_daily_drifts.get(date_key, set()))
+        for date_key in sorted(set(daily_totals) | set(daily_drifts)):
+            total_items = daily_totals.get(date_key, 0)
             if total_items <= 0:
                 continue
+            drift_items = len(daily_drifts.get(date_key, set()))
             score_trend.append(
                 {
                     "date": date_key,
@@ -1780,40 +1680,26 @@ class ComplianceService:
                 }
             )
 
-        total_items = len(synapse_checksums) + len(aks_checksums)
-        total_drifted_items = sum(len(items) for items in synapse_drifted_by_workspace.values()) + sum(
-            len(items) for items in aks_drifted_by_cluster.values()
-        )
+        total_pipelines = sum(len(items) for items in synapse_pipelines_by_workspace.values())
+        total_pods = sum(len(items) for items in aks_pods_by_cluster.values())
+        drifted_pipelines = sum(len(items) for items in synapse_drifted_by_workspace.values())
+        drifted_pods = sum(len(items) for items in aks_drifted_by_cluster.values())
+        total_items = total_pipelines + total_pods
         overall_score = (
-            round(max(total_items - total_drifted_items, 0) / total_items * 100, 1) if total_items > 0 else 0.0
+            round(max(total_items - drifted_pipelines - drifted_pods, 0) / total_items * 100, 1)
+            if total_items > 0
+            else 0.0
         )
-
-        # ── Reconcile summaries with the actual drift data used above ──
-        # The pre-computed summaries may disagree because they use a
-        # different time window.  Override with the authoritative counts
-        # derived from the same 30-day drift queryset so every tile on the
-        # dashboard is driven by one consistent data set.
-        total_drifted_synapse_pipelines = sum(len(items) for items in synapse_drifted_by_workspace.values())
-        synapse_summary["total_pipelines"] = len(synapse_checksums)
-        synapse_summary["drifted_pipelines"] = total_drifted_synapse_pipelines
-        synapse_summary["compliant_pipelines"] = max(len(synapse_checksums) - total_drifted_synapse_pipelines, 0)
-
-        total_drifted_aks_pods = sum(len(items) for items in aks_drifted_by_cluster.values())
         drifted_cluster_count = len(aks_drifted_by_cluster)
-        aks_summary["total_pods"] = len(aks_checksums)
-        aks_summary["clusters"] = len(aks_checksums_by_cluster)
-        aks_summary["drifted_pods"] = total_drifted_aks_pods
-        aks_summary["drifted_clusters"] = drifted_cluster_count
-        aks_summary["compliant_clusters"] = max(len(aks_checksums_by_cluster) - drifted_cluster_count, 0)
 
         return {
             "overall_score": overall_score,
             "overall_grade": self._score_to_grade(overall_score),
             "calculated_at": await self._latest_iso_timestamp(
-                latest_synapse_snapshot,
-                latest_aks_snapshot,
-                max((drift.detection_date for drift in synapse_drifts), default=None),
-                max((drift.detection_date for drift in aks_drifts), default=None),
+                max((row[2] for row in synapse_rows), default=None),
+                max((row[3] for row in aks_rows), default=None),
+                max((row[3] for row in synapse_drift_rows), default=None),
+                max((row[4] for row in aks_drift_rows), default=None),
             ),
             "total_resources": len(resources),
             "by_type": by_type,
@@ -1821,9 +1707,19 @@ class ComplianceService:
             "critical_issues": critical_issues,
             "high_issues": high_issues,
             "score_trend": score_trend,
-            "synapse_summary": synapse_summary,
-            "aks_summary": aks_summary,
-            "resources": sorted(resources, key=lambda x: x["score"])[:10],
+            "synapse_summary": {
+                "total_pipelines": total_pipelines,
+                "drifted_pipelines": drifted_pipelines,
+                "compliant_pipelines": max(total_pipelines - drifted_pipelines, 0),
+            },
+            "aks_summary": {
+                "clusters": len(aks_pods_by_cluster),
+                "total_pods": total_pods,
+                "drifted_pods": drifted_pods,
+                "drifted_clusters": drifted_cluster_count,
+                "compliant_clusters": max(len(aks_pods_by_cluster) - drifted_cluster_count, 0),
+            },
+            "resources": sorted(resources, key=lambda x: x["score"]),
         }
 
     async def _get_dashboard_calculated_at(
@@ -1848,8 +1744,10 @@ class ComplianceService:
 
         latest_aks_snapshot = await self._get_latest_scoped_aks_snapshot_date(subscription_ids)
 
-        workspace_stmt = select(SynapsePipelineChecksum.workspace_name).where(
-            SynapsePipelineChecksum.subscription_id.in_(subscription_ids)
+        workspace_stmt = (
+            select(SynapsePipelineChecksum.workspace_name)
+            .where(SynapsePipelineChecksum.subscription_id.in_(subscription_ids))
+            .distinct()
         )
         workspace_result = await self.db.execute(workspace_stmt)
         allowed_workspaces = {row[0] for row in workspace_result.all() if row[0]}
@@ -1977,8 +1875,7 @@ class ComplianceService:
     _WORKSPACE_CACHE_TTL: float = 300.0  # 5 minutes
 
     # In-memory cache for AKS cluster names (avoids repeated full-table DISTINCT)
-    _aks_cluster_cache: set[str] = set()
-    _aks_cluster_cache_ts: float = 0.0
+    _aks_cluster_cache: dict[frozenset[str], tuple[float, frozenset[str]]] = {}
     _AKS_CLUSTER_CACHE_TTL: float = 300.0  # 5 minutes
 
     @staticmethod
@@ -3152,7 +3049,7 @@ class ComplianceService:
         now = from_time or datetime.now(UTC)
         if schedule.schedule_type == "cron" and schedule.cron_expression:
             tz = ZoneInfo(schedule.timezone or "UTC")
-            trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=tz)
+            trigger = cron_trigger_from_crontab(schedule.cron_expression, timezone=tz)
             next_fire = trigger.get_next_fire_time(None, now)
             # Store as naive UTC to match the DB column type
             if next_fire is not None and next_fire.tzinfo is not None:

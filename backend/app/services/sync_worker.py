@@ -19,6 +19,7 @@ import random
 from datetime import datetime, timedelta
 
 import structlog
+from kubernetes.client.rest import ApiException
 from sqlalchemy import select, update
 
 from app.core import database as _db_module
@@ -53,6 +54,30 @@ _NON_RETRYABLE_ERROR_SUBSTRINGS = (
     "AuthenticationError",
     "AADSTS",
 )
+
+_K8S_STATUS_HINTS = {
+    401: "the cluster's API server rejected the portal's Azure AD token",
+    403: "the portal's identity lacks the Kubernetes RBAC permission for this",
+}
+
+
+def _describe_job_error(exc: Exception) -> str:
+    """One readable line for the job's last_error, which the UI shows as-is.
+
+    A Kubernetes ApiException's str() carries every HTTP response header and the
+    raw JSON body; keep the status, reason, and the API server's message.
+    """
+    if isinstance(exc, ApiException):
+        message = ""
+        with contextlib.suppress(TypeError, ValueError, AttributeError):
+            message = json.loads(exc.body or "{}").get("message", "") or ""
+        text = f"Kubernetes API {exc.status} {exc.reason or ''}".rstrip()
+        if message and message != exc.reason:
+            text += f": {message}"
+        hint = _K8S_STATUS_HINTS.get(exc.status or 0)
+        return f"{text} — {hint}" if hint else text
+    return f"{type(exc).__name__}: {exc}"
+
 
 _worker_task: asyncio.Task | None = None
 _shutdown_event: asyncio.Event | None = None
@@ -312,7 +337,7 @@ async def _worker_loop() -> None:
                     job_type=job.job_type,
                     error=str(exc)[:500],
                 )
-                status, error, result = "failed", f"{type(exc).__name__}: {exc}"[:500], None
+                status, error, result = "failed", _describe_job_error(exc)[:500], None
 
             is_retryable = not any(s in (error or "") for s in _NON_RETRYABLE_ERROR_SUBSTRINGS)
             if status != "completed" and is_retryable and (job.attempts or 0) < MAX_ATTEMPTS:

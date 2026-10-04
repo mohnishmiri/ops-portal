@@ -9,6 +9,8 @@ Provides enterprise-grade AKS operational capabilities using:
 """
 
 import asyncio
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, ClassVar
@@ -16,6 +18,7 @@ from typing import Any, ClassVar
 import httpx
 import structlog
 import urllib3
+from azure.core.credentials import AccessToken
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
 from kubernetes import client as k8s_client
@@ -50,6 +53,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = structlog.get_logger(__name__)
 
 
+def _refresh_k8s_bearer(configuration: k8s_client.Configuration) -> None:
+    """Kubernetes ``refresh_api_key_hook``: a current bearer token before each request."""
+    configuration.api_key["authorization"] = f"Bearer {AKSOperationsService._get_k8s_token()}"
+
+
 class AKSOperationsService(
     AKSResourceOperationsMixin,
     AKSWorkloadOperationsMixin,
@@ -67,8 +75,18 @@ class AKSOperationsService(
     - CronJob management
     """
 
-    # K8s client cache TTL in seconds (tokens expire after ~1 hour)
+    # How long a cluster's client (endpoint, CA, connection pool) is reused before
+    # its credentials are fetched from ARM again. The bearer token is NOT tied to
+    # this: it is renewed before every request (see _get_k8s_token).
     _K8S_CLIENT_TTL = 50 * 60  # 50 minutes
+
+    # Azure AD audience of every AKS API server (the AKS AAD Server application).
+    _K8S_TOKEN_SCOPE = "6dae42f8-4368-4678-94ff-3960e28e3630/.default"
+    # Renew the API-server token this long before it expires.
+    _K8S_TOKEN_REFRESH_MARGIN = 5 * 60
+    _k8s_token: ClassVar[AccessToken | None] = None
+    # Kubernetes calls run in worker threads, so the token is guarded by a thread lock.
+    _k8s_token_lock: ClassVar[threading.Lock] = threading.Lock()
 
     # Shared by every request in the process.  The service object is created per
     # request, and building a client costs an Azure ARM credential call, an AAD
@@ -2957,12 +2975,11 @@ class AKSOperationsService(
         Uses user credentials first; falls back to admin credentials, then direct
         cluster info when both credential methods fail.
         """
-        import time as _time
 
         def _fresh() -> bool:
             return (
                 cluster_id in self._k8s_clients
-                and _time.time() - self._k8s_clients_ts.get(cluster_id, 0) <= self._K8S_CLIENT_TTL
+                and time.time() - self._k8s_clients_ts.get(cluster_id, 0) <= self._K8S_CLIENT_TTL
             )
 
         if _fresh():
@@ -2977,7 +2994,7 @@ class AKSOperationsService(
             if cluster_id in self._k8s_clients:
                 logger.info("k8s_client_cache_evicted", cluster_id=cluster_id)
             self._k8s_clients[cluster_id] = await self._build_k8s_clients(cluster_id)
-            self._k8s_clients_ts[cluster_id] = _time.time()
+            self._k8s_clients_ts[cluster_id] = time.time()
             return self._k8s_clients[cluster_id]
 
     async def _build_k8s_clients(
@@ -3051,10 +3068,15 @@ class AKSOperationsService(
             configuration.verify_ssl = False  # no CA cert available
             logger.warning("k8s_using_fqdn_fallback", cluster=cluster_name)
 
-        # Always authenticate with Azure AD token (AKS AAD Server audience).
+        # Authenticate with an Azure AD token (AKS AAD Server audience), renewed
+        # before every request. Fixing it at build time made a cached client keep
+        # an expired token: the shared credential hands out its cached token,
+        # which can have minutes left, while the client lives for 50 minutes —
+        # and every Kubernetes call then fails with 401 Unauthorized.
         # Off the event loop: a CLI-backed credential shells out to `az`.
         token = await asyncio.to_thread(self._get_k8s_token)
         configuration.api_key = {"authorization": f"Bearer {token}"}
+        configuration.refresh_api_key_hook = _refresh_k8s_bearer
         # The client is shared by concurrent requests; urllib3's default of 4
         # pooled connections would discard and re-open TLS connections.
         configuration.connection_pool_maxsize = 16
@@ -3066,15 +3088,24 @@ class AKSOperationsService(
             k8s_client.BatchV1Api(api_client),
         )
 
-    def _get_k8s_token(self) -> str:
-        """Get Azure AD token for Kubernetes API authentication.
+    @classmethod
+    def _get_k8s_token(cls) -> str:
+        """Azure AD token the Kubernetes API servers accept, renewed before it expires.
 
-        Uses the AKS AAD Server application ID as the audience to obtain
-        a token that the Kubernetes API server will accept.
+        Runs before every Kubernetes request (the clients' refresh_api_key_hook),
+        so the token is reused until it is within _K8S_TOKEN_REFRESH_MARGIN of
+        expiry and only then requested again — a CLI-backed credential would
+        otherwise shell out to `az` on every call. Class-level (one token per
+        process) and free of `self`, because cached clients outlive the
+        per-request service instance that built them.
         """
-        # 6dae42f8-4368-4678-94ff-3960e28e3630 is the well-known Azure
-        # Kubernetes Service AAD Server application ID.
-        token = self.credential.get_token("6dae42f8-4368-4678-94ff-3960e28e3630/.default")
+        token = cls._k8s_token
+        if token is None or token.expires_on - time.time() < cls._K8S_TOKEN_REFRESH_MARGIN:
+            with cls._k8s_token_lock:
+                token = cls._k8s_token
+                if token is None or token.expires_on - time.time() < cls._K8S_TOKEN_REFRESH_MARGIN:
+                    token = get_azure_credential().get_token(cls._K8S_TOKEN_SCOPE)
+                    cls._k8s_token = token
         return token.token
 
     def _get_azure_token(self) -> str:

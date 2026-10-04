@@ -170,10 +170,11 @@ export const useCreateChecksumSchedule = (
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data) => checksumScheduleApi.createSchedule(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
-    },
     ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
+      return options?.onSuccess?.(...args);
+    },
   });
 };
 
@@ -187,11 +188,13 @@ export const useUpdateChecksumSchedule = (
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ scheduleId, data }) => checksumScheduleApi.updateSchedule(scheduleId, data),
-    onSuccess: (_resp, { scheduleId }) => {
+    ...options,
+    onSuccess: (...args) => {
+      const [, { scheduleId }] = args;
       queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
       queryClient.invalidateQueries({ queryKey: ["checksumSchedules", scheduleId] });
+      return options?.onSuccess?.(...args);
     },
-    ...options,
   });
 };
 
@@ -205,10 +208,11 @@ export const useDeleteChecksumSchedule = (
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (scheduleId) => checksumScheduleApi.deleteSchedule(scheduleId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
-    },
     ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
+      return options?.onSuccess?.(...args);
+    },
   });
 };
 
@@ -222,15 +226,16 @@ export const useTestChecksumSchedule = (
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (scheduleId) => checksumScheduleApi.testSchedule(scheduleId),
-    onSuccess: () => {
+    ...options,
+    onSuccess: (...args) => {
       queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
       queryClient.invalidateQueries({ queryKey: ["checksum-runs"] });
       queryClient.invalidateQueries({ queryKey: ["checksum-results"] });
       queryClient.invalidateQueries({ queryKey: ["checksum-metrics"] });
       queryClient.invalidateQueries({ queryKey: ["aks-checksum-runs"] });
       queryClient.invalidateQueries({ queryKey: ["aks-checksum-metrics"] });
+      return options?.onSuccess?.(...args);
     },
-    ...options,
   });
 };
 
@@ -244,9 +249,10 @@ export const useToggleChecksumSchedule = (
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (scheduleId) => checksumScheduleApi.toggleSchedule(scheduleId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
-    },
     ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: ["checksumSchedules"] });
+      return options?.onSuccess?.(...args);
+    },
   });
 };

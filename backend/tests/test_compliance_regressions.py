@@ -8,7 +8,7 @@ from app.api.v1.endpoints import checksum_schedules
 from app.models.database import ChecksumResult, ChecksumRun, SynapsePipelineChecksum
 from app.schemas.checksum_schedules import ChecksumScheduleDetail
 from app.schemas.compliance import ExcelExportRequest, ModuleType
-from app.services.compliance_excel_service import ComplianceExcelService
+from app.services.compliance_excel_service import ComplianceExcelService, ExportScope
 from app.services.compliance_service import ComplianceService
 
 
@@ -97,6 +97,7 @@ async def test_generate_export_accepts_uppercase_module_type(monkeypatch):
             include_scores=False,
             include_checksum_runs=False,
         ),
+        scope=ExportScope(frozenset(), frozenset(), frozenset()),
     )
 
     assert buffer.getbuffer().nbytes > 0
@@ -518,50 +519,6 @@ async def test_run_checksum_verification_persists_new_live_snapshot_against_late
 
 
 @pytest.mark.anyio
-async def test_get_dashboard_aks_summary_uses_latest_scoped_snapshot_and_drift():
-    scoped_snapshot = datetime(2026, 4, 12, 8, 0, 0)
-    scoped_drift = datetime(2026, 4, 12, 8, 30, 0)
-    allowed_cluster_id = (
-        "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks-allowed"
-    )
-
-    # With the SQL-level subscription filter the DB returns only
-    # scoped results, so the mock queue is:
-    #   1. scalar → MAX(snapshot_date) for scoped subscriptions
-    #   2. execute → pod checksums (already filtered by subscription)
-    #   3. scalar → MAX(detection_date) for scoped subscriptions
-    #   4. execute → drifts (already filtered by subscription)
-    fake_db = _QueuedDbSessionWithScalar(
-        [
-            scoped_snapshot,
-            _FakeScalarListResult(
-                [
-                    SimpleNamespace(cluster_id=allowed_cluster_id, cluster_name="aks-allowed"),
-                    SimpleNamespace(cluster_id=allowed_cluster_id, cluster_name="aks-allowed"),
-                ]
-            ),
-            scoped_drift,
-            _FakeScalarListResult(
-                [
-                    SimpleNamespace(cluster_id=allowed_cluster_id, cluster_name="aks-allowed"),
-                ]
-            ),
-        ]
-    )
-    service = ComplianceService(fake_db)
-
-    summary = await service._get_dashboard_aks_summary(["sub-1"])
-
-    assert summary == {
-        "clusters": 1,
-        "total_pods": 2,
-        "compliant_clusters": 0,
-        "drifted_clusters": 1,
-        "drifted_pods": 1,
-    }
-
-
-@pytest.mark.anyio
 async def test_get_compliance_dashboard_prefers_snapshot_dashboard_when_live_data_exists(monkeypatch):
     service = ComplianceService(_QueuedDbSession([]))
     snapshot_dashboard = {
@@ -598,12 +555,6 @@ async def test_get_compliance_dashboard_prefers_snapshot_dashboard_when_live_dat
     async def _resolve_scope(_subscription_ids=None):
         return ["sub-1"]
 
-    async def _synapse_summary(_subscription_ids=None):
-        return snapshot_dashboard["synapse_summary"]
-
-    async def _aks_summary(_subscription_ids=None):
-        return snapshot_dashboard["aks_summary"]
-
     async def _snapshot_build(**_kwargs):
         return snapshot_dashboard
 
@@ -611,8 +562,6 @@ async def test_get_compliance_dashboard_prefers_snapshot_dashboard_when_live_dat
         raise AssertionError("stale stored scores should not be consulted when live snapshot data exists")
 
     monkeypatch.setattr(service, "_resolve_scoped_subscription_ids", _resolve_scope)
-    monkeypatch.setattr(service, "_get_dashboard_synapse_summary", _synapse_summary)
-    monkeypatch.setattr(service, "_get_dashboard_aks_summary", _aks_summary)
     monkeypatch.setattr(service, "_build_dashboard_from_checksum_snapshots", _snapshot_build)
     monkeypatch.setattr(service, "_get_latest_compliance_scores", _unexpected_scores)
 
@@ -803,159 +752,3 @@ def test_leadership_dashboard_model_dump_json_roundtrips():
     assert len(restored.cost_trend) == 1
     assert len(restored.top_spenders) == 1
     assert len(restored.six_month_trend) == 1
-
-
-# ---------------------------------------------------------------------------
-# Compliance dashboard summary reconciliation regression
-# ---------------------------------------------------------------------------
-
-_AKS_CLUSTER_ID = "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks-a"
-
-
-def _synapse_checksum(workspace: str, pipeline: str, date: datetime):
-    return SimpleNamespace(
-        workspace_name=workspace,
-        pipeline_name=pipeline,
-        snapshot_date=date,
-        subscription_id="sub-1",
-    )
-
-
-def _aks_checksum(cluster: str, pod: str, date: datetime):
-    return SimpleNamespace(
-        cluster_name=cluster,
-        pod_name=pod,
-        snapshot_date=date,
-        cluster_id=_AKS_CLUSTER_ID,
-    )
-
-
-def _synapse_drift(workspace: str, pipeline: str, date: datetime, drift_type: str = "modified"):
-    return SimpleNamespace(
-        workspace_name=workspace,
-        pipeline_name=pipeline,
-        detection_date=date,
-        acknowledged=False,
-        drift_type=drift_type,
-    )
-
-
-def _aks_drift(cluster: str, pod: str, date: datetime, severity: str = "high"):
-    return SimpleNamespace(
-        cluster_name=cluster,
-        pod_name=pod,
-        detection_date=date,
-        acknowledged=False,
-        severity=severity,
-        cluster_id=_AKS_CLUSTER_ID,
-    )
-
-
-class _QueuedDbSessionWithScalar(_QueuedDbSession):
-    """Extends _QueuedDbSession with ``scalar()`` support."""
-
-    async def scalar(self, statement):
-        self.statement = statement
-        return self._responses.pop(0)
-
-
-@pytest.mark.anyio
-async def test_dashboard_summary_reconciliation_overrides_precomputed_values():
-    """Regression: The pre-computed synapse_summary and aks_summary used a
-    different time window (latest-date-only) which caused KPI tiles to show
-    stale or zero drifted counts while the resource table showed the correct
-    numbers.  The reconciliation block in _build_dashboard_from_checksum_snapshots
-    must override both summaries with the same drift data used for scores.
-    """
-    snap_date = datetime(2026, 4, 15)
-    drift_date = datetime(2026, 4, 14)
-
-    # 10 Synapse pipelines, 3 drifted
-    synapse_checksums = [_synapse_checksum("ws-a", f"pipe-{i}", snap_date) for i in range(10)]
-    synapse_drifts = [_synapse_drift("ws-a", f"pipe-{i}", drift_date) for i in range(3)]
-
-    # 20 AKS pods in 1 cluster, 5 drifted
-    aks_checksums = [_aks_checksum("aks-a", f"pod-{i}", snap_date) for i in range(20)]
-    aks_drifts = [_aks_drift("aks-a", f"pod-{i}", drift_date) for i in range(5)]
-
-    # Intentionally WRONG pre-computed summaries (what the old code produced
-    # when the latest drift date had no matching drifts): drifted=0 / drifted=1
-    wrong_synapse_summary: dict = {
-        "total_pipelines": 10,
-        "compliant_pipelines": 10,
-        "drifted_pipelines": 0,
-    }
-    wrong_aks_summary: dict = {
-        "clusters": 1,
-        "total_pods": 20,
-        "compliant_clusters": 1,
-        "drifted_clusters": 0,
-        "drifted_pods": 1,
-    }
-
-    # DB responses in call order within _build_dashboard_from_checksum_snapshots:
-    #  1. scalar  → max synapse snapshot date
-    #  2. execute → synapse checksums
-    #  3. scalar  → max AKS snapshot date (SQL-level subscription filter)
-    #  4. execute → AKS checksums (SQL-level subscription filter)
-    #  5. execute → allowed synapse workspace names
-    #  6. execute → synapse drifts
-    #  7. execute → AKS drifts (SQL-level subscription filter)
-    fake_db = _QueuedDbSessionWithScalar(
-        [
-            # 1. scalar: max synapse snapshot date
-            snap_date,
-            # 2. execute: synapse checksums
-            _FakeScalarListResult(synapse_checksums),
-            # 3. scalar: max AKS snapshot date (subscription-filtered)
-            snap_date,
-            # 4. execute: AKS checksums (subscription-filtered)
-            _FakeScalarListResult(aks_checksums),
-            # 5. execute: allowed synapse workspace names
-            _FakeTupleResult([("ws-a",)]),
-            # 6. execute: synapse drifts
-            _FakeScalarListResult(synapse_drifts),
-            # 7. execute: AKS drifts (subscription-filtered)
-            _FakeScalarListResult(aks_drifts),
-            # 8. execute: synapse trend checksums (30-day window)
-            _FakeScalarListResult(synapse_checksums),
-            # 9. execute: AKS trend checksums (30-day window, subscription-filtered)
-            _FakeScalarListResult(aks_checksums),
-        ]
-    )
-
-    service = ComplianceService(fake_db)
-
-    result = await service._build_dashboard_from_checksum_snapshots(
-        subscription_ids=["sub-1"],
-        start_date=datetime(2026, 3, 15),
-        synapse_summary=wrong_synapse_summary,
-        aks_summary=wrong_aks_summary,
-    )
-
-    # ── Synapse summary must reflect the 3 drifted pipelines, NOT 0 ──
-    syn = result["synapse_summary"]
-    assert syn["total_pipelines"] == 10
-    assert syn["drifted_pipelines"] == 3, (
-        f"Expected 3 drifted pipelines (from drift data), got {syn['drifted_pipelines']}"
-    )
-    assert syn["compliant_pipelines"] == 7
-
-    # ── AKS summary must reflect the 5 drifted pods, NOT 1 ──
-    aks = result["aks_summary"]
-    assert aks["total_pods"] == 20
-    assert aks["drifted_pods"] == 5, f"Expected 5 drifted pods (from drift data), got {aks['drifted_pods']}"
-    assert aks["clusters"] == 1
-    assert aks["drifted_clusters"] == 1
-    assert aks["compliant_clusters"] == 0
-
-    # ── Overall score consistency: (30 items - 8 drifted) / 30 = 73.3% ──
-    assert result["overall_score"] == 73.3
-
-    # ── Resource table must agree with summaries ──
-    resources = result["resources"]
-    synapse_resource = next(r for r in resources if r["type"] == "synapse_workspace")
-    assert synapse_resource["critical_issues"] == 3  # same as drifted_pipelines
-
-    aks_resource = next(r for r in resources if r["type"] == "aks_cluster")
-    assert aks_resource["critical_issues"] == 5  # same as drifted_pods

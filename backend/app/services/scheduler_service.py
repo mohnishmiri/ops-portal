@@ -16,9 +16,10 @@ import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cron import cron_trigger_from_crontab
 from app.core.database import get_db_session
 from app.models.database import (
     AlertScheduleConfig,
@@ -785,46 +786,66 @@ async def run_checksum_schedules_job() -> None:
             schedules = result.scalars().all()
 
             for schedule in schedules:
+                schedule_id, schedule_name = schedule.id, schedule.name
                 if schedule.next_run_at and schedule.next_run_at > now:
                     logger.debug(
                         "checksum_schedule_not_due",
-                        schedule=schedule.name,
+                        schedule=schedule_name,
                         next_run_at=str(schedule.next_run_at),
                         now=str(now),
                     )
                     continue
 
-                logger.info(
-                    "checksum_schedule_executing",
-                    schedule=schedule.name,
-                    module_type=schedule.module_type,
-                    next_run_at=str(schedule.next_run_at),
-                    now=str(now),
-                )
-
                 try:
-                    # Execute checksum collection and comparison
+                    if not await _claim_checksum_schedule(db, schedule, now):
+                        logger.info("checksum_schedule_claimed_elsewhere", schedule=schedule_name)
+                        continue
+
+                    logger.info(
+                        "checksum_schedule_executing",
+                        schedule=schedule_name,
+                        module_type=schedule.module_type,
+                        now=str(now),
+                    )
                     await _execute_schedule_checksum(
                         db=db,
                         schedule=schedule,
                         compliance_service=compliance_service,
                     )
 
-                    schedule.last_run_at = now
-                    schedule.next_run_at = _compute_next_run_time(schedule, now)
-                    await db.commit()
-
                 except Exception as e:
                     await db.rollback()
                     logger.error(
                         "checksum_schedule_run_failed",
-                        schedule_id=schedule.id,
-                        schedule_name=schedule.name,
+                        schedule_id=schedule_id,
+                        schedule_name=schedule_name,
                         error=str(e),
                     )
 
     except Exception as e:
         logger.error("checksum_schedule_job_failed", error=str(e))
+
+
+async def _claim_checksum_schedule(db: AsyncSession, schedule: ChecksumScheduleConfig, now: datetime) -> bool:
+    """Advance next_run_at atomically so only one replica runs a due schedule."""
+    claimed = await db.execute(
+        update(ChecksumScheduleConfig)
+        .where(
+            ChecksumScheduleConfig.id == schedule.id,
+            ChecksumScheduleConfig.is_enabled.is_(True),
+            or_(ChecksumScheduleConfig.next_run_at.is_(None), ChecksumScheduleConfig.next_run_at <= now),
+        )
+        .values(last_run_at=now, next_run_at=_compute_next_run_time(schedule, now))
+        .returning(ChecksumScheduleConfig.id)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.scalar_one_or_none() is None:
+        await db.rollback()
+        return False
+    await db.commit()
+    # Pick up edits made since this tick loaded the schedule list.
+    await db.refresh(schedule)
+    return True
 
 
 async def run_certificate_expiry_alerts_job() -> None:
@@ -949,7 +970,7 @@ def _compute_next_run_time(schedule: ChecksumScheduleConfig, now: datetime) -> d
     if schedule.schedule_type == "cron" and schedule.cron_expression:
         try:
             tz = ZoneInfo(schedule.timezone or "UTC")
-            trigger = CronTrigger.from_crontab(
+            trigger = cron_trigger_from_crontab(
                 schedule.cron_expression,
                 timezone=tz,
             )

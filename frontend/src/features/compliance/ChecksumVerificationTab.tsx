@@ -17,6 +17,7 @@ import {
   useDownloadChecksumCsv,
   useEmailChecksumResults,
   refreshChecksumResults,
+  summarizeChecksumRun,
   type ChecksumResultItem,
   type ChecksumRun,
 } from "../../services/complianceApi";
@@ -131,9 +132,9 @@ export default function ChecksumVerificationTab({ onShowToast }: ChecksumVerific
         workspaceName: checksumWorkspace ?? "",
         ...(checksumEmailAddr ? { notification_emails: [checksumEmailAddr] } : {}),
       });
-      setLastRunId(result.run_id);
-      const emailNote = checksumEmailAddr ? ` — report emailed to ${checksumEmailAddr}` : "";
-      onShowToast(`Checksum verification complete: ${result.passed} PASS, ${result.failed} FAIL${emailNote}`);
+      const summary = summarizeChecksumRun(result, checksumEmailAddr);
+      setLastRunId(summary.runId);
+      onShowToast(summary.message, summary.type);
     } catch (e: unknown) {
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
@@ -351,7 +352,7 @@ export default function ChecksumVerificationTab({ onShowToast }: ChecksumVerific
           </h2>
           <WorkspaceSelector
             value={checksumWorkspace}
-            onChange={(ws) => { setChecksumWorkspace(ws); setPipelinePage(0); }}
+            onChange={(ws) => { setChecksumWorkspace(ws); setLastRunId(null); setPipelinePage(0); }}
             allowEmpty
             className="min-w-[260px]"
           />
