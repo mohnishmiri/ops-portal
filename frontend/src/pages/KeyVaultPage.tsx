@@ -252,26 +252,39 @@ const GridPagination: React.FC<{
   );
 };
 
+/**
+ * Every Key Vault grid row is the same height whatever its cells hold — text,
+ * badges, or action buttons: 49px = 1px row border + 20px cell padding + one
+ * 28px GridIconButton. Plain text rows are padded up to it.
+ */
+const kvRow = `${gridStyles.row} h-[49px]`;
+
+/** Row action button, 28px square with a 16px icon, so it fits a kvRow. */
 const GridIconButton: React.FC<{
   title: string;
-  onClick: () => void;
-  tone: "blue" | "red" | "gray" | "green";
+  onClick: (e: React.MouseEvent) => void;
+  tone: "blue" | "red" | "gray" | "green" | "att";
   disabled?: boolean;
+  /** Spins the icon (e.g. a sync in progress). */
+  spinning?: boolean;
   children: React.ReactNode;
-}> = ({ title, onClick, tone, disabled = false, children }) => {
+}> = ({ title, onClick, tone, disabled = false, spinning = false, children }) => {
   const tones: Record<string, string> = {
     blue: "text-blue-600 hover:bg-blue-50",
     red: "text-red-600 hover:bg-red-50",
     gray: "text-gray-600 hover:bg-gray-50",
     green: "text-green-600 hover:bg-green-50",
+    att: "text-att-600 hover:bg-att-50",
   };
 
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`p-2 rounded-lg disabled:opacity-50 ${tones[tone]}`}
+      aria-label={title}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-lg disabled:opacity-50 [&>svg]:h-4 [&>svg]:w-4 ${spinning ? "[&>svg]:animate-spin" : ""} ${tones[tone]}`}
     >
       {children}
     </button>
@@ -529,7 +542,7 @@ const ExpiringItemsTable: React.FC<{
               const key = expiringItemKey(item);
               const fixed = fixedKeys.has(key);
               return (
-                <tr key={key} className={gridStyles.row}>
+                <tr key={key} className={kvRow}>
                   <td className={gridStyles.strongCell}>
                     <button
                       type="button"
@@ -697,7 +710,7 @@ const VaultSummaryTable: React.FC<{
               key={v.name}
               onClick={() => onSelect(v.name)}
               title="Manage this vault's secrets, keys and certificates below"
-              className={`${gridStyles.row} cursor-pointer transition ${
+              className={`${kvRow} cursor-pointer transition ${
                 selectedVault === v.name ? gridStyles.selectedRow : ""
               }`}
             >
@@ -725,15 +738,15 @@ const VaultSummaryTable: React.FC<{
               {canWrite && (
                 <td className={gridStyles.centerCell}>
                   <div className="flex justify-center gap-1">
-                    <button
+                    <GridIconButton
                       onClick={(e) => { e.stopPropagation(); onSyncVault?.(v.name, v.vault_uri); }}
                       disabled={syncingVault === v.name}
-                      className="p-2 text-att-600 hover:bg-att-50 rounded-lg disabled:opacity-50"
+                      spinning={syncingVault === v.name}
+                      tone="att"
                       title={`Sync ${v.name} from Azure`}
-                      aria-label={`Sync ${v.name}`}
                     >
-                      <span className={syncingVault === v.name ? "inline-block animate-spin" : "inline-block"}>{Icons.refresh()}</span>
-                    </button>
+                      {Icons.refresh()}
+                    </GridIconButton>
                   </div>
                 </td>
               )}
@@ -1778,7 +1791,7 @@ const SecretsTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = 
           </thead>
           <tbody>
             {paginated.map((s: SecretInfo) => (
-              <tr key={s.name} className={gridStyles.row}>
+              <tr key={s.name} className={kvRow}>
                 <td className={`${gridStyles.strongCell} font-mono text-xs`}>
                   <span className="inline-flex items-center gap-2">
                     <button type="button" onClick={() => onOpenItem("secret", s.name)} className={nameLinkClass} title="Open secret details">
@@ -2195,7 +2208,7 @@ const KeysTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = ({ 
           </thead>
           <tbody>
             {paginated.map((k: KeyInfo) => (
-              <tr key={k.name} className={gridStyles.row}>
+              <tr key={k.name} className={kvRow}>
                 <td className={`${gridStyles.strongCell} font-mono text-xs`}>
                   <button type="button" onClick={() => onOpenItem("key", k.name)} className={nameLinkClass} title="Open key details">
                     <Highlight text={k.name} term={search} />
@@ -2259,8 +2272,6 @@ const KeysTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = ({ 
 
 // ── Certificates Tab ──────────────────────────────────────────────────
 
-/** SAN chips shown before "+N more"; matching SANs are always shown first. */
-const SAN_PREVIEW = 2;
 
 const CertificatesTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem }> = ({ vaultUri, onOpenItem }) => {
   const { timezone } = usePortalTimezone();
@@ -2426,15 +2437,20 @@ const CertificatesTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem 
               const matched = matches.get(c.name) ?? [];
               const sanTerm = matched.includes("san") ? term.toLowerCase() : "";
               const sans = c.san || [];
-              // Matching SANs first so a hit never hides behind "+N more".
-              const sanHits = sanTerm ? sans.filter((s) => s.toLowerCase().includes(sanTerm)) : [];
-              const shownSans = sanHits.length ? sanHits.slice(0, 5) : sans.slice(0, SAN_PREVIEW);
-              const hiddenSans = sans.length - shownSans.length;
+              // One chip keeps the row one line high; while searching it is the
+              // first matching SAN, so a hit never hides behind "+N more".
+              const shownSan = (sanTerm && sans.find((s) => s.toLowerCase().includes(sanTerm))) || sans[0];
+              const hiddenSans = sans.length - 1;
               const hidden = matched.filter((f) => f === "thumbprint" || f === "tags");
               return (
-              <tr key={c.name} className={gridStyles.row}>
+              <tr key={c.name} className={kvRow}>
                 <td className={`${gridStyles.strongCell} font-mono text-xs`}>
-                  <button type="button" onClick={() => onOpenItem("certificate", c.name)} className={nameLinkClass} title="Open certificate details">
+                  <button
+                    type="button"
+                    onClick={() => onOpenItem("certificate", c.name)}
+                    className={`${nameLinkClass} inline-block max-w-[20rem] truncate align-middle`}
+                    title={`${c.name} — open certificate details`}
+                  >
                     <Highlight text={c.name} term={matched.includes("name") ? term : ""} />
                   </button>
                   {hidden.length > 0 && (
@@ -2448,17 +2464,15 @@ const CertificatesTab: React.FC<{ vaultUri: string | null; onOpenItem: OpenItem 
                 </td>
                 <td className={`${gridStyles.cell} max-w-[220px] text-xs`}>
                   {sans.length > 0 ? (
-                    <div className="flex gap-1 flex-wrap" title={sans.join("\n")}>
-                      {shownSans.map((s) => (
-                        <span key={s} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-mono text-[10px]">
-                          <Highlight text={s} term={sanTerm} />
-                        </span>
-                      ))}
+                    <div className="flex items-center gap-1" title={sans.join("\n")}>
+                      <span className="inline-block max-w-[11rem] truncate rounded bg-blue-50 px-1.5 py-0.5 align-middle font-mono text-[10px] text-blue-700">
+                        <Highlight text={shownSan} term={sanTerm} />
+                      </span>
                       {hiddenSans > 0 && (
                         <button
                           type="button"
                           onClick={() => onOpenItem("certificate", c.name)}
-                          className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 text-[10px] hover:bg-gray-200"
+                          className="shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 text-[10px] hover:bg-gray-200"
                           title="Show every SAN in the certificate details"
                         >
                           +{hiddenSans} more
@@ -2705,7 +2719,7 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
           </thead>
           <tbody>
             {paginated.map((entry: KeyVaultAuditEntry) => (
-              <tr key={entry.id} className={gridStyles.row}>
+              <tr key={entry.id} className={kvRow}>
                 <td className={`${gridStyles.cell} text-xs whitespace-nowrap`}>{fmt(entry.timestamp)}</td>
                 <td className={gridStyles.cell}>{auditActionBadge(entry.action)}</td>
                 <td className={gridStyles.cell}>
@@ -2728,7 +2742,9 @@ const AuditHistoryTab: React.FC<{ vaultUri: string | null; vaultName: string | n
                   <Badge label={entry.status === "success" ? "Success" : "Failed"} color={entry.status === "success" ? "green" : "red"} />
                 </td>
                 <td className={`${gridStyles.cell} text-xs`}>{entry.user_email || entry.user_id}</td>
-                <td className={`${gridStyles.cell} text-xs text-slate-600`}>{entry.summary}</td>
+                <td className={`${gridStyles.cell} text-xs text-slate-600`}>
+                  <span className="block max-w-[28rem] truncate" title={entry.summary}>{entry.summary}</span>
+                </td>
               </tr>
             ))}
             {filtered.length === 0 && (
