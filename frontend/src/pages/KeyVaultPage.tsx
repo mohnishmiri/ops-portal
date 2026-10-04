@@ -2777,6 +2777,8 @@ interface ItemDetailTarget {
   tab?: ItemDetailTab;
 }
 
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
 /** "Failed vaults (2): a, b | Vaults preserved from cache … (22): x, y" → its parts. */
 const syncMessageParts = (message: string) => message.split(" | ").map((part) => part.trim()).filter(Boolean);
 
@@ -2954,6 +2956,17 @@ const KeyVaultPage: React.FC = () => {
 
   const d = dashboard;
   const expiredCount = d.expired_count ?? expiringItems.filter((i) => i.days_remaining < 0).length;
+  // Tile subtitles: where the inventory lives, and what kind of items are due.
+  const subscriptionCount = new Set(d.vault_summaries.map((v) => v.subscription_id).filter(Boolean)).size;
+  const vaultsHolding = (type: VaultTypeFilter) => d.vault_summaries.filter((v) => v[`${type}_count`] > 0).length;
+  const typeBreakdown = (inWindow: (days: number) => boolean, none: string) => {
+    const due = expiringItems.filter((i) => inWindow(i.days_remaining));
+    const parts = (["secret", "certificate", "key"] as const)
+      .map((type) => [type, due.filter((i) => i.type === type).length] as const)
+      .filter(([, count]) => count > 0)
+      .map(([type, count]) => plural(count, type));
+    return parts.length ? parts.join(" · ") : none;
+  };
   const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     { key: "secrets", label: "Secrets", icon: Icons.secret("text-green-600") },
     { key: "keys", label: "Keys", icon: Icons.key("text-purple-600") },
@@ -3058,72 +3071,82 @@ const KeyVaultPage: React.FC = () => {
         </div>
       )}
 
-      {/* KPI tiles — each filters the grid beneath it, like AKS Operations */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-7">
-        <MetricCard
-          title="Vaults"
-          value={d.total_vaults}
-          icon={Icons.vault("h-5 w-5")}
-          tone="blue"
-          onClick={() => toggleInventory(null)}
-          actionLabel="Show all vaults"
-        />
-        <MetricCard
-          title="Secrets"
-          value={d.total_secrets}
-          icon={Icons.secret("h-5 w-5")}
-          tone="green"
-          onClick={() => toggleInventory("secrets")}
-          active={vaultTypeFilter === "secrets"}
-          actionLabel="Show the vaults that hold secrets, most first"
-        />
-        <MetricCard
-          title="Keys"
-          value={d.total_keys}
-          icon={Icons.key("h-5 w-5")}
-          tone="purple"
-          onClick={() => toggleInventory("keys")}
-          active={vaultTypeFilter === "keys"}
-          actionLabel="Show the vaults that hold keys, most first"
-        />
-        <MetricCard
-          title="Certificates"
-          value={d.total_certificates}
-          icon={Icons.certificate("h-5 w-5")}
-          tone="indigo"
-          onClick={() => toggleInventory("certificates")}
-          active={vaultTypeFilter === "certificates"}
-          actionLabel="Show the vaults that hold certificates, most first"
-        />
-        <MetricCard
-          title="Expired"
-          value={expiredCount}
-          subtitle="enabled, past expiry"
-          icon={Icons.expired("h-5 w-5")}
-          tone={expiredCount > 0 ? "red" : "slate"}
-          onClick={() => toggleExpiry("expired")}
-          active={expiryWindow === "expired"}
-          actionLabel="Show expired items"
-        />
-        <MetricCard
-          title="Expiring (30d)"
-          value={d.expiring_within_30_days}
-          subtitle="within 30 days"
-          icon={Icons.warning("h-5 w-5")}
-          tone={d.expiring_within_30_days > 0 ? "amber" : "slate"}
-          onClick={() => toggleExpiry("30")}
-          active={expiryWindow === "30"}
-          actionLabel="Show items expiring within 30 days"
-        />
-        <MetricCard
-          title="Expiring (90d)"
-          value={d.expiring_within_90_days}
-          subtitle="within 90 days"
-          icon={Icons.clipboard("h-5 w-5")}
-          tone={d.expiring_within_90_days > 0 ? "orange" : "slate"}
-          onClick={() => toggleExpiry("90")}
-          actionLabel="Show items expiring within 90 days"
-        />
+      {/* KPI tiles — each filters the grid beneath it, like AKS Operations.
+          Two rows (inventory, then expiry health): seven tiles in one row of
+          the max-w-7xl page are ~160px wide and clip their titles. */}
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <MetricCard
+            title="Vaults"
+            value={d.total_vaults}
+            subtitle={`in ${plural(subscriptionCount, "subscription")}`}
+            icon={Icons.vault("h-5 w-5")}
+            tone="blue"
+            onClick={() => toggleInventory(null)}
+            actionLabel="Show all vaults"
+          />
+          <MetricCard
+            title="Secrets"
+            value={d.total_secrets}
+            subtitle={`across ${plural(vaultsHolding("secrets"), "vault")}`}
+            icon={Icons.secret("h-5 w-5")}
+            tone="green"
+            onClick={() => toggleInventory("secrets")}
+            active={vaultTypeFilter === "secrets"}
+            actionLabel="Show the vaults that hold secrets, most first"
+          />
+          <MetricCard
+            title="Keys"
+            value={d.total_keys}
+            subtitle={`across ${plural(vaultsHolding("keys"), "vault")}`}
+            icon={Icons.key("h-5 w-5")}
+            tone="purple"
+            onClick={() => toggleInventory("keys")}
+            active={vaultTypeFilter === "keys"}
+            actionLabel="Show the vaults that hold keys, most first"
+          />
+          <MetricCard
+            title="Certificates"
+            value={d.total_certificates}
+            subtitle={`across ${plural(vaultsHolding("certificates"), "vault")}`}
+            icon={Icons.certificate("h-5 w-5")}
+            tone="indigo"
+            onClick={() => toggleInventory("certificates")}
+            active={vaultTypeFilter === "certificates"}
+            actionLabel="Show the vaults that hold certificates, most first"
+          />
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <MetricCard
+            title="Expired"
+            value={expiredCount}
+            subtitle={typeBreakdown((days) => days < 0, "Nothing enabled is past expiry")}
+            icon={Icons.expired("h-5 w-5")}
+            tone={expiredCount > 0 ? "red" : "slate"}
+            onClick={() => toggleExpiry("expired")}
+            active={expiryWindow === "expired"}
+            actionLabel="Show expired items (enabled items past their expiry date)"
+          />
+          <MetricCard
+            title="Expiring (30d)"
+            value={d.expiring_within_30_days}
+            subtitle={typeBreakdown((days) => days >= 0 && days <= 30, "Nothing due in 30 days")}
+            icon={Icons.warning("h-5 w-5")}
+            tone={d.expiring_within_30_days > 0 ? "amber" : "slate"}
+            onClick={() => toggleExpiry("30")}
+            active={expiryWindow === "30"}
+            actionLabel="Show items expiring within 30 days"
+          />
+          <MetricCard
+            title="Expiring (90d)"
+            value={d.expiring_within_90_days}
+            subtitle={typeBreakdown((days) => days >= 0 && days <= 90, "Nothing due in 90 days")}
+            icon={Icons.clipboard("h-5 w-5")}
+            tone={d.expiring_within_90_days > 0 ? "orange" : "slate"}
+            onClick={() => toggleExpiry("90")}
+            actionLabel="Show items expiring within 90 days"
+          />
+        </div>
       </div>
 
       {/* Expired & expiring items */}

@@ -6,34 +6,24 @@
 
 import React from "react";
 import type { CertificateInfo } from "../../services/costApi";
+import { isDateOnly, parseApiDate } from "../../utils/dateFormat";
 
 // ── Dates ─────────────────────────────────────────────────────────────
 
-/**
- * The Key Vault API returns naive UTC timestamps ("2026-10-07T03:00:00").
- * `new Date()` would read those as *local* time and shift every value by the
- * browser's UTC offset, so a missing zone is treated as UTC.
- */
-export function parseUtc(iso: string | null | undefined): Date | null {
-  if (!iso) return null;
-  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(iso);
-  const date = new Date(hasZone || !/T\d/.test(iso) ? iso : `${iso}Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
 export const fmtDate = (iso: string | null | undefined, tz?: string) => {
-  const date = parseUtc(iso);
+  const date = parseApiDate(iso);
   if (!date) return iso ? String(iso) : "—";
   return date.toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
-    ...(tz ? { timeZone: tz } : {}),
+    // A date-only value is a calendar date; keep its day in every zone.
+    ...(isDateOnly(iso) ? { timeZone: "UTC" } : tz ? { timeZone: tz } : {}),
   });
 };
 
 export const fmtDateTime = (iso: string | null | undefined, tz?: string) => {
-  const date = parseUtc(iso);
+  const date = parseApiDate(iso);
   if (!date) return iso ? String(iso) : "—";
   return date.toLocaleString("en-US", {
     year: "numeric",
@@ -47,7 +37,7 @@ export const fmtDateTime = (iso: string | null | undefined, tz?: string) => {
 
 /** Whole days until `iso` (negative once past); null when there is no date. */
 export function daysUntil(iso: string | null | undefined): number | null {
-  const date = parseUtc(iso);
+  const date = parseApiDate(iso);
   if (!date) return null;
   return Math.floor((date.getTime() - Date.now()) / 86_400_000);
 }

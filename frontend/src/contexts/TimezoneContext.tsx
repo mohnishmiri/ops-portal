@@ -9,6 +9,15 @@
 import React, { createContext, useContext, useMemo } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import apiClient from "../services/apiClient";
+import { isDateOnly, parseApiDate } from "../utils/dateFormat";
+
+/**
+ * "Oct 7, 2026" for a date-only value. It is a calendar date, not midnight
+ * UTC — converting it to a zone west of UTC would show the day before.
+ */
+function formatCalendarDate(date: Date): string {
+  return date.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
+}
 
 // ── Common IANA timezone options offered in the Admin panel ────────────
 
@@ -67,8 +76,11 @@ export const TimezoneProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const ctx = useMemo<TimezoneCtx>(() => {
     const formatDate = (value: string | Date | null | undefined): string => {
       if (!value) return "—";
+      const date = parseApiDate(value);
+      if (!date) return String(value);
       try {
-        return new Date(value as string).toLocaleString(undefined, {
+        if (isDateOnly(value)) return formatCalendarDate(date);
+        return date.toLocaleString(undefined, {
           timeZone: timezone,
           year: "numeric",
           month: "short",
@@ -85,8 +97,11 @@ export const TimezoneProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const formatShortDate = (value: string | Date | null | undefined): string => {
       if (!value) return "—";
+      const date = parseApiDate(value);
+      if (!date) return String(value);
       try {
-        return new Date(value as string).toLocaleDateString(undefined, {
+        if (isDateOnly(value)) return formatCalendarDate(date);
+        return date.toLocaleDateString(undefined, {
           timeZone: timezone,
           year: "numeric",
           month: "short",

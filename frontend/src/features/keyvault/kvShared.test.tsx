@@ -1,10 +1,10 @@
 /**
  * Key Vault helpers: certificate search across fields, UTF-8-safe Base64,
- * and naive-UTC timestamps.
+ * and date display.
  */
 
 import { describe, expect, it } from "vitest";
-import { certificateMatchFields, decodeBase64Utf8, encodeBase64Utf8, expiryLabel, parseUtc } from "./kvShared";
+import { certificateMatchFields, decodeBase64Utf8, encodeBase64Utf8, expiryLabel, fmtDate } from "./kvShared";
 
 const cert = {
   name: "attccdashboard-web-att-com",
@@ -52,20 +52,21 @@ describe("Base64 helpers", () => {
   });
 });
 
-describe("parseUtc", () => {
-  it("reads zone-less API timestamps as UTC, not local time", () => {
-    expect(parseUtc("2026-10-07T03:00:00")?.toISOString()).toBe("2026-10-07T03:00:00.000Z");
-    expect(parseUtc("2026-10-07T03:00:00+05:30")?.toISOString()).toBe("2026-10-06T21:30:00.000Z");
-    expect(parseUtc("2026-10-07")?.toISOString()).toBe("2026-10-07T00:00:00.000Z");
-    expect(parseUtc(null)).toBeNull();
-    expect(parseUtc("garbage")).toBeNull();
-  });
-});
-
 describe("expiryLabel", () => {
   it("says how long ago an item expired", () => {
     expect(expiryLabel(-3)).toBe("Expired 3d ago");
     expect(expiryLabel(12)).toBe("12d");
     expect(expiryLabel(null)).toBe("No expiry");
+  });
+});
+
+describe("fmtDate", () => {
+  it("keeps a date-only value's calendar day in zones west of UTC", () => {
+    expect(fmtDate("2026-10-07", "America/Chicago")).toBe("Oct 7, 2026");
+  });
+
+  it("converts zone-less timestamps from UTC into the portal zone", () => {
+    expect(fmtDate("2026-10-07T03:00:00", "America/Chicago")).toBe("Oct 6, 2026");
+    expect(fmtDate("2026-10-07T03:00:00", "Asia/Kolkata")).toBe("Oct 7, 2026");
   });
 });

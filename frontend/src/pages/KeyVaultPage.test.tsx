@@ -162,13 +162,13 @@ describe("KeyVaultPage tiles", () => {
     expect(within(grid).queryByText("db-password")).toBeNull();
     expect(within(grid).queryByText("old-token")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show expired items" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show expired items (enabled items past their expiry date)" }));
     grid = expiringGrid();
     expect(within(grid).getByText("db-password")).toBeInTheDocument();
     expect(within(grid).getByText("Expired 3d ago")).toBeInTheDocument();
     expect(within(grid).queryByText("api-token")).toBeNull();
     expect(screen.getByText("Expired items")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show expired items" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Show expired items (enabled items past their expiry date)" })).toHaveAttribute("aria-pressed", "true");
 
     fireEvent.click(screen.getByRole("button", { name: "Show items expiring within 30 days" }));
     grid = expiringGrid();
@@ -178,6 +178,21 @@ describe("KeyVaultPage tiles", () => {
     // Clicking the active tile again clears it.
     fireEvent.click(screen.getByRole("button", { name: "Show items expiring within 30 days" }));
     expect(within(expiringGrid()).getByText("web-cert")).toBeInTheDocument();
+  });
+
+  it("gives every tile a subtitle", async () => {
+    renderPage();
+    await screen.findByText("Azure Key Vault");
+    const subtitle = (name: string) =>
+      screen.getByRole("button", { name }).querySelector("p.mt-1")?.textContent;
+
+    expect(subtitle("Show all vaults")).toBe("in 1 subscription");
+    expect(subtitle("Show the vaults that hold secrets, most first")).toBe("across 2 vaults");
+    expect(subtitle("Show the vaults that hold keys, most first")).toBe("across 1 vault");
+    expect(subtitle("Show the vaults that hold certificates, most first")).toBe("across 1 vault");
+    expect(subtitle("Show expired items (enabled items past their expiry date)")).toBe("1 secret");
+    expect(subtitle("Show items expiring within 30 days")).toBe("1 secret");
+    expect(subtitle("Show items expiring within 90 days")).toBe("1 secret · 1 certificate");
   });
 
   it("narrows the vault inventory from the Keys tile", async () => {
