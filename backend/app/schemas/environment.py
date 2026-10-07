@@ -4,6 +4,7 @@ Pydantic schemas for Environment Scaling & Scheduling module.
 
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -136,13 +137,18 @@ class ScheduleResponse(BaseModel):
 
 class SequenceStep(BaseModel):
     order: int = Field(ge=1)
-    deployment_name: str
+    # The same deployment may appear in several steps (scale to 1, later to 50).
+    deployment_name: str = Field(min_length=1, max_length=253)
     replicas: int = Field(default=1, ge=0, le=100)
     wait_condition: WaitCondition = WaitCondition.PODS_READY
+    # Timeout for the pod waits; the wait itself for fixed_time.
     timeout_seconds: int = Field(default=600, ge=0, le=3600)
     health_endpoint: str | None = None
     retry_count: int = Field(default=3, ge=0, le=10)
-    on_failure: str = "abort"  # abort or continue
+    on_failure: Literal["abort", "continue"] = "abort"
+
+
+MAX_SEQUENCE_STEPS = 200
 
 
 class SequenceCreate(BaseModel):
@@ -150,13 +156,13 @@ class SequenceCreate(BaseModel):
     cluster_id: str
     namespace: str
     sequence_type: SequenceType
-    steps: list[SequenceStep]
+    steps: list[SequenceStep] = Field(min_length=1, max_length=MAX_SEQUENCE_STEPS)
     rollback_on_failure: bool = True
 
 
 class SequenceUpdate(BaseModel):
-    name: str | None = None
-    steps: list[SequenceStep] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    steps: list[SequenceStep] | None = Field(default=None, min_length=1, max_length=MAX_SEQUENCE_STEPS)
     rollback_on_failure: bool | None = None
 
 

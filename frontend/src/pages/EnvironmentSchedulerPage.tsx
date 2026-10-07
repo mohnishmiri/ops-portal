@@ -37,12 +37,15 @@ import {
   useDeleteSequence,
   useStartSequence,
   useStopSequence,
+  useExecution,
   type AuditLogEntry,
+  type ExecutionHistory,
 } from "../services/environmentApi";
 import EnvironmentScaleDialog from "../features/environment/EnvironmentScaleDialog";
 import ScheduleManagement from "../features/environment/ScheduleManagement";
 import SequenceDesigner from "../features/environment/SequenceDesigner";
 import ExecutionHistoryGrid from "../features/environment/ExecutionHistory";
+import { StatusBadge, apiErrorMessage, operationLabel, statusLabel } from "../features/environment/executionStatus";
 
 const Icons = {
   environment: (cls = "h-5 w-5") => (
@@ -92,6 +95,10 @@ const EnvironmentSchedulerPage: React.FC = () => {
   const [clusterSearch, setClusterSearch] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The sequence run followed in the live panel; runs execute server-side.
+  const [trackedExecutionId, setTrackedExecutionId] = useState<number | null>(null);
+  const [dismissedExecutionIds, setDismissedExecutionIds] = useState<Set<number>>(() => new Set());
+  const trackedStatusRef = useRef<string | null>(null);
 
   // ── Data queries ──
   const { data: clustersData } = useCachedClusters();
@@ -101,6 +108,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
   const { data: sequences, isLoading: sequencesLoading } = useEnvironmentSequences(selectedCluster?.id, selectedNamespace);
   const { data: history, isLoading: historyLoading } = useExecutionHistory(selectedCluster?.id, selectedNamespace);
   const { data: auditLogs } = useEnvironmentAuditLogs(100);
+  const { data: trackedExecution } = useExecution(trackedExecutionId);
 
   const clusters = clustersData?.clusters ?? [];
 
@@ -128,6 +136,53 @@ const EnvironmentSchedulerPage: React.FC = () => {
     if (!selectedCluster || nsList.length === 0) return;
     if (!nsList.includes(selectedNamespace)) setSelectedNamespace(nsList[0]);
   }, [selectedCluster, nsList, selectedNamespace]);
+
+  // Newest execution per sequence (history arrives newest first).
+  const lastRuns = useMemo(() => {
+    const map: Record<number, ExecutionHistory> = {};
+    for (const h of history ?? []) if (h.sequence_id && !map[h.sequence_id]) map[h.sequence_id] = h;
+    return map;
+  }, [history]);
+
+  // Pick up a sequence already running here — started from another tab, by a
+  // colleague, or by a schedule — unless it was dismissed.
+  useEffect(() => {
+    if (trackedExecutionId != null) return;
+    const running = (history ?? []).find((h) => h.status === "running" && h.sequence_id && !dismissedExecutionIds.has(h.id));
+    if (running) setTrackedExecutionId(running.id);
+  }, [history, trackedExecutionId, dismissedExecutionIds]);
+
+  // When the followed run finishes: report it and refresh the live replica counts.
+  useEffect(() => {
+    if (!trackedExecution) return;
+    const previous = trackedStatusRef.current;
+    trackedStatusRef.current = trackedExecution.status;
+    if (previous !== "running" || trackedExecution.status === "running") return;
+    const name = trackedExecution.sequence_name ?? "Sequence";
+    const done = trackedExecution.status === "completed";
+    setToast({
+      message: done
+        ? `${name}: all ${trackedExecution.total_deployments} steps completed`
+        : `${name}: ${statusLabel(trackedExecution.status).toLowerCase()} — ${trackedExecution.failed_count} step(s) failed`,
+      type: done ? "success" : "error",
+    });
+    queryClient.invalidateQueries({ queryKey: ["environment-status"] });
+    queryClient.invalidateQueries({ queryKey: ["environment-history"] });
+    queryClient.invalidateQueries({ queryKey: ["environment-schedules"] });
+    queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
+  }, [trackedExecution, queryClient]);
+
+  // Only the selected cluster/namespace's run is shown in the tabs.
+  const visibleTrackedExecution =
+    trackedExecution && selectedCluster && trackedExecution.cluster_id === selectedCluster.id && trackedExecution.namespace === selectedNamespace
+      ? trackedExecution
+      : null;
+
+  const dismissTrackedExecution = useCallback(() => {
+    if (trackedExecutionId != null) setDismissedExecutionIds((prev) => new Set(prev).add(trackedExecutionId));
+    setTrackedExecutionId(null);
+    trackedStatusRef.current = null;
+  }, [trackedExecutionId]);
 
   // /environment/status is served live from Kubernetes (bypass_cache=True), so this
   // list and the KPI cards above share one source of truth. The DB-cached endpoint
@@ -261,9 +316,32 @@ const EnvironmentSchedulerPage: React.FC = () => {
     [deleteSchedule],
   );
 
+  // Sequence runs return at once with status "running"; the live panel follows them.
+  const followRun = useCallback((result: { execution_id: number; status: string }, kind: string) => {
+    if (result.status === "dry_run") {
+      setToast({ message: `${kind} dry run recorded in History`, type: "info" });
+      return;
+    }
+    trackedStatusRef.current = null;
+    setTrackedExecutionId(result.execution_id);
+    setToast({ message: `${kind} started — live progress is shown at the top of this tab`, type: "info" });
+  }, []);
+
   const handleRunScheduleNow = useCallback(
     async (id: number) => {
-      const result = await runScheduleNow.mutateAsync(id);
+      let result: Awaited<ReturnType<typeof runScheduleNow.mutateAsync>>;
+      try {
+        result = await runScheduleNow.mutateAsync(id);
+      } catch (err) {
+        // e.g. 409 while the linked sequence is already running
+        setToast({ message: apiErrorMessage(err, "Could not run the schedule"), type: "error" });
+        throw err;
+      }
+      if (result.status === "running") {
+        // Sequence-linked: runs on the server; the live panel takes over.
+        followRun(result, "Scheduled sequence");
+        return result;
+      }
       setToast({
         message: `Schedule executed: ${result.completed}/${result.total_deployments} completed`,
         type: result.failed > 0 ? "warning" : "success",
@@ -272,7 +350,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
       scheduleDelayedRefetch();
       return result;
     },
-    [runScheduleNow, scheduleDelayedRefetch],
+    [runScheduleNow, scheduleDelayedRefetch, followRun],
   );
 
   const handleCreateSequence = useCallback(
@@ -306,13 +384,10 @@ const EnvironmentSchedulerPage: React.FC = () => {
         replica_count: replicaCount,
         dry_run: dryRun,
       });
-      setToast({
-        message: `Startup sequence ${result.status}: ${result.completed}/${result.total_deployments} in ${result.details.length > 0 ? "completed" : "done"}`,
-        type: result.failed > 0 ? "warning" : "success",
-      });
+      followRun(result, "Startup sequence");
       return result;
     },
-    [startSequence],
+    [startSequence, followRun],
   );
 
   const handleExecuteStop = useCallback(
@@ -321,13 +396,10 @@ const EnvironmentSchedulerPage: React.FC = () => {
         sequence_id: sequenceId,
         dry_run: dryRun,
       });
-      setToast({
-        message: `Shutdown sequence ${result.status}: ${result.completed}/${result.total_deployments}`,
-        type: result.failed > 0 ? "warning" : "success",
-      });
+      followRun(result, "Shutdown sequence");
       return result;
     },
-    [stopSequence],
+    [stopSequence, followRun],
   );
 
   const tabs: { key: Tab; label: string; icon: typeof Icons.environment }[] = [
@@ -660,19 +732,16 @@ const EnvironmentSchedulerPage: React.FC = () => {
                 <div className="space-y-2">
                   {(history ?? []).slice(0, 5).map((h) => (
                     <div key={h.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        {Icons.history("h-4 w-4 text-gray-400")}
-                        <span className="text-sm text-gray-700">{h.operation.replace(/_/g, " ")}</span>
+                      <div className="flex min-w-0 items-center gap-3">
+                        {Icons.history("h-4 w-4 shrink-0 text-gray-400")}
+                        <span className="text-sm text-gray-700">{operationLabel(h.operation)}</span>
+                        {(h.sequence_name || h.schedule_name) && (
+                          <span className="truncate text-sm font-medium text-gray-900">{h.sequence_name ?? h.schedule_name}</span>
+                        )}
                         <span className="text-xs text-gray-400">{h.namespace}</span>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                          h.status === "completed" ? "bg-green-100 text-green-700"
-                          : h.status === "failed" ? "bg-red-100 text-red-700"
-                          : "bg-blue-100 text-blue-700"
-                        }`}>
-                          {h.status}
-                        </span>
+                        <StatusBadge status={h.status} />
                         <span className="text-xs text-gray-500">
                           {h.started_at ? new Date(h.started_at).toLocaleString() : ""}
                         </span>
@@ -699,25 +768,36 @@ const EnvironmentSchedulerPage: React.FC = () => {
               onUpdate={handleUpdateSchedule}
               onDelete={handleDeleteSchedule}
               onRunNow={handleRunScheduleNow}
+              trackedExecution={visibleTrackedExecution}
+              onDismissExecution={dismissTrackedExecution}
+              onViewHistory={() => setActiveTab("history")}
               isLoading={schedulesLoading || createSchedule.isPending}
             />
           </div>
         )}
 
-        {activeTab === "sequences" && selectedCluster && (
-          <SequenceDesigner
-            canWrite={canWrite}
-            sequences={sequences ?? []}
-            deployments={deploymentList}
-            clusterId={selectedCluster.id}
-            namespace={selectedNamespace}
-            onCreate={handleCreateSequence}
-            onUpdate={handleUpdateSequence}
-            onDelete={handleDeleteSequence}
-            onExecuteStart={handleExecuteStart}
-            onExecuteStop={handleExecuteStop}
-            isLoading={sequencesLoading || createSequence.isPending}
-          />
+        {/* Kept mounted (like Schedules) so a half-built sequence survives a tab switch. */}
+        {selectedCluster && (
+          <div className={activeTab === "sequences" ? "" : "hidden"}>
+            <SequenceDesigner
+              canWrite={canWrite}
+              sequences={sequences ?? []}
+              deployments={deploymentList}
+              clusterId={selectedCluster.id}
+              namespace={selectedNamespace}
+              schedules={schedules ?? []}
+              lastRuns={lastRuns}
+              onCreate={handleCreateSequence}
+              onUpdate={handleUpdateSequence}
+              onDelete={handleDeleteSequence}
+              onExecuteStart={handleExecuteStart}
+              onExecuteStop={handleExecuteStop}
+              trackedExecution={visibleTrackedExecution}
+              onDismissExecution={dismissTrackedExecution}
+              onViewHistory={() => setActiveTab("history")}
+              isLoading={sequencesLoading}
+            />
+          </div>
         )}
 
         {activeTab === "history" && (
@@ -782,6 +862,16 @@ const ACTION_LABELS: Record<string, string> = {
   execute_stop_sequence: "Executed Shutdown Sequence",
   environment_scale_up: "Scaled Up Environment",
   environment_scale_down: "Scaled Down Environment",
+  sequence_execution_finished: "Sequence Run Finished",
+};
+
+const AUDIT_STATUS_CLASS: Record<string, string> = {
+  success: "bg-green-100 text-green-700",
+  completed: "bg-green-100 text-green-700",
+  started: "bg-blue-100 text-blue-700",
+  running: "bg-blue-100 text-blue-700",
+  dry_run: "bg-purple-100 text-purple-700",
+  rolled_back: "bg-orange-100 text-orange-700",
 };
 
 const AuditLogsTab: React.FC<{ logs: AuditLogEntry[] }> = ({ logs }) => {
@@ -851,8 +941,8 @@ const AuditLogsTab: React.FC<{ logs: AuditLogEntry[] }> = ({ logs }) => {
                 {log.resource_id && <span className="ml-1 text-xs text-gray-400">#{log.resource_id}</span>}
               </td>
               <td className="px-4 py-2.5 text-center">
-                <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${log.status === "success" || log.status === "completed" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
-                  {log.status}
+                <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${AUDIT_STATUS_CLASS[log.status] ?? "bg-red-100 text-red-700"}`}>
+                  {log.status.replace(/_/g, " ")}
                 </span>
               </td>
               <td className="px-4 py-2.5 text-xs text-gray-500">{log.user_email || log.user_id}</td>

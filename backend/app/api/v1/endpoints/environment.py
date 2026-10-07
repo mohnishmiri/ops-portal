@@ -27,7 +27,11 @@ from app.schemas.environment import (
 )
 from app.services.environment_scaling_service import (
     EnvironmentScalingService,
+    SequenceAlreadyRunningError,
+    SequenceInUseError,
+    SequenceValidationError,
     get_environment_scaling_service,
+    launch_sequence_run,
 )
 
 logger = structlog.get_logger(__name__)
@@ -268,6 +272,11 @@ async def update_sequence(
             details={"sequence_id": sequence_id, "updated_fields": list(body.model_dump(exclude_none=True).keys())},
         )
         return result
+    except IntegrityError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A sequence named '{body.name}' already exists for this cluster/namespace.",
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -296,6 +305,8 @@ async def delete_sequence(
             details={"sequence_id": sequence_id},
         )
         return {"deleted": True}
+    except SequenceInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -306,44 +317,90 @@ async def delete_sequence(
 # ── Sequence Execution ────────────────────────────────────────────────
 
 
-@router.post("/start-sequence")
-async def start_sequence(
+async def _run_sequence_request(
     body: SequenceExecuteRequest,
-    service: EnvironmentScalingService = Depends(_get_service),
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
-):
-    """Execute a startup sequence."""
-    try:
+    service: EnvironmentScalingService,
+    user: UserContext,
+    *,
+    action: str,
+) -> dict:
+    """Dry runs answer inline. Real runs are recorded, then executed in the
+    background: the response carries the execution_id the UI polls for live
+    step status."""
+    if body.dry_run:
         result = await service.execute_sequence(
             sequence_id=body.sequence_id,
             replica_count=body.replica_count,
-            dry_run=body.dry_run,
+            dry_run=True,
             user_id=user.user_id,
             user_email=user.email,
         )
         await service._write_audit(
             user_id=user.user_id,
             user_email=user.email,
-            action="execute_start_sequence",
+            action=action,
             resource_type="environment_sequence",
             resource_id=str(body.sequence_id),
-            status=result.get("status", "unknown"),
-            details={
-                "sequence_id": body.sequence_id,
-                "total": result.get("total_deployments"),
-                "completed": result.get("completed"),
-                "failed": result.get("failed"),
-                "dry_run": body.dry_run,
-            },
+            status="dry_run",
+            details={"sequence_id": body.sequence_id, "total": result.get("total_deployments"), "dry_run": True},
         )
         return result
+
+    sequence, execution = await service.begin_sequence_execution(
+        sequence_id=body.sequence_id,
+        replica_count=body.replica_count,
+        user_id=user.user_id,
+        user_email=user.email,
+    )
+    await service._write_audit(
+        user_id=user.user_id,
+        user_email=user.email,
+        action=action,
+        resource_type="environment_sequence",
+        resource_id=str(sequence.id),
+        status="started",
+        details={
+            "name": sequence.name,
+            "execution_id": execution.id,
+            "namespace": sequence.namespace,
+            "steps": execution.total_deployments,
+        },
+    )
+    launch_sequence_run(
+        sequence_id=sequence.id,
+        execution_id=execution.id,
+        user_id=user.user_id,
+        user_email=user.email,
+    )
+    return service.execution_started_result(execution)
+
+
+async def _sequence_endpoint(body, service, user, *, action: str, log_event: str) -> dict:
+    try:
+        return await _run_sequence_request(body, service, user, action=action)
+    except SequenceAlreadyRunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except HTTPException:
         raise
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
-        logger.error("start_sequence_failed", error=str(exc)[:200])
+        logger.error(log_event, error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
+
+
+@router.post("/start-sequence")
+async def start_sequence(
+    body: SequenceExecuteRequest,
+    service: EnvironmentScalingService = Depends(_get_service),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+):
+    """Start a startup sequence; returns at once with the running execution."""
+    return await _sequence_endpoint(
+        body, service, user, action="execute_start_sequence", log_event="start_sequence_failed"
+    )
 
 
 @router.post("/stop-sequence")
@@ -352,38 +409,14 @@ async def stop_sequence(
     service: EnvironmentScalingService = Depends(_get_service),
     user: UserContext = Depends(require_role(UserRole.WRITE)),
 ):
-    """Execute a shutdown sequence."""
-    try:
-        result = await service.execute_sequence(
-            sequence_id=body.sequence_id,
-            replica_count=0,
-            dry_run=body.dry_run,
-            user_id=user.user_id,
-            user_email=user.email,
-        )
-        await service._write_audit(
-            user_id=user.user_id,
-            user_email=user.email,
-            action="execute_stop_sequence",
-            resource_type="environment_sequence",
-            resource_id=str(body.sequence_id),
-            status=result.get("status", "unknown"),
-            details={
-                "sequence_id": body.sequence_id,
-                "total": result.get("total_deployments"),
-                "completed": result.get("completed"),
-                "failed": result.get("failed"),
-                "dry_run": body.dry_run,
-            },
-        )
-        return result
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        logger.error("stop_sequence_failed", error=str(exc)[:200])
-        raise HTTPException(status_code=500, detail=str(exc)[:500])
+    """Start a shutdown sequence; returns at once with the running execution."""
+    return await _sequence_endpoint(
+        body.model_copy(update={"replica_count": 0}),
+        service,
+        user,
+        action="execute_stop_sequence",
+        log_event="stop_sequence_failed",
+    )
 
 
 # ── Execution History ─────────────────────────────────────────────────
@@ -405,15 +438,60 @@ async def get_execution_history(
     )
 
 
+@router.get("/history/{execution_id}")
+async def get_execution(
+    execution_id: int,
+    service: EnvironmentScalingService = Depends(_get_service),
+    user: UserContext = Depends(get_current_user),
+):
+    """One execution with per-step status, polled while a sequence runs."""
+    execution = await service.get_execution(execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail=f"Execution {execution_id} not found")
+    return execution
+
+
 @router.post("/schedule/{schedule_id}/run")
 async def run_schedule_now(
     schedule_id: int,
     service: EnvironmentScalingService = Depends(_get_service),
     user: UserContext = Depends(require_role(UserRole.WRITE)),
 ):
-    """Manually trigger a scheduled job immediately."""
+    """Trigger a schedule now, as the clicking user.
+
+    A sequence-linked schedule returns at once with the running execution (it
+    can take many minutes); a plain namespace scale finishes inline.
+    """
     try:
-        result = await service.execute_scheduled_job(schedule_id)
+        schedule = await service.load_schedule_for_run(schedule_id)
+        if schedule.sequence_id:
+            sequence, execution = await service.begin_scheduled_sequence(
+                schedule, user_id=user.user_id, user_email=user.email
+            )
+            await service._write_audit(
+                user_id=user.user_id,
+                user_email=user.email,
+                action="run_schedule_manually",
+                resource_type="environment_schedule",
+                resource_id=str(schedule_id),
+                status="started",
+                details={
+                    "schedule_id": schedule_id,
+                    "job_name": schedule.job_name,
+                    "sequence": sequence.name,
+                    "execution_id": execution.id,
+                },
+            )
+            launch_sequence_run(
+                sequence_id=sequence.id,
+                execution_id=execution.id,
+                user_id=user.user_id,
+                user_email=user.email,
+                schedule_id=schedule_id,
+            )
+            return service.execution_started_result(execution)
+
+        result = await service.execute_scheduled_job(schedule_id, user_id=user.user_id, user_email=user.email)
         await service._write_audit(
             user_id=user.user_id,
             user_email=user.email,
@@ -429,6 +507,10 @@ async def run_schedule_now(
             },
         )
         return result
+    except SequenceAlreadyRunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except HTTPException:
         raise
     except ValueError as exc:

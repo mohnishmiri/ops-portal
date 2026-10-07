@@ -36,14 +36,23 @@ export interface EnvironmentScaleResult {
 
 export interface StepDetail {
   deployment: string;
-  current_replicas?: number;
+  /** Replica count before the step ran (the "from" of 0 → 60). */
+  current_replicas?: number | null;
   target_replicas: number;
   status: string;
   error?: string;
   order?: number;
   // Set by the sequence executor per step (environment_scaling_service.py).
+  /** 1-based execution position; a deployment can appear in several steps. */
+  step?: number;
+  wait_condition?: string;
+  timeout_seconds?: number;
+  on_failure?: string;
   started_at?: string;
   duration_seconds?: number;
+  rollback_status?: "rolled_back" | "rollback_failed";
+  rolled_back_to?: number;
+  rollback_error?: string;
 }
 
 export interface EnvironmentSchedule {
@@ -155,6 +164,8 @@ export interface ExecutionHistory {
   cluster_id: string;
   namespace: string;
   operation: string;
+  sequence_name?: string | null;
+  schedule_name?: string | null;
   status: string;
   total_deployments: number;
   completed_count: number;
@@ -384,6 +395,19 @@ export function useExecutionHistory(cluster_id?: string, namespace?: string, lim
       if (data && data.some((h) => h.status === "running")) return 5_000;
       return 30_000;
     },
+  });
+}
+
+/** One execution, polled every 2s while it runs (live sequence progress). */
+export function useExecution(executionId: number | null) {
+  return useQuery({
+    queryKey: ["environment-execution", executionId],
+    queryFn: async () => {
+      const response = await apiClient.get<ExecutionHistory>(`/environment/history/${executionId}`);
+      return response.data;
+    },
+    enabled: executionId != null,
+    refetchInterval: (query) => (query.state.data?.status === "running" || !query.state.data ? 2_000 : false),
   });
 }
 

@@ -546,6 +546,9 @@ class AKSOperationsService(
         """
         apps_v1, _, _ = await self._get_k8s_clients(cluster_id)
 
+        # Bound before the read: a missing deployment fails there, and the
+        # handler's `if history` would otherwise mask the 404 with a NameError.
+        history = None
         try:
             # Get current deployment
             deployment = apps_v1.read_namespaced_deployment(deployment_name, namespace)

@@ -10,10 +10,13 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { gridStyles, SortableHeader, type SortState, nextSortState } from "../../components/gridStyles";
+import { StatusBadge } from "./executionStatus";
+import { SequenceExecutionPanel } from "./SequenceRunPanels";
 import type {
   EnvironmentSchedule,
   EnvironmentSequence,
   EnvironmentScaleResult,
+  ExecutionHistory,
   ScheduleCreateRequest,
   StepDetail,
 } from "../../services/environmentApi";
@@ -27,6 +30,10 @@ interface Props {
   onUpdate: (id: number, data: Partial<ScheduleCreateRequest>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onRunNow: (id: number) => Promise<EnvironmentScaleResult>;
+  /** A sequence run being followed live (Run Now of a sequence-linked schedule). */
+  trackedExecution?: ExecutionHistory | null;
+  onDismissExecution?: () => void;
+  onViewHistory?: () => void;
   isLoading: boolean;
   /** Write role: create, edit, enable/disable, run, and delete. Read-only users only view. */
   canWrite: boolean;
@@ -76,6 +83,9 @@ const ScheduleManagement: React.FC<Props> = ({
   onUpdate,
   onDelete,
   onRunNow,
+  trackedExecution = null,
+  onDismissExecution,
+  onViewHistory,
   isLoading,
 }) => {
   const [showForm, setShowForm] = useState(false);
@@ -105,6 +115,11 @@ const ScheduleManagement: React.FC<Props> = ({
     timerRef.current = setInterval(() => setExecElapsed(Math.floor((Date.now() - startTime) / 1000)), 1000);
     try {
       const result = await onRunNow(s.id);
+      if (result.status === "running") {
+        // Sequence-linked: it runs on the server and the live panel follows it.
+        setRunningSchedule(null);
+        return;
+      }
       setExecResult(result);
     } catch { /* handled by parent */ }
     finally {
@@ -389,6 +404,10 @@ const ScheduleManagement: React.FC<Props> = ({
         </div>
       )}
 
+      {trackedExecution && (
+        <SequenceExecutionPanel execution={trackedExecution} onClose={() => onDismissExecution?.()} onViewHistory={onViewHistory} />
+      )}
+
       {/* Execution Progress Panel */}
       {runningSchedule && (
         <div className="rounded-xl border border-att-200 bg-white shadow-sm p-5 space-y-4">
@@ -560,9 +579,7 @@ const ScheduleManagement: React.FC<Props> = ({
                   {s.last_run_at ? (
                     <div>
                       <div className="text-xs">{new Date(s.last_run_at).toLocaleString()}</div>
-                      {s.last_run_status && (
-                        <span className={`text-xs ${s.last_run_status === "completed" ? "text-green-600" : "text-red-600"}`}>{s.last_run_status}</span>
-                      )}
+                      {s.last_run_status && <StatusBadge status={s.last_run_status} />}
                     </div>
                   ) : (
                     <span className="text-xs text-gray-400">Never</span>

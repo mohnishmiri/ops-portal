@@ -8,13 +8,13 @@ Uses APScheduler for:
 - Azure resource inventory sync
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +69,7 @@ async def start_scheduler() -> None:
 
     scheduler.start()
     await sync_alert_schedule_jobs()
+    await realign_env_cron_schedules()
     logger.info("scheduler_started", jobs=len(scheduler.get_jobs()))
 
 
@@ -193,7 +194,8 @@ def _normalize_run_time(value: datetime | None) -> datetime | None:
 
 def _build_alert_schedule_trigger(config: AlertScheduleConfig):
     if config.schedule_type == "cron" and config.cron_expression:
-        return CronTrigger.from_crontab(config.cron_expression, timezone=UTC)
+        # Standard crontab day-of-week (0=Sun); APScheduler's own parser counts from Monday.
+        return cron_trigger_from_crontab(config.cron_expression, timezone=UTC)
     return IntervalTrigger(minutes=max(config.interval_minutes or 1, 1), timezone=UTC)
 
 
@@ -1058,13 +1060,58 @@ def get_scheduler_status() -> dict[str, Any]:
 # ── Environment Scaling Schedule Runner ───────────────────────────────
 
 
+# Runs launched by the runner. Each replica runs at most this many at once,
+# and never two in the same cluster/namespace (they would scale against each
+# other); a run waiting for its namespace does not hold one of the slots.
+ENV_SCHEDULE_CONCURRENCY = 5
+_env_run_tasks: set[asyncio.Task] = set()
+_env_run_guards: dict[str, Any] = {}
+
+
+def _env_run_slot_and_lock(cluster_id: str, namespace: str) -> tuple[asyncio.Semaphore, asyncio.Lock]:
+    # Created per event loop: asyncio primitives are bound to the loop that uses them.
+    loop = asyncio.get_running_loop()
+    if _env_run_guards.get("loop") is not loop:
+        _env_run_guards.clear()
+        _env_run_guards.update(loop=loop, slots=asyncio.Semaphore(ENV_SCHEDULE_CONCURRENCY), locks={})
+    locks: dict[tuple[str, str], asyncio.Lock] = _env_run_guards["locks"]
+    return _env_run_guards["slots"], locks.setdefault((cluster_id, namespace), asyncio.Lock())
+
+
+def _launch_env_schedule_run(schedule_id: int, cluster_id: str, namespace: str) -> asyncio.Task:
+    task = asyncio.create_task(_run_env_schedule(schedule_id, cluster_id, namespace))
+    _env_run_tasks.add(task)
+    task.add_done_callback(_env_run_tasks.discard)
+    return task
+
+
+async def _run_env_schedule(schedule_id: int, cluster_id: str, namespace: str) -> None:
+    """One claimed schedule, on its own DB session, under the namespace lock."""
+    from app.services.environment_scaling_service import get_environment_scaling_service
+
+    slots, namespace_lock = _env_run_slot_and_lock(cluster_id, namespace)
+    async with namespace_lock, slots:
+        try:
+            async for db in get_db_session():
+                await get_environment_scaling_service(db).execute_scheduled_job(schedule_id)
+        except Exception as exc:
+            logger.error("environment_schedule_run_failed", schedule_id=schedule_id, error=str(exc)[:200])
+
+
 async def run_environment_schedules_job() -> None:
-    """Execute due environment scaling schedules."""
+    """Claim due environment schedules and launch each run in its own task.
+
+    The tick only claims and launches, so a long startup sequence no longer
+    holds back every other schedule on this replica until it finishes.
+    """
     from app.models.database import EnvironmentExecutionHistory, EnvironmentSchedule
     from app.services.environment_scaling_service import get_environment_scaling_service
 
     try:
         async for db in get_db_session():
+            # A run whose replica died would otherwise keep its namespace "busy" forever.
+            await get_environment_scaling_service(db).sweep_abandoned_executions()
+
             now = datetime.utcnow()
             result = await db.execute(select(EnvironmentSchedule).where(EnvironmentSchedule.is_enabled.is_(True)))
             schedules = result.scalars().all()
@@ -1081,45 +1128,128 @@ async def run_environment_schedules_job() -> None:
                 if schedule.start_date and now < schedule.start_date:
                     continue
 
-                # Skip if there's already a running execution for this schedule
-                running_check = await db.execute(
-                    select(EnvironmentExecutionHistory.id)
-                    .where(EnvironmentExecutionHistory.schedule_id == schedule.id)
-                    .where(EnvironmentExecutionHistory.status == "running")
-                    .limit(1)
-                )
-                if running_check.scalar_one_or_none() is not None:
-                    logger.debug(
-                        "environment_schedule_skipped_already_running",
+                # Something already running in this namespace — a sequence started
+                # by hand, or another schedule — goes first. The schedule stays due
+                # and starts on a later tick once the namespace is free.
+                busy = (
+                    await db.execute(
+                        select(EnvironmentExecutionHistory.id)
+                        .where(
+                            EnvironmentExecutionHistory.cluster_id == schedule.cluster_id,
+                            EnvironmentExecutionHistory.namespace == schedule.namespace,
+                            EnvironmentExecutionHistory.status == "running",
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if busy is not None:
+                    logger.info(
+                        "environment_schedule_waiting_for_namespace",
                         schedule_id=schedule.id,
                         job_name=schedule.job_name,
+                        running_execution_id=busy,
                     )
                     continue
 
-                # Update next_run_at BEFORE execution to prevent re-trigger
-                schedule.next_run_at = _compute_env_schedule_next_run(schedule, now)
-                await db.commit()
+                # Every replica runs this job, so only an atomic claim keeps a
+                # due run to one replica.
+                if not await _claim_env_schedule(db, schedule, now):
+                    logger.info("environment_schedule_claimed_elsewhere", schedule_id=schedule.id)
+                    continue
 
                 logger.info(
-                    "environment_schedule_executing",
+                    "environment_schedule_launched",
                     schedule_id=schedule.id,
                     job_name=schedule.job_name,
                 )
-
-                try:
-                    service = get_environment_scaling_service(db)
-                    await service.execute_scheduled_job(schedule.id)
-                    await db.commit()
-                except Exception as exc:
-                    await db.rollback()
-                    logger.error(
-                        "environment_schedule_run_failed",
-                        schedule_id=schedule.id,
-                        error=str(exc)[:200],
-                    )
+                _launch_env_schedule_run(schedule.id, schedule.cluster_id, schedule.namespace)
 
     except Exception as exc:
         logger.error("environment_schedule_job_failed", error=str(exc)[:200])
+
+
+async def realign_env_cron_schedules() -> int:
+    """Recompute the stored next run of enabled cron environment schedules.
+
+    Environment schedules used to read the cron day-of-week from Monday, so
+    "0 8 * * 1-5" ran Tue–Sat, and each stored next_run_at still points at a
+    day from that reading. A future next run is recomputed with the standard
+    reading; one already due is left to the runner. Idempotent: a correct
+    value recomputes to itself. Each schedule that moves is logged for review.
+    """
+    from app.models.database import EnvironmentSchedule
+
+    changed = 0
+    try:
+        async for db in get_db_session():
+            now = datetime.utcnow()
+            rows = (
+                (
+                    await db.execute(
+                        select(EnvironmentSchedule).where(
+                            EnvironmentSchedule.is_enabled.is_(True),
+                            EnvironmentSchedule.schedule_type == "cron",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for schedule in rows:
+                if not schedule.cron_expression or not schedule.next_run_at or schedule.next_run_at <= now:
+                    continue
+                try:
+                    # An invalid expression falls back to "now + 24h", which would
+                    # push it a day further on every restart; leave those alone.
+                    cron_trigger_from_crontab(schedule.cron_expression, timezone=ZoneInfo(schedule.timezone or "UTC"))
+                except Exception:
+                    continue
+                corrected = _compute_env_schedule_next_run(schedule, now)
+                if corrected and corrected != schedule.next_run_at:
+                    logger.warning(
+                        "environment_schedule_next_run_realigned",
+                        schedule_id=schedule.id,
+                        job_name=schedule.job_name,
+                        cron_expression=schedule.cron_expression,
+                        timezone=schedule.timezone,
+                        previous_next_run_utc=schedule.next_run_at.isoformat(),
+                        corrected_next_run_utc=corrected.isoformat(),
+                    )
+                    schedule.next_run_at = corrected
+                    changed += 1
+            if changed:
+                await db.commit()
+    except Exception as exc:
+        logger.error("environment_schedule_realign_failed", error=str(exc)[:200])
+    return changed
+
+
+async def _claim_env_schedule(db: AsyncSession, schedule, now: datetime) -> bool:
+    """Advance next_run_at atomically so only one replica runs a due environment schedule."""
+    from app.models.database import EnvironmentSchedule
+
+    claimed = await db.execute(
+        update(EnvironmentSchedule)
+        .where(
+            EnvironmentSchedule.id == schedule.id,
+            EnvironmentSchedule.is_enabled.is_(True),
+            or_(EnvironmentSchedule.next_run_at.is_(None), EnvironmentSchedule.next_run_at <= now),
+        )
+        # A one-time schedule has no next run, and a NULL next_run_at reads as
+        # due — without disabling it here it re-ran every minute.
+        .values(
+            next_run_at=_compute_env_schedule_next_run(schedule, now),
+            is_enabled=schedule.schedule_type != "one_time",
+        )
+        .returning(EnvironmentSchedule.id)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.scalar_one_or_none() is None:
+        await db.rollback()
+        return False
+    await db.commit()
+    await db.refresh(schedule)
+    return True
 
 
 def _compute_env_schedule_next_run(
@@ -1137,7 +1267,8 @@ def _compute_env_schedule_next_run(
 
     if schedule.schedule_type == "cron" and schedule.cron_expression:
         try:
-            trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=tz)
+            # from_crontab alone read day-of-week from Monday: "1-5" ran Tue–Sat.
+            trigger = cron_trigger_from_crontab(schedule.cron_expression, timezone=tz)
             next_fire = trigger.get_next_fire_time(None, now.replace(tzinfo=UTC))
             if next_fire and next_fire.tzinfo:
                 return next_fire.astimezone(UTC).replace(tzinfo=None)

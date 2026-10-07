@@ -9,12 +9,14 @@ Provides:
 """
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
 from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, desc, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.access_scope import arm_scope_clause, assert_resource_access
@@ -30,6 +32,61 @@ from app.services.aks_operations_service import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# A run executes in the process that started it. If that replica restarts
+# mid-run nothing updates the row again, so a "running" row is treated as
+# abandoned once it has made no progress for longer than its current step
+# could legitimately take, plus this grace.
+ABANDONED_GRACE_SECONDS = 300
+# Plain namespace scales have no per-step waits and finish in seconds.
+ABANDONED_SCALE_SECONDS = 900
+DEFAULT_STEP_TIMEOUT_SECONDS = 600
+
+# Holds references so background sequence runs are not garbage-collected.
+_background_runs: set[asyncio.Task] = set()
+
+
+class SequenceAlreadyRunningError(Exception):
+    """A sequence may only have one live execution at a time."""
+
+
+class SequenceValidationError(ValueError):
+    """The sequence exists but cannot be run as stored."""
+
+
+class SequenceInUseError(Exception):
+    """Schedules still reference the sequence."""
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _iso_z(dt: datetime) -> str:
+    return dt.replace(tzinfo=None).isoformat() + "Z"
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.rstrip("Z")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _describe_error(exc: Exception) -> str:
+    """One readable line for History: a raw ApiException is HTTP headers and JSON."""
+    if isinstance(exc, ApiException):
+        message = exc.reason or "Kubernetes API error"
+        try:
+            body = json.loads(exc.body or "{}")
+            if isinstance(body, dict) and body.get("message"):
+                message = body["message"]
+        except (TypeError, ValueError):
+            pass
+        return f"Kubernetes API {exc.status}: {message}"[:500]
+    return (str(exc) or exc.__class__.__name__)[:500]
 
 
 class EnvironmentScalingService:
@@ -59,6 +116,8 @@ class EnvironmentScalingService:
         dry_run: bool,
         user_id: str,
         user_email: str,
+        execution_type: str = "manual",
+        schedule_id: int | None = None,
     ) -> dict[str, Any]:
         """Scale all or selected deployments in a namespace."""
         target_replicas = 0 if operation == "scale_down" else replica_count
@@ -84,13 +143,14 @@ class EnvironmentScalingService:
 
         # Create execution record
         execution = EnvironmentExecutionHistory(
-            execution_type="manual",
+            execution_type=execution_type,
             cluster_id=cluster_id,
             namespace=namespace,
             operation=operation,
             status="running",
             total_deployments=len(targets),
             replica_count=target_replicas,
+            schedule_id=schedule_id,
             initiated_by=user_id,
             initiated_by_email=user_email,
             started_at=datetime.now(UTC).replace(tzinfo=None),
@@ -174,22 +234,25 @@ class EnvironmentScalingService:
                         "current_replicas": current,
                         "target_replicas": target_replicas,
                         "status": "failed",
-                        "error": str(exc)[:500],
+                        "error": _describe_error(exc),
                     }
                 )
                 logger.error("env_scale_deployment_failed", deployment=dep_name, error=str(exc)[:200])
 
         # Finalize execution record
         final_status = "completed" if failed == 0 else "failed"
+        now = _utc_now()
+        duration = (now - execution.started_at).total_seconds()
         if self.db and execution.id:
             execution.status = final_status
             execution.completed_count = completed
             execution.failed_count = failed
             execution.skipped_count = skipped
             execution.step_details = details
-            now = datetime.now(UTC).replace(tzinfo=None)
             execution.completed_at = now
-            execution.duration_seconds = (now - execution.started_at).total_seconds()
+            execution.duration_seconds = duration
+            if failed:
+                execution.error_message = f"{failed} of {len(targets)} deployment(s) failed to scale"
             await self.db.commit()
 
         # Write audit log
@@ -219,6 +282,7 @@ class EnvironmentScalingService:
             "completed": completed,
             "failed": failed,
             "skipped": skipped,
+            "duration_seconds": round(duration, 1),
             "details": details,
         }
 
@@ -232,179 +296,338 @@ class EnvironmentScalingService:
         dry_run: bool,
         user_id: str,
         user_email: str,
+        execution_type: str = "sequence",
+        schedule_id: int | None = None,
     ) -> dict[str, Any]:
-        """Execute a startup or shutdown sequence."""
+        """Execute a startup or shutdown sequence to completion.
+
+        Used by the scheduler and for dry runs. The API runs real executions in
+        the background instead (begin_sequence_execution + launch_sequence_run)
+        so a long sequence is not bound to one HTTP request.
+        """
         if not self.db:
             raise ValueError("Database required for sequence execution")
+        if dry_run:
+            return await self._dry_run_sequence(
+                sequence_id=sequence_id, replica_count=replica_count, user_id=user_id, user_email=user_email
+            )
 
+        sequence, execution = await self.begin_sequence_execution(
+            sequence_id=sequence_id,
+            replica_count=replica_count,
+            user_id=user_id,
+            user_email=user_email,
+            execution_type=execution_type,
+            schedule_id=schedule_id,
+        )
+        return await self.run_sequence_execution(sequence, execution, user_id=user_id, user_email=user_email)
+
+    async def _load_sequence(self, sequence_id: int) -> EnvironmentSequence:
         result = await self.db.execute(select(EnvironmentSequence).where(EnvironmentSequence.id == sequence_id))
         sequence = result.scalar_one_or_none()
         if not sequence:
             raise ValueError(f"Sequence {sequence_id} not found")
         assert_resource_access(sequence.cluster_id, "write", context=f"execute_sequence {sequence_id}")
+        return sequence
 
-        steps = sequence.steps or []
-        sorted_steps = sorted(steps, key=lambda s: s.get("order", 0))
-        if sequence.sequence_type == "shutdown":
-            sorted_steps = list(reversed(sorted_steps))
+    @staticmethod
+    def _plan_steps(sequence: EnvironmentSequence, fallback_replicas: int = 1) -> list[dict]:
+        """The steps in execution order — the order shown in the designer, top to bottom.
 
-        target_replicas = 0 if sequence.sequence_type == "shutdown" else replica_count
+        A deployment may appear more than once (scale to 1 early, to 50 later),
+        so steps are identified by position, never by deployment name.
+        """
+        is_shutdown = sequence.sequence_type == "shutdown"
+        ordered = sorted(sequence.steps or [], key=lambda s: s.get("order", 0))
+        return [
+            {
+                "step": position,
+                "order": step.get("order", position),
+                "deployment": step.get("deployment_name", ""),
+                "target_replicas": 0 if is_shutdown else step.get("replicas", fallback_replicas),
+                # Scale-downs never waited; record that instead of a condition that is ignored.
+                "wait_condition": "skip" if is_shutdown else step.get("wait_condition", "pods_ready"),
+                "timeout_seconds": step.get("timeout_seconds", DEFAULT_STEP_TIMEOUT_SECONDS),
+                "on_failure": step.get("on_failure", "abort"),
+                "status": "pending",
+            }
+            for position, step in enumerate(ordered, start=1)
+        ]
 
+    async def _dry_run_sequence(
+        self, *, sequence_id: int, replica_count: int, user_id: str, user_email: str
+    ) -> dict[str, Any]:
+        sequence = await self._load_sequence(sequence_id)
+        details = [{**step, "status": "dry_run"} for step in self._plan_steps(sequence, replica_count)]
+        now = _utc_now()
         execution = EnvironmentExecutionHistory(
             execution_type="sequence",
             cluster_id=sequence.cluster_id,
             namespace=sequence.namespace,
             operation=f"sequence_{sequence.sequence_type}",
-            status="running",
-            total_deployments=len(sorted_steps),
-            replica_count=target_replicas,
+            status="completed",
+            total_deployments=len(details),
+            completed_count=len(details),
             sequence_id=sequence_id,
+            step_details=details,
             initiated_by=user_id,
             initiated_by_email=user_email,
-            started_at=datetime.now(UTC).replace(tzinfo=None),
+            started_at=now,
+            completed_at=now,
+            duration_seconds=0,
         )
         self.db.add(execution)
         await self.db.commit()
         await self.db.refresh(execution)
+        return {
+            "execution_id": execution.id,
+            "status": "dry_run",
+            "total_deployments": len(details),
+            "completed": len(details),
+            "failed": 0,
+            "skipped": 0,
+            "details": details,
+        }
 
-        if dry_run:
-            details = [
-                {
-                    "order": step.get("order"),
-                    "deployment": step.get("deployment_name"),
-                    "target_replicas": step.get("replicas", target_replicas)
-                    if sequence.sequence_type != "shutdown"
-                    else 0,
-                    "wait_condition": step.get("wait_condition", "pods_ready"),
-                    "status": "dry_run",
-                }
-                for step in sorted_steps
-            ]
-            execution.status = "completed"
-            execution.step_details = details
-            execution.completed_count = len(sorted_steps)
-            execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
-            await self.db.commit()
-            return {
-                "execution_id": execution.id,
-                "status": "dry_run",
-                "total_deployments": len(sorted_steps),
-                "completed": len(sorted_steps),
-                "failed": 0,
-                "skipped": 0,
-                "details": details,
-            }
+    async def begin_sequence_execution(
+        self,
+        *,
+        sequence_id: int,
+        user_id: str,
+        user_email: str,
+        replica_count: int = 1,
+        execution_type: str = "sequence",
+        schedule_id: int | None = None,
+    ) -> tuple[EnvironmentSequence, EnvironmentExecutionHistory]:
+        """Validate the sequence and record its execution as running, every step pending.
 
+        Raises SequenceAlreadyRunningError while another run of the same sequence
+        is live: two runs would scale the same deployments against each other.
+        """
+        if not self.db:
+            raise ValueError("Database required for sequence execution")
+        sequence = await self._load_sequence(sequence_id)
+        plan = self._plan_steps(sequence, replica_count)
+        if not plan:
+            raise SequenceValidationError(f"Sequence '{sequence.name}' has no steps to run")
+
+        await self._expire_abandoned_executions()
+        running = (
+            await self.db.execute(
+                select(EnvironmentExecutionHistory)
+                .where(
+                    EnvironmentExecutionHistory.sequence_id == sequence_id,
+                    EnvironmentExecutionHistory.status == "running",
+                )
+                .order_by(desc(EnvironmentExecutionHistory.started_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if running is not None:
+            who = running.initiated_by_email or running.initiated_by
+            raise SequenceAlreadyRunningError(
+                f"Sequence '{sequence.name}' is already running (execution #{running.id}, started by {who}). "
+                "Wait for it to finish before starting it again."
+            )
+
+        execution = EnvironmentExecutionHistory(
+            execution_type=execution_type,
+            cluster_id=sequence.cluster_id,
+            namespace=sequence.namespace,
+            operation=f"sequence_{sequence.sequence_type}",
+            status="running",
+            total_deployments=len(plan),
+            replica_count=0 if sequence.sequence_type == "shutdown" else replica_count,
+            sequence_id=sequence_id,
+            schedule_id=schedule_id,
+            step_details=plan,
+            initiated_by=user_id,
+            initiated_by_email=user_email,
+            started_at=_utc_now(),
+        )
+        self.db.add(execution)
+        await self.db.commit()
+        await self.db.refresh(execution)
+        return sequence, execution
+
+    async def run_sequence_execution(
+        self,
+        sequence: EnvironmentSequence,
+        execution: EnvironmentExecutionHistory,
+        *,
+        user_id: str,
+        user_email: str,
+    ) -> dict[str, Any]:
+        """Run the recorded steps in order, persisting after every transition so
+        History shows live progress."""
+        steps = [dict(s) for s in (execution.step_details or [])]
         completed = 0
         failed = 0
-        skipped = 0
-        step_details: list[dict] = []
+        failures: list[str] = []
+        abort_index: int | None = None
 
-        # Pre-populate step_details with "pending" for all steps so frontend can show the list
-        for step in sorted_steps:
-            step_details.append(
-                {
-                    "order": step.get("order"),
-                    "deployment": step.get("deployment_name", ""),
-                    "target_replicas": 0
-                    if sequence.sequence_type == "shutdown"
-                    else step.get("replicas", target_replicas),
-                    "status": "pending",
-                }
-            )
-        execution.step_details = [dict(s) for s in step_details]
-        await self.db.commit()
-
-        for idx, step in enumerate(sorted_steps):
-            dep_name = step.get("deployment_name", "")
-            step_replicas = 0 if sequence.sequence_type == "shutdown" else step.get("replicas", target_replicas)
-            timeout = step.get("timeout_seconds", 600)
-            wait_condition = step.get("wait_condition", "pods_ready")
-            on_failure = step.get("on_failure", "abort")
-
-            # Mark current step as "running"
-            step_start = datetime.now(UTC)
-            step_details[idx]["status"] = "running"
-            step_details[idx]["started_at"] = step_start.replace(tzinfo=None).isoformat() + "Z"
-            execution.step_details = [dict(s) for s in step_details]
+        async def persist() -> None:
+            execution.step_details = [dict(s) for s in steps]
             execution.completed_count = completed
+            execution.failed_count = failed
             await self.db.commit()
 
-            try:
-                await self.aks.scale_deployment(
-                    cluster_id=sequence.cluster_id,
-                    namespace=sequence.namespace,
-                    deployment_name=dep_name,
-                    replicas=step_replicas,
-                    user_id=user_id,
-                    user_email=user_email,
-                )
+        try:
+            for idx, step in enumerate(steps):
+                dep_name = step.get("deployment", "")
+                target = int(step.get("target_replicas") or 0)
+                step_start = datetime.now(UTC)
+                step["status"] = "running"
+                step["started_at"] = _iso_z(step_start)
+                await persist()
 
-                # Wait for condition if scaling up
-                if step_replicas > 0 and wait_condition != "skip":
-                    await self._wait_for_deployment(
+                try:
+                    scaled = await self.aks.scale_deployment(
                         cluster_id=sequence.cluster_id,
                         namespace=sequence.namespace,
                         deployment_name=dep_name,
-                        desired_replicas=step_replicas,
-                        timeout_seconds=timeout,
-                        wait_condition=wait_condition,
+                        replicas=target,
+                        user_id=user_id,
+                        user_email=user_email,
                     )
-
-                completed += 1
-                step_duration = (datetime.now(UTC) - step_start).total_seconds()
-                step_details[idx]["status"] = "completed"
-                step_details[idx]["duration_seconds"] = round(step_duration, 1)
-                execution.step_details = [dict(s) for s in step_details]
-                execution.completed_count = completed
-                await self.db.commit()
-
-            except Exception as exc:
-                failed += 1
-                step_duration = (datetime.now(UTC) - step_start).total_seconds()
-                step_details[idx]["status"] = "failed"
-                step_details[idx]["error"] = str(exc)[:500]
-                step_details[idx]["duration_seconds"] = round(step_duration, 1)
-                execution.step_details = [dict(s) for s in step_details]
-                execution.failed_count = failed
-                await self.db.commit()
-                logger.error("sequence_step_failed", deployment=dep_name, error=str(exc)[:200])
-
-                if on_failure == "abort":
-                    if sequence.rollback_on_failure and completed > 0:
-                        await self._rollback_sequence(
-                            step_details=step_details,
+                    # The "before" value: History shows it as 0 → 60, and rollback restores it.
+                    step["current_replicas"] = (scaled or {}).get("previous_replicas")
+                    step["scaled"] = True
+                    if target > 0:
+                        await self._wait_for_deployment(
                             cluster_id=sequence.cluster_id,
                             namespace=sequence.namespace,
-                            user_id=user_id,
-                            user_email=user_email,
+                            deployment_name=dep_name,
+                            desired_replicas=target,
+                            timeout_seconds=int(step.get("timeout_seconds") or 0),
+                            wait_condition=step.get("wait_condition", "pods_ready"),
                         )
-                        execution.status = "rolled_back"
-                    else:
-                        execution.status = "failed"
+                    completed += 1
+                    step["status"] = "completed"
+                except Exception as exc:
+                    failed += 1
+                    step["status"] = "failed"
+                    step["error"] = _describe_error(exc)
+                    failures.append(f"step {step.get('step', idx + 1)} ({dep_name}): {step['error']}")
+                    logger.error("sequence_step_failed", deployment=dep_name, error=step["error"][:200])
+
+                step["duration_seconds"] = round((datetime.now(UTC) - step_start).total_seconds(), 1)
+                await persist()
+
+                if step["status"] == "failed" and step.get("on_failure", "abort") == "abort":
+                    abort_index = idx
+                    for later in steps[idx + 1 :]:
+                        later["status"] = "not_run"
                     break
+        except asyncio.CancelledError:
+            # The portal is shutting down mid-run. Say so rather than leave it "running".
+            await self._finalize_interrupted(execution, steps)
+            raise
 
-        if execution.status == "running":
-            execution.status = "completed" if failed == 0 else "failed"
+        rolled_back = 0
+        # Rollback undoes a startup. A failed shutdown is left as-is: restarting
+        # what was already stopped is not what anyone running a shutdown wants.
+        if abort_index is not None and sequence.rollback_on_failure and sequence.sequence_type != "shutdown":
+            rolled_back = await self._rollback_steps(
+                [s for s in steps[: abort_index + 1] if s.get("scaled")],
+                cluster_id=sequence.cluster_id,
+                namespace=sequence.namespace,
+                user_id=user_id,
+                user_email=user_email,
+            )
 
+        if failed == 0:
+            status = "completed"
+            error_message = None
+        elif rolled_back:
+            status = "rolled_back"
+            error_message = f"Aborted at {failures[-1].rstrip('.')}. Rolled back {rolled_back} scaled step(s)."
+        elif abort_index is not None:
+            status = "failed"
+            error_message = f"Aborted at {failures[-1]}"
+        else:
+            status = "failed"
+            error_message = (
+                f"{failed} step(s) failed; the sequence continued because they are set to "
+                f"'Continue on failure'. First failure: {failures[0]}"
+            )
+
+        now = _utc_now()
+        execution.status = status
+        execution.error_message = error_message[:2000] if error_message else None
         execution.completed_count = completed
         execution.failed_count = failed
-        execution.skipped_count = skipped
-        execution.step_details = [dict(s) for s in step_details]
-        now = datetime.now(UTC).replace(tzinfo=None)
+        execution.skipped_count = 0
+        execution.step_details = [dict(s) for s in steps]
         execution.completed_at = now
         execution.duration_seconds = (now - execution.started_at).total_seconds()
         await self.db.commit()
 
+        not_run = sum(1 for s in steps if s.get("status") == "not_run")
+        await self._write_audit(
+            user_id=user_id,
+            user_email=user_email,
+            action="sequence_execution_finished",
+            resource_type="environment_sequence",
+            resource_id=str(sequence.id),
+            status=status,
+            details={
+                "name": sequence.name,
+                "execution_id": execution.id,
+                "namespace": sequence.namespace,
+                "total": len(steps),
+                "completed": completed,
+                "failed": failed,
+                "not_run": not_run,
+                "rolled_back": rolled_back,
+            },
+        )
+
         return {
             "execution_id": execution.id,
-            "status": execution.status,
-            "total_deployments": len(sorted_steps),
+            "status": status,
+            "total_deployments": len(steps),
             "completed": completed,
             "failed": failed,
-            "skipped": skipped,
-            "details": step_details,
+            "skipped": 0,
+            "not_run": not_run,
+            "duration_seconds": round(execution.duration_seconds, 1),
+            "error": error_message or "",
+            "details": steps,
         }
+
+    @staticmethod
+    def execution_started_result(execution: EnvironmentExecutionHistory) -> dict[str, Any]:
+        """Response for a run that has just been launched in the background."""
+        return {
+            "execution_id": execution.id,
+            "status": "running",
+            "total_deployments": execution.total_deployments,
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "details": execution.step_details or [],
+        }
+
+    async def _finalize_interrupted(self, execution: EnvironmentExecutionHistory, steps: list[dict]) -> None:
+        try:
+            for s in steps:
+                if s.get("status") == "running":
+                    s["status"] = "interrupted"
+                elif s.get("status") == "pending":
+                    s["status"] = "not_run"
+            now = _utc_now()
+            execution.status = "failed"
+            execution.error_message = (
+                "Execution interrupted: the portal instance running it was stopped. "
+                "Check the deployments' current replica counts before re-running."
+            )
+            execution.step_details = [dict(s) for s in steps]
+            execution.completed_at = now
+            execution.duration_seconds = (now - execution.started_at).total_seconds()
+            await self.db.commit()
+        except Exception as exc:  # best effort; the abandoned-run sweep is the backstop
+            logger.warning("sequence_interrupt_record_failed", execution_id=execution.id, error=str(exc)[:200])
 
     async def _wait_for_deployment(
         self,
@@ -416,57 +639,144 @@ class EnvironmentScalingService:
         timeout_seconds: int,
         wait_condition: str,
     ) -> None:
-        """Wait until a deployment meets the specified condition."""
-        deadline = asyncio.get_event_loop().time() + timeout_seconds
-        apps_v1, _, _ = await self.aks._get_k8s_clients(cluster_id)
+        """Wait until a deployment meets the step's condition, or raise TimeoutError."""
+        if wait_condition == "skip":
+            return
+        if wait_condition == "fixed_time":
+            await asyncio.sleep(max(0, timeout_seconds))
+            return
 
-        while asyncio.get_event_loop().time() < deadline:
+        # "health_endpoint" steps carry no URL to probe. Readiness probes are the
+        # health check Kubernetes already runs, so they wait for ready pods —
+        # previously they waited out the full timeout and then failed.
+        use_available = wait_condition == "deployment_available"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        apps_v1, _, _ = await self.aks._get_k8s_clients(cluster_id)
+        observed = 0
+
+        while True:
             try:
                 dep = await asyncio.to_thread(apps_v1.read_namespaced_deployment_status, deployment_name, namespace)
                 ready = dep.status.ready_replicas or 0
                 available = dep.status.available_replicas or 0
-
-                if wait_condition == "pods_ready" and ready >= desired_replicas:
-                    return
-                if wait_condition == "deployment_available" and available >= desired_replicas:
-                    return
-                if wait_condition == "fixed_time":
-                    await asyncio.sleep(min(timeout_seconds, 30))
+                observed = available if use_available else ready
+                if observed >= desired_replicas:
                     return
             except ApiException:
                 pass
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(5, remaining))
 
-            await asyncio.sleep(5)
+        label = "available" if use_available else "ready"
+        raise TimeoutError(f"only {observed}/{desired_replicas} pods {label} after {timeout_seconds}s")
 
-        raise TimeoutError(f"Deployment {deployment_name} did not reach ready state within {timeout_seconds}s")
-
-    async def _rollback_sequence(
+    async def _rollback_steps(
         self,
+        scaled_steps: list[dict],
         *,
-        step_details: list[dict],
         cluster_id: str,
         namespace: str,
         user_id: str,
         user_email: str,
-    ) -> None:
-        """Rollback completed steps by scaling back to 0."""
-        completed_steps = [s for s in step_details if s.get("status") == "completed"]
-        for step in reversed(completed_steps):
+    ) -> int:
+        """Undo scaled steps newest-first, restoring each to its replica count
+        before the step. Walking backwards makes repeated steps for the same
+        deployment unwind correctly (50 → 1, then 1 → 0)."""
+        undone = 0
+        for step in reversed(scaled_steps):
             dep_name = step.get("deployment", "")
+            restore_to = step.get("current_replicas")
+            restore_to = int(restore_to) if restore_to is not None else 0
             try:
-                await self.aks.scale_deployment(
-                    cluster_id=cluster_id,
-                    namespace=namespace,
-                    deployment_name=dep_name,
-                    replicas=0,
-                    user_id=user_id,
-                    user_email=user_email,
-                )
+                if restore_to != step.get("target_replicas"):
+                    await self.aks.scale_deployment(
+                        cluster_id=cluster_id,
+                        namespace=namespace,
+                        deployment_name=dep_name,
+                        replicas=restore_to,
+                        user_id=user_id,
+                        user_email=user_email,
+                    )
                 step["rollback_status"] = "rolled_back"
+                step["rolled_back_to"] = restore_to
+                undone += 1
             except Exception as exc:
                 step["rollback_status"] = "rollback_failed"
-                step["rollback_error"] = str(exc)[:500]
+                step["rollback_error"] = _describe_error(exc)
                 logger.error("rollback_step_failed", deployment=dep_name, error=str(exc)[:200])
+        return undone
+
+    async def _expire_abandoned_executions(self) -> int:
+        """Fail "running" executions whose executor has gone away (see ABANDONED_GRACE_SECONDS)."""
+        if not self.db:
+            return 0
+        rows = (
+            (
+                await self.db.execute(
+                    select(EnvironmentExecutionHistory).where(EnvironmentExecutionHistory.status == "running")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        now = _utc_now()
+        expired = 0
+        for row in rows:
+            if now < self._abandon_deadline(row):
+                continue
+            steps = [dict(s) for s in (row.step_details or [])]
+            for s in steps:
+                if s.get("status") == "running":
+                    s["status"] = "interrupted"
+                elif s.get("status") == "pending":
+                    s["status"] = "not_run"
+            row.step_details = steps
+            row.status = "failed"
+            row.completed_at = now
+            row.duration_seconds = (now - row.started_at).total_seconds() if row.started_at else None
+            row.error_message = (
+                "Execution stopped unexpectedly: the portal instance running it restarted or lost its "
+                "connection. Check the deployments' current replica counts before re-running."
+            )
+            if row.schedule_id:
+                # Otherwise the Schedules tab keeps showing this run as "running".
+                await self.db.execute(
+                    update(EnvironmentSchedule)
+                    .where(
+                        EnvironmentSchedule.id == row.schedule_id,
+                        EnvironmentSchedule.last_run_status == "running",
+                    )
+                    .values(last_run_status="failed")
+                    .execution_options(synchronize_session=False)
+                )
+            expired += 1
+        if expired:
+            await self.db.commit()
+            logger.warning("environment_executions_expired", count=expired)
+        return expired
+
+    @staticmethod
+    def _abandon_deadline(row: EnvironmentExecutionHistory) -> datetime:
+        started = row.started_at or _utc_now()
+        steps = row.step_details or []
+        if row.execution_type != "sequence" and not any(isinstance(s, dict) and "step" in s for s in steps):
+            return started + timedelta(seconds=ABANDONED_SCALE_SECONDS)
+        last_activity = started
+        for s in steps:
+            if not isinstance(s, dict):
+                continue
+            step_started = _parse_iso(s.get("started_at"))
+            if step_started is None:
+                continue
+            if s.get("status") == "running":
+                end = step_started + timedelta(seconds=s.get("timeout_seconds") or DEFAULT_STEP_TIMEOUT_SECONDS)
+            else:
+                end = step_started + timedelta(seconds=s.get("duration_seconds") or 0)
+            last_activity = max(last_activity, end)
+        return last_activity + timedelta(seconds=ABANDONED_GRACE_SECONDS)
 
     # ── Environment Status ────────────────────────────────────────────
 
@@ -707,7 +1017,12 @@ class EnvironmentScalingService:
             ]
 
         sequence.updated_at = datetime.now(UTC).replace(tzinfo=None)
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            # Renamed onto another sequence's name; the endpoint reports 409.
+            await self.db.rollback()
+            raise
         await self.db.refresh(sequence)
         return self._sequence_to_dict(sequence)
 
@@ -721,6 +1036,22 @@ class EnvironmentScalingService:
         ).scalar_one_or_none()
         if cluster is not None:
             assert_resource_access(cluster, "write", context=f"delete_sequence {sequence_id}")
+        # environment_schedules.sequence_id is a foreign key: deleting a linked
+        # sequence used to surface as a 500 with the raw constraint error.
+        linked = (
+            (
+                await self.db.execute(
+                    select(EnvironmentSchedule.job_name).where(EnvironmentSchedule.sequence_id == sequence_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if linked:
+            names = ", ".join(sorted(linked))
+            raise SequenceInUseError(
+                f"This sequence is used by schedule(s): {names}. Unlink or delete those schedules first."
+            )
         await self.db.execute(delete(EnvironmentSequence).where(EnvironmentSequence.id == sequence_id))
         await self.db.commit()
         return True
@@ -768,6 +1099,7 @@ class EnvironmentScalingService:
         """Get execution history, optionally filtered."""
         if not self.db:
             return []
+        await self.sweep_abandoned_executions()
 
         stmt = select(EnvironmentExecutionHistory).order_by(desc(EnvironmentExecutionHistory.started_at)).limit(limit)
         clause = arm_scope_clause(EnvironmentExecutionHistory.cluster_id)
@@ -779,7 +1111,64 @@ class EnvironmentScalingService:
             stmt = stmt.where(EnvironmentExecutionHistory.namespace == namespace)
 
         result = await self.db.execute(stmt)
-        return [self._execution_to_dict(e) for e in result.scalars().all()]
+        executions = result.scalars().all()
+        sequence_names, schedule_names = await self._names_for(executions)
+        return [
+            self._execution_to_dict(
+                e,
+                sequence_name=sequence_names.get(e.sequence_id),
+                schedule_name=schedule_names.get(e.schedule_id),
+            )
+            for e in executions
+        ]
+
+    async def get_execution(self, execution_id: int) -> dict | None:
+        """One execution, for polling a run's live progress."""
+        if not self.db:
+            return None
+        await self.sweep_abandoned_executions()
+        execution = (
+            await self.db.execute(
+                select(EnvironmentExecutionHistory).where(EnvironmentExecutionHistory.id == execution_id)
+            )
+        ).scalar_one_or_none()
+        if execution is None:
+            return None
+        assert_resource_access(execution.cluster_id, "read", context=f"get_execution {execution_id}")
+        sequence_names, schedule_names = await self._names_for([execution])
+        return self._execution_to_dict(
+            execution,
+            sequence_name=sequence_names.get(execution.sequence_id),
+            schedule_name=schedule_names.get(execution.schedule_id),
+        )
+
+    async def sweep_abandoned_executions(self) -> None:
+        # Reads must keep working even if the sweep cannot write.
+        try:
+            await self._expire_abandoned_executions()
+        except Exception as exc:
+            await self.db.rollback()
+            logger.warning("environment_execution_sweep_failed", error=str(exc)[:200])
+
+    async def _names_for(self, executions) -> tuple[dict[int, str], dict[int, str]]:
+        """Sequence and schedule names, so History says which one ran."""
+        sequence_ids = {e.sequence_id for e in executions if e.sequence_id}
+        schedule_ids = {e.schedule_id for e in executions if e.schedule_id}
+        sequence_names: dict[int, str] = {}
+        schedule_names: dict[int, str] = {}
+        if sequence_ids:
+            rows = await self.db.execute(
+                select(EnvironmentSequence.id, EnvironmentSequence.name).where(EnvironmentSequence.id.in_(sequence_ids))
+            )
+            sequence_names = {row[0]: row[1] for row in rows.all()}
+        if schedule_ids:
+            rows = await self.db.execute(
+                select(EnvironmentSchedule.id, EnvironmentSchedule.job_name).where(
+                    EnvironmentSchedule.id.in_(schedule_ids)
+                )
+            )
+            schedule_names = {row[0]: row[1] for row in rows.all()}
+        return sequence_names, schedule_names
 
     async def get_audit_logs(self, limit: int = 100) -> list[dict]:
         """Get audit logs for environment scheduler operations."""
@@ -811,30 +1200,67 @@ class EnvironmentScalingService:
 
     # ── Scheduled Job Execution ───────────────────────────────────────
 
-    async def execute_scheduled_job(self, schedule_id: int) -> dict[str, Any]:
-        """Execute a scheduled scaling job (called by the scheduler)."""
+    async def load_schedule_for_run(self, schedule_id: int) -> EnvironmentSchedule:
         if not self.db:
             raise ValueError("Database required")
-
         result = await self.db.execute(select(EnvironmentSchedule).where(EnvironmentSchedule.id == schedule_id))
         schedule = result.scalar_one_or_none()
         if not schedule:
             raise ValueError(f"Schedule {schedule_id} not found")
         # "Run now" from the UI; the background scheduler has no request scope.
         assert_resource_access(schedule.cluster_id, "write", context=f"run_schedule {schedule_id}")
+        return schedule
+
+    async def _mark_schedule_started(self, schedule: EnvironmentSchedule) -> None:
+        schedule.last_run_at = _utc_now()
+        schedule.last_run_status = "running"
+        await self.db.commit()
+
+    async def begin_scheduled_sequence(
+        self, schedule: EnvironmentSchedule, *, user_id: str, user_email: str
+    ) -> tuple[EnvironmentSequence, EnvironmentExecutionHistory]:
+        """Record a sequence-linked schedule's run as started.
+
+        The execution carries schedule_id from the start, so the runner sees an
+        in-flight run and History labels it scheduled rather than manual.
+        """
+        sequence, execution = await self.begin_sequence_execution(
+            sequence_id=schedule.sequence_id,
+            replica_count=schedule.replica_count,
+            user_id=user_id,
+            user_email=user_email,
+            execution_type="scheduled",
+            schedule_id=schedule.id,
+        )
+        await self._mark_schedule_started(schedule)
+        return sequence, execution
+
+    async def execute_scheduled_job(
+        self,
+        schedule_id: int,
+        *,
+        user_id: str | None = None,
+        user_email: str | None = None,
+    ) -> dict[str, Any]:
+        """Run a schedule to completion: a scheduler tick, or "Run now" of a plain scale.
+
+        Runs act as the schedule's creator unless a user triggered them.
+        """
+        schedule = await self.load_schedule_for_run(schedule_id)
+        run_as_id = user_id or schedule.created_by
+        run_as_email = (user_email or "") if user_id else (schedule.created_by_email or "")
 
         try:
-            # If linked to a sequence, execute the sequence instead of plain scale
             if schedule.sequence_id:
-                scale_result = await self.execute_sequence(
-                    sequence_id=schedule.sequence_id,
-                    replica_count=schedule.replica_count,
-                    dry_run=False,
-                    user_id=schedule.created_by,
-                    user_email=schedule.created_by_email or "",
+                sequence, execution = await self.begin_scheduled_sequence(
+                    schedule, user_id=run_as_id, user_email=run_as_email
+                )
+                result = await self.run_sequence_execution(
+                    sequence, execution, user_id=run_as_id, user_email=run_as_email
                 )
             else:
-                scale_result = await self.scale_environment(
+                await self._mark_schedule_started(schedule)
+                result = await self.scale_environment(
                     cluster_id=schedule.cluster_id,
                     namespace=schedule.namespace,
                     operation=schedule.operation,
@@ -842,53 +1268,51 @@ class EnvironmentScalingService:
                     deployment_names=None,
                     replica_count=schedule.replica_count,
                     dry_run=False,
-                    user_id=schedule.created_by,
-                    user_email=schedule.created_by_email or "",
+                    user_id=run_as_id,
+                    user_email=run_as_email,
+                    execution_type="scheduled",
+                    schedule_id=schedule_id,
                 )
-
-            schedule.last_run_at = datetime.now(UTC).replace(tzinfo=None)
-            schedule.last_run_status = scale_result["status"]
-
-            # Update execution record with schedule_id
-            if self.db and scale_result.get("execution_id"):
-                stmt = (
-                    update(EnvironmentExecutionHistory)
-                    .where(EnvironmentExecutionHistory.id == scale_result["execution_id"])
-                    .values(schedule_id=schedule_id)
-                )
-                await self.db.execute(stmt)
-                await self.db.commit()
-
-            # Send notification email on completion or failure
-            await self._send_schedule_notification(schedule, scale_result)
-
-            return scale_result
-
         except Exception as exc:
-            schedule.last_run_at = datetime.now(UTC).replace(tzinfo=None)
-            schedule.last_run_status = "failed"
+            await self.finish_scheduled_job(schedule, error=exc)
+            raise
+
+        await self.finish_scheduled_job(schedule, result)
+        return result
+
+    async def finish_scheduled_job(
+        self,
+        schedule: EnvironmentSchedule,
+        result: dict[str, Any] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        """Record a scheduled run's outcome on the schedule and email the recipients."""
+        status = result["status"] if result else "failed"
+        try:
+            if schedule.last_run_status != "running" or schedule.last_run_at is None:
+                schedule.last_run_at = _utc_now()
+            schedule.last_run_status = status
             await self.db.commit()
+        except Exception as exc:
+            logger.warning("schedule_status_update_failed", schedule_id=schedule.id, error=str(exc)[:200])
 
-            # Send failure notification
-            await self._send_schedule_notification(
-                schedule,
-                {
-                    "status": "failed",
-                    "total_deployments": 0,
-                    "completed": 0,
-                    "failed": 0,
-                    "skipped": 0,
-                    "error": str(exc)[:500],
-                },
-            )
-
+        if error is not None:
             logger.error(
                 "scheduled_job_failed",
-                schedule_id=schedule_id,
+                schedule_id=schedule.id,
                 job_name=schedule.job_name,
-                error=str(exc)[:200],
+                error=str(error)[:200],
             )
-            raise
+            result = {
+                "status": "failed",
+                "total_deployments": 0,
+                "completed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "error": _describe_error(error),
+            }
+        await self._send_schedule_notification(schedule, result)
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -897,7 +1321,7 @@ class EnvironmentScalingService:
         """Compute initial next_run_at for a new schedule using its timezone."""
         from zoneinfo import ZoneInfo
 
-        from apscheduler.triggers.cron import CronTrigger
+        from app.core.cron import cron_trigger_from_crontab
 
         if schedule.schedule_type == "one_time":
             return schedule.start_date
@@ -907,7 +1331,8 @@ class EnvironmentScalingService:
 
         if schedule.schedule_type == "cron" and schedule.cron_expression:
             try:
-                trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=tz)
+                # Standard crontab day-of-week (0=Sun); from_crontab alone counts from Monday.
+                trigger = cron_trigger_from_crontab(schedule.cron_expression, timezone=tz)
                 next_fire = trigger.get_next_fire_time(None, now)
                 if next_fire and next_fire.tzinfo:
                     return next_fire.astimezone(UTC).replace(tzinfo=None)
@@ -1190,13 +1615,21 @@ class EnvironmentScalingService:
             "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         }
 
-    def _execution_to_dict(self, e: EnvironmentExecutionHistory) -> dict:
+    def _execution_to_dict(
+        self,
+        e: EnvironmentExecutionHistory,
+        *,
+        sequence_name: str | None = None,
+        schedule_name: str | None = None,
+    ) -> dict:
         return {
             "id": e.id,
             "execution_type": e.execution_type,
             "cluster_id": e.cluster_id,
             "namespace": e.namespace,
             "operation": e.operation,
+            "sequence_name": sequence_name,
+            "schedule_name": schedule_name,
             "status": e.status,
             "total_deployments": e.total_deployments,
             "completed_count": e.completed_count,
@@ -1247,3 +1680,66 @@ class EnvironmentScalingService:
 def get_environment_scaling_service(db: AsyncSession | None) -> EnvironmentScalingService:
     """Factory for EnvironmentScalingService."""
     return EnvironmentScalingService(db)
+
+
+def launch_sequence_run(
+    *,
+    sequence_id: int,
+    execution_id: int,
+    user_id: str,
+    user_email: str,
+    schedule_id: int | None = None,
+) -> None:
+    """Run a recorded execution in the background on its own DB session.
+
+    Startups wait for pods per step and can take many minutes — far past the
+    ingress timeout if held inside the HTTP request. The task inherits the
+    caller's context, so it acts with the access scope of the user who started
+    it. With schedule_id, the schedule's last-run status and email follow.
+    """
+    task = asyncio.create_task(
+        _run_sequence_in_background(
+            sequence_id=sequence_id,
+            execution_id=execution_id,
+            user_id=user_id,
+            user_email=user_email,
+            schedule_id=schedule_id,
+        )
+    )
+    _background_runs.add(task)
+    task.add_done_callback(_background_runs.discard)
+
+
+async def _run_sequence_in_background(
+    *,
+    sequence_id: int,
+    execution_id: int,
+    user_id: str,
+    user_email: str,
+    schedule_id: int | None = None,
+) -> None:
+    from app.core.database import get_db_session
+
+    try:
+        async for db in get_db_session():
+            sequence = await db.get(EnvironmentSequence, sequence_id)
+            execution = await db.get(EnvironmentExecutionHistory, execution_id)
+            schedule = await db.get(EnvironmentSchedule, schedule_id) if schedule_id else None
+            if sequence is None or execution is None:
+                logger.error("sequence_background_run_missing", sequence_id=sequence_id, execution_id=execution_id)
+                return
+            service = EnvironmentScalingService(db)
+            try:
+                result = await service.run_sequence_execution(
+                    sequence, execution, user_id=user_id, user_email=user_email
+                )
+            except Exception as exc:
+                if schedule is not None:
+                    await service.finish_scheduled_job(schedule, error=exc)
+                raise
+            if schedule is not None:
+                await service.finish_scheduled_job(schedule, result)
+            logger.info("sequence_background_run_finished", execution_id=execution_id, status=result["status"])
+    except Exception as exc:
+        # The row stays "running"; the abandoned-run sweep fails it later.
+        logger.error("sequence_background_run_failed", execution_id=execution_id, error=str(exc)[:300])

@@ -13,6 +13,16 @@ import React, { useState, useEffect } from "react";
 import { gridStyles, SortableHeader, type SortState, nextSortState } from "../../components/gridStyles";
 import type { ExecutionHistory, StepDetail } from "../../services/environmentApi";
 import apiClient from "../../services/apiClient";
+import {
+  ExecutionStepsTable,
+  StatusBadge,
+  effectiveStepStatus,
+  formatDuration,
+  operationLabel,
+  statusLabel,
+  stepCounts,
+  type StepSortKey,
+} from "./executionStatus";
 
 interface Props {
   history: ExecutionHistory[];
@@ -23,15 +33,6 @@ type HistoryField = "started_at" | "operation" | "status" | "namespace";
 
 const PAGE_SIZES = [10, 20, 50];
 
-const statusColors: Record<string, string> = {
-  completed: "bg-green-100 text-green-700",
-  failed: "bg-red-100 text-red-700",
-  running: "bg-blue-100 text-blue-700",
-  pending: "bg-gray-100 text-gray-500",
-  rolled_back: "bg-orange-100 text-orange-700",
-  dry_run: "bg-purple-100 text-purple-700",
-};
-
 const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortState<HistoryField>>({ key: "started_at", direction: "desc" });
@@ -39,10 +40,8 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
   const [pageSize, setPageSize] = useState(20);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [detailSearch, setDetailSearch] = useState("");
-  const [stepSort, setStepSort] = useState<SortState<"deployment" | "change" | "status" | "duration">>({
-    key: "status",
-    direction: "asc",
-  });
+  // Execution order by default: that is how a sequence is read.
+  const [stepSort, setStepSort] = useState<SortState<StepSortKey>>({ key: "step", direction: "asc" });
   const [runningElapsed, setRunningElapsed] = useState<Record<number, number>>({});
   const [logDeployment, setLogDeployment] = useState<string | null>(null);
   const [logContent, setLogContent] = useState<string>("");
@@ -69,10 +68,7 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
     return () => clearInterval(timer);
   }, [runningEntries.length]);
 
-  const formatElapsed = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    return m > 0 ? `${m}m ${secs % 60}s` : `${secs}s`;
-  };
+  const formatElapsed = formatDuration;
 
   const handleShowLog = async (entry: ExecutionHistory, deploymentName: string) => {
     setLogDeployment(deploymentName);
@@ -108,13 +104,19 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
     setLogLoading(false);
   };
 
+  const q = search.toLowerCase();
   const filtered = history.filter(
     (h) =>
-      h.namespace.toLowerCase().includes(search.toLowerCase()) ||
-      h.operation.toLowerCase().includes(search.toLowerCase()) ||
-      h.execution_type.toLowerCase().includes(search.toLowerCase()) ||
-      h.status.toLowerCase().includes(search.toLowerCase()) ||
-      (h.initiated_by_email ?? "").toLowerCase().includes(search.toLowerCase()),
+      h.namespace.toLowerCase().includes(q) ||
+      h.operation.toLowerCase().includes(q) ||
+      operationLabel(h.operation).toLowerCase().includes(q) ||
+      h.execution_type.toLowerCase().includes(q) ||
+      h.status.toLowerCase().includes(q) ||
+      statusLabel(h.status).toLowerCase().includes(q) ||
+      (h.sequence_name ?? "").toLowerCase().includes(q) ||
+      (h.schedule_name ?? "").toLowerCase().includes(q) ||
+      (h.initiated_by_email ?? "").toLowerCase().includes(q) ||
+      (h.step_details ?? []).some((d) => d.deployment.toLowerCase().includes(q)),
   );
 
   const sorted = [...filtered].sort((a, b) => {
@@ -132,13 +134,16 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
   // Detail filtering for expanded row
   const getFilteredDetails = (h: ExecutionHistory) => {
     if (!h.step_details) return [];
-    const rows = detailSearch
-      ? h.step_details.filter(
+    const term = detailSearch.toLowerCase();
+    // Keep each step's execution position: older rows predate the "step" field.
+    const numbered = h.step_details.map((d, i) => (d.step != null ? d : { ...d, step: d.order ?? i + 1 }));
+    const rows = term
+      ? numbered.filter(
           (d) =>
-            d.deployment.toLowerCase().includes(detailSearch.toLowerCase()) ||
-            d.status.toLowerCase().includes(detailSearch.toLowerCase()),
+            d.deployment.toLowerCase().includes(term) ||
+            statusLabel(effectiveStepStatus(d, h.status)).toLowerCase().includes(term),
         )
-      : h.step_details;
+      : numbered;
 
     const dir = stepSort.direction === "asc" ? 1 : -1;
     const compare = (a: StepDetail, b: StepDetail): number => {
@@ -146,13 +151,14 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
         // Sort the change column by its magnitude, not its rendered text.
         case "change": return (a.target_replicas - (a.current_replicas ?? 0)) - (b.target_replicas - (b.current_replicas ?? 0));
         case "duration": return (a.duration_seconds ?? 0) - (b.duration_seconds ?? 0);
-        case "status": return a.status.localeCompare(b.status);
-        default: return a.deployment.localeCompare(b.deployment);
+        case "status": return effectiveStepStatus(a, h.status).localeCompare(effectiveStepStatus(b, h.status));
+        case "deployment": return a.deployment.localeCompare(b.deployment);
+        default: return (a.step ?? 0) - (b.step ?? 0);
       }
     };
     return [...rows].sort((a, b) => {
       const c = compare(a, b);
-      return c !== 0 ? c * dir : a.deployment.localeCompare(b.deployment);
+      return c !== 0 ? c * dir : (a.step ?? 0) - (b.step ?? 0);
     });
   };
 
@@ -188,10 +194,13 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
           <tbody>
             {paginated.map((h) => {
               // Derive progress from step_details for consistency
-              const stepsCompleted = h.step_details ? h.step_details.filter((d) => d.status === "completed").length : h.completed_count;
-              const stepsRunning = h.step_details ? h.step_details.filter((d) => d.status === "running").length : 0;
-              const stepsFailed = h.step_details ? h.step_details.filter((d) => d.status === "failed").length : h.failed_count;
-              const stepsDone = stepsCompleted + stepsFailed;
+              const counts = h.step_details ? stepCounts(h.step_details, h.status) : null;
+              const stepsCompleted = counts ? counts.completed : h.completed_count;
+              const stepsRunning = counts ? counts.running : 0;
+              const stepsFailed = counts ? counts.failed : h.failed_count;
+              const stepsNotRun = counts ? counts.not_run : 0;
+              const stepsDone = h.status === "running" ? stepsCompleted + stepsFailed : h.total_deployments;
+              const runName = h.sequence_name ?? h.schedule_name;
               return (
               <React.Fragment key={h.id}>
                 <tr
@@ -207,23 +216,24 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                     </span>
                   </td>
                   <td className={gridStyles.cell}>{h.namespace}</td>
-                  <td className={gridStyles.cell}>{h.operation.replace(/_/g, " ")}</td>
                   <td className={gridStyles.cell}>
-                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[h.status] || "bg-gray-100 text-gray-600"}`}>
-                      {h.status === "running" && <svg className="mr-1 h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>}
-                      {h.status.replace(/_/g, " ")}
-                    </span>
+                    <span className="block">{operationLabel(h.operation)}</span>
+                    {runName && <span className="block text-xs font-semibold text-gray-900" title={h.schedule_name && h.sequence_name ? `Schedule: ${h.schedule_name}` : undefined}>{runName}</span>}
+                  </td>
+                  <td className={gridStyles.cell}>
+                    <StatusBadge status={h.status} size="md" />
                   </td>
                   <td className={gridStyles.centerCell}>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2" title={`${stepsCompleted} completed, ${stepsFailed} failed${stepsNotRun ? `, ${stepsNotRun} not run` : ""} of ${h.total_deployments}`}>
                       <div className="h-2 w-16 rounded-full bg-gray-200 overflow-hidden">
                         <div
-                          className={`h-2 rounded-full transition-all duration-700 ${h.status === "running" ? "bg-gradient-to-r from-att-400 to-att-600" : h.status === "failed" || stepsFailed > 0 ? "bg-red-500" : "bg-green-500"}`}
-                          style={{ width: h.total_deployments > 0 ? `${(stepsDone / h.total_deployments) * 100}%` : "0%" }}
+                          className={`h-2 rounded-full transition-all duration-700 ${h.status === "running" ? "bg-gradient-to-r from-att-400 to-att-600" : h.status === "rolled_back" ? "bg-orange-500" : h.status === "failed" || stepsFailed > 0 ? "bg-red-500" : "bg-green-500"}`}
+                          style={{ width: h.total_deployments > 0 ? `${Math.min(100, (stepsDone / h.total_deployments) * 100)}%` : "0%" }}
                         />
                       </div>
-                      <span className="text-xs text-gray-500">
+                      <span className="whitespace-nowrap text-xs text-gray-500">
                         {stepsCompleted}/{h.total_deployments}
+                        {stepsFailed > 0 && <span className="ml-1 font-semibold text-red-600">· {stepsFailed} failed</span>}
                       </span>
                     </div>
                   </td>
@@ -252,90 +262,46 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                           <span className="text-xs text-blue-600">{stepsCompleted} of {h.total_deployments} steps done{stepsRunning > 0 ? `, ${stepsRunning} running` : ""}</span>
                         </div>
                       )}
-                      {/* Detail search */}
-                      <div className="flex items-center gap-3">
-                        <span className="text-xs font-semibold text-gray-600">{h.step_details ? getFilteredDetails(h).length : h.total_deployments} deployment step{(h.step_details ? getFilteredDetails(h).length : h.total_deployments) !== 1 ? "s" : ""}</span>
+                      {/* Summary + detail search */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {counts && (
+                          <>
+                            <span className="rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-200">{counts.completed} completed</span>
+                            {counts.failed > 0 && <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-200">{counts.failed} failed</span>}
+                            {counts.running > 0 && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-200">{counts.running} running</span>}
+                            {counts.pending > 0 && <span className="rounded-full bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-600 ring-1 ring-inset ring-gray-200">{counts.pending} pending</span>}
+                            {counts.not_run > 0 && <span className="rounded-full bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-600 ring-1 ring-inset ring-gray-200">{counts.not_run} not run</span>}
+                            {counts.rolledBack > 0 && <span className="rounded-full bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-700 ring-1 ring-inset ring-orange-200">{counts.rolledBack} rolled back</span>}
+                          </>
+                        )}
+                        <span className="text-xs text-gray-400">
+                          {h.step_details ? getFilteredDetails(h).length : h.total_deployments} step{(h.step_details ? getFilteredDetails(h).length : h.total_deployments) !== 1 ? "s" : ""}
+                          {h.initiated_by_email && <> · started by {h.initiated_by_email}</>}
+                          {h.completed_at && <> · finished {new Date(h.completed_at).toLocaleString()}</>}
+                        </span>
                         <input
                           type="text"
                           placeholder="Search steps..."
+                          aria-label="Search steps"
                           value={detailSearch}
                           onChange={(e) => setDetailSearch(e.target.value)}
                           onClick={(e) => e.stopPropagation()}
                           className="ml-auto w-48 rounded-lg border border-gray-300 px-2 py-1 text-xs focus:border-att-400 focus:ring-1 focus:ring-att-100"
                         />
                       </div>
+                      {h.error_message && (
+                        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800" role="alert">{h.error_message}</div>
+                      )}
                       {h.step_details && h.step_details.length > 0 ? (
-                        <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white">
-                          <table className="w-full text-xs">
-                            <thead className="bg-gray-50 sticky top-0">
-                              <tr>
-                                <th className="px-3 py-1.5 text-left font-semibold text-gray-600"><SortableHeader label="Deployment Name" active={stepSort.key === "deployment"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "deployment"))} /></th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600"><SortableHeader label="Scale Change" active={stepSort.key === "change"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "change"))} align="center" /></th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600"><SortableHeader label="Status" active={stepSort.key === "status"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "status"))} align="center" /></th>
-                                <th className="px-3 py-1.5 text-center font-semibold text-gray-600"><SortableHeader label="Duration" active={stepSort.key === "duration"} direction={stepSort.direction} onClick={() => setStepSort(nextSortState(stepSort, "duration"))} align="center" /></th>
-                                <th className="px-3 py-1.5 text-left font-semibold text-gray-600">Error</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {getFilteredDetails(h).map((d, i) => (
-                                <tr key={i} className={`border-t border-gray-100 ${d.status === "running" ? "bg-blue-50/50" : ""}`}>
-                                  <td className="px-3 py-1.5 font-mono">
-                                    {(d.status === "running" || d.status === "pending") && h.status === "running" ? (
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); handleShowLog(h, d.deployment); }}
-                                        className="text-att-600 hover:text-att-800 hover:underline font-mono text-xs"
-                                        title="View deployment events"
-                                      >
-                                        {d.deployment}
-                                      </button>
-                                    ) : (
-                                      <span className="text-xs">{d.deployment}</span>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-1.5 text-center font-mono text-xs">
-                                    {d.current_replicas != null ? (
-                                      <span className="inline-flex items-center gap-1">
-                                        <span className="text-gray-500">{d.current_replicas}</span>
-                                        <svg className="h-3 w-3 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-                                        <span className={d.target_replicas > (d.current_replicas ?? 0) ? "text-green-700 font-semibold" : d.target_replicas < (d.current_replicas ?? 0) ? "text-red-700 font-semibold" : "text-gray-600"}>{d.target_replicas}</span>
-                                      </span>
-                                    ) : (
-                                      <span>{d.target_replicas}</span>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-1.5 text-center">
-                                    {d.status === "running" ? (
-                                      <span className="inline-flex items-center gap-1 text-xs font-medium text-att-600">
-                                        <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>
-                                        Running
-                                      </span>
-                                    ) : d.status === "pending" ? (
-                                      <span className="inline-flex items-center gap-1 text-xs text-gray-400">
-                                        <span className="h-2 w-2 rounded-full bg-gray-300"></span>
-                                        Pending
-                                      </span>
-                                    ) : (
-                                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[d.status] || "bg-gray-100 text-gray-600"}`}>
-                                        {d.status === "completed" && <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12" /></svg>}
-                                        {d.status}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-1.5 text-center text-xs text-gray-500">
-                                    {d.duration_seconds != null
-                                      ? formatElapsed(Math.round(d.duration_seconds))
-                                      : d.status === "running" && (d as unknown as Record<string, unknown>).started_at
-                                        ? <StepElapsedTimer startedAt={String((d as unknown as Record<string, unknown>).started_at)} />
-                                        : "\u2014"}
-                                  </td>
-                                  <td className="px-3 py-1.5 text-red-500 max-w-xs truncate">{d.error || ""}</td>
-                                </tr>
-                              ))}
-                              {getFilteredDetails(h).length === 0 && (
-                                <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-400">No matching steps</td></tr>
-                              )}
-                            </tbody>
-                          </table>
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <ExecutionStepsTable
+                            steps={getFilteredDetails(h)}
+                            executionStatus={h.status}
+                            sort={stepSort}
+                            onSort={(key) => setStepSort(nextSortState(stepSort, key))}
+                            onShowLog={(dep) => handleShowLog(h, dep)}
+                            maxHeightClass="max-h-[26rem]"
+                          />
                         </div>
                       ) : h.status === "running" ? (
                         <div className="rounded-lg border border-gray-200 bg-white p-4 text-center text-xs text-gray-400">
@@ -343,9 +309,6 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                           Waiting for deployment steps to complete — data will appear in real-time
                         </div>
                       ) : null}
-                      {h.error_message && (
-                        <p className="text-xs text-red-600">Error: {h.error_message}</p>
-                      )}
                       {/* Deployment log viewer */}
                       {logDeployment && expandedId === h.id && (
                         <div className="mt-3 rounded-lg border border-gray-300 bg-gray-900 overflow-hidden">
@@ -400,25 +363,3 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
 };
 
 export default ExecutionHistoryGrid;
-
-/** Live elapsed timer for a running deployment step. */
-const StepElapsedTimer: React.FC<{ startedAt: string }> = ({ startedAt }) => {
-  const [elapsed, setElapsed] = useState(0);
-
-  useEffect(() => {
-    const start = new Date(startedAt).getTime();
-    if (isNaN(start)) return;
-    const update = () => setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
-    update();
-    const timer = setInterval(update, 1000);
-    return () => clearInterval(timer);
-  }, [startedAt]);
-
-  if (isNaN(new Date(startedAt).getTime())) return <span className="text-gray-400">—</span>;
-
-  const m = Math.floor(elapsed / 60);
-  const s = elapsed % 60;
-  const display = m > 0 ? `${m}m ${s}s` : `${s}s`;
-
-  return <span className="font-mono font-semibold text-att-600">{display}</span>;
-};
