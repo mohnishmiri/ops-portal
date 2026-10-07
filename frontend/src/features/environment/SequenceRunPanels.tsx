@@ -16,6 +16,7 @@ import {
   operationLabel,
   stepCounts,
   useElapsedSince,
+  waitSummary,
 } from "./executionStatus";
 import type { LiveDeployment } from "./SequenceStepList";
 
@@ -85,10 +86,8 @@ export const RunConfirmDialog: React.FC<RunConfirmProps> = ({ sequence, liveByNa
   });
   const missing = plan.filter((p) => p.missing);
   const deploymentCount = new Set(steps.map((s) => s.deployment_name)).size;
-  // Worst case: every pod wait runs to its timeout, every fixed wait in full.
-  const worstCase = isShutdown
-    ? 0
-    : steps.reduce((sum, s) => sum + (s.wait_condition === "skip" ? 0 : s.timeout_seconds || 0), 0);
+  const podWaits = isShutdown ? [] : steps.filter((s) => s.wait_condition !== "skip" && s.wait_condition !== "fixed_time");
+  const fixedWaits = isShutdown ? 0 : steps.reduce((sum, s) => sum + (s.wait_condition === "fixed_time" ? s.timeout_seconds || 0 : 0), 0);
 
   const confirm = async () => {
     setSubmitting(true);
@@ -144,7 +143,12 @@ export const RunConfirmDialog: React.FC<RunConfirmProps> = ({ sequence, liveByNa
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
             <p className="font-semibold text-gray-800">Duration</p>
-            <p>{isShutdown ? "Usually under a minute." : `Up to ${formatDuration(worstCase)} if every wait hits its limit.`} Runs on the server; you can leave this page.</p>
+            <p>
+              {isShutdown
+                ? "Usually under a minute."
+                : `${podWaits.length ? "Pod waits keep going while pods are still coming up and fail only when they stop progressing." : ""}${fixedWaits ? ` Fixed waits add ${formatDuration(fixedWaits)}.` : ""}`}{" "}
+              Runs on the server; you can leave this page.
+            </p>
           </div>
         </div>
 
@@ -175,8 +179,7 @@ export const RunConfirmDialog: React.FC<RunConfirmProps> = ({ sequence, liveByNa
                   <td className="px-3 py-1.5 text-center text-gray-500">{p.live ? `${p.live.ready_replicas}/${p.live.replicas}` : "—"}</td>
                   <td className="px-3 py-1.5 text-center"><ScaleChange from={p.from} to={p.to} /></td>
                   <td className="px-3 py-1.5 text-gray-500">
-                    {isShutdown ? "No wait" : WAIT_LABELS[p.step.wait_condition] ?? p.step.wait_condition}
-                    {!isShutdown && p.step.wait_condition !== "skip" && ` · ${p.step.wait_condition === "fixed_time" ? "" : "≤ "}${formatDuration(p.step.timeout_seconds)}`}
+                    {isShutdown ? "No wait" : waitSummary(p.step.wait_condition, p.step.timeout_seconds, p.step.min_ready_percent)}
                   </td>
                   <td className={`px-3 py-1.5 ${p.step.on_failure === "continue" ? "text-amber-700" : "text-gray-500"}`}>{p.step.on_failure === "continue" ? "Continue" : "Abort"}</td>
                 </tr>
@@ -323,7 +326,9 @@ export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClos
         <div className="mb-1 flex justify-between text-xs text-gray-500">
           <span>
             {running && current
-              ? <>Step {current.step ?? "?"} of {total}: <span className="font-mono font-semibold text-gray-700">{current.deployment}</span> → {current.target_replicas} pods{current.wait_condition && current.wait_condition !== "skip" ? `, ${WAIT_LABELS[current.wait_condition]?.toLowerCase() ?? current.wait_condition}` : ""}</>
+              ? <>Step {current.step ?? "?"} of {total}: <span className="font-mono font-semibold text-gray-700">{current.deployment}</span> → {current.target_replicas} pods{current.ready_replicas != null
+                  ? `, ${current.ready_replicas}/${current.target_replicas} ready${current.required_ready != null && current.required_ready < current.target_replicas ? ` (moves on at ${current.required_ready})` : ""}`
+                  : current.wait_condition && current.wait_condition !== "skip" ? `, ${WAIT_LABELS[current.wait_condition]?.toLowerCase() ?? current.wait_condition}` : ""}</>
               : `${finished} of ${total} steps finished`}
           </span>
           <span>{pct}%</span>

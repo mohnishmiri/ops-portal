@@ -77,7 +77,9 @@ export const StatusBadge: React.FC<{ status: string; size?: "sm" | "md" }> = ({ 
  */
 export function effectiveStepStatus(step: StepDetail, executionStatus: string): string {
   if (executionStatus === "running") return step.status;
-  if (step.status === "pending") return "not_run";
+  // Very old executors marked never-run steps "rolled_back"; the step itself
+  // never ran (undone steps carry rollback_status instead).
+  if (step.status === "pending" || (step.status === "rolled_back" && step.duration_seconds == null)) return "not_run";
   if (step.status === "running") return "interrupted";
   return step.status;
 }
@@ -104,6 +106,16 @@ export const WAIT_LABELS: Record<string, string> = {
   fixed_time: "Fixed wait",
   skip: "No wait",
 };
+
+/** "Pods ready (80%) · fail if stuck 10m", "Fixed wait · 30s", "No wait". */
+export function waitSummary(wait?: string | null, timeout?: number | null, percent?: number | null): string {
+  if (!wait) return "—";
+  const base = WAIT_LABELS[wait] ?? wait;
+  if (wait === "skip") return base;
+  if (wait === "fixed_time") return timeout != null ? `${base} · ${formatDuration(timeout)}` : base;
+  const share = percent != null && percent < 100 ? ` (${percent}%)` : "";
+  return `${base}${share}${timeout != null ? ` · fail if stuck ${formatDuration(timeout)}` : ""}`;
+}
 
 export function operationLabel(operation: string): string {
   switch (operation) {
@@ -153,6 +165,21 @@ export const ScaleChange: React.FC<{ from?: number | null; to: number }> = ({ fr
   );
 };
 
+/** "37/60 ready" with a bar; marks the threshold when a step may move on early. */
+const ReadyMeter: React.FC<{ ready: number; target: number; required?: number; live: boolean }> = ({ ready, target, required, live }) => {
+  const pct = Math.min(100, Math.round((ready / target) * 100));
+  const threshold = required != null && required < target ? Math.round((required / target) * 100) : null;
+  return (
+    <div className="mx-auto mt-1 w-24" title={threshold != null ? `Moves on at ${required}/${target} ready` : undefined}>
+      <div className="relative h-1.5 overflow-hidden rounded-full bg-gray-200">
+        <div className={`h-1.5 rounded-full ${live ? "bg-att-500" : ready >= (required ?? target) ? "bg-green-500" : "bg-red-400"}`} style={{ width: `${pct}%` }} />
+        {threshold != null && <div className="absolute inset-y-0 w-px bg-gray-600" style={{ left: `${threshold}%` }} />}
+      </div>
+      <p className="mt-0.5 text-[10px] text-gray-500">{ready}/{target} ready</p>
+    </div>
+  );
+};
+
 export type StepSortKey = "step" | "deployment" | "change" | "status" | "duration";
 
 interface StepsTableProps {
@@ -187,7 +214,7 @@ export const ExecutionStepsTable: React.FC<StepsTableProps> = ({
         <thead className="sticky top-0 z-10 bg-gray-50">
           <tr className="text-gray-600">
             <th className="w-12 px-3 py-2 text-left font-semibold">{header("#", "step")}</th>
-            <th className="px-3 py-2 text-left font-semibold">{header("Deployment", "deployment")}</th>
+            <th className="min-w-[13rem] px-3 py-2 text-left font-semibold">{header("Deployment", "deployment")}</th>
             <th className="px-3 py-2 text-center font-semibold">{header("Replicas", "change", "center")}</th>
             <th className="px-3 py-2 text-left font-semibold">Wait</th>
             <th className="px-3 py-2 text-left font-semibold">{header("Status", "status")}</th>
@@ -225,13 +252,13 @@ export const ExecutionStepsTable: React.FC<StepsTableProps> = ({
                     <span className="break-all">{d.deployment}</span>
                   )}
                 </td>
-                <td className="px-3 py-2 text-center"><ScaleChange from={d.current_replicas} to={d.target_replicas} /></td>
-                <td className="px-3 py-2 whitespace-nowrap text-gray-500">
-                  {d.wait_condition ? WAIT_LABELS[d.wait_condition] ?? d.wait_condition : "—"}
-                  {d.wait_condition && d.wait_condition !== "skip" && d.timeout_seconds != null && (
-                    <span className="text-gray-400"> · {d.wait_condition === "fixed_time" ? "" : "≤ "}{formatDuration(d.timeout_seconds)}</span>
+                <td className="px-3 py-2 text-center">
+                  <ScaleChange from={d.current_replicas} to={d.target_replicas} />
+                  {d.ready_replicas != null && d.target_replicas > 0 && (status === "running" || status === "failed" || d.note) && (
+                    <ReadyMeter ready={d.ready_replicas} target={d.target_replicas} required={d.required_ready} live={status === "running"} />
                   )}
                 </td>
+                <td className="px-3 py-2 text-gray-500">{waitSummary(d.wait_condition, d.timeout_seconds, d.min_ready_percent)}</td>
                 <td className="px-3 py-2">
                   <div className="flex flex-col items-start gap-1">
                     <StatusBadge status={status} />
@@ -251,6 +278,8 @@ export const ExecutionStepsTable: React.FC<StepsTableProps> = ({
                 </td>
                 <td className="px-3 py-2 text-[11px]">
                   {d.error && <p className="break-words text-red-700">{d.error}</p>}
+                  {status === "running" && d.pod_issues && <p className="break-words text-amber-700">{d.pod_issues}</p>}
+                  {d.note && <p className="break-words text-gray-600">{d.note}</p>}
                   {d.rollback_status === "rolled_back" && d.rolled_back_to != null && (
                     <p className="text-orange-700">Restored to {d.rolled_back_to} replica{d.rolled_back_to === 1 ? "" : "s"}</p>
                   )}

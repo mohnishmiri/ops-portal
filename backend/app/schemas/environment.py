@@ -141,8 +141,11 @@ class SequenceStep(BaseModel):
     deployment_name: str = Field(min_length=1, max_length=253)
     replicas: int = Field(default=1, ge=0, le=100)
     wait_condition: WaitCondition = WaitCondition.PODS_READY
-    # Timeout for the pod waits; the wait itself for fixed_time.
+    # Pod waits: fail after this long with no newly ready pod (restarts on
+    # progress, capped at 2h). fixed_time: the wait itself.
     timeout_seconds: int = Field(default=600, ge=0, le=3600)
+    # Pod waits: move on once this share of the target pods is ready.
+    min_ready_percent: int = Field(default=100, ge=1, le=100)
     health_endpoint: str | None = None
     retry_count: int = Field(default=3, ge=0, le=10)
     on_failure: Literal["abort", "continue"] = "abort"

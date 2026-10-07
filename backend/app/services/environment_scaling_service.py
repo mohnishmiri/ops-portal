@@ -10,6 +10,9 @@ Provides:
 
 import asyncio
 import json
+import math
+from collections import Counter
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -41,6 +44,60 @@ ABANDONED_GRACE_SECONDS = 300
 # Plain namespace scales have no per-step waits and finish in seconds.
 ABANDONED_SCALE_SECONDS = 900
 DEFAULT_STEP_TIMEOUT_SECONDS = 600
+# A pod wait restarts its timeout on every newly ready pod; this caps the total.
+STEP_WAIT_HARD_CAP_SECONDS = 7200
+POLL_SECONDS = 5
+# How long a pod wait goes without progress before it reports why, and how often.
+DIAGNOSE_AFTER_SECONDS = 60
+
+# (pods counted, pods required, diagnosis or None) — persisted for live progress.
+ProgressCallback = Callable[[int, int, str | None], Awaitable[None]]
+
+
+def required_ready_count(desired: int, min_ready_percent: int | None) -> int:
+    """Pods that must be ready before the next step: 80% of 60 is 48."""
+    percent = min(100, max(1, int(min_ready_percent or 100)))
+    return max(1, math.ceil(desired * percent / 100)) if desired > 0 else 0
+
+
+def _pod_not_ready_reason(pod) -> str | None:
+    status = pod.status
+    if status is None:
+        return None
+    if status.phase == "Pending":
+        for cond in status.conditions or []:
+            if cond.type == "PodScheduled" and cond.status == "False":
+                return f"unschedulable ({(cond.message or cond.reason or 'no node fits')[:160].rstrip('.')})"
+    for cs in [*(status.init_container_statuses or []), *(status.container_statuses or [])]:
+        waiting = cs.state.waiting if cs.state else None
+        if waiting and waiting.reason and waiting.reason not in ("ContainerCreating", "PodInitializing"):
+            return waiting.reason
+        terminated = cs.last_state.terminated if cs.last_state else None
+        if terminated and terminated.reason in ("OOMKilled", "Error") and not cs.ready and cs.restart_count:
+            return f"restarting ({terminated.reason})"
+    if status.phase == "Pending":
+        return "starting (pulling image / creating containers)"
+    if status.phase == "Running" and any(not cs.ready for cs in status.container_statuses or []):
+        return "running but failing the readiness probe"
+    return None
+
+
+def _diagnosis_hint(reasons: Counter) -> str:
+    text = " ".join(reasons)
+    if "Insufficient" in text or "Too many pods" in text or "didn't have free ports" in text:
+        return (
+            "The cluster has no room for more pods: check the node pool autoscaler maximum or the requested CPU/memory."
+        )
+    if "ImagePull" in text or "ErrImage" in text or "InvalidImageName" in text:
+        return "Image cannot be pulled: check the image tag and registry access; waiting longer won't help."
+    if "CrashLoopBackOff" in text or "restarting" in text:
+        return "Containers are crashing: check the pod logs; waiting longer won't help."
+    if "CreateContainerConfigError" in text:
+        return "A referenced ConfigMap or Secret is missing or invalid."
+    if "readiness probe" in text:
+        return "Pods run but don't pass readiness; check the app's dependencies and probe settings."
+    return ""
+
 
 # Holds references so background sequence runs are not garbage-collected.
 _background_runs: set[asyncio.Task] = set()
@@ -73,6 +130,21 @@ def _parse_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.rstrip("Z")).replace(tzinfo=None)
     except ValueError:
         return None
+
+
+def _stored_step(s: dict, index: int) -> dict:
+    """A sequence step as saved on create and update."""
+    return {
+        "order": s.get("order", index + 1),
+        "deployment_name": s["deployment_name"],
+        "replicas": s.get("replicas", 1),
+        "wait_condition": s.get("wait_condition", "pods_ready"),
+        "timeout_seconds": s.get("timeout_seconds", DEFAULT_STEP_TIMEOUT_SECONDS),
+        "min_ready_percent": s.get("min_ready_percent", 100),
+        "health_endpoint": s.get("health_endpoint"),
+        "retry_count": s.get("retry_count", 3),
+        "on_failure": s.get("on_failure", "abort"),
+    }
 
 
 def _describe_error(exc: Exception) -> str:
@@ -348,6 +420,7 @@ class EnvironmentScalingService:
                 # Scale-downs never waited; record that instead of a condition that is ignored.
                 "wait_condition": "skip" if is_shutdown else step.get("wait_condition", "pods_ready"),
                 "timeout_seconds": step.get("timeout_seconds", DEFAULT_STEP_TIMEOUT_SECONDS),
+                "min_ready_percent": step.get("min_ready_percent") or 100,
                 "on_failure": step.get("on_failure", "abort"),
                 "status": "pending",
             }
@@ -494,14 +567,35 @@ class EnvironmentScalingService:
                     step["current_replicas"] = (scaled or {}).get("previous_replicas")
                     step["scaled"] = True
                     if target > 0:
-                        await self._wait_for_deployment(
+
+                        async def on_progress(ready: int, required: int, issue: str | None, step=step) -> None:
+                            # Live "37/60 ready" in the UI; last_progress_at also tells
+                            # the abandoned-run sweep this step is alive.
+                            step["ready_replicas"] = ready
+                            step["required_ready"] = required
+                            if issue is None:
+                                step["last_progress_at"] = _iso_z(datetime.now(UTC))
+                                step.pop("pod_issues", None)
+                            else:
+                                step["pod_issues"] = issue
+                            await persist()
+
+                        reached = await self._wait_for_deployment(
                             cluster_id=sequence.cluster_id,
                             namespace=sequence.namespace,
                             deployment_name=dep_name,
                             desired_replicas=target,
                             timeout_seconds=int(step.get("timeout_seconds") or 0),
                             wait_condition=step.get("wait_condition", "pods_ready"),
+                            min_ready_percent=int(step.get("min_ready_percent") or 100),
+                            on_progress=on_progress,
                         )
+                        if 0 < reached < target:
+                            step["note"] = (
+                                f"Continued with {reached}/{target} ready ({step.get('min_ready_percent')}% threshold); "
+                                "the remaining pods keep starting"
+                            )
+                    step.pop("pod_issues", None)
                     completed += 1
                     step["status"] = "completed"
                 except Exception as exc:
@@ -638,22 +732,39 @@ class EnvironmentScalingService:
         desired_replicas: int,
         timeout_seconds: int,
         wait_condition: str,
-    ) -> None:
-        """Wait until a deployment meets the step's condition, or raise TimeoutError."""
+        min_ready_percent: int = 100,
+        on_progress: ProgressCallback | None = None,
+    ) -> int:
+        """Wait until enough pods meet the step's condition; returns the count reached.
+
+        The timeout is a no-progress window, not a total: it restarts whenever
+        another pod becomes ready, so a 60-pod scale-up that keeps coming up is
+        not failed halfway (nodes being added by the autoscaler take minutes).
+        A step fails when nothing improves for the whole window, or at the
+        STEP_WAIT_HARD_CAP_SECONDS safety limit. Raises TimeoutError with what
+        is holding the pods back.
+        """
         if wait_condition == "skip":
-            return
+            return 0
         if wait_condition == "fixed_time":
             await asyncio.sleep(max(0, timeout_seconds))
-            return
+            return 0
 
         # "health_endpoint" steps carry no URL to probe. Readiness probes are the
-        # health check Kubernetes already runs, so they wait for ready pods —
-        # previously they waited out the full timeout and then failed.
+        # health check Kubernetes already runs, so they wait for ready pods.
         use_available = wait_condition == "deployment_available"
+        label = "available" if use_available else "ready"
+        required = required_ready_count(desired_replicas, min_ready_percent)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
-        apps_v1, _, _ = await self.aks._get_k8s_clients(cluster_id)
+        started = loop.time()
+        hard_deadline = started + max(timeout_seconds, STEP_WAIT_HARD_CAP_SECONDS)
+        stall_deadline = started + timeout_seconds
+        last_progress = started
+        last_diagnosis = started
+        apps_v1, core_v1, _ = await self.aks._get_k8s_clients(cluster_id)
+        best = -1
         observed = 0
+        dep = None
 
         while True:
             try:
@@ -661,17 +772,75 @@ class EnvironmentScalingService:
                 ready = dep.status.ready_replicas or 0
                 available = dep.status.available_replicas or 0
                 observed = available if use_available else ready
-                if observed >= desired_replicas:
-                    return
             except ApiException:
                 pass
-            remaining = deadline - loop.time()
-            if remaining <= 0:
+            now = loop.time()
+            if observed >= required:
+                if on_progress:
+                    await on_progress(observed, required, None)
+                return observed
+            if observed > best:
+                best = observed
+                last_progress = now
+                stall_deadline = now + timeout_seconds
+                if on_progress:
+                    await on_progress(observed, required, None)
+            elif (
+                on_progress
+                and now - last_progress >= DIAGNOSE_AFTER_SECONDS
+                and now - last_diagnosis >= DIAGNOSE_AFTER_SECONDS
+            ):
+                # Stuck for a while: say why while it is still waiting, so
+                # someone can add nodes or fix the image before it fails.
+                last_diagnosis = now
+                await on_progress(observed, required, await self._diagnose_unready_pods(core_v1, dep, namespace))
+            if now >= stall_deadline or now >= hard_deadline:
                 break
-            await asyncio.sleep(min(5, remaining))
+            await asyncio.sleep(max(0, min(POLL_SECONDS, stall_deadline - now, hard_deadline - now)))
 
-        label = "available" if use_available else "ready"
-        raise TimeoutError(f"only {observed}/{desired_replicas} pods {label} after {timeout_seconds}s")
+        if now >= hard_deadline and now < stall_deadline:
+            message = f"only {observed}/{desired_replicas} pods {label} after the {STEP_WAIT_HARD_CAP_SECONDS // 60} min maximum wait"
+        else:
+            message = (
+                f"only {observed}/{desired_replicas} pods {label}; no new pod became {label} for {timeout_seconds}s"
+            )
+        if required < desired_replicas:
+            message += f" (needed {required})"
+        diagnosis = await self._diagnose_unready_pods(core_v1, dep, namespace)
+        raise TimeoutError(f"{message}. {diagnosis}" if diagnosis else message)
+
+    async def _diagnose_unready_pods(self, core_v1, dep, namespace: str) -> str:
+        """Why pods aren't ready, in a sentence: unschedulable (no capacity),
+        image or crash problems, failing readiness probes, or a quota that stops
+        pods from being created at all. Empty when it can't tell."""
+        try:
+            for cond in (dep.status.conditions or []) if dep is not None and dep.status else []:
+                # Quota and admission errors: the pods are never created.
+                if cond.type == "ReplicaFailure" and cond.status == "True":
+                    return f"Pods cannot be created: {(cond.message or cond.reason or '')[:220]}"
+            labels = dep.spec.selector.match_labels if dep is not None and dep.spec and dep.spec.selector else None
+            if not labels:
+                return ""
+            selector = ",".join(f"{k}={v}" for k, v in labels.items())
+            pods = await asyncio.to_thread(
+                core_v1.list_namespaced_pod, namespace, label_selector=selector, _request_timeout=15
+            )
+        except Exception:
+            return ""
+
+        reasons: Counter[str] = Counter()
+        for pod in pods.items or []:
+            if pod.metadata and pod.metadata.deletion_timestamp:
+                continue
+            reason = _pod_not_ready_reason(pod)
+            if reason:
+                reasons[reason] += 1
+        if not reasons:
+            return ""
+        parts = [f"{count} pod{'s' if count != 1 else ''} {reason}" for reason, count in reasons.most_common(3)]
+        summary = "; ".join(parts)
+        hint = _diagnosis_hint(reasons)
+        return (f"Not ready: {summary}." + (f" {hint}" if hint else ""))[:420]
 
     async def _rollback_steps(
         self,
@@ -772,7 +941,10 @@ class EnvironmentScalingService:
             if step_started is None:
                 continue
             if s.get("status") == "running":
-                end = step_started + timedelta(seconds=s.get("timeout_seconds") or DEFAULT_STEP_TIMEOUT_SECONDS)
+                # Pod waits restart their timeout on progress (see _wait_for_deployment).
+                progressed = _parse_iso(s.get("last_progress_at"))
+                base = max(step_started, progressed) if progressed else step_started
+                end = base + timedelta(seconds=s.get("timeout_seconds") or DEFAULT_STEP_TIMEOUT_SECONDS)
             else:
                 end = step_started + timedelta(seconds=s.get("duration_seconds") or 0)
             last_activity = max(last_activity, end)
@@ -953,19 +1125,7 @@ class EnvironmentScalingService:
         if not self.db:
             raise ValueError("Database required")
 
-        steps = [
-            {
-                "order": s.get("order", i + 1),
-                "deployment_name": s["deployment_name"],
-                "replicas": s.get("replicas", 1),
-                "wait_condition": s.get("wait_condition", "pods_ready"),
-                "timeout_seconds": s.get("timeout_seconds", 600),
-                "health_endpoint": s.get("health_endpoint"),
-                "retry_count": s.get("retry_count", 3),
-                "on_failure": s.get("on_failure", "abort"),
-            }
-            for i, s in enumerate(data.get("steps", []))
-        ]
+        steps = [_stored_step(s, i) for i, s in enumerate(data.get("steps", []))]
 
         sequence = EnvironmentSequence(
             name=data["name"],
@@ -1002,19 +1162,7 @@ class EnvironmentScalingService:
         if "rollback_on_failure" in data and data["rollback_on_failure"] is not None:
             sequence.rollback_on_failure = data["rollback_on_failure"]
         if "steps" in data and data["steps"] is not None:
-            sequence.steps = [
-                {
-                    "order": s.get("order", i + 1),
-                    "deployment_name": s["deployment_name"],
-                    "replicas": s.get("replicas", 1),
-                    "wait_condition": s.get("wait_condition", "pods_ready"),
-                    "timeout_seconds": s.get("timeout_seconds", 600),
-                    "health_endpoint": s.get("health_endpoint"),
-                    "retry_count": s.get("retry_count", 3),
-                    "on_failure": s.get("on_failure", "abort"),
-                }
-                for i, s in enumerate(data["steps"])
-            ]
+            sequence.steps = [_stored_step(s, i) for i, s in enumerate(data["steps"])]
 
         sequence.updated_at = datetime.now(UTC).replace(tzinfo=None)
         try:

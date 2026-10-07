@@ -50,6 +50,14 @@ export interface StepDetail {
   on_failure?: string;
   started_at?: string;
   duration_seconds?: number;
+  min_ready_percent?: number;
+  /** Live while a pod wait runs: pods ready so far and pods needed. */
+  ready_replicas?: number;
+  required_ready?: number;
+  last_progress_at?: string;
+  /** Why pods are not ready yet, e.g. "3 pods unschedulable (Insufficient cpu)". */
+  pod_issues?: string;
+  note?: string;
   rollback_status?: "rolled_back" | "rollback_failed";
   rolled_back_to?: number;
   rollback_error?: string;
@@ -117,7 +125,10 @@ export interface SequenceStep {
   deployment_name: string;
   replicas: number;
   wait_condition: "pods_ready" | "health_endpoint" | "fixed_time" | "deployment_available" | "skip";
+  /** Pod waits: fail after this long with no newly ready pod (restarts on progress). fixed_time: the wait. */
   timeout_seconds: number;
+  /** Pod waits: move on once this share of the target pods is ready (default 100). */
+  min_ready_percent?: number;
   health_endpoint?: string;
   retry_count: number;
   on_failure: "abort" | "continue";

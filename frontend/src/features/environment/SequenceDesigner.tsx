@@ -19,7 +19,7 @@ import type {
   SequenceStep,
 } from "../../services/environmentApi";
 import { gridStyles, SortableHeader, type SortState, nextSortState } from "../../components/gridStyles";
-import { StatusBadge, WAIT_LABELS, apiErrorMessage, formatDuration } from "./executionStatus";
+import { StatusBadge, apiErrorMessage, waitSummary } from "./executionStatus";
 import {
   DEFAULT_TIMEOUT_SECONDS,
   FAILURE_OPTIONS,
@@ -74,6 +74,7 @@ const toDraft = (s: SequenceStep, i: number): DraftStep => ({
   // "Health endpoint" never had a URL to probe; the server now treats it as pods ready.
   wait_condition: s.wait_condition === "health_endpoint" ? "pods_ready" : s.wait_condition ?? "pods_ready",
   timeout_seconds: s.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS,
+  min_ready_percent: s.min_ready_percent ?? 100,
   retry_count: s.retry_count ?? 3,
   on_failure: s.on_failure ?? "abort",
 });
@@ -261,6 +262,7 @@ const SequenceDesigner: React.FC<Props> = ({
             replicas: isShutdown ? 0 : 1,
             wait_condition: isShutdown ? "skip" : "pods_ready",
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+            min_ready_percent: 100,
             retry_count: 3,
             on_failure: "abort",
           },
@@ -641,8 +643,7 @@ const SequenceDesigner: React.FC<Props> = ({
                                   <td className="px-3 py-1.5 font-mono">{step.deployment_name}</td>
                                   <td className="px-3 py-1.5 text-center font-mono">{seqShutdown ? 0 : step.replicas}</td>
                                   <td className="px-3 py-1.5 text-gray-500">
-                                    {seqShutdown ? "No wait" : WAIT_LABELS[step.wait_condition] ?? step.wait_condition}
-                                    {!seqShutdown && step.wait_condition !== "skip" && ` · ${step.wait_condition === "fixed_time" ? "" : "≤ "}${formatDuration(step.timeout_seconds)}`}
+                                    {seqShutdown ? "No wait" : waitSummary(step.wait_condition, step.timeout_seconds, step.min_ready_percent)}
                                   </td>
                                   <td className="px-3 py-1.5">
                                     <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${step.on_failure === "continue" ? "bg-yellow-50 text-yellow-700" : "bg-red-50 text-red-600"}`}>

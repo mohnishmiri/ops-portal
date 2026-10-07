@@ -420,9 +420,30 @@ export const SequenceStepList: React.FC<StepListProps> = ({
                       {WAIT_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
                     </select>
                   </label>
+                  {waits && step.wait_condition !== "fixed_time" && (
+                    <span className="flex items-center gap-1.5" title="Start the next step once this share of the pods is ready; the rest keep starting in the background.">
+                      until
+                      <NumberField
+                        value={step.min_ready_percent ?? 100}
+                        min={1}
+                        max={100}
+                        widthClass="w-11"
+                        ariaLabel={`Percent of pods ready for step ${idx + 1}`}
+                        onCommit={(n) => update(step.uid, { min_ready_percent: n })}
+                      />
+                      % ready
+                    </span>
+                  )}
                   {waits && (
-                    <span className="flex items-center gap-1.5" title={step.wait_condition === "fixed_time" ? "Seconds to wait before the next step" : "Fail the step if not ready within this many seconds"}>
-                      {step.wait_condition === "fixed_time" ? "for" : "timeout"}
+                    <span
+                      className="flex items-center gap-1.5"
+                      title={
+                        step.wait_condition === "fixed_time"
+                          ? "Seconds to wait before the next step"
+                          : "Fail only if no additional pod becomes ready for this long. The clock restarts each time another pod is ready (up to 2 hours per step), so large scale-ups are not failed while they are still coming up."
+                      }
+                    >
+                      {step.wait_condition === "fixed_time" ? "for" : "fail if stuck for"}
                       <NumberField
                         value={step.timeout_seconds}
                         min={1}

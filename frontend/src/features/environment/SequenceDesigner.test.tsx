@@ -130,6 +130,19 @@ describe("SequenceDesigner builder", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
+  it("lets a big step move on once a share of its pods is ready", async () => {
+    const user = userEvent.setup();
+    const props = renderDesigner();
+    await user.click(screen.getByTitle("Edit Sequence"));
+    const percent = screen.getByLabelText("Percent of pods ready for step 1");
+    await user.clear(percent);
+    await user.type(percent, "80");
+    await user.click(screen.getByRole("button", { name: "Update Sequence" }));
+    expect(props.onUpdate).toHaveBeenCalledWith(7, expect.objectContaining({
+      steps: [expect.objectContaining({ min_ready_percent: 80 }), expect.objectContaining({ min_ready_percent: 100 })],
+    }));
+  });
+
   it("moves a step with the arrow buttons", async () => {
     const user = userEvent.setup();
     renderDesigner();
@@ -194,6 +207,52 @@ describe("SequenceDesigner runs and deletes", () => {
 });
 
 describe("ExecutionHistory sequence status", () => {
+  it("shows live ready counts and why pods are stuck for a running step", async () => {
+    render(
+      <ExecutionHistoryGrid
+        isLoading={false}
+        history={[{
+          id: 11, execution_type: "sequence", cluster_id: "c1", namespace: "apps", operation: "sequence_startup",
+          sequence_name: "UI_Startup", status: "running", total_deployments: 1, completed_count: 0, failed_count: 0,
+          skipped_count: 0, replica_count: 1, schedule_id: null, sequence_id: 7, initiated_by: "u1",
+          initiated_by_email: "ops@example.com", started_at: new Date().toISOString(), completed_at: null,
+          duration_seconds: null, error_message: null,
+          step_details: [{
+            step: 1, deployment: "reportmanager-4-1-d2a", current_replicas: 0, target_replicas: 60, status: "running",
+            started_at: new Date().toISOString(), wait_condition: "pods_ready", timeout_seconds: 600, min_ready_percent: 80,
+            ready_replicas: 37, required_ready: 48, pod_issues: "Not ready: 23 pods unschedulable (0/12 nodes are available: 12 Insufficient cpu).",
+          }],
+        } as any]}
+      />,
+    );
+    // Running executions open on their own.
+    expect(await screen.findByText("37/60 ready")).toBeTruthy();
+    expect(screen.getByText(/23 pods unschedulable/)).toBeTruthy();
+    expect(screen.getByText("Pods ready (80%) · fail if stuck 10m")).toBeTruthy();
+  });
+
+  it("shows steps an old executor marked rolled_back without running them as Not run", async () => {
+    const user = userEvent.setup();
+    render(
+      <ExecutionHistoryGrid
+        isLoading={false}
+        history={[{
+          id: 12, execution_type: "sequence", cluster_id: "c1", namespace: "apps", operation: "sequence_startup",
+          sequence_name: "UI_Startup", status: "rolled_back", total_deployments: 2, completed_count: 1, failed_count: 1,
+          skipped_count: 0, replica_count: 1, schedule_id: null, sequence_id: 7, initiated_by: "u1",
+          initiated_by_email: null, started_at: "2026-08-10T16:13:52Z", completed_at: "2026-08-10T16:23:54Z",
+          duration_seconds: 603, error_message: null,
+          step_details: [
+            { deployment: "reportmanager-4-1-d2a", target_replicas: 1, status: "failed", order: 1, duration_seconds: 601 },
+            { deployment: "dataloader-4-1-d2a", target_replicas: 1, status: "rolled_back", order: 2 },
+          ],
+        } as any]}
+      />,
+    );
+    await act(async () => { await user.click(screen.getAllByText("Startup sequence")[0]); });
+    expect(screen.getByText("Not run")).toBeTruthy();
+  });
+
   it("names the sequence and shows unrun steps of a finished run as Not run, in step order", async () => {
     const user = userEvent.setup();
     render(
