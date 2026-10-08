@@ -42,9 +42,10 @@ class NotificationService:
         msg["From"] = settings.SMTP_FROM_ADDRESS
         msg["To"] = ", ".join(recipients)
 
+        # utf-8 → base64 in short lines; 7bit long lines get broken by relays at 998.
         if body_text:
-            msg.attach(MIMEText(body_text, "plain"))
-        msg.attach(MIMEText(body_html, "html"))
+            msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
 
         # Attach files
         if attachments:

@@ -792,7 +792,10 @@ class EmailNotificationService:
         msg["From"] = self.smtp_from
         msg["To"] = recipient
 
-        msg.attach(MIMEText(html_body, "html"))
+        # utf-8 makes the body base64 in short lines. Plain-ASCII HTML otherwise
+        # goes out 7bit with lines thousands of characters long, and relays break
+        # them at 998 mid-tag, which scrambles every table in the email.
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
 
         # Run SMTP in executor to avoid blocking
         loop = asyncio.get_event_loop()

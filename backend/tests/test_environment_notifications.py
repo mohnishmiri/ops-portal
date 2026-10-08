@@ -163,6 +163,27 @@ def test_the_summary_says_what_ran_where_and_why_it_failed():
     assert "<script>" not in html and "&lt;script&gt;" in html  # error text is escaped
 
 
+async def test_the_summary_survives_smtp_line_limits(monkeypatch):
+    # Relays break lines at 998 characters. The steps table renders as one line
+    # far longer than that, and sent 7bit it arrived with its cells scrambled.
+    from email import message_from_string
+
+    from app.services.email_notification_service import EmailNotificationService
+
+    _, html = render_email(_report(status="completed", error_message=None))
+    assert max(len(line) for line in html.splitlines()) > 998
+
+    wire: list[str] = []
+    mailer = EmailNotificationService(None)
+    monkeypatch.setattr(mailer, "_smtp_send", lambda msg, recipient: wire.append(msg.as_string()))
+    await mailer._send_via_smtp("ops@att.com", "subject", html)
+
+    assert max(len(line) for line in wire[0].splitlines()) <= 998
+    part = next(p for p in message_from_string(wire[0]).walk() if p.get_content_type() == "text/html")
+    assert part["Content-Transfer-Encoding"] == "base64"
+    assert part.get_payload(decode=True).decode(part.get_content_charset()) == html
+
+
 def test_subjects_for_success_and_rollback():
     assert render_email(_report(status="completed", error_message=None))[0].startswith("[OpsPortal] Completed: ")
     assert render_email(_report(status="rolled_back"))[0].startswith("[OpsPortal] FAILED (rolled back): ")
