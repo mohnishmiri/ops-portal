@@ -15,6 +15,7 @@ import type {
   EnvironmentScaleResult,
   EnvironmentSequence,
   ExecutionHistory,
+  NotifyOn,
   SequenceCreateRequest,
   SequenceStep,
 } from "../../services/environmentApi";
@@ -31,6 +32,7 @@ import {
   type LiveDeployment,
 } from "./SequenceStepList";
 import { DeleteSequenceDialog, RunConfirmDialog, SequenceExecutionPanel } from "./SequenceRunPanels";
+import { NotificationFields, invalidEmails } from "./NotificationFields";
 
 interface Deployment {
   name: string;
@@ -82,8 +84,13 @@ const toDraft = (s: SequenceStep, i: number): DraftStep => ({
 const toPayload = (steps: DraftStep[]): SequenceStep[] =>
   steps.map(({ uid: _uid, ...step }, i) => ({ ...step, order: i + 1 }));
 
-const snapshot = (name: string, rollback: boolean, steps: DraftStep[]) =>
-  JSON.stringify({ name: name.trim(), rollback, steps: toPayload(steps) });
+interface NotifySettings {
+  notifyOn: NotifyOn;
+  emails: string;
+}
+
+const snapshot = (name: string, rollback: boolean, steps: DraftStep[], notify: NotifySettings) =>
+  JSON.stringify({ name: name.trim(), rollback, steps: toPayload(steps), notify: [notify.notifyOn, notify.emails.trim()] });
 
 const SequenceDesigner: React.FC<Props> = ({
   canWrite,
@@ -109,6 +116,8 @@ const SequenceDesigner: React.FC<Props> = ({
   const [seqName, setSeqName] = useState("");
   const [seqType, setSeqType] = useState<"startup" | "shutdown">("startup");
   const [rollback, setRollback] = useState(true);
+  const [notifyOn, setNotifyOn] = useState<NotifyOn>("always");
+  const [notifyEmails, setNotifyEmails] = useState("");
   const [steps, setSteps] = useState<DraftStep[]>([]);
   const [builderSearch, setBuilderSearch] = useState("");
   const [saving, setSaving] = useState(false);
@@ -180,7 +189,10 @@ const SequenceDesigner: React.FC<Props> = ({
   if (!trimmedName) blockers.push("Enter a sequence name.");
   else if (nameTaken) blockers.push(`A sequence named "${trimmedName}" already exists in ${namespace}.`);
   if (steps.length === 0) blockers.push("Add at least one step.");
-  const isDirty = showBuilder && snapshot(seqName, rollback, steps) !== initialSnapshot.current;
+  const badEmails = invalidEmails(notifyEmails);
+  if (badEmails.length) blockers.push(`Fix the notification address: ${badEmails[0]}`);
+  const isDirty =
+    showBuilder && snapshot(seqName, rollback, steps, { notifyOn, emails: notifyEmails }) !== initialSnapshot.current;
 
   useEffect(() => {
     if (!highlightUid) return;
@@ -188,7 +200,17 @@ const SequenceDesigner: React.FC<Props> = ({
     return () => clearTimeout(t);
   }, [highlightUid]);
 
-  const openBuilder = (init: { id: number | null; name: string; type: "startup" | "shutdown"; rollback: boolean; steps: DraftStep[] }) => {
+  const openBuilder = (init: {
+    id: number | null;
+    name: string;
+    type: "startup" | "shutdown";
+    rollback: boolean;
+    steps: DraftStep[];
+    notify?: NotifySettings;
+  }) => {
+    const notify = init.notify ?? { notifyOn: "always" as NotifyOn, emails: "" };
+    setNotifyOn(notify.notifyOn);
+    setNotifyEmails(notify.emails);
     setEditingId(init.id);
     setSeqName(init.name);
     setSeqType(init.type);
@@ -197,7 +219,7 @@ const SequenceDesigner: React.FC<Props> = ({
     setBuilderSearch("");
     setSaveError(null);
     setNameTouched(false);
-    initialSnapshot.current = snapshot(init.name, init.rollback, init.steps);
+    initialSnapshot.current = snapshot(init.name, init.rollback, init.steps, notify);
     setShowBuilder(true);
     requestAnimationFrame(() => builderRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }));
   };
@@ -233,6 +255,7 @@ const SequenceDesigner: React.FC<Props> = ({
       type: seq.sequence_type,
       rollback: seq.rollback_on_failure,
       steps: [...seq.steps].sort((a, b) => a.order - b.order).map(toDraft),
+      notify: { notifyOn: seq.notify_on ?? "always", emails: seq.notification_emails ?? "" },
     });
   };
 
@@ -246,6 +269,7 @@ const SequenceDesigner: React.FC<Props> = ({
       type: seq.sequence_type,
       rollback: seq.rollback_on_failure,
       steps: [...seq.steps].sort((a, b) => a.order - b.order).map(toDraft),
+      notify: { notifyOn: seq.notify_on ?? "always", emails: seq.notification_emails ?? "" },
     });
   };
 
@@ -279,7 +303,14 @@ const SequenceDesigner: React.FC<Props> = ({
 
   const addAllNotYetAdded = () => notYetAdded.forEach((d) => addStep(d.name));
 
-  const applyToAll = (changes: Partial<SequenceStep>) => setSteps((prev) => prev.map((s) => ({ ...s, ...changes })));
+  const applyToAll = (changes: Partial<SequenceStep>) =>
+    setSteps((prev) =>
+      prev.map((s) => {
+        // Steps that stop a deployment keep waiting for pods to stop, not to be ready.
+        const podWait = changes.wait_condition === "pods_ready" || changes.wait_condition === "deployment_available";
+        return { ...s, ...changes, ...(podWait && s.replicas === 0 ? { wait_condition: "pods_terminated" as const } : {}) };
+      }),
+    );
 
   const handleSave = async () => {
     setNameTouched(true);
@@ -289,9 +320,24 @@ const SequenceDesigner: React.FC<Props> = ({
     try {
       const payload = toPayload(steps);
       if (editingId) {
-        await onUpdate(editingId, { name: trimmedName, steps: payload, rollback_on_failure: rollback });
+        await onUpdate(editingId, {
+          name: trimmedName,
+          steps: payload,
+          rollback_on_failure: rollback,
+          notify_on: notifyOn,
+          notification_emails: notifyEmails.trim(),
+        });
       } else {
-        await onCreate({ name: trimmedName, cluster_id: clusterId, namespace, sequence_type: seqType, steps: payload, rollback_on_failure: rollback });
+        await onCreate({
+          name: trimmedName,
+          cluster_id: clusterId,
+          namespace,
+          sequence_type: seqType,
+          steps: payload,
+          rollback_on_failure: rollback,
+          notify_on: notifyOn,
+          notification_emails: notifyEmails.trim() || undefined,
+        });
       }
       closeBuilder();
     } catch (err) {
@@ -394,6 +440,18 @@ const SequenceDesigner: React.FC<Props> = ({
                   : "If an aborting step fails, deployments this run scaled go back to their previous replica counts, newest first."}
               </p>
             </div>
+          </div>
+
+          <div className="rounded-lg border border-gray-200 bg-white px-4 py-3">
+            <NotificationFields
+              idPrefix="seq"
+              notifyOn={notifyOn}
+              onNotifyOnChange={setNotifyOn}
+              emails={notifyEmails}
+              onEmailsChange={setNotifyEmails}
+              alwaysIncluded="Whoever starts a run"
+            />
+            <p className="mt-2 text-xs text-gray-400">Schedules that run this sequence also email their own recipients.</p>
           </div>
 
           <div className="grid gap-5 lg:grid-cols-5">

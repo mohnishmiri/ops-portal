@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import Text, cast, delete, func, select, update
+from sqlalchemy import Text, cast, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
@@ -797,6 +797,27 @@ class CertificateSyncService:
         result = await self.db.execute(
             select(CertificateSnapshot).where(*conditions).order_by(CertificateSnapshot.not_after)
         )
+        return [self._serialize_cert(r) for r in result.scalars().all()]
+
+    async def find_certificates(
+        self,
+        *,
+        certificate_ids: set[int] | None = None,
+        common_names: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Cached rows matching any id or (case-insensitive) common name, in every collection.
+
+        Revoked and soft-deleted rows are included so callers can tell a
+        replacement that was withdrawn from one that does not exist yet.
+        """
+        clauses = []
+        if certificate_ids:
+            clauses.append(CertificateSnapshot.certificate_id.in_(sorted(certificate_ids)))
+        if common_names:
+            clauses.append(func.lower(CertificateSnapshot.common_name).in_(sorted(common_names)))
+        if not clauses:
+            return []
+        result = await self.db.execute(select(CertificateSnapshot).where(or_(*clauses)))
         return [self._serialize_cert(r) for r in result.scalars().all()]
 
     async def list_certificates_from_db(

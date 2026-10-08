@@ -15,24 +15,29 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
+from apscheduler.triggers.cron import CronTrigger
 from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, desc, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.access_scope import arm_scope_clause, assert_resource_access
+from app.core.cron import cron_trigger_from_crontab
 from app.models.database import (
     AuditLog,
     EnvironmentExecutionHistory,
     EnvironmentSchedule,
     EnvironmentSequence,
 )
+from app.services import environment_notifications as notifications
 from app.services.aks_operations_service import (
     AKSOperationsService,
     get_aks_operations_service,
 )
+from app.services.environment_notifications import RunReport, parse_recipients, should_notify
 
 logger = structlog.get_logger(__name__)
 
@@ -115,6 +120,125 @@ class SequenceInUseError(Exception):
     """Schedules still reference the sequence."""
 
 
+class ScheduleValidationError(ValueError):
+    """The schedule's timing can't produce a sensible run."""
+
+
+# ── Schedule timing ────────────────────────────────────────────────────
+#
+# start_date / end_date are wall-clock times in the schedule's timezone (what
+# the form shows next to the timezone picker); next_run_at is stored in UTC.
+# Daily / weekly / monthly runs are anchored to the start time — "daily from
+# Oct 8 08:00 US/Central" runs at 08:00 Central every day, across DST — instead
+# of "24h after the last tick", which drifted and skipped the first day.
+
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def schedule_zone(name: str | None) -> ZoneInfo:
+    try:
+        return ZoneInfo(name or "UTC")
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ScheduleValidationError(f"Unknown timezone: {name}") from exc
+
+
+def local_to_utc(value: datetime | None, tz_name: str | None) -> datetime | None:
+    """A wall-clock time in the schedule's timezone → naive UTC."""
+    if value is None:
+        return None
+    return value.replace(tzinfo=schedule_zone(tz_name)).astimezone(UTC).replace(tzinfo=None)
+
+
+def to_schedule_local(value: Any, tz_name: str | None) -> datetime | None:
+    """Parse a form/API date into wall-clock time in the schedule's timezone.
+    Naive input already is; an explicit offset ("Z", "+05:30") is converted."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ScheduleValidationError(f"Not a valid date and time: {value}") from exc
+    if value.tzinfo is not None:
+        return value.astimezone(schedule_zone(tz_name)).replace(tzinfo=None)
+    return value
+
+
+def schedule_trigger(schedule) -> CronTrigger | None:
+    """The cron trigger behind a recurring schedule; None for one-time."""
+    tz = schedule_zone(schedule.timezone)
+    if schedule.schedule_type == "cron":
+        if not schedule.cron_expression:
+            raise ScheduleValidationError("A cron schedule needs a cron expression")
+        try:
+            return cron_trigger_from_crontab(schedule.cron_expression, timezone=tz)
+        except ValueError as exc:
+            raise ScheduleValidationError(f"Invalid cron expression '{schedule.cron_expression}': {exc}") from exc
+    if schedule.schedule_type in ("daily", "weekly", "monthly"):
+        anchor = schedule.start_date
+        if anchor is None:  # no start given: the time of day it was created
+            created = getattr(schedule, "created_at", None) or _utc_now()
+            anchor = created.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+        fields: dict[str, Any] = {"hour": anchor.hour, "minute": anchor.minute, "second": 0}
+        if schedule.schedule_type == "weekly":
+            fields["day_of_week"] = _WEEKDAYS[anchor.weekday()]
+        elif schedule.schedule_type == "monthly":
+            # The 29th–31st don't exist every month; run on the month's last day then.
+            fields["day"] = anchor.day if anchor.day <= 28 else "last"
+        return CronTrigger(timezone=tz, **fields)
+    return None
+
+
+def next_schedule_run(schedule, after: datetime) -> datetime | None:
+    """First run at or after `after` (naive UTC), never before the start. One-time: its start."""
+    start_utc = local_to_utc(schedule.start_date, schedule.timezone)
+    if schedule.schedule_type == "one_time":
+        return start_utc
+    trigger = schedule_trigger(schedule)
+    if trigger is None:
+        return None
+    base = max(after, start_utc) if start_utc else after
+    fire = trigger.get_next_fire_time(None, base.replace(tzinfo=UTC))
+    return fire.astimezone(UTC).replace(tzinfo=None) if fire else None
+
+
+def upcoming_schedule_runs(schedule, count: int = 5, after: datetime | None = None) -> list[datetime]:
+    """The next few runs (naive UTC), stopping at the end date."""
+    after = after or _utc_now()
+    end_utc = local_to_utc(schedule.end_date, schedule.timezone)
+    runs: list[datetime] = []
+    cursor = after
+    while len(runs) < count:
+        nxt = next_schedule_run(schedule, cursor)
+        if nxt is None or (end_utc and nxt > end_utc) or (runs and nxt <= runs[-1]):
+            break
+        if nxt >= after or schedule.schedule_type == "one_time":
+            runs.append(nxt)
+        if schedule.schedule_type == "one_time":
+            break
+        cursor = nxt + timedelta(seconds=1)
+    return runs
+
+
+def describe_schedule(schedule) -> str:
+    """ "Weekdays… cron 0 8 * * 1-5 (US/Central)", "Daily at 08:00 (US/Central)"."""
+    tz = schedule.timezone or "UTC"
+    anchor = schedule.start_date
+    at = anchor.strftime("%H:%M") if anchor else None
+    if schedule.schedule_type == "cron":
+        return f"cron {schedule.cron_expression} ({tz})"
+    if schedule.schedule_type == "daily":
+        return f"Daily{f' at {at}' if at else ''} ({tz})"
+    if schedule.schedule_type == "weekly":
+        day = anchor.strftime("%A") + "s " if anchor else ""
+        return f"Weekly{f' on {day}at {at}' if anchor else ''} ({tz})"
+    if schedule.schedule_type == "monthly":
+        return f"Monthly{f' on day {anchor.day} at {at}' if anchor else ''} ({tz})"
+    if schedule.schedule_type == "one_time":
+        return f"Once at {anchor.strftime('%b %d, %Y %H:%M') if anchor else '—'} ({tz})"
+    return schedule.schedule_type
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
@@ -130,6 +254,43 @@ def _parse_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.rstrip("Z")).replace(tzinfo=None)
     except ValueError:
         return None
+
+
+def build_run_report(
+    *,
+    status: str,
+    trigger: str,
+    name: str | None,
+    execution: EnvironmentExecutionHistory | None = None,
+    result: dict[str, Any] | None = None,
+    operation: str | None = None,
+    cluster_id: str | None = None,
+    namespace: str | None = None,
+    timezone: str = "UTC",
+    error: str | None = None,
+) -> RunReport:
+    """What a run summary email says, from the execution row when there is one."""
+    result = result or {}
+    steps = (execution.step_details if execution is not None else None) or result.get("details") or []
+    return RunReport(
+        status=status,
+        operation=operation or (execution.operation if execution is not None else "scale_up"),
+        cluster_id=cluster_id or (execution.cluster_id if execution is not None else ""),
+        namespace=namespace or (execution.namespace if execution is not None else ""),
+        trigger=trigger,
+        name=name,
+        execution_id=(execution.id if execution is not None else None) or result.get("execution_id") or None,
+        started_at=execution.started_at if execution is not None else None,
+        finished_at=(execution.completed_at if execution is not None else None) or _utc_now(),
+        duration_seconds=(execution.duration_seconds if execution is not None else None)
+        or result.get("duration_seconds"),
+        timezone=timezone or "UTC",
+        steps=[dict(s) for s in steps],
+        error_message=error
+        or (execution.error_message if execution is not None else None)
+        or result.get("error")
+        or None,
+    )
 
 
 def _stored_step(s: dict, index: int) -> dict:
@@ -566,7 +727,24 @@ class EnvironmentScalingService:
                     # The "before" value: History shows it as 0 → 60, and rollback restores it.
                     step["current_replicas"] = (scaled or {}).get("previous_replicas")
                     step["scaled"] = True
-                    if target > 0:
+                    wait_condition = step.get("wait_condition", "pods_ready")
+                    if wait_condition == "pods_terminated":
+
+                        async def on_stopping(remaining: int, step=step) -> None:
+                            step["pods_remaining"] = remaining
+                            step["last_progress_at"] = _iso_z(datetime.now(UTC))
+                            await persist()
+
+                        await self._wait_for_scale_down(
+                            cluster_id=sequence.cluster_id,
+                            namespace=sequence.namespace,
+                            deployment_name=dep_name,
+                            desired_replicas=target,
+                            timeout_seconds=int(step.get("timeout_seconds") or 0),
+                            on_progress=on_stopping,
+                        )
+                    # A fixed wait also applies after scaling to 0 ("stop X, wait 30s").
+                    elif target > 0 or wait_condition == "fixed_time":
 
                         async def on_progress(ready: int, required: int, issue: str | None, step=step) -> None:
                             # Live "37/60 ready" in the UI; last_progress_at also tells
@@ -586,7 +764,7 @@ class EnvironmentScalingService:
                             deployment_name=dep_name,
                             desired_replicas=target,
                             timeout_seconds=int(step.get("timeout_seconds") or 0),
-                            wait_condition=step.get("wait_condition", "pods_ready"),
+                            wait_condition=wait_condition,
                             min_ready_percent=int(step.get("min_ready_percent") or 100),
                             on_progress=on_progress,
                         )
@@ -676,6 +854,17 @@ class EnvironmentScalingService:
                 "rolled_back": rolled_back,
             },
         )
+
+        # Scheduled runs are reported by finish_scheduled_job (schedule recipients).
+        if execution.schedule_id is None:
+            await self._email_run_summary(
+                recipients=parse_recipients(user_email, sequence.notification_emails),
+                notify_on=sequence.notify_on,
+                status=status,
+                execution=execution,
+                trigger=f"Started manually by {user_email or user_id}",
+                name=sequence.name,
+            )
 
         return {
             "execution_id": execution.id,
@@ -808,6 +997,71 @@ class EnvironmentScalingService:
             message += f" (needed {required})"
         diagnosis = await self._diagnose_unready_pods(core_v1, dep, namespace)
         raise TimeoutError(f"{message}. {diagnosis}" if diagnosis else message)
+
+    async def _wait_for_scale_down(
+        self,
+        *,
+        cluster_id: str,
+        namespace: str,
+        deployment_name: str,
+        desired_replicas: int,
+        timeout_seconds: int,
+        on_progress: Callable[[int], Awaitable[None]] | None = None,
+    ) -> int:
+        """Wait until the deployment is down to its target number of pods.
+
+        Counts pods that are still terminating: a startup that first stops one
+        service to free CPU and memory for the next must not start the next
+        while the old pods still hold it. Same no-progress timeout as pod waits,
+        restarting each time another pod goes. Returns the pods left.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        hard_deadline = started + max(timeout_seconds, STEP_WAIT_HARD_CAP_SECONDS)
+        stall_deadline = started + timeout_seconds
+        apps_v1, core_v1, _ = await self.aks._get_k8s_clients(cluster_id)
+        selector: str | None = None
+        fewest: int | None = None
+        remaining: int | None = None
+
+        while True:
+            try:
+                if selector is None:
+                    dep = await asyncio.to_thread(apps_v1.read_namespaced_deployment, deployment_name, namespace)
+                    labels = dep.spec.selector.match_labels if dep.spec and dep.spec.selector else None
+                    if not labels:
+                        return 0  # its pods can't be identified; nothing to wait on
+                    selector = ",".join(f"{k}={v}" for k, v in labels.items())
+                pods = await asyncio.to_thread(
+                    core_v1.list_namespaced_pod, namespace, label_selector=selector, _request_timeout=15
+                )
+                # Evicted/completed pods linger as Failed/Succeeded but hold no resources.
+                remaining = sum(
+                    1 for p in pods.items or [] if not (p.status and p.status.phase in ("Succeeded", "Failed"))
+                )
+            except ApiException as exc:
+                if exc.status == 404:
+                    return 0
+            now = loop.time()
+            if remaining is not None:
+                if remaining <= desired_replicas:
+                    if on_progress:
+                        await on_progress(remaining)
+                    return remaining
+                if fewest is None or remaining < fewest:
+                    fewest = remaining
+                    stall_deadline = now + timeout_seconds
+                    if on_progress:
+                        await on_progress(remaining)
+            if now >= stall_deadline or now >= hard_deadline:
+                break
+            await asyncio.sleep(max(0, min(POLL_SECONDS, stall_deadline - now, hard_deadline - now)))
+
+        left = "?" if remaining is None else remaining
+        raise TimeoutError(
+            f"{left} pods still running or terminating (target {desired_replicas}); none stopped for "
+            f"{timeout_seconds}s. Pods stuck terminating usually wait on a finalizer or a long termination grace period."
+        )
 
     async def _diagnose_unready_pods(self, core_v1, dep, namespace: str) -> str:
         """Why pods aren't ready, in a sentence: unschedulable (no capacity),
@@ -1019,16 +1273,18 @@ class EnvironmentScalingService:
             schedule_type=data["schedule_type"],
             cron_expression=data.get("cron_expression"),
             timezone=data.get("timezone", "UTC"),
-            start_date=self._parse_dt(data.get("start_date")),
-            end_date=self._parse_dt(data.get("end_date")),
+            start_date=to_schedule_local(data.get("start_date"), data.get("timezone")),
+            end_date=to_schedule_local(data.get("end_date"), data.get("timezone")),
             is_enabled=data.get("is_enabled", True),
             retry_count=data.get("retry_count", 3),
             failure_notification=data.get("failure_notification"),
+            notify_on=data.get("notify_on", "always"),
             sequence_id=data.get("sequence_id"),
             created_by=user_id,
             created_by_email=user_email,
+            created_at=_utc_now(),
         )
-        # Compute initial next_run_at using the schedule's timezone
+        self._validate_schedule_timing(schedule)
         schedule.next_run_at = self._compute_next_run(schedule)
         self.db.add(schedule)
         await self.db.commit()
@@ -1048,7 +1304,12 @@ class EnvironmentScalingService:
         if data.get("sequence_id") and data.get("sequence_id") != schedule.sequence_id:
             await self._assert_linked_sequence_writable(data["sequence_id"])
 
-        date_fields = {"start_date", "end_date"}
+        timing_fields = {"schedule_type", "cron_expression", "timezone", "start_date", "end_date"}
+        # Sent as null to clear them (other fields ignore null).
+        clearable = {"cron_expression", "start_date", "end_date", "failure_notification", "sequence_id"}
+        was_enabled = schedule.is_enabled
+        before = {f: getattr(schedule, f) for f in timing_fields}
+        tz_name = data.get("timezone") or schedule.timezone
         for field in [
             "job_name",
             "operation",
@@ -1061,11 +1322,25 @@ class EnvironmentScalingService:
             "is_enabled",
             "retry_count",
             "failure_notification",
+            "notify_on",
             "sequence_id",
         ]:
-            if field in data and data[field] is not None:
-                value = self._parse_dt(data[field]) if field in date_fields else data[field]
-                setattr(schedule, field, value)
+            if field not in data or (data[field] is None and field not in clearable):
+                continue
+            value = data[field]
+            if field in ("start_date", "end_date"):
+                value = to_schedule_local(value, tz_name)
+            elif value == "" and field in clearable:
+                value = None
+            setattr(schedule, field, value)
+
+        timing_changed = any(getattr(schedule, f) != before[f] for f in timing_fields)
+        re_enabled = schedule.is_enabled and not was_enabled
+        if schedule.is_enabled and (timing_changed or re_enabled):
+            # Without this an edited time kept the old next run, and re-enabling
+            # a paused schedule fired it at once for the missed run.
+            self._validate_schedule_timing(schedule)
+            schedule.next_run_at = self._compute_next_run(schedule)
 
         schedule.updated_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
@@ -1134,6 +1409,8 @@ class EnvironmentScalingService:
             sequence_type=data["sequence_type"],
             steps=steps,
             rollback_on_failure=data.get("rollback_on_failure", True),
+            notification_emails=data.get("notification_emails"),
+            notify_on=data.get("notify_on", "always"),
             created_by=user_id,
             created_by_email=user_email,
         )
@@ -1161,6 +1438,10 @@ class EnvironmentScalingService:
             sequence.name = data["name"]
         if "rollback_on_failure" in data and data["rollback_on_failure"] is not None:
             sequence.rollback_on_failure = data["rollback_on_failure"]
+        if "notification_emails" in data and data["notification_emails"] is not None:
+            sequence.notification_emails = data["notification_emails"] or None
+        if "notify_on" in data and data["notify_on"] is not None:
+            sequence.notify_on = data["notify_on"]
         if "steps" in data and data["steps"] is not None:
             sequence.steps = [_stored_step(s, i) for i, s in enumerate(data["steps"])]
 
@@ -1422,10 +1703,10 @@ class EnvironmentScalingService:
                     schedule_id=schedule_id,
                 )
         except Exception as exc:
-            await self.finish_scheduled_job(schedule, error=exc)
+            await self.finish_scheduled_job(schedule, error=exc, triggered_by_email=user_email if user_id else None)
             raise
 
-        await self.finish_scheduled_job(schedule, result)
+        await self.finish_scheduled_job(schedule, result, triggered_by_email=user_email if user_id else None)
         return result
 
     async def finish_scheduled_job(
@@ -1434,8 +1715,11 @@ class EnvironmentScalingService:
         result: dict[str, Any] | None = None,
         *,
         error: Exception | None = None,
+        triggered_by_email: str | None = None,
     ) -> None:
-        """Record a scheduled run's outcome on the schedule and email the recipients."""
+        """Record a scheduled run's outcome on the schedule and email the recipients:
+        the schedule's creator, its notification list, the linked sequence's list,
+        and whoever pressed Run now."""
         status = result["status"] if result else "failed"
         try:
             if schedule.last_run_status != "running" or schedule.last_run_at is None:
@@ -1452,259 +1736,112 @@ class EnvironmentScalingService:
                 job_name=schedule.job_name,
                 error=str(error)[:200],
             )
-            result = {
-                "status": "failed",
-                "total_deployments": 0,
-                "completed": 0,
-                "failed": 0,
-                "skipped": 0,
-                "error": _describe_error(error),
-            }
-        await self._send_schedule_notification(schedule, result)
+
+        sequence = await self.db.get(EnvironmentSequence, schedule.sequence_id) if schedule.sequence_id else None
+        execution = None
+        if result and result.get("execution_id"):
+            execution = await self.db.get(EnvironmentExecutionHistory, result["execution_id"])
+        if triggered_by_email:
+            trigger = f'Run now of schedule "{schedule.job_name}" by {triggered_by_email}'
+        else:
+            trigger = f'Schedule "{schedule.job_name}" · {describe_schedule(schedule)}'
+        await self._email_run_summary(
+            recipients=parse_recipients(
+                schedule.created_by_email,
+                schedule.failure_notification,
+                sequence.notification_emails if sequence else None,
+                triggered_by_email,
+            ),
+            notify_on=schedule.notify_on,
+            status=status,
+            execution=execution,
+            result=result,
+            trigger=trigger,
+            name=sequence.name if sequence else schedule.job_name,
+            operation=(f"sequence_{sequence.sequence_type}" if sequence else schedule.operation),
+            cluster_id=schedule.cluster_id,
+            namespace=schedule.namespace,
+            timezone=schedule.timezone or "UTC",
+            error=_describe_error(error) if error is not None else None,
+        )
+
+    async def _email_run_summary(
+        self,
+        *,
+        recipients: list[str],
+        notify_on: str | None,
+        status: str,
+        trigger: str,
+        name: str | None,
+        execution: EnvironmentExecutionHistory | None = None,
+        result: dict[str, Any] | None = None,
+        operation: str | None = None,
+        cluster_id: str | None = None,
+        namespace: str | None = None,
+        timezone: str = "UTC",
+        error: str | None = None,
+    ) -> None:
+        """Best effort: never raises, never fails the run."""
+        if not recipients or not should_notify(notify_on, status):
+            return
+        try:
+            report = build_run_report(
+                status=status,
+                trigger=trigger,
+                name=name,
+                execution=execution,
+                result=result,
+                operation=operation,
+                cluster_id=cluster_id,
+                namespace=namespace,
+                timezone=timezone,
+                error=error,
+            )
+            notifications.queue_run_email(recipients, report)
+        except Exception as exc:
+            logger.warning("environment_run_email_skipped", error=str(exc)[:200])
+
+    async def manual_scale_report(
+        self, result: dict[str, Any], *, cluster_id: str, namespace: str, operation: str, user_email: str
+    ) -> RunReport:
+        """Report for a manual namespace scale, built while the request's session is open."""
+        execution = None
+        if result.get("execution_id"):
+            execution = await self.db.get(EnvironmentExecutionHistory, result["execution_id"]) if self.db else None
+        return build_run_report(
+            status=result.get("status", "failed"),
+            trigger=f"Started manually by {user_email}",
+            name=None,
+            execution=execution,
+            result=result,
+            operation=operation,
+            cluster_id=cluster_id,
+            namespace=namespace,
+        )
 
     # ── Helpers ────────────────────────────────────────────────────────
 
     @staticmethod
     def _compute_next_run(schedule) -> datetime | None:
-        """Compute initial next_run_at for a new schedule using its timezone."""
-        from zoneinfo import ZoneInfo
-
-        from app.core.cron import cron_trigger_from_crontab
-
-        if schedule.schedule_type == "one_time":
-            return schedule.start_date
-
-        tz = ZoneInfo(schedule.timezone) if schedule.timezone else UTC
-        now = datetime.now(UTC)
-
-        if schedule.schedule_type == "cron" and schedule.cron_expression:
-            try:
-                # Standard crontab day-of-week (0=Sun); from_crontab alone counts from Monday.
-                trigger = cron_trigger_from_crontab(schedule.cron_expression, timezone=tz)
-                next_fire = trigger.get_next_fire_time(None, now)
-                if next_fire and next_fire.tzinfo:
-                    return next_fire.astimezone(UTC).replace(tzinfo=None)
-                return next_fire
-            except Exception:
-                return datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=24)
-
-        intervals = {
-            "daily": timedelta(days=1),
-            "weekly": timedelta(weeks=1),
-            "monthly": timedelta(days=30),
-        }
-        delta = intervals.get(schedule.schedule_type, timedelta(days=1))
-        base = schedule.start_date if schedule.start_date else datetime.now(UTC).replace(tzinfo=None)
-        return (
-            base + delta
-            if base > datetime.now(UTC).replace(tzinfo=None)
-            else datetime.now(UTC).replace(tzinfo=None) + delta
-        )
-
-    async def _send_schedule_notification(self, schedule, result: dict) -> None:
-        """Send professional email notification after a scheduled job execution.
-
-        Recipients are always determined by:
-        1. The schedule creator's email (created_by_email) — always included.
-        2. Any additional addresses in failure_notification (comma-separated) — merged in.
-        """
-        # Collect recipients: creator first, then any extra notification addresses
-        recipient_set: set[str] = set()
-        if schedule.created_by_email:
-            recipient_set.add(schedule.created_by_email.strip())
-        if schedule.failure_notification:
-            for addr in schedule.failure_notification.split(","):
-                addr = addr.strip()
-                if addr:
-                    recipient_set.add(addr)
-
-        if not recipient_set:
-            return
-
-        try:
-            from app.services.email_notification_service import EmailNotificationService
-
-            email_service = EmailNotificationService(self.db)
-            recipients = sorted(recipient_set)
-
-            status = result.get("status", "unknown")
-            job_name = schedule.job_name
-            namespace = schedule.namespace
-            completed = result.get("completed", 0)
-            total = result.get("total_deployments", 0)
-            failed = result.get("failed", 0)
-            skipped = result.get("skipped", 0)
-            error = result.get("error", "")
-            duration = result.get("duration_seconds")
-            duration_str = f"{duration:.1f}s" if duration else "—"
-            operation = schedule.operation.replace("_", " ").title()
-            exec_time = datetime.now(UTC).strftime("%b %d, %Y at %I:%M %p UTC")
-
-            is_success = status == "completed"
-            accent = "#0568AE" if is_success else "#C41E3A"
-            status_label = "COMPLETED SUCCESSFULLY" if is_success else "EXECUTION FAILED"
-
-            subject = f"Environment Scheduler | {job_name} | {status.title()}"
-
-            # Build step rows
-            step_rows = ""
-            details = result.get("details", [])
-            for i, step in enumerate(details[:25], 1):
-                dep_name = step.get("deployment", "")
-                step_status = step.get("status", "")
-                target = step.get("target_replicas", "")
-                if step_status == "completed":
-                    s_badge = '<span style="color:#0B6E4F;font-weight:600;font-size:12px;">● Completed</span>'
-                elif step_status == "failed":
-                    s_badge = '<span style="color:#C41E3A;font-weight:600;font-size:12px;">● Failed</span>'
-                elif step_status == "skipped":
-                    s_badge = '<span style="color:#8B6914;font-weight:600;font-size:12px;">● Skipped</span>'
-                else:
-                    s_badge = f'<span style="color:#6C757D;font-weight:600;font-size:12px;">● {step_status}</span>'
-                bg = "#FAFBFC" if i % 2 == 0 else "#FFFFFF"
-                step_rows += f"""<tr style="background:{bg};">
-                    <td style="padding:10px 20px;font-size:13px;color:#4A5568;border-bottom:1px solid #F0F0F0;">{i}</td>
-                    <td style="padding:10px 20px;font-size:13px;color:#1A202C;font-family:'Consolas','Courier New',monospace;border-bottom:1px solid #F0F0F0;">{dep_name}</td>
-                    <td style="padding:10px 20px;font-size:13px;color:#4A5568;text-align:center;border-bottom:1px solid #F0F0F0;">{target}</td>
-                    <td style="padding:10px 20px;text-align:center;border-bottom:1px solid #F0F0F0;">{s_badge}</td>
-                </tr>"""
-
-            step_section = ""
-            if step_rows:
-                overflow_note = (
-                    f'<p style="margin:12px 0 0;font-size:12px;color:#718096;">Showing {min(len(details), 25)} of {len(details)} deployments</p>'
-                    if len(details) > 25
-                    else ""
-                )
-                step_section = f"""
-                <tr><td style="padding:28px 40px 20px;">
-                    <p style="margin:0 0 14px;font-size:14px;font-weight:600;color:#1A202C;letter-spacing:0.3px;">DEPLOYMENT DETAILS</p>
-                    <table style="width:100%;border-collapse:collapse;border:1px solid #E8ECF0;" cellpadding="0" cellspacing="0">
-                        <thead><tr style="background:#F7F9FB;">
-                            <th style="padding:10px 20px;text-align:left;font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:0.8px;border-bottom:2px solid #E8ECF0;">#</th>
-                            <th style="padding:10px 20px;text-align:left;font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:0.8px;border-bottom:2px solid #E8ECF0;">Deployment</th>
-                            <th style="padding:10px 20px;text-align:center;font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:0.8px;border-bottom:2px solid #E8ECF0;">Replicas</th>
-                            <th style="padding:10px 20px;text-align:center;font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:0.8px;border-bottom:2px solid #E8ECF0;">Status</th>
-                        </tr></thead>
-                        <tbody>{step_rows}</tbody>
-                    </table>
-                    {overflow_note}
-                </td></tr>"""
-
-            error_section = ""
-            if error:
-                error_section = f"""
-                <tr><td style="padding:0 40px 20px;">
-                    <div style="background:#FFF5F5;border:1px solid #FED7D7;border-radius:6px;padding:16px 20px;">
-                        <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#C41E3A;text-transform:uppercase;letter-spacing:0.5px;">Error Details</p>
-                        <p style="margin:0;font-size:13px;color:#742A2A;font-family:'Consolas','Courier New',monospace;line-height:1.5;word-break:break-word;">{error[:500]}</p>
-                    </div>
-                </td></tr>"""
-
-            html_body = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#F4F6F9;-webkit-font-smoothing:antialiased;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#F4F6F9;padding:40px 0;">
-<tr><td align="center">
-<table width="640" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.04);">
-    <!-- Top accent bar -->
-    <tr><td style="height:4px;background:{accent};font-size:0;line-height:0;">&nbsp;</td></tr>
-
-    <!-- Header -->
-    <tr><td style="padding:36px 40px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-        <table width="100%"><tr>
-            <td style="vertical-align:top;">
-                <p style="margin:0;font-size:11px;font-weight:600;color:#A0AEC0;text-transform:uppercase;letter-spacing:1.5px;">AT&T OpsPortal</p>
-                <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#1A202C;letter-spacing:-0.3px;">Environment Scheduler</h1>
-            </td>
-            <td style="text-align:right;vertical-align:top;">
-                <div style="display:inline-block;background:{("#F0FFF4" if is_success else "#FFF5F5")};border:1px solid {("#C6F6D5" if is_success else "#FED7D7")};border-radius:24px;padding:8px 18px;">
-                    <span style="font-size:12px;font-weight:700;color:{("#276749" if is_success else "#C41E3A")};letter-spacing:0.3px;">{status_label}</span>
-                </div>
-            </td>
-        </tr></table>
-    </td></tr>
-
-    <!-- Metrics -->
-    <tr><td style="padding:0 40px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #EDF2F7;border-radius:8px;overflow:hidden;">
-            <tr>
-                <td style="width:25%;text-align:center;padding:20px 0;border-right:1px solid #EDF2F7;">
-                    <p style="margin:0;font-size:36px;font-weight:700;color:#2D3748;line-height:1;">{total}</p>
-                    <p style="margin:8px 0 0;font-size:11px;font-weight:600;color:#A0AEC0;text-transform:uppercase;letter-spacing:1px;">Total</p>
-                </td>
-                <td style="width:25%;text-align:center;padding:20px 0;border-right:1px solid #EDF2F7;">
-                    <p style="margin:0;font-size:36px;font-weight:700;color:#276749;line-height:1;">{completed}</p>
-                    <p style="margin:8px 0 0;font-size:11px;font-weight:600;color:#A0AEC0;text-transform:uppercase;letter-spacing:1px;">Completed</p>
-                </td>
-                <td style="width:25%;text-align:center;padding:20px 0;border-right:1px solid #EDF2F7;">
-                    <p style="margin:0;font-size:36px;font-weight:700;color:#C41E3A;line-height:1;">{failed}</p>
-                    <p style="margin:8px 0 0;font-size:11px;font-weight:600;color:#A0AEC0;text-transform:uppercase;letter-spacing:1px;">Failed</p>
-                </td>
-                <td style="width:25%;text-align:center;padding:20px 0;">
-                    <p style="margin:0;font-size:36px;font-weight:700;color:#975A16;line-height:1;">{skipped}</p>
-                    <p style="margin:8px 0 0;font-size:11px;font-weight:600;color:#A0AEC0;text-transform:uppercase;letter-spacing:1px;">Skipped</p>
-                </td>
-            </tr>
-        </table>
-    </td></tr>
-
-    <!-- Execution info -->
-    <tr><td style="padding:0 40px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #EDF2F7;border-radius:8px;overflow:hidden;">
-            <tr style="background:#F7F9FB;"><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;width:140px;border-bottom:1px solid #EDF2F7;">Job Name</td><td style="padding:12px 20px;font-size:14px;color:#1A202C;font-weight:600;border-bottom:1px solid #EDF2F7;">{job_name}</td></tr>
-            <tr><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;border-bottom:1px solid #EDF2F7;">Namespace</td><td style="padding:12px 20px;font-size:13px;color:#2D3748;font-family:'Consolas','Courier New',monospace;border-bottom:1px solid #EDF2F7;">{namespace}</td></tr>
-            <tr style="background:#F7F9FB;"><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;border-bottom:1px solid #EDF2F7;">Operation</td><td style="padding:12px 20px;font-size:13px;color:#2D3748;border-bottom:1px solid #EDF2F7;">{operation}</td></tr>
-            <tr><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;border-bottom:1px solid #EDF2F7;">Schedule</td><td style="padding:12px 20px;font-size:13px;color:#2D3748;border-bottom:1px solid #EDF2F7;">{schedule.schedule_type}{(" — " + schedule.cron_expression) if schedule.cron_expression else ""}</td></tr>
-            <tr style="background:#F7F9FB;"><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;border-bottom:1px solid #EDF2F7;">Timezone</td><td style="padding:12px 20px;font-size:13px;color:#2D3748;border-bottom:1px solid #EDF2F7;">{schedule.timezone}</td></tr>
-            <tr><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;border-bottom:1px solid #EDF2F7;">Duration</td><td style="padding:12px 20px;font-size:14px;color:#2D3748;font-weight:700;border-bottom:1px solid #EDF2F7;">{duration_str}</td></tr>
-            <tr style="background:#F7F9FB;"><td style="padding:12px 20px;font-size:12px;font-weight:600;color:#4A5568;">Executed At</td><td style="padding:12px 20px;font-size:13px;color:#2D3748;">{exec_time}</td></tr>
-        </table>
-    </td></tr>
-
-    {step_section}
-    {error_section}
-
-    <!-- Footer -->
-    <tr><td style="padding:28px 40px;border-top:1px solid #EDF2F7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-        <p style="margin:0;font-size:11px;color:#A0AEC0;text-align:center;line-height:1.8;letter-spacing:0.2px;">
-            AT&T OpsPortal — Environment Scheduler<br>
-            Automated notification — please do not reply
-        </p>
-    </td></tr>
-</table>
-</td></tr>
-</table>
-</body></html>"""
-
-            for recipient in recipients:
-                await email_service._send_single_email(
-                    recipient=recipient,
-                    subject=subject,
-                    html_body=html_body,
-                )
-
-            logger.info("schedule_notification_sent", job_name=job_name, recipients=recipients, status=status)
-
-        except Exception as exc:
-            logger.warning("schedule_notification_failed", job_name=schedule.job_name, error=str(exc)[:200])
+        """First run of a new, edited or re-enabled schedule (naive UTC)."""
+        return next_schedule_run(schedule, _utc_now())
 
     @staticmethod
-    def _parse_dt(value) -> datetime | None:
-        """Parse a datetime value — handles strings, datetime objects, and None."""
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None) if value.tzinfo else value
-        if isinstance(value, str):
-            try:
-                from dateutil.parser import parse as dateutil_parse
-
-                return dateutil_parse(value).replace(tzinfo=None)
-            except (ImportError, ValueError):
-                # Fallback: try fromisoformat
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
-        return None
+    def _validate_schedule_timing(schedule) -> None:
+        schedule_zone(schedule.timezone)
+        schedule_trigger(schedule)  # raises for a bad cron expression
+        if schedule.start_date and schedule.end_date and schedule.end_date <= schedule.start_date:
+            raise ScheduleValidationError("The end date must be after the start date")
+        if schedule.schedule_type == "one_time" and schedule.is_enabled:
+            start_utc = local_to_utc(schedule.start_date, schedule.timezone)
+            if start_utc is None:
+                raise ScheduleValidationError("A one-time schedule needs a start date and time")
+            if start_utc < _utc_now() - timedelta(minutes=1):
+                raise ScheduleValidationError("The start time of a one-time schedule is in the past")
+        if schedule.end_date and schedule.is_enabled:
+            end_utc = local_to_utc(schedule.end_date, schedule.timezone)
+            if end_utc < _utc_now():
+                raise ScheduleValidationError("The end date is in the past")
 
     @staticmethod
     def _format_dt_with_tz(dt: datetime | None, timezone: str | None) -> str | None:
@@ -1738,6 +1875,7 @@ class EnvironmentScalingService:
             "is_enabled": s.is_enabled,
             "retry_count": s.retry_count,
             "failure_notification": s.failure_notification,
+            "notify_on": s.notify_on or "always",
             "sequence_id": s.sequence_id,
             "created_by": s.created_by,
             "created_by_email": s.created_by_email,
@@ -1745,6 +1883,8 @@ class EnvironmentScalingService:
             "updated_at": (s.updated_at.isoformat() + "Z") if s.updated_at else None,
             "last_run_at": (s.last_run_at.isoformat() + "Z") if s.last_run_at else None,
             "next_run_at": self._format_dt_with_tz(s.next_run_at, s.timezone),
+            "next_run_at_utc": (s.next_run_at.isoformat() + "Z") if s.next_run_at else None,
+            "schedule_description": describe_schedule(s),
             "last_run_status": s.last_run_status,
         }
 
@@ -1757,6 +1897,8 @@ class EnvironmentScalingService:
             "sequence_type": s.sequence_type,
             "steps": s.steps or [],
             "rollback_on_failure": s.rollback_on_failure,
+            "notification_emails": s.notification_emails,
+            "notify_on": s.notify_on or "always",
             "created_by": s.created_by,
             "created_by_email": s.created_by_email,
             "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -1883,10 +2025,10 @@ async def _run_sequence_in_background(
                 )
             except Exception as exc:
                 if schedule is not None:
-                    await service.finish_scheduled_job(schedule, error=exc)
+                    await service.finish_scheduled_job(schedule, error=exc, triggered_by_email=user_email)
                 raise
             if schedule is not None:
-                await service.finish_scheduled_job(schedule, result)
+                await service.finish_scheduled_job(schedule, result, triggered_by_email=user_email)
             logger.info("sequence_background_run_finished", execution_id=execution_id, status=result["status"])
     except Exception as exc:
         # The row stays "running"; the abandoned-run sweep fails it later.

@@ -11,7 +11,15 @@ export const AKS_PAGE_SIZE = 15;
 type BackgroundSyncState = ReturnType<typeof useAksBackgroundSync>;
 
 /** "Sync from Kubernetes" button — same look and behaviour as the Deployments tab. */
-export function SyncFromKubernetesButton({ sync, title }: { sync: BackgroundSyncState; title?: string }) {
+export function SyncFromKubernetesButton({
+  sync,
+  title,
+  label = "Sync from Kubernetes",
+}: {
+  sync: BackgroundSyncState;
+  title?: string;
+  label?: string;
+}) {
   return (
     <button
       type="button"
@@ -23,7 +31,7 @@ export function SyncFromKubernetesButton({ sync, title }: { sync: BackgroundSync
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20} className={sync.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4"}>
         <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
       </svg>
-      {sync.isRunning ? "Syncing…" : "Sync from Kubernetes"}
+      {sync.isRunning ? "Syncing…" : label}
     </button>
   );
 }

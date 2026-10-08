@@ -19,6 +19,7 @@ import {
   LineChart,
   Line,
   Legend,
+  ReferenceArea,
 } from "recharts";
 import {
   useLeadershipDashboard,
@@ -46,6 +47,7 @@ import type {
 } from "../services/costApi";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
+import { DataQualityBanner, PreliminaryNote, fmtCostDate } from "../features/costs/costShared";
 
 const COLORS = [
   "#1976d2",
@@ -65,14 +67,15 @@ interface KPICardProps {
 }
 
 const KPICard: React.FC<KPICardProps> = ({ metric }) => {
+  // Spend going up is the risk signal for this audience: up = red, down = green.
   const trendIcon =
     metric.trend === "up" ? "▲" : metric.trend === "down" ? "▼" : "●";
   const trendColor =
     metric.trend === "up"
       ? "text-red-500"
       : metric.trend === "down"
-      ? "text-green-500"
-      : "text-gray-400";
+      ? "text-green-600"
+      : "text-gray-500";
 
   const formatValue = (value: number, unit: string) => {
     if (unit === "USD" || unit === "USD/year") {
@@ -81,24 +84,25 @@ const KPICard: React.FC<KPICardProps> = ({ metric }) => {
         maximumFractionDigits: 0,
       })}`;
     }
-    if (unit === "%") return `${value.toFixed(1)}%`;
+    if (unit === "%") return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
     return value.toLocaleString();
   };
 
   const metricName = metric.name.toLowerCase();
-  const tone = metricName.includes("savings")
-    ? "green"
-    : metricName.includes("recommend")
-      ? "purple"
-      : metricName.includes("budget")
-        ? "amber"
+  const isChangeMetric = metric.unit === "%";
+  const tone = metricName.includes("projected")
+    ? "indigo"
+    : metricName.includes("last month")
+      ? "slate"
+      : isChangeMetric
+        ? metric.trend === "up" ? "amber" : metric.trend === "down" ? "green" : "blue"
         : "blue";
-  const icon = metricName.includes("savings")
+  const icon = metricName.includes("projected")
     ? MetricCardIcons.chart()
-    : metricName.includes("recommend")
-      ? MetricCardIcons.layers()
-      : metricName.includes("budget")
-        ? MetricCardIcons.alert()
+    : metricName.includes("last month")
+      ? MetricCardIcons.calendar()
+      : isChangeMetric
+        ? MetricCardIcons.activity()
         : MetricCardIcons.currency();
 
   return (
@@ -109,9 +113,13 @@ const KPICard: React.FC<KPICardProps> = ({ metric }) => {
       icon={icon}
       tone={tone}
       meta={
-        <span className={`text-sm font-semibold ${trendColor}`}>
-          {trendIcon} {Math.abs(metric.change_pct).toFixed(1)}%
-        </span>
+        // A % metric's value already is the change; repeating it adds noise.
+        !isChangeMetric && metric.comparison_label ? (
+          <span className={`text-sm font-semibold ${trendColor}`} title={metric.comparison_label}>
+            {trendIcon} {Math.abs(metric.change_pct).toFixed(1)}%
+            <span className="ml-1 text-xs font-normal text-slate-500">{metric.comparison_label}</span>
+          </span>
+        ) : undefined
       }
     />
   );
@@ -121,6 +129,8 @@ const KPICard: React.FC<KPICardProps> = ({ metric }) => {
 
 interface TrendChartProps {
   data: Array<{ date: string; cost: number; group_value?: string }>;
+  /** Days on/after this UTC date may still change (shaded on the chart). */
+  preliminaryFrom?: string | null;
 }
 
 interface TrendPivotPoint {
@@ -132,8 +142,7 @@ interface TrendPivotPoint {
 const SUB_COLORS: Record<string, string> = {};
 const PALETTE = ["#1976d2", "#e65100", "#2e7d32", "#7b1fa2", "#c62828", "#00838f"];
 
-const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
-  const { timezone } = usePortalTimezone();
+const CostTrendChart: React.FC<TrendChartProps> = ({ data, preliminaryFrom }) => {
   // Pivot: one row per date, one column per subscription + total
   const { pivoted, subs } = React.useMemo(() => {
     const subsSet = new Set<string>();
@@ -189,6 +198,10 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
     };
   }, [pivoted]);
 
+  const lastDate = pivoted.length ? pivoted[pivoted.length - 1].date : null;
+  const shadeFrom = preliminaryFrom && lastDate && preliminaryFrom <= lastDate ? preliminaryFrom : null;
+  const isPreliminary = (date: string) => Boolean(shadeFrom && date >= shadeFrom);
+
   return (
     <section className="relative overflow-hidden rounded-2xl border border-att-100 bg-gradient-to-br from-white via-white to-att-50/70 p-6 shadow-sm shadow-att-100/40">
       <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-att-300 via-att-500 to-blue-300" />
@@ -196,7 +209,7 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
         <div className="max-w-3xl">
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-att-100 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-att-700">Short-Horizon Trend</span>
-            <span className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 ring-1 ring-att-100">Last 15 days</span>
+            <span className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 ring-1 ring-att-100">Last 15 closed days (UTC)</span>
             <span className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 ring-1 ring-att-100">{subs.length} subscriptions tracked</span>
           </div>
           <div className="mt-4 flex items-start gap-3">
@@ -211,7 +224,7 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
             <MetricCard
               title="Latest Day"
               value={fmtCompact(Number(trendSummary.latest.total || 0))}
-              subtitle={new Date(trendSummary.latest.date).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: timezone })}
+              subtitle={`${fmtCostDate(trendSummary.latest.date, { weekday: true })}${isPreliminary(trendSummary.latest.date) ? " · preliminary" : ""} · vs previous day`}
               icon={MetricCardIcons.currency()}
               tone="att"
               valueClassName="text-xl"
@@ -224,7 +237,7 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
             <MetricCard
               title="Peak Day"
               value={fmtCompact(Number(trendSummary.peak.total || 0))}
-              subtitle={new Date(trendSummary.peak.date).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: timezone })}
+              subtitle={fmtCostDate(trendSummary.peak.date, { weekday: true })}
               icon={MetricCardIcons.alert()}
               tone="amber"
               valueClassName="text-xl"
@@ -232,7 +245,7 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
             <MetricCard
               title="Daily Average"
               value={fmtCompact(trendSummary.average)}
-              subtitle="Average across current window"
+              subtitle={`Average of the ${pivoted.length} days shown`}
               icon={MetricCardIcons.chart()}
               tone="blue"
               valueClassName="text-xl"
@@ -244,10 +257,13 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
         <ResponsiveContainer width="100%" height={320}>
           <LineChart data={pivoted}>
             <CartesianGrid strokeDasharray="3 3" stroke="#d5ecf7" />
+            {shadeFrom && lastDate && (
+              <ReferenceArea x1={shadeFrom} x2={lastDate} fill="#e2e8f0" fillOpacity={0.6} ifOverflow="extendDomain" />
+            )}
             <XAxis
               dataKey="date"
               tick={{ fontSize: 12 }}
-              tickFormatter={(val) => new Date(val).toLocaleDateString("en-US", { day: "numeric", month: "short", timeZone: timezone })}
+              tickFormatter={(val: string) => fmtCostDate(val)}
             />
             <YAxis
               tick={{ fontSize: 12 }}
@@ -258,13 +274,8 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
                 `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
                 name === "total" ? "Total" : name,
               ]}
-              labelFormatter={(label) =>
-                new Date(label).toLocaleDateString("en-US", {
-                  month: "long",
-                  day: "numeric",
-                  year: "numeric",
-                  timeZone: timezone,
-                })
+              labelFormatter={(label: string) =>
+                `${fmtCostDate(label, { year: true, weekday: true })}${isPreliminary(label) ? " · preliminary" : ""}`
               }
               contentStyle={{ borderRadius: "16px", border: "1px solid #b0d8ee", boxShadow: "0 10px 30px rgba(63,155,202,0.12)" }}
             />
@@ -295,6 +306,7 @@ const CostTrendChart: React.FC<TrendChartProps> = ({ data }) => {
             />
           </LineChart>
         </ResponsiveContainer>
+        <PreliminaryNote from={shadeFrom} through={lastDate} />
       </div>
     </section>
   );
@@ -1225,27 +1237,28 @@ const AICostAdvisor: React.FC<AICostAdvisorProps> = ({
 interface InsightMetricsProps {
   dashboard: LeadershipDashboardData;
   optimization: OptimizationSummary | undefined;
+  optimizationLoading: boolean;
   trendData: NonProdVsProdTrend | undefined;
 }
 
-const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization, trendData }) => {
-  const cards = React.useMemo(() => {
-    const result: { title: string; value: string; subtitle: string; icon: React.ReactNode; tone: "att" | "blue" | "green" | "amber" | "orange" | "red" | "purple" }[] = [];
+const COMMITMENT_MODELS = new Set(["Reservation", "SavingsPlan"]);
+const PRICING_LABELS: Record<string, string> = { SavingsPlan: "Savings Plan", OnDemand: "On-demand" };
 
-    // Stable baseline for percentage tiles. KPI[0] is the current partial
-    // month's spend — using it as a denominator early in a month inflated
-    // waste/savings ratios above 200%. Prefer the last full month from
-    // six_month_trend; fall back to KPI[0] if no history is available.
+const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization, optimizationLoading, trendData }) => {
+  const cards = React.useMemo(() => {
+    const result: { title: string; value: string; subtitle: string; icon: React.ReactNode; tone: "att" | "blue" | "green" | "emerald" | "amber" | "orange" | "red" | "purple" }[] = [];
+
+    // six_month_trend holds full months only (the partial current month is
+    // excluded server-side). Months where a subscription is missing days are
+    // flagged complete=false and kept out of trend comparisons.
     const sortedTrend = [...dashboard.six_month_trend].sort((a, b) =>
       a.month.localeCompare(b.month)
     );
+    const completeTrend = sortedTrend.filter((m) => m.complete !== false);
     const lastFullMonth = sortedTrend.length ? sortedTrend[sortedTrend.length - 1] : null;
     const lastFullMonthSpend = lastFullMonth ? Number(lastFullMonth.total_cost) : 0;
-    const baselineSpend = lastFullMonthSpend > 0 ? lastFullMonthSpend : Number(dashboard.kpis[0]?.value || 0);
 
-    // Prod vs Non-Prod split — prefer the last full month from the
-    // amortized DB (carries env_label set from AdminSubscription); fall
-    // back to /costs/nonprod-vs-prod if not yet loaded.
+    // Prod vs Non-Prod split for the last full month (env from the Admin panel).
     if (lastFullMonth && Number(lastFullMonth.total_cost) > 0) {
       const prod = Number(lastFullMonth.prod_cost);
       const total = Number(lastFullMonth.total_cost);
@@ -1253,7 +1266,7 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
       result.push({
         title: "Prod Spend Share",
         value: fmtPercent(prodPct),
-        subtitle: `${fmtCompact(prod)} of ${fmtCompact(total)} (${lastFullMonth.month_label})`,
+        subtitle: `${fmtCompact(prod)} of ${fmtCompact(total)} (${lastFullMonth.month_label}${lastFullMonth.complete === false ? ", incomplete data" : ""})`,
         icon: MetricCardIcons.shield(),
         tone: "blue",
       });
@@ -1269,42 +1282,62 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
       });
     }
 
-    // Monthly waste rate vs last full month's spend (stable denominator).
-    if (optimization && baselineSpend > 0) {
-      const wastePct = (optimization.wastage.total_monthly_waste / baselineSpend) * 100;
+    // Commitment coverage: share of spend on Reservations + Savings Plans.
+    const mix = dashboard.pricing_mix ?? [];
+    if (mix.length) {
+      const committed = mix.filter((m) => COMMITMENT_MODELS.has(m.name));
+      const covered = committed.reduce((sum, m) => sum + m.pct, 0);
+      const parts = committed.map((m) => `${PRICING_LABELS[m.name] ?? m.name} ${fmtPercent(m.pct)}`);
       result.push({
-        title: "Waste Rate",
-        value: fmtPercent(wastePct),
-        subtitle: `${fmtCompact(optimization.wastage.total_monthly_waste)}/mo waste`,
-        icon: MetricCardIcons.alert(),
-        tone: wastePct > 20 ? "red" : wastePct > 10 ? "amber" : "green",
+        title: "Commitment Coverage",
+        value: fmtPercent(covered),
+        subtitle: `${parts.join(" · ") || "No committed spend"} · ${dashboard.pricing_mix_month ?? ""}${dashboard.pricing_mix_complete ? "" : " (partial data)"}`,
+        icon: MetricCardIcons.checkCircle(),
+        tone: "emerald",
       });
     }
 
-    // 6-month trend direction — also based on six_month_trend (which now
-    // excludes the partial current month, so no fake "-98%" drop).
-    if (sortedTrend.length >= 2) {
-      const first = sortedTrend[0];
-      const last = sortedTrend[sortedTrend.length - 1];
+    // 6-month trend across complete months, so a gap can't fake a swing.
+    const trendBasis = completeTrend.length >= 2 ? completeTrend : sortedTrend;
+    if (trendBasis.length >= 2) {
+      const first = trendBasis[0];
+      const last = trendBasis[trendBasis.length - 1];
       const firstCost = Number(first.total_cost);
       const lastCost = Number(last.total_cost);
       const delta = firstCost > 0 ? ((lastCost - firstCost) / firstCost) * 100 : 0;
+      const skipped = sortedTrend.length - completeTrend.length;
       result.push({
         title: "6-Month Trend",
         value: `${delta >= 0 ? "+" : ""}${fmtPercent(delta)}`,
-        subtitle: `${fmtCompact(firstCost)} → ${fmtCompact(lastCost)}`,
+        subtitle: `${first.month_label} ${fmtCompact(firstCost)} → ${last.month_label} ${fmtCompact(lastCost)}${
+          trendBasis === completeTrend && skipped > 0 ? ` · ${skipped} incomplete month${skipped === 1 ? "" : "s"} excluded` : ""
+        }${trendBasis !== completeTrend ? " · includes incomplete months" : ""}`,
         icon: MetricCardIcons.activity(),
         tone: delta > 5 ? "red" : delta < -5 ? "green" : "att",
+      });
+    }
+
+    // Savings opportunity, with identified waste against a full month's spend.
+    if (optimization) {
+      const waste = optimization.wastage.total_monthly_waste;
+      const baseline = lastFullMonthSpend > 0 ? lastFullMonthSpend : Number(dashboard.kpis[0]?.value || 0);
+      const wastePct = baseline > 0 ? (waste / baseline) * 100 : 0;
+      result.push({
+        title: "Savings Opportunities",
+        value: `${fmtUSD(optimization.total_estimated_annual_savings)}/yr`,
+        subtitle: `${fmtCompact(waste)}/mo identified waste · ${fmtPercent(wastePct)} of ${lastFullMonth?.month_label ?? "monthly"} spend`,
+        icon: MetricCardIcons.chart(),
+        tone: wastePct > 20 ? "red" : wastePct > 10 ? "amber" : "green",
       });
     }
 
     return result;
   }, [dashboard, optimization, trendData]);
 
-  if (!cards.length) return null;
+  if (!cards.length && !optimizationLoading) return null;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {cards.map((card) => (
         <MetricCard
           key={card.title}
@@ -1316,6 +1349,12 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
           valueClassName="text-xl"
         />
       ))}
+      {optimizationLoading && !optimization && (
+        <div className="flex items-center justify-center rounded-xl border border-gray-100 bg-white p-6 shadow-sm">
+          <div className="mr-3 h-6 w-6 animate-spin rounded-full border-b-2 border-blue-400" />
+          <span className="text-sm text-gray-400">Loading savings data…</span>
+        </div>
+      )}
     </div>
   );
 };
@@ -1421,19 +1460,12 @@ const LeadershipDashboard: React.FC = () => {
     );
   }
 
-  // Merge the single optimization-driven KPI that earns its place on the
-  // forecast view — the dollar opportunity, not the count of items.
-  const allKpis = [...dashboard.kpis];
-  if (optimization) {
-    allKpis.push({
-      name: "Total Savings Opportunities",
-      value: optimization.total_estimated_annual_savings,
-      unit: "USD/year",
-      trend: "down" as const,
-      change_pct: 0,
-      description: "Estimated annual savings from all recommendations",
-    });
-  }
+  const dataThrough =
+    dashboard.data_through ??
+    (dashboard.cost_trend.length
+      ? [...dashboard.cost_trend].sort((a, b) => b.date.localeCompare(a.date))[0].date
+      : null);
+  const dataQuality = dashboard.data_quality ?? [];
 
   return (
     <div className="py-6 space-y-6">
@@ -1445,16 +1477,12 @@ const LeadershipDashboard: React.FC = () => {
             Cost Forecast
           </h1>
           <p className="mt-1 text-sm text-gray-500">
-            Cost Forecast — Updated{" "}
-            {formatDate(dashboard.report_date)}
+            Amortized Azure spend · snapshot updated {formatDate(dashboard.report_date)}
           </p>
           <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-gray-400">
-            {dashboard.cost_trend.length > 0 && (
-              <span>
-                Data through{" "}
-                {new Date(
-                  [...dashboard.cost_trend].sort((a, b) => b.date.localeCompare(a.date))[0].date
-                ).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+            {dataThrough && (
+              <span title="Azure reports usage by UTC day; the current day is excluded until it closes.">
+                Data through {fmtCostDate(dataThrough, { year: true })} (UTC)
               </span>
             )}
             {syncStatus?.last_sync && (
@@ -1489,7 +1517,7 @@ const LeadershipDashboard: React.FC = () => {
             onClick={handleDashRefresh}
             disabled={dashRefreshing}
             className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition flex items-center gap-2"
-            title="Refresh the leadership snapshot from Azure-backed source data"
+            title="Pull the latest month from Azure Cost Management and rebuild this view"
           >
           {dashRefreshing ? (
             <>
@@ -1527,21 +1555,34 @@ const LeadershipDashboard: React.FC = () => {
         </div>
       )}
 
+      {/* Data quality — gaps or stale data make every figure below incomplete. */}
+      <DataQualityBanner
+        heading="Some cost data is missing — figures below may be understated"
+        items={dataQuality.map((issue, i) => ({
+          key: `${issue.kind}-${issue.subscription_id ?? i}`,
+          title: issue.subscription_name ?? (issue.kind === "stale" ? "Data is behind" : "Cost data"),
+          detail:
+            issue.kind === "stale" || issue.no_data
+              ? issue.message
+              : `${issue.missing_days} day(s) with no data${issue.missing_ranges.length ? ` (${issue.missing_ranges.slice(0, 3).join("; ")}${issue.missing_ranges.length > 3 ? "; …" : ""})` : ""}`,
+        }))}
+        footnote="The scheduled sync retries missing days automatically; per-subscription details are on the Amortized Costs page."
+      />
+
       {/* KPI Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {allKpis.map((kpi, i) => (
-          <KPICard key={i} metric={kpi} />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {dashboard.kpis.map((kpi) => (
+          <KPICard key={kpi.name} metric={kpi} />
         ))}
-        {optLoading && !optimization && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 flex items-center justify-center col-span-2">
-            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-400 mr-3" />
-            <span className="text-sm text-gray-400">Loading optimization data…</span>
-          </div>
-        )}
       </div>
 
       {/* Derived Insight Metrics */}
-      <InsightMetrics dashboard={dashboard} optimization={optimization} trendData={trendData} />
+      <InsightMetrics
+        dashboard={dashboard}
+        optimization={optimization}
+        optimizationLoading={optLoading}
+        trendData={trendData}
+      />
 
       {ollamaEnabled && (
         <AICostAdvisor
@@ -1570,7 +1611,7 @@ const LeadershipDashboard: React.FC = () => {
 
       {/* Charts Grid */}
       <div className="grid grid-cols-1 gap-6">
-        <CostTrendChart data={dashboard.cost_trend} />
+        <CostTrendChart data={dashboard.cost_trend} preliminaryFrom={dashboard.preliminary_from} />
       </div>
 
       {/* Enhanced Wastage Summary */}

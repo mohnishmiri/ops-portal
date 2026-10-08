@@ -143,6 +143,43 @@ describe("SequenceDesigner builder", () => {
     }));
   });
 
+  it("lets a startup step scale a deployment to 0 and wait for its pods to stop", async () => {
+    const user = userEvent.setup();
+    const props = renderDesigner();
+    await user.click(screen.getByTitle("Edit Sequence"));
+
+    const replicas = screen.getByLabelText("Replicas for step 2");
+    await user.clear(replicas);
+    await user.type(replicas, "0");
+    await user.tab();
+
+    const wait = screen.getByLabelText("Wait condition for step 2") as HTMLSelectElement;
+    expect(wait.value).toBe("pods_terminated");
+    expect([...wait.options].map((o) => o.value)).not.toContain("pods_ready");
+    expect(screen.queryByLabelText("Percent of pods ready for step 2")).toBeNull();
+    expect(within(stepCards()[1]).getByText("Stops deployment")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Update Sequence" }));
+    expect(props.onUpdate).toHaveBeenCalledWith(7, expect.objectContaining({
+      steps: [
+        expect.objectContaining({ deployment_name: "attccleadscomp", replicas: 1, wait_condition: "pods_ready" }),
+        expect.objectContaining({ deployment_name: "attccleadsauditlog", replicas: 0, wait_condition: "pods_terminated" }),
+      ],
+    }));
+  });
+
+  it("goes back to waiting for ready pods when a stopped step is scaled up again", async () => {
+    const user = userEvent.setup();
+    renderDesigner();
+    await user.click(screen.getByTitle("Edit Sequence"));
+    const replicas = screen.getByLabelText("Replicas for step 2");
+    await user.clear(replicas);
+    await user.type(replicas, "0");
+    await user.clear(replicas);
+    await user.type(replicas, "5");
+    expect((screen.getByLabelText("Wait condition for step 2") as HTMLSelectElement).value).toBe("pods_ready");
+  });
+
   it("moves a step with the arrow buttons", async () => {
     const user = userEvent.setup();
     renderDesigner();
@@ -173,6 +210,21 @@ describe("SequenceDesigner runs and deletes", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "Start sequence" }));
     expect(props.onExecuteStart).toHaveBeenCalledWith(7, 1, false);
+  });
+
+  it("calls out deployments a startup scales down before it runs", async () => {
+    const user = userEvent.setup();
+    const withStop = {
+      ...savedSequence,
+      steps: [
+        { order: 1, deployment_name: "attccleadsauditlog", replicas: 0, wait_condition: "pods_terminated", timeout_seconds: 600, retry_count: 3, on_failure: "abort" },
+        savedSequence.steps[0],
+      ],
+    };
+    renderDesigner({ sequences: [withStop] });
+    await user.click(screen.getByTitle("Run Startup Sequence"));
+    const note = within(screen.getByRole("dialog")).getByText(/This startup also scales down 1 deployment/);
+    expect(note.textContent).toContain("attccleadsauditlog (1 → 0, step 1)");
   });
 
   it("explains why a sequence used by a schedule cannot be deleted", async () => {

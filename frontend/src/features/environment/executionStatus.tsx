@@ -104,6 +104,7 @@ export const WAIT_LABELS: Record<string, string> = {
   deployment_available: "Deployment available",
   health_endpoint: "Pods ready",
   fixed_time: "Fixed wait",
+  pods_terminated: "Pods stopped",
   skip: "No wait",
 };
 
@@ -113,7 +114,7 @@ export function waitSummary(wait?: string | null, timeout?: number | null, perce
   const base = WAIT_LABELS[wait] ?? wait;
   if (wait === "skip") return base;
   if (wait === "fixed_time") return timeout != null ? `${base} · ${formatDuration(timeout)}` : base;
-  const share = percent != null && percent < 100 ? ` (${percent}%)` : "";
+  const share = percent != null && percent < 100 && wait !== "pods_terminated" ? ` (${percent}%)` : "";
   return `${base}${share}${timeout != null ? ` · fail if stuck ${formatDuration(timeout)}` : ""}`;
 }
 
@@ -254,6 +255,9 @@ export const ExecutionStepsTable: React.FC<StepsTableProps> = ({
                 </td>
                 <td className="px-3 py-2 text-center">
                   <ScaleChange from={d.current_replicas} to={d.target_replicas} />
+                  {status === "running" && d.pods_remaining != null && d.pods_remaining > d.target_replicas && (
+                    <p className="mt-1 text-[10px] text-gray-500">{d.pods_remaining} pods still stopping</p>
+                  )}
                   {d.ready_replicas != null && d.target_replicas > 0 && (status === "running" || status === "failed" || d.note) && (
                     <ReadyMeter ready={d.ready_replicas} target={d.target_replicas} required={d.required_ready} live={status === "running"} />
                   )}

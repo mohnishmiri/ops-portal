@@ -6,7 +6,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.environment_notifications import normalize_recipients
 
 # ── Enums ──
 
@@ -34,6 +36,8 @@ class WaitCondition(str, Enum):
     HEALTH_ENDPOINT = "health_endpoint"
     FIXED_TIME = "fixed_time"
     DEPLOYMENT_AVAILABLE = "deployment_available"
+    # Scale-down steps: until the extra pods (incl. terminating) are gone.
+    PODS_TERMINATED = "pods_terminated"
     SKIP = "skip"
 
 
@@ -60,6 +64,14 @@ class EnvironmentScaleRequest(BaseModel):
     deployment_names: list[str] | None = None
     replica_count: int = Field(default=1, ge=0, le=100)
     dry_run: bool = False
+    # Email the person scaling a summary when it finishes, plus any extra addresses.
+    notify: bool = True
+    notification_emails: str | None = None
+
+    _check_emails = field_validator("notification_emails")(lambda v: normalize_recipients(v))
+
+
+NotifyOn = Literal["always", "failure", "never"]
 
 
 class EnvironmentScaleResponse(BaseModel):
@@ -88,8 +100,12 @@ class ScheduleCreate(BaseModel):
     end_date: datetime | None = None
     is_enabled: bool = True
     retry_count: int = Field(default=3, ge=0, le=10)
+    # Extra run-summary recipients; the schedule's creator is always emailed.
     failure_notification: str | None = None
+    notify_on: NotifyOn = "always"
     sequence_id: int | None = None
+
+    _check_emails = field_validator("failure_notification")(lambda v: normalize_recipients(v))
 
 
 class ScheduleUpdate(BaseModel):
@@ -104,7 +120,18 @@ class ScheduleUpdate(BaseModel):
     is_enabled: bool | None = None
     retry_count: int | None = None
     failure_notification: str | None = None
+    notify_on: NotifyOn | None = None
     sequence_id: int | None = None
+
+    _check_emails = field_validator("failure_notification")(lambda v: normalize_recipients(v) if v else v)
+
+
+class SchedulePreviewRequest(BaseModel):
+    schedule_type: ScheduleType
+    cron_expression: str | None = None
+    timezone: str = "UTC"
+    start_date: datetime | None = None
+    end_date: datetime | None = None
 
 
 class ScheduleResponse(BaseModel):
@@ -161,12 +188,23 @@ class SequenceCreate(BaseModel):
     sequence_type: SequenceType
     steps: list[SequenceStep] = Field(min_length=1, max_length=MAX_SEQUENCE_STEPS)
     rollback_on_failure: bool = True
+    notification_emails: str | None = None
+    notify_on: NotifyOn = "always"
+
+    _check_emails = field_validator("notification_emails")(lambda v: normalize_recipients(v))
 
 
 class SequenceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     steps: list[SequenceStep] | None = Field(default=None, min_length=1, max_length=MAX_SEQUENCE_STEPS)
     rollback_on_failure: bool | None = None
+    # "" clears the list (None means "leave unchanged").
+    notification_emails: str | None = None
+    notify_on: NotifyOn | None = None
+
+    _check_emails = field_validator("notification_emails")(
+        lambda v: (normalize_recipients(v) or "") if v is not None else None
+    )
 
 
 class SequenceResponse(BaseModel):

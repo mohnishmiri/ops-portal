@@ -9,8 +9,13 @@ Provides:
 - Environment status
 """
 
+from datetime import UTC
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,18 +25,25 @@ from app.models.auth import UserContext, UserRole
 from app.schemas.environment import (
     EnvironmentScaleRequest,
     ScheduleCreate,
+    SchedulePreviewRequest,
     ScheduleUpdate,
     SequenceCreate,
     SequenceExecuteRequest,
     SequenceUpdate,
 )
+from app.services import environment_notifications as notifications
+from app.services.environment_notifications import parse_recipients
 from app.services.environment_scaling_service import (
     EnvironmentScalingService,
+    ScheduleValidationError,
     SequenceAlreadyRunningError,
     SequenceInUseError,
     SequenceValidationError,
     get_environment_scaling_service,
     launch_sequence_run,
+    local_to_utc,
+    to_schedule_local,
+    upcoming_schedule_runs,
 )
 
 logger = structlog.get_logger(__name__)
@@ -65,6 +77,17 @@ async def scale_environment(
             user_id=user.user_id,
             user_email=user.email,
         )
+        recipients = parse_recipients(user.email if body.notify else None, body.notification_emails)
+        if recipients and not body.dry_run and result.get("total_deployments"):
+            report = await service.manual_scale_report(
+                result,
+                cluster_id=body.cluster_id,
+                namespace=body.namespace,
+                operation=body.operation.value,
+                user_email=user.email,
+            )
+            # Sent after the response: SMTP must not hold up the person scaling.
+            notifications.queue_run_email(recipients, report)
         return result
     except HTTPException:
         raise
@@ -135,11 +158,57 @@ async def create_schedule(
             },
         )
         return result
+    except ScheduleValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("schedule_create_failed", error=str(exc)[:200])
         raise HTTPException(status_code=500, detail=str(exc)[:500])
+
+
+@router.get("/schedule/preview")
+async def preview_schedule(
+    schedule_type: str = Query(...),
+    cron_expression: str | None = Query(None),
+    timezone: str = Query("UTC"),
+    start_date: str | None = Query(None),
+    end_date: str | None = Query(None),
+    user: UserContext = Depends(get_current_user),
+):
+    """The next runs a schedule would make — shown in the form before saving."""
+    try:
+        body = SchedulePreviewRequest(
+            schedule_type=schedule_type,
+            cron_expression=cron_expression or None,
+            timezone=timezone,
+            start_date=start_date or None,
+            end_date=end_date or None,
+        )
+        draft = SimpleNamespace(
+            schedule_type=body.schedule_type.value,
+            cron_expression=body.cron_expression,
+            timezone=body.timezone,
+            start_date=to_schedule_local(body.start_date, body.timezone),
+            end_date=to_schedule_local(body.end_date, body.timezone),
+            created_at=None,
+        )
+        runs = upcoming_schedule_runs(draft, count=5)
+    except (ScheduleValidationError, ValidationError, ValueError) as exc:
+        message = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc)
+        raise HTTPException(status_code=400, detail=message)
+    zone = ZoneInfo(body.timezone)
+    return {
+        "timezone": body.timezone,
+        "runs": [
+            {
+                "utc": run.isoformat() + "Z",
+                "local": run.replace(tzinfo=UTC).astimezone(zone).strftime("%a %b %d, %Y %I:%M %p %Z"),
+            }
+            for run in runs
+        ],
+        "start_utc": (local_to_utc(draft.start_date, body.timezone).isoformat() + "Z") if draft.start_date else None,
+    }
 
 
 @router.put("/schedule/{schedule_id}")
@@ -151,9 +220,11 @@ async def update_schedule(
 ):
     """Update an existing environment schedule."""
     try:
+        # exclude_unset, not exclude_none: an explicit null clears an end date,
+        # the notification list or the sequence link.
         result = await service.update_schedule(
             schedule_id=schedule_id,
-            data=body.model_dump(mode="json", exclude_none=True),
+            data=body.model_dump(mode="json", exclude_unset=True),
         )
         await service._write_audit(
             user_id=user.user_id,
@@ -162,9 +233,11 @@ async def update_schedule(
             resource_type="environment_schedule",
             resource_id=str(schedule_id),
             status="success",
-            details={"schedule_id": schedule_id, "updated_fields": list(body.model_dump(exclude_none=True).keys())},
+            details={"schedule_id": schedule_id, "updated_fields": list(body.model_dump(exclude_unset=True).keys())},
         )
         return result
+    except ScheduleValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except HTTPException:
         raise
     except ValueError as exc:

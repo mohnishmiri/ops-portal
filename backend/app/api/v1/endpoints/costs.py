@@ -8,11 +8,12 @@ time-series analysis, and drill-down capabilities.
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
-from app.core.database import get_db
+from app.core.database import get_db, get_db_session
 from app.core.subscription_scope import subscription_ids_for_manual_amortized_sync
 from app.models.auth import UserContext, UserRole
 from app.models.cost import (
@@ -23,7 +24,7 @@ from app.models.cost import (
     GroupByDimension,
     MultiSubscriptionOverview,
 )
-from app.services.amortized_cost_sync_service import AmortizedCostSyncService
+from app.services.amortized_cost_sync_service import EXPORT_LEVELS, AmortizedCostSyncService
 from app.services.cost_service import CostService
 
 router = APIRouter()
@@ -305,6 +306,57 @@ async def get_amortized_drilldown(
         if _is_database_error(exc):
             _raise_database_unavailable(exc)
         raise
+
+
+@router.get(
+    "/amortized/export",
+    summary="Export amortized cost detail as CSV",
+    description=(
+        "Streams the amortized cost data behind the dashboard as CSV for the "
+        "selected window and environment. level=resources gives one row per "
+        "resource and service; level=daily gives every stored row (resource, "
+        "service, day) with full-precision cost so it reconciles to the cent."
+    ),
+)
+async def export_amortized_costs(
+    env: str = Query(default="ALL", description="PROD, NONPROD, or ALL"),
+    months: int = Query(default=2, ge=1, le=12, description="Number of months of data to export (1-12)"),
+    level: str = Query(default="resources", description="resources or daily"),
+    user: UserContext = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Stream amortized cost detail as CSV."""
+    if level not in EXPORT_LEVELS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"level must be one of: {', '.join(EXPORT_LEVELS)}",
+        )
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is down. Please try again later.",
+        )
+    try:
+        # Scope is resolved here, inside the request context; the stream below
+        # runs after the request's session is released, so it opens its own.
+        spec = await AmortizedCostSyncService(db).build_export_spec(env=env, months=months)
+    except Exception as exc:
+        if _is_database_error(exc):
+            _raise_database_unavailable(exc)
+        raise
+
+    async def _stream():
+        async for stream_db in get_db_session():
+            async for chunk in AmortizedCostSyncService(stream_db).iter_export_csv(spec, level):
+                yield chunk
+            break
+
+    filename = AmortizedCostSyncService.export_filename(spec, level)
+    return StreamingResponse(
+        _stream(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post(

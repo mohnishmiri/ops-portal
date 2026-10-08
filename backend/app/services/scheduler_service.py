@@ -69,7 +69,7 @@ async def start_scheduler() -> None:
 
     scheduler.start()
     await sync_alert_schedule_jobs()
-    await realign_env_cron_schedules()
+    await realign_env_schedule_next_runs()
     logger.info("scheduler_started", jobs=len(scheduler.get_jobs()))
 
 
@@ -147,8 +147,8 @@ def _register_platform_jobs(scheduler: AsyncIOScheduler) -> None:
         coalesce=True,
     )
 
-    # Certificate automation ticks hourly but each config runs at most once a
-    # day (enforced in the service), so a restart cannot skip or duplicate a day.
+    # Certificate automation ticks hourly in every worker of every replica; a
+    # per-day claim row in the service lets exactly one of them run each config.
     scheduler.add_job(
         run_certificate_expiry_alerts_job,
         IntervalTrigger(hours=1),
@@ -164,6 +164,18 @@ def _register_platform_jobs(scheduler: AsyncIOScheduler) -> None:
         IntervalTrigger(hours=1),
         id="certificate_auto_renewal",
         name="Certificate Auto-Renewal",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # An alert schedule edit reaches only the worker that served the request;
+    # without this every other worker keeps firing the old trigger until restart.
+    scheduler.add_job(
+        sync_alert_schedule_jobs,
+        IntervalTrigger(minutes=1),
+        id="alert_schedule_resync",
+        name="Alert Schedule Resync",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -199,6 +211,54 @@ def _build_alert_schedule_trigger(config: AlertScheduleConfig):
     return IntervalTrigger(minutes=max(config.interval_minutes or 1, 1), timezone=UTC)
 
 
+def _alert_schedule_min_gap(config: AlertScheduleConfig) -> timedelta:
+    """Half the shortest spacing between two real runs of a schedule.
+
+    Every worker on every replica fires each schedule: cron firings land within
+    seconds of each other, interval firings at each worker's start-up offset.
+    Anything closer than half the schedule's own period is one of those copies.
+    """
+    period = timedelta(minutes=max(config.interval_minutes or 1, 1))
+    if config.schedule_type == "cron" and config.cron_expression:
+        try:
+            trigger = cron_trigger_from_crontab(config.cron_expression, timezone=UTC)
+            fire = trigger.get_next_fire_time(None, datetime.now(UTC))
+            spacings = []
+            for _ in range(12):
+                following = trigger.get_next_fire_time(fire, fire) if fire else None
+                if following is None:
+                    break
+                spacings.append(following - fire)
+                fire = following
+            period = min(spacings) if spacings else timedelta(minutes=1)
+        except Exception:
+            period = timedelta(minutes=1)
+    return max(period / 2, timedelta(seconds=30))
+
+
+async def _claim_alert_schedule(db: AsyncSession, config: AlertScheduleConfig, now: datetime) -> bool:
+    """Stamp last_run_at atomically so exactly one worker runs each firing."""
+    claimed = await db.execute(
+        update(AlertScheduleConfig)
+        .where(
+            AlertScheduleConfig.id == config.id,
+            AlertScheduleConfig.is_enabled.is_(True),
+            or_(
+                AlertScheduleConfig.last_run_at.is_(None),
+                AlertScheduleConfig.last_run_at <= now - _alert_schedule_min_gap(config),
+            ),
+        )
+        .values(last_run_at=now)
+        .returning(AlertScheduleConfig.id)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.scalar_one_or_none() is None:
+        await db.rollback()
+        return False
+    await db.commit()
+    return True
+
+
 async def ensure_default_alert_schedule_configs() -> dict[str, Any]:
     """Seed default alert schedules for empty environments."""
     async for db in get_db_session():
@@ -222,28 +282,46 @@ async def sync_alert_schedule_jobs() -> dict[str, Any]:
 
         active_job_ids: set[str] = set()
         synced = 0
+        replaced = 0
 
         for config in configs:
             job_id = _alert_schedule_job_id(config.id)
+            job = scheduler.get_job(job_id)
 
             if not config.is_enabled:
-                if scheduler.get_job(job_id):
+                if job:
                     scheduler.remove_job(job_id)
                 config.next_run_at = None
                 continue
 
-            trigger = _build_alert_schedule_trigger(config)
-            job = scheduler.add_job(
-                execute_alert_schedule_job,
-                trigger,
-                id=job_id,
-                name=config.name,
-                args=[config.id],
-                replace_existing=True,
-                max_instances=1,
-                coalesce=True,
-            )
-            config.next_run_at = _normalize_run_time(job.next_run_time)
+            try:
+                trigger = _build_alert_schedule_trigger(config)
+            except Exception as exc:
+                logger.warning("alert_schedule_trigger_invalid", schedule_config_id=config.id, error=str(exc)[:200])
+                if job:
+                    active_job_ids.add(job_id)
+                continue
+
+            # This runs every minute; re-adding an unchanged job would restart
+            # its interval so it never fired, so only a changed trigger is replaced.
+            if job is None or str(job.trigger) != str(trigger):
+                replaced += 1
+                job = scheduler.add_job(
+                    execute_alert_schedule_job,
+                    trigger,
+                    id=job_id,
+                    name=config.name,
+                    args=[config.id],
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                )
+                config.next_run_at = _normalize_run_time(job.next_run_time)
+            else:
+                if job.name != config.name:
+                    job.modify(name=config.name)
+                if config.next_run_at is None:
+                    config.next_run_at = _normalize_run_time(job.next_run_time)
             active_job_ids.add(job_id)
             synced += 1
 
@@ -257,7 +335,8 @@ async def sync_alert_schedule_jobs() -> dict[str, Any]:
             removed += 1
 
         await db.commit()
-        logger.info("alert_schedule_jobs_synced", synced=synced, removed=removed)
+        if replaced or removed:
+            logger.info("alert_schedule_jobs_synced", synced=synced, replaced=replaced, removed=removed)
         return {"synced": synced, "removed": removed, "running": True}
 
     return {"synced": 0, "removed": 0, "running": scheduler.running}
@@ -576,6 +655,13 @@ async def execute_alert_schedule_job(schedule_config_id: int) -> None:
                 await db.commit()
                 break
 
+            # Each check emails on what it finds, and copies running side by side
+            # each see "no alert yet" — so they would all create one and all send.
+            if not await _claim_alert_schedule(db, config, datetime.utcnow()):
+                logger.info("alert_schedule_job_skipped", schedule=config.name, reason="run_by_another_worker")
+                break
+            await db.refresh(config)
+
             unsupported_checks: list[str] = []
             if config.check_vm_thresholds:
                 await check_vm_thresholds_job()
@@ -584,13 +670,12 @@ async def execute_alert_schedule_job(schedule_config_id: int) -> None:
             if config.check_pg_thresholds:
                 await check_pg_thresholds_job()
             if config.send_daily_digest:
-                await send_daily_digest_job()
+                await send_daily_digest_job(digest_recipients=list(config.digest_recipients or []))
             if config.check_storage_thresholds:
                 unsupported_checks.append("storage")
             if config.check_disk_thresholds:
                 unsupported_checks.append("disk")
 
-            config.last_run_at = datetime.utcnow()
             job = get_scheduler().get_job(_alert_schedule_job_id(config.id))
             config.next_run_at = _normalize_run_time(job.next_run_time if job else None)
             await db.commit()
@@ -610,8 +695,12 @@ async def execute_alert_schedule_job(schedule_config_id: int) -> None:
         )
 
 
-async def send_daily_digest_job() -> None:
-    """Send daily digest email with all active alerts."""
+async def send_daily_digest_job(digest_recipients: list[str] | None = None) -> None:
+    """Send the digest of all active alerts.
+
+    A schedule passes its own recipients. Pooling every digest schedule's list
+    instead meant each schedule mailed everyone, once per schedule.
+    """
     logger.info("daily_digest_started")
 
     try:
@@ -630,32 +719,38 @@ async def send_daily_digest_job() -> None:
                 logger.info("daily_digest_skipped", reason="no_active_alerts")
                 return
 
-            # Get digest recipients from schedule config
-            schedule_result = await db.execute(
-                select(AlertScheduleConfig).where(
-                    AlertScheduleConfig.send_daily_digest.is_(True),
-                    AlertScheduleConfig.is_enabled.is_(True),
+            recipients: list[str] = []
+            if digest_recipients is not None:
+                recipients.extend(digest_recipients)
+            else:
+                schedule_result = await db.execute(
+                    select(AlertScheduleConfig).where(
+                        AlertScheduleConfig.send_daily_digest.is_(True),
+                        AlertScheduleConfig.is_enabled.is_(True),
+                    )
                 )
-            )
-            schedule_configs = schedule_result.scalars().all()
-
-            recipients = set()
-            for config in schedule_configs:
-                recipients.update(config.digest_recipients or [])
+                for config in schedule_result.scalars().all():
+                    recipients.extend(config.digest_recipients or [])
 
             if not recipients:
                 # Fallback: use all unique notification emails from configs
                 vm_config_result = await db.execute(select(VMThresholdAlertConfig.notification_emails))
                 for row in vm_config_result.scalars().all():
                     if row:
-                        recipients.update(row)
+                        recipients.extend(row)
 
                 expiry_config_result = await db.execute(select(CustomExpiryAlertConfig.notification_emails))
                 for row in expiry_config_result.scalars().all():
                     if row:
-                        recipients.update(row)
+                        recipients.extend(row)
 
-            if not recipients:
+            # "A@att.com" and "a@att.com " are one inbox; the first spelling is kept.
+            by_inbox: dict[str, str] = {}
+            for email in recipients:
+                if isinstance(email, str) and email.strip():
+                    by_inbox.setdefault(email.strip().lower(), email.strip())
+            unique_recipients = list(by_inbox.values())
+            if not unique_recipients:
                 logger.info("daily_digest_skipped", reason="no_recipients")
                 return
 
@@ -681,7 +776,7 @@ async def send_daily_digest_job() -> None:
             ]
 
             await email_service.send_alert_digest(
-                recipient_emails=list(recipients),
+                recipient_emails=unique_recipients,
                 vm_alerts=vm_alert_data,
                 expiry_alerts=expiry_alert_data,
             )
@@ -690,7 +785,7 @@ async def send_daily_digest_job() -> None:
                 "daily_digest_sent",
                 vm_alerts=len(vm_alerts),
                 expiry_alerts=len(expiry_alerts),
-                recipients=len(recipients),
+                recipients=len(unique_recipients),
             )
 
     except Exception as e:
@@ -765,7 +860,9 @@ async def sync_amortized_cost_job() -> None:
             # Sync 12 months to ensure all time-period filters have data available
             result = await sync_service.full_sync(months=12, triggered_by="scheduler")
             logger.info(
-                "amortized_cost_sync_completed",
+                "amortized_cost_sync_finished",
+                status=result.get("status", "unknown"),
+                partial_failures=result.get("partial_failures", 0),
                 months_synced=result.get("months_synced", 0),
                 rows_synced=result.get("rows_synced", 0),
                 total_cost=result.get("total_cost", 0),
@@ -878,6 +975,24 @@ async def run_certificate_auto_renewal_job() -> None:
                 "certificate_auto_renewal_job_finished",
                 schedules_run=result.get("schedules_run", 0),
             )
+            renewed_collections = {
+                r["collection_id"]
+                for r in result.get("results", [])
+                if r.get("renewed") and r.get("collection_id") is not None
+            }
+            if renewed_collections:
+                from app.services.certificate_sync_service import CertificateSyncService
+
+                for collection_id in sorted(renewed_collections):
+                    try:
+                        await CertificateSyncService(db).sync_collection(collection_id, triggered_by="auto_renewal")
+                    except Exception as exc:  # noqa: BLE001 - the next page visit refreshes it anyway
+                        await db.rollback()
+                        logger.warning(
+                            "certificate_auto_renewal_resync_failed",
+                            collection_id=collection_id,
+                            error=str(exc)[:200],
+                        )
     except Exception as e:
         logger.error("certificate_auto_renewal_job_failed", error=str(e)[:300])
 
@@ -1120,12 +1235,15 @@ async def run_environment_schedules_job() -> None:
                 if schedule.next_run_at and schedule.next_run_at > now:
                     continue
 
-                if schedule.end_date and now > schedule.end_date:
+                # Start and end dates are wall-clock times in the schedule's timezone.
+                end_utc = _schedule_bound_utc(schedule.end_date, schedule.timezone)
+                if end_utc and now > end_utc:
                     schedule.is_enabled = False
                     await db.commit()
                     continue
 
-                if schedule.start_date and now < schedule.start_date:
+                start_utc = _schedule_bound_utc(schedule.start_date, schedule.timezone)
+                if start_utc and now < start_utc:
                     continue
 
                 # Something already running in this namespace — a sequence started
@@ -1168,48 +1286,41 @@ async def run_environment_schedules_job() -> None:
         logger.error("environment_schedule_job_failed", error=str(exc)[:200])
 
 
-async def realign_env_cron_schedules() -> int:
-    """Recompute the stored next run of enabled cron environment schedules.
+async def realign_env_schedule_next_runs() -> int:
+    """Recompute the stored next run of enabled environment schedules.
 
-    Environment schedules used to read the cron day-of-week from Monday, so
-    "0 8 * * 1-5" ran Tue–Sat, and each stored next_run_at still points at a
-    day from that reading. A future next run is recomputed with the standard
-    reading; one already due is left to the runner. Idempotent: a correct
-    value recomputes to itself. Each schedule that moves is logged for review.
+    Stored values can be wrong from earlier releases: cron read the
+    day-of-week from Monday ("1-5" ran Tue–Sat), daily/weekly/monthly were
+    "now + 1/7/30 days" and drifted off their start time, and start dates were
+    treated as UTC rather than the schedule's timezone. A future next run is
+    recomputed with today's rules; one already due is left to the runner.
+    Idempotent: a correct value recomputes to itself. Each move is logged.
     """
     from app.models.database import EnvironmentSchedule
+    from app.services.environment_scaling_service import next_schedule_run
 
     changed = 0
     try:
         async for db in get_db_session():
             now = datetime.utcnow()
             rows = (
-                (
-                    await db.execute(
-                        select(EnvironmentSchedule).where(
-                            EnvironmentSchedule.is_enabled.is_(True),
-                            EnvironmentSchedule.schedule_type == "cron",
-                        )
-                    )
-                )
+                (await db.execute(select(EnvironmentSchedule).where(EnvironmentSchedule.is_enabled.is_(True))))
                 .scalars()
                 .all()
             )
             for schedule in rows:
-                if not schedule.cron_expression or not schedule.next_run_at or schedule.next_run_at <= now:
+                if not schedule.next_run_at or schedule.next_run_at <= now:
                     continue
                 try:
-                    # An invalid expression falls back to "now + 24h", which would
-                    # push it a day further on every restart; leave those alone.
-                    cron_trigger_from_crontab(schedule.cron_expression, timezone=ZoneInfo(schedule.timezone or "UTC"))
+                    corrected = next_schedule_run(schedule, now)
                 except Exception:
-                    continue
-                corrected = _compute_env_schedule_next_run(schedule, now)
+                    continue  # invalid cron/timezone: leave it for someone to fix
                 if corrected and corrected != schedule.next_run_at:
                     logger.warning(
                         "environment_schedule_next_run_realigned",
                         schedule_id=schedule.id,
                         job_name=schedule.job_name,
+                        schedule_type=schedule.schedule_type,
                         cron_expression=schedule.cron_expression,
                         timezone=schedule.timezone,
                         previous_next_run_utc=schedule.next_run_at.isoformat(),
@@ -1256,30 +1367,24 @@ def _compute_env_schedule_next_run(
     schedule,
     now: datetime,
 ) -> datetime | None:
-    """Compute the next run time for an environment schedule in UTC."""
-    from zoneinfo import ZoneInfo
+    """The run after the one just claimed (naive UTC); None for one-time schedules."""
+    from app.services.environment_scaling_service import next_schedule_run
 
     if schedule.schedule_type == "one_time":
         return None
+    try:
+        nxt = next_schedule_run(schedule, now + timedelta(seconds=1))
+    except Exception:
+        nxt = None
+    # A NULL next_run_at reads as due: never leave a recurring schedule without one.
+    return nxt or now + timedelta(hours=24)
 
-    # Use the schedule's timezone for cron computation
-    tz = ZoneInfo(schedule.timezone) if schedule.timezone else UTC
 
-    if schedule.schedule_type == "cron" and schedule.cron_expression:
-        try:
-            # from_crontab alone read day-of-week from Monday: "1-5" ran Tue–Sat.
-            trigger = cron_trigger_from_crontab(schedule.cron_expression, timezone=tz)
-            next_fire = trigger.get_next_fire_time(None, now.replace(tzinfo=UTC))
-            if next_fire and next_fire.tzinfo:
-                return next_fire.astimezone(UTC).replace(tzinfo=None)
-            return next_fire
-        except Exception:
-            return now + timedelta(hours=24)
+def _schedule_bound_utc(value: datetime | None, tz_name: str | None) -> datetime | None:
+    """A start/end date (wall clock in the schedule's timezone) in naive UTC."""
+    from app.services.environment_scaling_service import local_to_utc
 
-    intervals = {
-        "daily": timedelta(days=1),
-        "weekly": timedelta(weeks=1),
-        "monthly": timedelta(days=30),
-    }
-    delta = intervals.get(schedule.schedule_type, timedelta(days=1))
-    return now + delta
+    try:
+        return local_to_utc(value, tz_name)
+    except Exception:
+        return value

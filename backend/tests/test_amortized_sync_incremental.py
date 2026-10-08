@@ -2,7 +2,7 @@
 Unit tests for AmortizedCostSyncService incremental logic.
 
 Tests the _compute_fetch_ranges and _delete_fetch_ranges helpers
-using an in-memory SQLite engine (AmortizedCostRecord has no JSONB columns).
+using an in-memory SQLite engine (the amortized tables have no JSONB columns).
 """
 
 from datetime import date, timedelta
@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models.database import AmortizedCostRecord
+from app.models.database import AmortizedCostPricingDaily, AmortizedCostRecord
 from app.services.amortized_cost_sync_service import (
     CORRECTION_WINDOW_DAYS,
     AmortizedCostSyncService,
@@ -29,6 +29,7 @@ async def amortized_db():
     )
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: AmortizedCostRecord.__table__.create(c, checkfirst=True))
+        await conn.run_sync(lambda c: AmortizedCostPricingDaily.__table__.create(c, checkfirst=True))
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
         yield session

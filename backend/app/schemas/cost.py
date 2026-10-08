@@ -92,7 +92,8 @@ class CostDataPoint(BaseModel):
     """Single cost data point."""
 
     date: date
-    cost: Decimal = Field(ge=0, decimal_places=2)
+    # No lower bound: a day's amortized cost can be negative when Azure posts a credit.
+    cost: Decimal = Field(decimal_places=2)
     currency: str = "USD"
     group_value: str = Field(description="Value of the grouping dimension")
     group_dimension: GroupByDimension
@@ -116,7 +117,8 @@ class CostByGroup(BaseModel):
 
     group_dimension: GroupByDimension
     group_value: str
-    total_cost: Decimal = Field(ge=0, decimal_places=2)
+    # Amortized totals can be negative when Azure posts a refund or credit.
+    total_cost: Decimal = Field(decimal_places=2)
     percentage_of_total: float
     currency: str = "USD"
 
@@ -173,6 +175,10 @@ class KPIMetric(BaseModel):
     trend: CostTrendDirection
     change_pct: float
     description: str
+    comparison_label: str | None = Field(
+        default=None,
+        description="What change_pct compares against, e.g. 'vs Sep 1 – Sep 7, 2026'",
+    )
 
 
 class MonthlyCostPoint(BaseModel):
@@ -180,14 +186,40 @@ class MonthlyCostPoint(BaseModel):
 
     month: str = Field(description="YYYY-MM format")
     month_label: str = Field(description="Human-readable label e.g. 'Sep 2025'")
-    total_cost: Decimal = Field(ge=0, decimal_places=2)
-    non_prod_cost: Decimal = Field(default=Decimal("0"), ge=0, decimal_places=2)
-    prod_cost: Decimal = Field(default=Decimal("0"), ge=0, decimal_places=2)
+    # No lower bound: a month's amortized cost can be negative after a refund.
+    total_cost: Decimal = Field(decimal_places=2)
+    non_prod_cost: Decimal = Field(default=Decimal("0"), decimal_places=2)
+    prod_cost: Decimal = Field(default=Decimal("0"), decimal_places=2)
     subscription_breakdown: dict[str, Decimal] = Field(
         default_factory=dict,
         description="cost per subscription_id",
     )
     currency: str = "USD"
+    complete: bool = Field(
+        default=True,
+        description="Every subscription in scope has cost data for every day of the month",
+    )
+    missing_days: int = Field(default=0, description="Subscription-days in the month with no cost data")
+
+
+class DataQualityIssue(BaseModel):
+    """A gap or staleness problem that makes dashboard totals incomplete."""
+
+    kind: str = Field(description="'missing_data' or 'stale'")
+    message: str
+    subscription_id: str | None = None
+    subscription_name: str | None = None
+    no_data: bool = Field(default=False, description="No rows at all in the period: no spend, or never synced")
+    missing_days: int = 0
+    missing_ranges: list[str] = Field(default_factory=list)
+
+
+class PricingMixItem(BaseModel):
+    """Share of spend by Azure pricing model (OnDemand, Reservation, SavingsPlan, Spot)."""
+
+    name: str
+    cost: Decimal = Field(decimal_places=2)
+    pct: float
 
 
 class LeadershipDashboard(BaseModel):
@@ -202,6 +234,18 @@ class LeadershipDashboard(BaseModel):
     )
     savings_opportunities: Decimal = Field(description="Total estimated savings")
     report_date: datetime
+    data_through: date | None = Field(
+        default=None,
+        description="Last closed UTC day included in the figures",
+    )
+    preliminary_from: date | None = Field(
+        default=None,
+        description="Days on or after this date may still be updated by Azure",
+    )
+    data_quality: list[DataQualityIssue] = Field(default_factory=list)
+    pricing_mix: list[PricingMixItem] = Field(default_factory=list)
+    pricing_mix_month: str | None = None
+    pricing_mix_complete: bool = False
 
 
 class LeadershipAdvisorSyncStatus(BaseModel):

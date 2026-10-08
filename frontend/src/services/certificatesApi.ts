@@ -676,6 +676,8 @@ export interface AutoRenewalRunResult {
   certificates_due: number;
   renewed: number;
   failed: number;
+  /** Due but already replaced (renewed earlier, in the portal or in Keyfactor). */
+  skipped?: number;
   emails_sent: number;
 }
 

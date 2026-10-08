@@ -28,6 +28,7 @@ from app.models.database import (
     AccessRequestItem,
     AdminConfig,
     AdminSubscription,
+    CertificateAutomationClaim,
     CertificateCollectionSnapshot,
     CertificateKeyEscrow,
     Permission,
@@ -127,6 +128,21 @@ CREATE TABLE IF NOT EXISTS cert_enrollment_profiles (
 
 
 @pytest.fixture(autouse=True)
+def sent_run_emails(monkeypatch):
+    """Environment Scheduler run summaries are recorded, never sent over SMTP."""
+    from app.services import environment_notifications
+
+    sent: list[tuple[list[str], object]] = []
+
+    async def _record(recipients, report):
+        sent.append((list(recipients), report))
+        return len(recipients)
+
+    monkeypatch.setattr(environment_notifications, "send_run_email", _record)
+    return sent
+
+
+@pytest.fixture(autouse=True)
 def _project_access(request, monkeypatch):
     """Full subscription access for every user unless a test opts in.
 
@@ -165,6 +181,7 @@ async def db_engine():
         await conn.run_sync(lambda c: TeamMembership.__table__.create(c, checkfirst=True))
         # cert_key_escrow holds no JSONB, so it compiles on SQLite as-is.
         await conn.run_sync(lambda c: CertificateKeyEscrow.__table__.create(c, checkfirst=True))
+        await conn.run_sync(lambda c: CertificateAutomationClaim.__table__.create(c, checkfirst=True))
         # A collection sync writes the certificate count back here.
         await conn.run_sync(lambda c: CertificateCollectionSnapshot.__table__.create(c, checkfirst=True))
         # Project / app / subscription access.  None of these hold JSONB.

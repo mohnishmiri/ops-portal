@@ -950,9 +950,11 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
     setRunningId(c.id);
     run.mutate(c.id, {
       onSuccess: (r) => {
+        const skipped = r.skipped ?? 0;
+        const alreadyRenewed = skipped ? ` ${skipped} already renewed and left alone.` : "";
         const message = r.armed
-          ? `Renewed ${r.renewed} of ${r.certificates_due} due certificate(s)${r.failed ? `, ${r.failed} failed` : ""}. ${r.emails_sent} report email(s) sent.`
-          : `Dry run: ${r.certificates_due} certificate(s) are due and would be renewed. Nothing was issued. ${r.emails_sent} report email(s) sent.`;
+          ? `Renewed ${r.renewed} of ${r.certificates_due} due certificate(s)${r.failed ? `, ${r.failed} failed` : ""}.${alreadyRenewed} ${r.emails_sent} report email(s) sent.`
+          : `Dry run: ${Math.max(r.certificates_due - skipped, 0)} certificate(s) are due and would be renewed. Nothing was issued.${alreadyRenewed} ${r.emails_sent} report email(s) sent.`;
         onToast(message, r.failed ? "error" : "success");
       },
       onError: (e) => onToast(certificateErrorMessage(e, "Failed to run auto-renewal."), "error"),
@@ -1025,7 +1027,9 @@ const AutoRenewalPanel: React.FC<{ onToast: (message: string, type?: ToastType) 
             </p>
             <p className="mb-3 text-xs text-gray-500">
               Each renewed certificate is imported into the entries you select, using the key from
-              the renewal itself — no password is needed. Leave empty to renew without touching AKV.
+              the renewal itself — no password is needed. When the schedule covers more than one
+              certificate, an entry is only replaced if it currently holds the certificate being
+              renewed, so renewals never overwrite each other. Leave empty to renew without touching AKV.
             </p>
             {/* Fed the names of the certificates this schedule will renew, so
                 the Key Vault entries holding them are preselected — the same

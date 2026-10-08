@@ -22,7 +22,14 @@ export interface EnvironmentScaleRequest {
   deployment_names?: string[];
   replica_count: number;
   dry_run?: boolean;
+  /** Email the person scaling a summary when it finishes (default true). */
+  notify?: boolean;
+  /** Extra summary recipients, comma separated. */
+  notification_emails?: string;
 }
+
+/** When run summaries are emailed. */
+export type NotifyOn = "always" | "failure" | "never";
 
 export interface EnvironmentScaleResult {
   execution_id: number;
@@ -55,6 +62,8 @@ export interface StepDetail {
   ready_replicas?: number;
   required_ready?: number;
   last_progress_at?: string;
+  /** Live while a scale-down waits: pods still running or terminating. */
+  pods_remaining?: number;
   /** Why pods are not ready yet, e.g. "3 pods unschedulable (Insufficient cpu)". */
   pod_issues?: string;
   note?: string;
@@ -77,14 +86,20 @@ export interface EnvironmentSchedule {
   end_date: string | null;
   is_enabled: boolean;
   retry_count: number;
+  /** Extra run-summary recipients; the creator is always emailed. */
   failure_notification: string | null;
+  notify_on?: NotifyOn;
   sequence_id: number | null;
   created_by: string;
   created_by_email: string | null;
   created_at: string;
   updated_at: string;
   last_run_at: string | null;
+  /** Wall-clock time in the schedule's timezone. */
   next_run_at: string | null;
+  next_run_at_utc?: string | null;
+  /** e.g. "Daily at 08:00 (US/Central)". */
+  schedule_description?: string;
   last_run_status: string | null;
 }
 
@@ -97,12 +112,14 @@ export interface ScheduleCreateRequest {
   schedule_type: "one_time" | "daily" | "weekly" | "monthly" | "cron";
   cron_expression?: string;
   timezone?: string;
-  start_date?: string;
-  end_date?: string;
+  /** Wall-clock time in `timezone` (datetime-local value). */
+  start_date?: string | null;
+  end_date?: string | null;
   is_enabled?: boolean;
   retry_count?: number;
-  failure_notification?: string;
-  sequence_id?: number;
+  failure_notification?: string | null;
+  notify_on?: NotifyOn;
+  sequence_id?: number | null;
 }
 
 export interface ScheduleUpdateRequest {
@@ -112,19 +129,22 @@ export interface ScheduleUpdateRequest {
   schedule_type?: "one_time" | "daily" | "weekly" | "monthly" | "cron";
   cron_expression?: string;
   timezone?: string;
-  start_date?: string;
-  end_date?: string;
+  /** null clears it. */
+  start_date?: string | null;
+  end_date?: string | null;
   is_enabled?: boolean;
   retry_count?: number;
-  failure_notification?: string;
-  sequence_id?: number;
+  failure_notification?: string | null;
+  notify_on?: NotifyOn;
+  sequence_id?: number | null;
 }
 
 export interface SequenceStep {
   order: number;
   deployment_name: string;
   replicas: number;
-  wait_condition: "pods_ready" | "health_endpoint" | "fixed_time" | "deployment_available" | "skip";
+  /** pods_terminated: scale-down steps wait until the stopped pods are gone. */
+  wait_condition: "pods_ready" | "health_endpoint" | "fixed_time" | "deployment_available" | "pods_terminated" | "skip";
   /** Pod waits: fail after this long with no newly ready pod (restarts on progress). fixed_time: the wait. */
   timeout_seconds: number;
   /** Pod waits: move on once this share of the target pods is ready (default 100). */
@@ -142,6 +162,9 @@ export interface EnvironmentSequence {
   sequence_type: "startup" | "shutdown";
   steps: SequenceStep[];
   rollback_on_failure: boolean;
+  /** Run summaries go to whoever starts a run plus these addresses. */
+  notification_emails?: string | null;
+  notify_on?: NotifyOn;
   created_by: string;
   created_by_email: string | null;
   created_at: string;
@@ -155,12 +178,17 @@ export interface SequenceCreateRequest {
   sequence_type: "startup" | "shutdown";
   steps: SequenceStep[];
   rollback_on_failure?: boolean;
+  notification_emails?: string;
+  notify_on?: NotifyOn;
 }
 
 export interface SequenceUpdateRequest {
   name?: string;
   steps?: SequenceStep[];
   rollback_on_failure?: boolean;
+  /** "" clears the list. */
+  notification_emails?: string;
+  notify_on?: NotifyOn;
 }
 
 export interface SequenceExecuteRequest {
@@ -304,6 +332,26 @@ export function useRunScheduleNow() {
       queryClient.invalidateQueries({ queryKey: ["aks-deployments-cached"] });
     },
   });
+}
+
+export interface SchedulePreview {
+  timezone: string;
+  runs: { utc: string; local: string }[];
+  start_utc: string | null;
+}
+
+/** The next runs a schedule would make, computed by the server's scheduler logic. */
+export async function fetchSchedulePreview(params: {
+  schedule_type: string;
+  cron_expression?: string;
+  timezone: string;
+  start_date?: string | null;
+  end_date?: string | null;
+}): Promise<SchedulePreview> {
+  const response = await apiClient.get<SchedulePreview>("/environment/schedule/preview", {
+    params: Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== "")),
+  });
+  return response.data;
 }
 
 // ── Sequences ─────────────────────────────────────────────────────────

@@ -12,6 +12,10 @@
  * - Location / subscription / charge-type / pricing-model breakdowns
  * - Environment comparison (Prod vs Non-Prod)
  * - Drill-down modal for filtered resource view
+ * - Per-subscription data-completeness warnings and preliminary-day shading
+ * - CSV export (resource summary or full daily detail)
+ *
+ * All dates are UTC days; the current UTC day is excluded until Azure closes it.
  */
 
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
@@ -32,21 +36,28 @@ import {
   Cell,
   LineChart,
   Line,
+  ReferenceArea,
 } from "recharts";
 import {
   useAmortizedCostSummary,
   useAmortizedDrilldown,
   useAmortizedCostSync,
   useAmortizedCostSyncStatus,
+  downloadAmortizedExport,
   AmortizedCostSummary,
   AmortizedBreakdownItem,
-  AmortizedTopResource,
-  AmortizedPivotService,
+  AmortizedExportLevel,
 } from "../services/costApi";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { MetricCard, MetricCardIcons } from "../components/MetricCard";
 import { gridStyles } from "../components/gridStyles";
 import { useAuth } from "../contexts/AuthContext";
+import {
+  DataQualityBanner,
+  PreliminaryNote,
+  fmtCostDate,
+  fmtCostRange,
+} from "../features/costs/costShared";
 // ── Palette & Helpers ─────────────────────────────────────────────────
 
 const COLORS = [
@@ -76,6 +87,11 @@ const fmtDate = (d: string) => {
 };
 
 const fmtPct = (n: number) => `${n.toFixed(1)}%`;
+
+const fmtTooltipDate = (d: string) => fmtCostDate(d, { year: true, weekday: true });
+
+/** Recharts formatter that leaves gaps (null) visible as "No data". */
+const fmtTooltipUSD = (val: number | null) => (val == null ? "No data" : fmtUSD(val));
 
 const getFriendlyErrorMessage = (error: unknown): string => {
   if (isAxiosError(error)) {
@@ -145,6 +161,20 @@ function usePaginatedRows<T>(rows: T[], pageSize = DEFAULT_GRID_PAGE_SIZE) {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────
+
+const shareOf = (part: number, total: number) => (total ? fmtPct((part / total) * 100) : "0.0%");
+
+/** "2026 Jul" + "(Jul 8–31)" / "(MTD)" when the window covers only part of the month. */
+const monthHeader = (data: AmortizedCostSummary, month: string): { label: string; note?: string } => {
+  const label = data.monthly_pivot?.month_labels?.[month] ?? month;
+  const coverage = data.monthly_pivot?.month_coverage?.[month];
+  if (!coverage?.partial) return { label };
+  const note =
+    coverage.end === data.date_range.end && coverage.start.endsWith("-01")
+      ? `MTD · ${coverage.days} of ${coverage.days_in_month} days`
+      : `${fmtCostDate(coverage.start)} – ${fmtCostDate(coverage.end)} · ${coverage.days} of ${coverage.days_in_month} days`;
+  return { label, note };
+};
 
 const KPICard: React.FC<{
   label: string;
@@ -267,19 +297,25 @@ const AmortizedCostDashboard: React.FC = () => {
     return () => clearInterval(t);
   }, [dataUpdatedAt]);
 
-  // Detect data gaps: 3+ consecutive $0-cost days in the middle of the trend
-  // (not the edges, which may genuinely have no data yet)
-  const gapDaysDetected = useMemo(() => {
-    const trend = data?.daily_trend;
-    if (!trend || trend.length < 14) return 0;
-    const middle = trend.slice(7, -3); // ignore first 7 and last 3 days
-    let max = 0, run = 0;
-    for (const day of middle) {
-      if ((day as { cost: number }).cost === 0) { run++; max = Math.max(max, run); }
-      else run = 0;
-    }
-    return max;
-  }, [data?.daily_trend]);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState<AmortizedExportLevel | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const handleExport = useCallback(
+    async (level: AmortizedExportLevel) => {
+      setExportMenuOpen(false);
+      setExporting(level);
+      setExportError(null);
+      try {
+        await downloadAmortizedExport(env, months, level);
+      } catch (err) {
+        setExportError(getFriendlyErrorMessage(err));
+      } finally {
+        setExporting(null);
+      }
+    },
+    [env, months],
+  );
 
   const handleSync = useCallback(
     (force = false) => {
@@ -348,13 +384,13 @@ const AmortizedCostDashboard: React.FC = () => {
             Amortized Cost Dashboard
           </h1>
           <p className="mt-1 text-sm text-gray-500">
-            {hasData
-              ? `Auto-synced from Azure • ${summary?.date_range.start} to ${summary?.date_range.end} • ${summary?.row_count.toLocaleString()} line items`
-              : "Auto-synced from Azure • no cached amortized rows available yet"}
+            {hasData && summary
+              ? `${fmtCostRange(summary.date_range.start, summary.date_range.end)} (UTC) • data through ${fmtCostDate(summary.data_through ?? summary.latest_available_date, { year: true })} • ${summary.row_count.toLocaleString()} cost records`
+              : "Synced from Azure Cost Management • no amortized cost data available yet"}
           </p>
           <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1.5">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-            Live · refreshes every 5 min · last refreshed {lastRefreshLabel}
+            Page refreshes every 5 min · last refreshed {lastRefreshLabel} · today (UTC) is excluded until Azure closes the day
           </p>
         </div>
 
@@ -399,6 +435,48 @@ const AmortizedCostDashboard: React.FC = () => {
             </svg>
             Refresh
           </button>
+          <div
+            className="relative"
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setExportMenuOpen(false);
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setExportMenuOpen((open) => !open)}
+              disabled={!hasData || exporting !== null}
+              aria-haspopup="menu"
+              aria-expanded={exportMenuOpen}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 shadow-sm transition"
+            >
+              <svg className={`h-4 w-4 ${exporting ? "animate-pulse" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" />
+              </svg>
+              {exporting ? "Exporting…" : "Export CSV"}
+            </button>
+            {exportMenuOpen && (
+              <div role="menu" className="absolute right-0 z-30 mt-2 w-72 rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleExport("resources")}
+                  className="w-full rounded-lg px-3 py-2 text-left hover:bg-att-50"
+                >
+                  <span className="block text-sm font-medium text-gray-900">Resource summary</span>
+                  <span className="block text-xs text-gray-500">One row per resource and service for the selected period</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleExport("daily")}
+                  className="w-full rounded-lg px-3 py-2 text-left hover:bg-att-50"
+                >
+                  <span className="block text-sm font-medium text-gray-900">Daily detail</span>
+                  <span className="block text-xs text-gray-500">Every cost record by day, full precision — reconciles to the cent</span>
+                </button>
+              </div>
+            )}
+          </div>
           {canWrite && (
             <button
               onClick={() => handleSync(false)}
@@ -438,15 +516,32 @@ const AmortizedCostDashboard: React.FC = () => {
 
       {/* Sync status bar */}
       {syncStatus?.last_sync && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3 flex items-center justify-between text-sm">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2 text-gray-600">
-            <span className={`inline-block w-2 h-2 rounded-full ${syncStatus.status === "completed" ? "bg-green-500" : syncStatus.status === "running" ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`} />
-            <span>Last sync: {formatDate(syncStatus.last_sync)}</span>
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                syncStatus.status === "running"
+                  ? "bg-yellow-500 animate-pulse"
+                  : syncStatus.status === "failed"
+                    ? "bg-red-500"
+                    : syncStatus.warning
+                      ? "bg-amber-500"
+                      : "bg-green-500"
+              }`}
+            />
+            <span>
+              {syncStatus.status === "failed" ? "Last sync failed" : syncStatus.warning ? "Last sync completed with gaps" : "Last sync"}:{" "}
+              {formatDate(syncStatus.last_sync)}
+            </span>
             {syncStatus.rows_synced != null && (
-              <span className="text-gray-400">&bull; {syncStatus.rows_synced.toLocaleString()} rows</span>
+              <span className="text-gray-400">&bull; {syncStatus.rows_synced.toLocaleString()} rows refreshed</span>
             )}
             {syncStatus.triggered_by && (
               <span className="text-gray-400">&bull; triggered by {syncStatus.triggered_by}</span>
+            )}
+            {syncStatus.data_through && (
+              <span className="text-gray-400">&bull; Azure data through {fmtCostDate(syncStatus.data_through, { year: true })}</span>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -457,65 +552,105 @@ const AmortizedCostDashboard: React.FC = () => {
               Sync scope: {syncStatus.monitored_subscription_count ?? 0} monitored subscription{(syncStatus.monitored_subscription_count ?? 0) === 1 ? "" : "s"}
             </span>
           </div>
+          </div>
+          {(syncStatus.warning || (syncStatus.status === "failed" && syncStatus.error_message)) && (
+            <p
+              className={`mt-2 line-clamp-2 text-xs ${syncStatus.status === "failed" ? "text-red-700" : "text-amber-800"}`}
+              title={syncStatus.warning || syncStatus.error_message || undefined}
+            >
+              {syncStatus.warning || syncStatus.error_message}
+            </p>
+          )}
         </div>
       )}
 
-      {/* Sync error notification */}
+      {/* Sync / export error notifications */}
       {syncMutation.isError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          <span className="font-medium">Sync failed</span> — {String(syncMutation.error)}
+          <span className="font-medium">Sync failed</span> — {getFriendlyErrorMessage(syncMutation.error)}
+        </div>
+      )}
+      {exportError && (
+        <div className="flex items-start justify-between rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          <span>
+            <span className="font-medium">Export failed</span> — {exportError}
+          </span>
+          <button onClick={() => setExportError(null)} className="ml-4 text-red-500 hover:text-red-700" aria-label="Dismiss">
+            ×
+          </button>
         </div>
       )}
 
-      {/* Data gap warning — shown when 3+ consecutive $0-cost days are detected
-          in the middle of the trend, which indicates missing data rather than
-          genuine zero spend.  Leadership should not report on data with gaps. */}
-      {gapDaysDetected >= 3 && !syncMutation.isPending && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 flex items-start gap-3">
-          <svg className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-          </svg>
-          <div>
-            <p className="font-semibold">Data gap detected — not ready for leadership reporting</p>
-            <p className="mt-0.5 text-amber-700">
-              The chart shows {gapDaysDetected} consecutive days with $0 cost, which indicates missing Azure data rather than genuine zero spend.
-              Click <span className="font-medium">Sync from Azure</span> (with <span className="font-medium">Last 12 months</span> selected) to fill the gap.
-              Repeat 2–3 times if Azure rate-limits the first attempt.
-            </p>
-          </div>
-        </div>
+      {/* Data completeness — per subscription, from the backend. A subscription
+          missing days understates every total on this page, so say so plainly. */}
+      {summary?.coverage && !summary.coverage.complete && !syncMutation.isPending && (
+        <DataQualityBanner
+          heading="Data incomplete for this period — totals below exclude the missing days"
+          items={summary.coverage.issues.map((issue) => ({
+            key: issue.subscription_id,
+            title: issue.subscription_name,
+            detail: issue.no_data
+              ? "no cost data in this period — either no spend, or it has not been synced yet"
+              : `no cost data for ${issue.missing_days} of ${issue.total_days} days (${issue.missing_ranges
+              .slice(0, 3)
+              .map((r) => (r.start === r.end ? fmtCostDate(r.start, { year: true }) : fmtCostRange(r.start, r.end)))
+              .join("; ")}${issue.missing_range_count > 3 ? `; +${issue.missing_range_count - 3} more` : ""})`,
+          }))}
+          footnote={
+            <>
+              The scheduled sync retries missing days automatically; a subscription created during the period will show a gap before it existed.
+              {canWrite ? (
+                <>
+                  {" "}Use <span className="font-medium">Sync from Azure</span> to run it now.
+                </>
+              ) : null}
+            </>
+          }
+        />
       )}
-
 
       {hasData && summary ? (
         <>
           {/* KPI Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
             <KPICard
               label="Total Amortized Cost"
               value={fmtCompact(summary.total_cost)}
-              sub={fmtUSD(summary.total_cost)}
+              sub={`${fmtUSD(summary.total_cost)} · ${fmtCostRange(summary.date_range.start, summary.date_range.end)}`}
               icon={MetricCardIcons.currency()}
               tone="blue"
             />
             <KPICard
               label="Production"
               value={fmtCompact(summary.env_comparison.totals["Prod"] ?? 0)}
-              sub={`${((summary.env_comparison.totals["Prod"] ?? 0) / summary.total_cost * 100).toFixed(1)}% of total`}
+              sub={`${shareOf(summary.env_comparison.totals["Prod"] ?? 0, summary.total_cost)} of total`}
               icon={MetricCardIcons.shield()}
               tone="emerald"
             />
             <KPICard
               label="Non-Production"
               value={fmtCompact(summary.env_comparison.totals["Non-Prod"] ?? 0)}
-              sub={`${((summary.env_comparison.totals["Non-Prod"] ?? 0) / summary.total_cost * 100).toFixed(1)}% of total`}
+              sub={`${shareOf(summary.env_comparison.totals["Non-Prod"] ?? 0, summary.total_cost)} of total`}
               icon={MetricCardIcons.cloud()}
               tone="amber"
             />
             <KPICard
+              label="Commitment Coverage"
+              value={summary.commitment ? fmtPct(summary.commitment.covered_pct) : "—"}
+              sub={
+                summary.commitment
+                  ? summary.commitment.complete
+                    ? "Spend on Reservations + Savings Plans"
+                    : `Based on ${fmtPct(summary.commitment.pricing_coverage_pct)} of spend — backfilling`
+                  : "Pricing data arrives with the next sync"
+              }
+              icon={MetricCardIcons.checkCircle()}
+              tone="emerald"
+            />
+            <KPICard
               label="Services / Resources"
-              value={`${summary.service_breakdown.length} / ${summary.top_resources.length}+`}
-              sub={`${summary.subscription_breakdown.length} subscription(s)`}
+              value={`${summary.service_count ?? summary.service_breakdown.length} / ${(summary.resource_count ?? summary.top_resources.length).toLocaleString()}`}
+              sub={`${summary.subscription_count ?? summary.subscription_breakdown.length} subscription(s) · ${summary.resource_group_count ?? summary.resource_group_breakdown.length} resource groups`}
               icon={MetricCardIcons.layers()}
               tone="purple"
             />
@@ -575,21 +710,28 @@ const OverviewTab: React.FC<{
   data: AmortizedCostSummary;
   onDrilldown: (type: string, value: string) => void;
 }> = ({ data, onDrilldown }) => {
-  // Env comparison monthly chart data
+  // Env comparison monthly chart data; partial months are marked with *.
   const envMonthly = useMemo(() => {
     const months = Object.keys(data.env_comparison.monthly).sort();
-    return months.map((m) => ({
-      month: m,
-      Prod: data.env_comparison.monthly[m]["Prod"] ?? 0,
-      "Non-Prod": data.env_comparison.monthly[m]["Non-Prod"] ?? 0,
-    }));
+    return months.map((m) => {
+      const { label, note } = monthHeader(data, m);
+      return {
+        month: note ? `${label}*` : label,
+        note,
+        Prod: data.env_comparison.monthly[m]["Prod"] ?? 0,
+        "Non-Prod": data.env_comparison.monthly[m]["Non-Prod"] ?? 0,
+      };
+    });
   }, [data]);
+  const hasPartialMonth = envMonthly.some((m) => m.note);
+  const trendEnd = data.daily_trend.length ? data.daily_trend[data.daily_trend.length - 1].date : null;
+  const preliminaryFrom = data.preliminary_from && trendEnd && data.preliminary_from <= trendEnd ? data.preliminary_from : null;
 
   return (
     <div className="space-y-6">
       {/* Daily Trend — Prod vs Non-Prod */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <SectionTitle title="Daily Cost Trend" sub="Prod vs Non-Prod amortized cost per day" />
+        <SectionTitle title="Daily Cost Trend" sub="Prod vs Non-Prod amortized cost per UTC day — gaps mark days with no synced data" />
         <div className="h-80">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data.daily_trend}>
@@ -606,16 +748,24 @@ const OverviewTab: React.FC<{
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={fmtDate} />
               <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => fmtCompact(v)} />
+              {preliminaryFrom && trendEnd && (
+                <ReferenceArea x1={preliminaryFrom} x2={trendEnd} fill="#e2e8f0" fillOpacity={0.6} ifOverflow="extendDomain" />
+              )}
               <Tooltip
-                formatter={(val: number) => fmtUSD(val)}
-                labelFormatter={(l: string) => `Date: ${l}`}
+                formatter={fmtTooltipUSD}
+                labelFormatter={(l: string) => {
+                  const point = data.daily_trend.find((p) => p.date === l);
+                  const total = point?.cost == null ? "no data synced" : `total ${fmtUSD(point.cost)}`;
+                  return `${fmtTooltipDate(l)} · ${total}${point?.preliminary ? " · preliminary" : ""}`;
+                }}
               />
               <Legend />
-              <Area type="monotone" dataKey="prod" name="Prod" stroke="#3b82f6" fill="url(#gradProd)" strokeWidth={2} />
-              <Area type="monotone" dataKey="non_prod" name="Non-Prod" stroke="#10b981" fill="url(#gradNP)" strokeWidth={2} />
+              <Area type="monotone" dataKey="prod" name="Prod" stroke="#3b82f6" fill="url(#gradProd)" strokeWidth={2} connectNulls={false} />
+              <Area type="monotone" dataKey="non_prod" name="Non-Prod" stroke="#10b981" fill="url(#gradNP)" strokeWidth={2} connectNulls={false} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
+        <PreliminaryNote from={preliminaryFrom} through={trendEnd} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -662,13 +812,22 @@ const OverviewTab: React.FC<{
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => fmtCompact(v)} />
-                <Tooltip formatter={(val: number) => fmtUSD(val)} />
+                <Tooltip
+                  formatter={(val: number) => fmtUSD(val)}
+                  labelFormatter={(label: string) => {
+                    const row = envMonthly.find((m) => m.month === label);
+                    return row?.note ? `${label.replace(/\*$/, "")} (${row.note})` : label;
+                  }}
+                />
                 <Legend />
                 <Bar dataKey="Prod" fill="#3b82f6" radius={[4, 4, 0, 0]} />
                 <Bar dataKey="Non-Prod" fill="#10b981" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
+          {hasPartialMonth && (
+            <p className="mt-2 text-xs text-gray-500">* Partial month — only the days inside the selected period are included.</p>
+          )}
         </div>
       </div>
 
@@ -682,7 +841,7 @@ const OverviewTab: React.FC<{
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={fmtDate} />
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => fmtCompact(v)} />
-                <Tooltip formatter={(val: number) => fmtUSD(val)} />
+                <Tooltip formatter={fmtTooltipUSD} labelFormatter={fmtTooltipDate} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 {(data.top_service_names || []).map((svc, i) => (
                   <Area
@@ -711,9 +870,19 @@ const OverviewTab: React.FC<{
 
       {/* Quick breakdowns row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <BreakdownCard title="By Location" items={data.location_breakdown} />
-        <BreakdownCard title="By Charge Type" items={data.charge_type_breakdown as AmortizedBreakdownItem[]} />
-        <BreakdownCard title="By Pricing Model" items={data.pricing_model_breakdown as AmortizedBreakdownItem[]} />
+        <BreakdownCard title="By Location" sub="Azure region of each resource" items={data.location_breakdown} />
+        <BreakdownCard
+          title="By Pricing Model"
+          sub={pricingSubtitle(data)}
+          items={data.pricing_model_breakdown}
+          emptyText="Pricing data arrives with the next sync."
+        />
+        <BreakdownCard
+          title="By Charge Type"
+          sub="Unused reservation / savings plan charges are commitment waste"
+          items={data.charge_type_breakdown}
+          emptyText="Charge-type data arrives with the next sync."
+        />
       </div>
     </div>
   );
@@ -982,7 +1151,11 @@ const ResourcesTab: React.FC<{
       {/* Top Resources Table */}
       <div className={gridStyles.shell}>
         <div className={gridStyles.panelHeader}>
-          <SectionTitle title="Top Resources by Cost" sub={`Showing ${pagedResources.length} of ${filtered.length}`} compact />
+          <SectionTitle
+            title="Top Resources by Cost"
+            sub={`Top ${data.top_resources.length} of ${(data.resource_count ?? data.top_resources.length).toLocaleString()} resources · use Export CSV for the full list`}
+            compact
+          />
           <GridSearchInput
             value={resourceSearch}
             onChange={setResourceSearch}
@@ -1145,7 +1318,7 @@ const PivotTab: React.FC<{ data: AmortizedCostSummary }> = ({ data }) => {
       <div className={gridStyles.panelHeader}>
         <SectionTitle
           title="Monthly Cost Pivot — Service x Month"
-          sub={`Showing ${pagedPivotServices.length} of ${filteredServices.length} services`}
+          sub={`Showing ${pagedPivotServices.length} of ${filteredServices.length} services · ${fmtCostRange(data.date_range.start, data.date_range.end)}`}
           compact
         />
         <GridSearchInput
@@ -1161,11 +1334,19 @@ const PivotTab: React.FC<{ data: AmortizedCostSummary }> = ({ data }) => {
               <th className={`${gridStyles.headerCell} sticky left-0 z-20 min-w-[220px] bg-att-50/95`}>
                 Service Type
               </th>
-              {pivot.months.map((m) => (
-                <th key={m} className={`${gridStyles.headerCell} min-w-[120px] text-right`}>
-                  {pivot.month_labels[m] || m}
-                </th>
-              ))}
+              {pivot.months.map((m) => {
+                const { label, note } = monthHeader(data, m);
+                return (
+                  <th key={m} className={`${gridStyles.headerCell} min-w-[130px] text-right`} title={note}>
+                    {label}
+                    {note && (
+                      <span className="mt-0.5 block text-[10px] font-medium normal-case tracking-normal text-amber-700">
+                        {note}
+                      </span>
+                    )}
+                  </th>
+                );
+              })}
               <th className="min-w-[130px] bg-att-100 px-4 py-3 text-right text-xs font-bold uppercase tracking-[0.12em] text-att-800">
                 Total
               </th>
@@ -1302,7 +1483,8 @@ const DrilldownTab: React.FC<{
           Clear filters
         </button>
         <span className="text-sm text-gray-500 ml-auto">
-          Total: {fmtUSD(data.total_cost)} &bull; {data.row_count.toLocaleString()} line items
+          Total: {fmtUSD(data.total_cost)} &bull; {(data.resource_count ?? drilldownResources.length).toLocaleString()} resources &bull;{" "}
+          {data.row_count.toLocaleString()} cost records
         </span>
       </div>
 
@@ -1316,7 +1498,7 @@ const DrilldownTab: React.FC<{
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={fmtDate} />
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => fmtCompact(v)} />
-                <Tooltip formatter={(val: number) => fmtUSD(val)} />
+                <Tooltip formatter={(val: number) => fmtUSD(val)} labelFormatter={fmtTooltipDate} />
                 <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
@@ -1329,7 +1511,11 @@ const DrilldownTab: React.FC<{
         <div className={gridStyles.panelHeader}>
           <SectionTitle
             title="Resources"
-            sub={`Showing ${pagedResources.length} of ${filteredResources.length} resource(s)`}
+            sub={
+              (data.resource_count ?? 0) > drilldownResources.length
+                ? `Top ${drilldownResources.length} of ${(data.resource_count ?? 0).toLocaleString()} resources by cost`
+                : `Showing ${pagedResources.length} of ${filteredResources.length} resource(s)`
+            }
             compact
           />
           <GridSearchInput
@@ -1396,19 +1582,38 @@ const DrilldownTab: React.FC<{
 
 // ── Breakdown Card (reusable) ─────────────────────────────────────────
 
+const pricingSubtitle = (data: AmortizedCostSummary): string => {
+  const c = data.commitment;
+  if (!c) return "On-demand vs Reservation / Savings Plan";
+  if (c.complete) return `${fmtPct(c.covered_pct)} of spend is on committed pricing`;
+  return `Covers ${fmtPct(c.pricing_coverage_pct)} of spend so far — older months backfill on upcoming syncs`;
+};
+
 const BreakdownCard: React.FC<{
   title: string;
+  sub?: string;
   items: AmortizedBreakdownItem[];
-}> = ({ title, items }) => (
+  emptyText?: string;
+}> = ({ title, sub, items, emptyText = "No data for this period." }) => (
   <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-    <h3 className="text-sm font-semibold text-gray-700 mb-3">{title}</h3>
-    <div className="space-y-2">
+    <h3 className="text-sm font-semibold text-gray-700">{title}</h3>
+    {sub && <p className="mt-0.5 text-xs text-gray-500">{sub}</p>}
+    <div className="mt-3 space-y-2.5">
+      {items.length === 0 && <p className="text-sm text-gray-400">{emptyText}</p>}
       {items.slice(0, 8).map((item) => (
-        <div key={item.name} className="flex items-center justify-between text-sm">
-          <span className="text-gray-700 truncate max-w-[60%]" title={item.name}>
-            {item.name}
-          </span>
-          <span className="font-mono text-gray-900">{fmtCompact(item.cost)}</span>
+        <div key={item.name} className="text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-gray-700 truncate" title={item.name}>
+              {item.name}
+            </span>
+            <span className="shrink-0 font-mono text-gray-900">
+              {fmtCompact(item.cost)}
+              <span className="ml-2 inline-block w-12 text-right text-xs text-gray-500">{fmtPct(item.pct ?? 0)}</span>
+            </span>
+          </div>
+          <div className="mt-1 h-1.5 rounded-full bg-att-50">
+            <div className="h-1.5 rounded-full bg-att-400" style={{ width: `${Math.min(Math.max(item.pct ?? 0, 0), 100)}%` }} />
+          </div>
         </div>
       ))}
     </div>

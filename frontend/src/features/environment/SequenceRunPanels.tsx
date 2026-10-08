@@ -85,6 +85,8 @@ export const RunConfirmDialog: React.FC<RunConfirmProps> = ({ sequence, liveByNa
     return { position: i + 1, step: s, live, from, to, missing: liveLoaded && !live };
   });
   const missing = plan.filter((p) => p.missing);
+  // A startup can scale some deployments down first; make that unmissable.
+  const scaleDowns = isShutdown ? [] : plan.filter((p) => p.from != null && p.to < p.from);
   const deploymentCount = new Set(steps.map((s) => s.deployment_name)).size;
   const podWaits = isShutdown ? [] : steps.filter((s) => s.wait_condition !== "skip" && s.wait_condition !== "fixed_time");
   const fixedWaits = isShutdown ? 0 : steps.reduce((sum, s) => sum + (s.wait_condition === "fixed_time" ? s.timeout_seconds || 0 : 0), 0);
@@ -152,6 +154,18 @@ export const RunConfirmDialog: React.FC<RunConfirmProps> = ({ sequence, liveByNa
           </div>
         </div>
 
+        {scaleDowns.length > 0 && (
+          <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-900">
+            This startup also scales down {scaleDowns.length} deployment{scaleDowns.length === 1 ? "" : "s"}:{" "}
+            {scaleDowns.map((p, i) => (
+              <span key={p.position}>
+                {i > 0 && ", "}
+                <span className="font-mono">{p.step.deployment_name}</span> ({p.from} → {p.to}, step {p.position})
+              </span>
+            ))}
+            .
+          </div>
+        )}
         {missing.length > 0 && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" role="alert">
             {missing.length} step{missing.length === 1 ? "" : "s"} reference deployments not found in {sequence.namespace}:{" "}
@@ -326,7 +340,9 @@ export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClos
         <div className="mb-1 flex justify-between text-xs text-gray-500">
           <span>
             {running && current
-              ? <>Step {current.step ?? "?"} of {total}: <span className="font-mono font-semibold text-gray-700">{current.deployment}</span> → {current.target_replicas} pods{current.ready_replicas != null
+              ? <>Step {current.step ?? "?"} of {total}: <span className="font-mono font-semibold text-gray-700">{current.deployment}</span> → {current.target_replicas} pods{current.pods_remaining != null && current.pods_remaining > current.target_replicas
+                  ? `, ${current.pods_remaining} pods still stopping`
+                  : current.ready_replicas != null
                   ? `, ${current.ready_replicas}/${current.target_replicas} ready${current.required_ready != null && current.required_ready < current.target_replicas ? ` (moves on at ${current.required_ready})` : ""}`
                   : current.wait_condition && current.wait_condition !== "skip" ? `, ${WAIT_LABELS[current.wait_condition]?.toLowerCase() ?? current.wait_condition}` : ""}</>
               : `${finished} of ${total} steps finished`}

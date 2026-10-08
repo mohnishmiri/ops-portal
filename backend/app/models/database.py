@@ -1491,6 +1491,29 @@ class AmortizedCostMonthlySummary(Base):
     __table_args__ = (Index("ix_monthly_summary_date", "month_year"),)
 
 
+class AmortizedCostPricingDaily(Base):
+    """Daily amortized cost per subscription by pricing model and charge type.
+
+    Azure's Query API allows only two grouping dimensions, so the resource-level
+    rows in ``amortized_cost_records`` cannot also carry the pricing model. This
+    rollup comes from a separate query whose daily totals also serve as the
+    reconciliation check for the resource-level rows of the same range.
+    """
+
+    __tablename__ = "amortized_cost_pricing_daily"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cost_date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
+    subscription_id = Column(String(50), nullable=False, index=True)
+    pricing_model = Column(String(50), nullable=False, default="")  # OnDemand / Reservation / SavingsPlan / Spot
+    charge_type = Column(String(50), nullable=False, default="")  # Usage / UnusedReservation / UnusedSavingsPlan / ...
+    cost_amount = Column(Float, nullable=False, default=0.0)
+    currency = Column(String(10), nullable=False, default="USD")
+    synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_amortized_pricing_sub_date", "subscription_id", "cost_date"),)
+
+
 class LeadershipDashboardSnapshot(Base):
     """Stores pre-computed leadership dashboard data for fast loading."""
 
@@ -1681,6 +1704,32 @@ class CertificateKeyEscrow(Base):
     __table_args__ = (UniqueConstraint("thumbprint", name="uq_cert_escrow_thumbprint"),)
 
 
+class CertificateAutomationClaim(Base):
+    """One row per unit of certificate automation work that may run only once a day.
+
+    Every uvicorn worker on every replica runs its own scheduler, so a read-then-
+    act "did this already run?" check lets all of them through at once. The
+    unique key makes the insert itself the lock: exactly one process wins.
+
+    ``claim_type`` is the run action (an alert rule or renewal schedule, keyed
+    by config id) or ``renew_certificate`` (keyed by Keyfactor certificate id).
+    """
+
+    __tablename__ = "cert_automation_claims"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    claim_type = Column(String(40), nullable=False)
+    subject_id = Column(Integer, nullable=False)
+    claim_date = Column(String(10), nullable=False)  # UTC date, YYYY-MM-DD
+    claimed_by = Column(String(255), nullable=True)
+    claimed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("claim_type", "subject_id", "claim_date", name="uq_cert_automation_claim"),
+        Index("ix_cert_automation_claims_claimed_at", "claimed_at"),
+    )
+
+
 class CertificateSyncStatus(Base):
     """Tracks the last certificate sync job (Keyfactor → PostgreSQL)."""
 
@@ -1773,7 +1822,11 @@ class EnvironmentSchedule(Base):
     end_date = Column(DateTime, nullable=True)
     is_enabled = Column(Boolean, nullable=False, default=True)
     retry_count = Column(Integer, nullable=False, default=3)
-    failure_notification = Column(String(500), nullable=True)  # email or webhook
+    # Extra run-summary recipients (comma separated); the creator is always included.
+    failure_notification = Column(String(500), nullable=True)
+    notify_on = Column(
+        String(20), nullable=False, default="always", server_default="always"
+    )  # always | failure | never
     sequence_id = Column(Integer, ForeignKey("environment_sequences.id"), nullable=True)
     created_by = Column(String(255), nullable=False)
     created_by_email = Column(String(255), nullable=True)
@@ -1801,6 +1854,11 @@ class EnvironmentSequence(Base):
     sequence_type = Column(String(50), nullable=False)  # startup, shutdown
     steps = Column(JSONB, nullable=False)  # [{order, deployment_name, replicas, wait_condition, timeout_seconds}]
     rollback_on_failure = Column(Boolean, nullable=False, default=True)
+    # Run summaries go to whoever starts a run plus these addresses.
+    notification_emails = Column(String(1000), nullable=True)
+    notify_on = Column(
+        String(20), nullable=False, default="always", server_default="always"
+    )  # always | failure | never
     created_by = Column(String(255), nullable=False)
     created_by_email = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

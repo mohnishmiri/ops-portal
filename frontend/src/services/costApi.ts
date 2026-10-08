@@ -52,6 +52,8 @@ export interface KPIMetric {
   trend: "up" | "down" | "stable";
   change_pct: number;
   description: string;
+  /** What change_pct compares against, e.g. "vs Sep 1 – Sep 7, 2026". */
+  comparison_label?: string | null;
 }
 
 export interface MonthlyCostPoint {
@@ -62,6 +64,26 @@ export interface MonthlyCostPoint {
   prod_cost: number;
   subscription_breakdown: Record<string, number>;
   currency: string;
+  /** Every subscription in scope has data for every day of the month. */
+  complete?: boolean;
+  missing_days?: number;
+}
+
+export interface DataQualityIssue {
+  kind: "missing_data" | "stale" | string;
+  message: string;
+  subscription_id?: string | null;
+  subscription_name?: string | null;
+  /** No rows at all in the period: no spend, or never synced. */
+  no_data?: boolean;
+  missing_days: number;
+  missing_ranges: string[];
+}
+
+export interface PricingMixItem {
+  name: string;
+  cost: number;
+  pct: number;
 }
 
 export interface LeadershipDashboard {
@@ -71,6 +93,36 @@ export interface LeadershipDashboard {
   six_month_trend: MonthlyCostPoint[];
   savings_opportunities: number;
   report_date: string;
+  /** Last closed UTC day included in the figures (YYYY-MM-DD). */
+  data_through?: string | null;
+  /** Days on/after this date may still be updated by Azure. */
+  preliminary_from?: string | null;
+  data_quality?: DataQualityIssue[];
+  pricing_mix?: PricingMixItem[];
+  pricing_mix_month?: string | null;
+  pricing_mix_complete?: boolean;
+}
+
+/** Backend serialises Decimal fields as strings — coerce them to numbers. */
+function normalizeLeadershipDashboard(data: LeadershipDashboard): LeadershipDashboard {
+  return {
+    ...data,
+    kpis: (data.kpis || []).map((k) => ({ ...k, value: Number(k.value) })),
+    cost_trend: (data.cost_trend || []).map((p) => ({ ...p, cost: Number(p.cost) })),
+    top_spenders: (data.top_spenders || []).map((s) => ({ ...s, total_cost: Number(s.total_cost) })),
+    savings_opportunities: Number(data.savings_opportunities ?? 0),
+    six_month_trend: (data.six_month_trend || []).map((m) => ({
+      ...m,
+      total_cost: Number(m.total_cost),
+      non_prod_cost: Number(m.non_prod_cost ?? 0),
+      prod_cost: Number(m.prod_cost ?? 0),
+      subscription_breakdown: Object.fromEntries(
+        Object.entries(m.subscription_breakdown || {}).map(([k, v]) => [k, Number(v)])
+      ),
+    })),
+    pricing_mix: (data.pricing_mix || []).map((p) => ({ ...p, cost: Number(p.cost) })),
+    data_quality: data.data_quality || [],
+  };
 }
 
 export interface CostRecommendation {
@@ -402,32 +454,8 @@ export function useLeadershipDashboard() {
   return useQuery<LeadershipDashboard>({
     queryKey: ["dashboard", "leadership", scopeKey],
     queryFn: async () => {
-      const { data } = await apiClient.get("/dashboards/leadership");
-      // Backend returns Decimal fields as strings — coerce to numbers
-      if (data.kpis) {
-        data.kpis = data.kpis.map((k: KPIMetric) => ({ ...k, value: Number(k.value) }));
-      }
-      if (data.cost_trend) {
-        data.cost_trend = data.cost_trend.map((p: CostDataPoint) => ({ ...p, cost: Number(p.cost) }));
-      }
-      if (data.top_spenders) {
-        data.top_spenders = data.top_spenders.map((s: CostByGroup) => ({ ...s, total_cost: Number(s.total_cost) }));
-      }
-      if (data.savings_opportunities != null) {
-        data.savings_opportunities = Number(data.savings_opportunities);
-      }
-      if (data.six_month_trend) {
-        data.six_month_trend = data.six_month_trend.map((m: MonthlyCostPoint) => ({
-          ...m,
-          total_cost: Number(m.total_cost),
-          non_prod_cost: Number(m.non_prod_cost ?? 0),
-          prod_cost: Number(m.prod_cost ?? 0),
-          subscription_breakdown: Object.fromEntries(
-            Object.entries(m.subscription_breakdown || {}).map(([k, v]) => [k, Number(v)])
-          ),
-        }));
-      }
-      return data;
+      const { data } = await apiClient.get<LeadershipDashboard>("/dashboards/leadership");
+      return normalizeLeadershipDashboard(data);
     },
     staleTime: 5 * 60 * 1000, // 5 minutes
     gcTime: 30 * 60 * 1000,
@@ -522,33 +550,11 @@ export async function refreshLeadershipDashboard(queryClient: QueryClient): Prom
   await enqueueAndAwaitSyncJob("leadership", {
     idempotencyKey: `leadership-refresh-${minuteBucket}`,
   });
-  const { data } = await apiClient.get("/dashboards/leadership?refresh=true");
-  // Apply the same numeric coercion as the hook
-  if (data.kpis) {
-    data.kpis = data.kpis.map((k: KPIMetric) => ({ ...k, value: Number(k.value) }));
-  }
-  if (data.cost_trend) {
-    data.cost_trend = data.cost_trend.map((p: CostDataPoint) => ({ ...p, cost: Number(p.cost) }));
-  }
-  if (data.top_spenders) {
-    data.top_spenders = data.top_spenders.map((s: CostByGroup) => ({ ...s, total_cost: Number(s.total_cost) }));
-  }
-  if (data.savings_opportunities != null) {
-    data.savings_opportunities = Number(data.savings_opportunities);
-  }
-  if (data.six_month_trend) {
-    data.six_month_trend = data.six_month_trend.map((m: MonthlyCostPoint) => ({
-      ...m,
-      total_cost: Number(m.total_cost),
-      non_prod_cost: Number(m.non_prod_cost ?? 0),
-      prod_cost: Number(m.prod_cost ?? 0),
-      subscription_breakdown: Object.fromEntries(
-        Object.entries(m.subscription_breakdown || {}).map(([k, v]) => [k, Number(v)])
-      ),
-    }));
-  }
-  // Update the query cache in-place so the UI re-renders immediately
-  queryClient.setQueryData(["dashboard", "leadership"], data);
+  // Bust the server-side page cache for this scope, then refetch every
+  // leadership query. The page's query key includes the subscription scope,
+  // so writing the payload under ["dashboard", "leadership"] never reached it.
+  await apiClient.get("/dashboards/leadership?refresh=true");
+  await queryClient.invalidateQueries({ queryKey: ["dashboard", "leadership"] });
 
   // The wastage / "Breakdown by Category" grid on the Leadership Dashboard
   // is fed by /optimize/summary, which has its own server-side cache keyed
@@ -1963,15 +1969,20 @@ export function useNonProdVsProdTrend(months: number = 6) {
 
 export interface AmortizedDailyTrendPoint {
   date: string;
+  /** null = no data synced for that day (a gap, not $0). */
   cost: number | null;
   prod: number | null;
   non_prod: number | null;
+  /** Azure may still add usage for this day (within ~72h of close). */
+  preliminary?: boolean;
 }
 
 export interface AmortizedBreakdownItem {
   name: string;
   cost: number;
   pct: number;
+  subscription_id?: string;
+  environment?: string;
 }
 
 export interface AmortizedTopResource {
@@ -1982,6 +1993,42 @@ export interface AmortizedTopResource {
   location: string;
   subscription: string;
   cost: number;
+  active_days?: number;
+}
+
+export interface AmortizedMonthCoverage {
+  start: string;
+  end: string;
+  days: number;
+  days_in_month: number;
+  partial: boolean;
+}
+
+export interface AmortizedCoverageIssue {
+  subscription_id: string;
+  subscription_name: string;
+  /** No rows at all in the period: no spend, or never synced. */
+  no_data?: boolean;
+  missing_days: number;
+  total_days: number;
+  missing_ranges: { start: string; end: string }[];
+  missing_range_count: number;
+}
+
+export interface AmortizedCoverage {
+  window_start: string;
+  window_end: string;
+  expected_subscriptions: number;
+  complete: boolean;
+  issues: AmortizedCoverageIssue[];
+}
+
+export interface AmortizedCommitment {
+  covered_cost: number;
+  covered_pct: number;
+  pricing_total: number;
+  pricing_coverage_pct: number;
+  complete: boolean;
 }
 
 export interface AmortizedPivotService {
@@ -1996,6 +2043,7 @@ export interface AmortizedMonthlyPivot {
   services: AmortizedPivotService[];
   monthly_totals: Record<string, number>;
   grand_total: number;
+  month_coverage?: Record<string, AmortizedMonthCoverage>;
 }
 
 export interface AmortizedEnvComparison {
@@ -2007,7 +2055,17 @@ export interface AmortizedCostSummary {
   environment: string;
   total_cost: number;
   row_count: number;
+  /** Requested window; ends at the last closed UTC day. */
   date_range: { start: string; end: string };
+  as_of?: string;
+  data_through?: string | null;
+  preliminary_from?: string;
+  coverage?: AmortizedCoverage;
+  service_count?: number;
+  resource_count?: number;
+  resource_group_count?: number;
+  subscription_count?: number;
+  commitment?: AmortizedCommitment | null;
   source_date_range: { start: string; end: string };
   latest_available_date: string | null;
   has_pending_source_data: boolean;
@@ -2020,8 +2078,8 @@ export interface AmortizedCostSummary {
   top_resources: AmortizedTopResource[];
   monthly_pivot: AmortizedMonthlyPivot;
   env_comparison: AmortizedEnvComparison;
-  charge_type_breakdown: { name: string; cost: number }[];
-  pricing_model_breakdown: { name: string; cost: number }[];
+  charge_type_breakdown: AmortizedBreakdownItem[];
+  pricing_model_breakdown: AmortizedBreakdownItem[];
   daily_by_service: Record<string, number | string | null>[];
   top_service_names: string[];
   generated_at: string;
@@ -2047,6 +2105,8 @@ export interface AmortizedDrilldown {
   };
   total_cost: number;
   row_count: number;
+  resource_count?: number;
+  date_range?: { start: string; end: string };
   resources: AmortizedDrilldownResource[];
   daily_trend: { date: string; cost: number }[];
   generated_at: string;
@@ -2083,6 +2143,10 @@ export interface AmortizedCostSyncStatus {
   total_cost: number | null;
   duration_seconds: number | null;
   error_message: string | null;
+  /** Set when the last run completed but some date ranges kept older data. */
+  warning?: string | null;
+  /** Latest closed UTC day with cost data for the monitored subscriptions. */
+  data_through?: string | null;
   monitored_subscription_ids?: string[];
   monitored_subscription_count?: number;
 }
@@ -2157,4 +2221,27 @@ export function useAmortizedDrilldown(
   });
 }
 
+export type AmortizedExportLevel = "resources" | "daily";
 
+/** Download the amortized cost detail behind the dashboard as CSV. */
+export async function downloadAmortizedExport(
+  env: string,
+  months: number,
+  level: AmortizedExportLevel,
+): Promise<void> {
+  const response = await apiClient.get("/costs/amortized/export", {
+    params: { env, months, level },
+    responseType: "blob",
+    timeout: 5 * 60 * 1000, // a 12-month daily export can be large
+  });
+  const disposition = String(response.headers["content-disposition"] || "");
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `amortized-cost-${level}.csv`;
+  const url = window.URL.createObjectURL(response.data as Blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  window.URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+}

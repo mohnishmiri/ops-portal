@@ -11,10 +11,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, text
 
-from app.models.database import AuditLog
+from app.models.database import AuditLog, CertificateAutomationClaim
 from app.services.certificate_automation_service import (
     ALERT_CONFIG_ACTION,
     ALERT_RUN_ACTION,
+    RENEW_CERTIFICATE_CLAIM,
     RENEWAL_CONFIG_ACTION,
     RENEWAL_RUN_ACTION,
     CertificateAutomationService,
@@ -58,11 +59,17 @@ class FakeKeyfactor:
 
 
 class FakeVault:
-    """Key Vault import stub."""
+    """Key Vault stub: ``held`` maps entry name → thumbprint of the certificate in it."""
 
-    def __init__(self, fail_names: set[str] | None = None) -> None:
+    def __init__(self, fail_names: set[str] | None = None, held: dict[str, str] | None = None) -> None:
         self.imports: list[dict] = []
         self.fail_names = fail_names or set()
+        self.held = held or {}
+
+    async def get_certificate(self, vault_uri, name):
+        if name not in self.held:
+            raise RuntimeError(f"CertificateNotFound: {name}")
+        return {"name": name, "thumbprint": self.held[name]}
 
     async def import_certificate(self, vault_uri, name, cert_bytes, *, password=None, **kwargs):
         if name in self.fail_names:
@@ -79,15 +86,17 @@ def automation(db_session):
     return service
 
 
-async def _cache_cert(db_session, *, cert_id: int, cn: str, days_out: int, collection_id: int = 2573):
+async def _cache_cert(
+    db_session, *, cert_id: int, cn: str, days_out: int, collection_id: int = 2573, revoked: bool = False
+):
     expiry = (datetime.now(UTC) + timedelta(days=days_out)).strftime("%Y-%m-%dT%H:%M:%S%z")
     await db_session.execute(
         text(
             "INSERT INTO cert_certificates "
             "(collection_id, certificate_id, common_name, not_after, revoked, thumbprint, key_size) "
-            "VALUES (:col, :cid, :cn, :na, 0, :tp, 4096)"
+            "VALUES (:col, :cid, :cn, :na, :rv, :tp, 4096)"
         ),
-        {"col": collection_id, "cid": cert_id, "cn": cn, "na": expiry, "tp": f"TP{cert_id}"},
+        {"col": collection_id, "cid": cert_id, "cn": cn, "na": expiry, "rv": int(revoked), "tp": f"TP{cert_id}"},
     )
     await db_session.commit()
 
@@ -394,6 +403,81 @@ async def test_alert_scoped_to_all_collections(db_session, automation):
     assert names == {"a.att.com", "b.att.com"}
 
 
+_ALERT_RULE = {
+    "collection_id": 2573,
+    "enabled": True,
+    "warning_days": 60,
+    "critical_days": 30,
+    "notification_emails": ["leadership@att.com"],
+}
+
+
+async def _not_yet(*_args, **_kwargs) -> bool:
+    return False
+
+
+async def test_concurrent_schedulers_send_one_report(db_session, automation):
+    # Every uvicorn worker on every replica ticks in the same minute. None has
+    # written its run record yet, so the audit check lets them all through;
+    # the claim is what has to stop the rest.
+    await _cache_cert(db_session, cert_id=1, cn="critical.att.com", days_out=5)
+    await _add_config(db_session, ALERT_CONFIG_ACTION, _ALERT_RULE)
+    other_worker = CertificateAutomationService(db_session)
+    other_worker.email = automation.email
+    automation._ran_recently = _not_yet
+    other_worker._ran_recently = _not_yet
+
+    await automation.run_expiry_alerts(trigger="schedule")
+    second = await other_worker.run_expiry_alerts(trigger="schedule")
+
+    assert len(automation.email.expiry_reports) == 1
+    assert second["configs_evaluated"] == 0
+
+
+async def test_failed_scheduled_alert_is_retried_on_the_next_tick(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="critical.att.com", days_out=5)
+    await _add_config(db_session, ALERT_CONFIG_ACTION, _ALERT_RULE)
+    original = automation.run_alert_config
+    attempts = []
+
+    async def flaky(config, *, trigger):
+        attempts.append(trigger)
+        if len(attempts) == 1:
+            raise RuntimeError("database hiccup")
+        return await original(config, trigger=trigger)
+
+    automation.run_alert_config = flaky
+
+    first = await automation.run_expiry_alerts(trigger="schedule")
+    await automation.run_expiry_alerts(trigger="schedule")
+
+    assert first["results"][0]["status"] == "failed"
+    assert len(automation.email.expiry_reports) == 1
+
+
+async def test_repeated_recipient_gets_one_copy(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="critical.att.com", days_out=5)
+    await _add_config(
+        db_session,
+        ALERT_CONFIG_ACTION,
+        {**_ALERT_RULE, "notification_emails": ["Leadership@att.com", " leadership@att.com ", "", "ops@att.com"]},
+    )
+
+    await automation.run_expiry_alerts(trigger="manual")
+
+    assert automation.email.expiry_reports[0]["recipient_emails"] == ["Leadership@att.com", "ops@att.com"]
+
+
+async def test_certificate_in_two_collections_is_listed_once(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="shared.att.com", days_out=10, collection_id=1)
+    await _cache_cert(db_session, cert_id=1, cn="shared.att.com", days_out=10, collection_id=2)
+    await _add_config(db_session, ALERT_CONFIG_ACTION, {**_ALERT_RULE, "collection_id": None})
+
+    await automation.run_expiry_alerts(trigger="manual")
+
+    assert [c["common_name"] for c in automation.email.expiry_reports[0]["critical"]] == ["shared.att.com"]
+
+
 # ── Auto-renewal ───────────────────────────────────────────────────────
 
 
@@ -442,7 +526,7 @@ async def test_unarmed_schedule_issues_nothing(db_session, automation, monkeypat
 
 async def test_armed_schedule_renews_escrows_and_loads_to_akv(db_session, automation, monkeypatch):
     keyfactor = FakeKeyfactor()
-    vault = FakeVault()
+    vault = FakeVault(held={"cesdataroutergearsperf-test-att-com": "TP1"})
     monkeypatch.setattr("app.services.certificate_automation_service.CertificateService", lambda: keyfactor)
     monkeypatch.setattr("app.services.certificate_automation_service.KeyVaultService", lambda: vault)
     await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
@@ -492,7 +576,10 @@ async def test_akv_import_failure_is_reported_per_entry(db_session, automation, 
     # The certificate was still renewed; only the import failed, and the report
     # has to make that distinction or someone will re-run a renewal needlessly.
     keyfactor = FakeKeyfactor()
-    vault = FakeVault(fail_names={"cesdataroutergearsperf-test-att-com"})
+    vault = FakeVault(
+        fail_names={"cesdataroutergearsperf-test-att-com"},
+        held={"cesdataroutergearsperf-test-att-com": "TP1"},
+    )
     monkeypatch.setattr("app.services.certificate_automation_service.CertificateService", lambda: keyfactor)
     monkeypatch.setattr("app.services.certificate_automation_service.KeyVaultService", lambda: vault)
     await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
@@ -578,3 +665,286 @@ async def test_scheduled_renewal_runs_once_per_day(db_session, automation, monke
     await automation.run_auto_renewals(trigger="schedule")
 
     assert len(keyfactor.calls) == 1
+
+
+def _patch_backends(monkeypatch, keyfactor: FakeKeyfactor, vault: FakeVault | None = None) -> FakeVault:
+    vault = vault or FakeVault()
+    monkeypatch.setattr("app.services.certificate_automation_service.CertificateService", lambda: keyfactor)
+    monkeypatch.setattr("app.services.certificate_automation_service.KeyVaultService", lambda: vault)
+    return vault
+
+
+async def _record_manual_renewal(db_session, *, old_id: int, new_id: int | None) -> None:
+    db_session.add(
+        AuditLog(
+            user_id="engineer",
+            user_email="engineer@att.com",
+            action="renew_certificate",
+            resource_type="certificate",
+            resource_id=str(old_id),
+            details={"new_certificate_id": new_id},
+            status="success",
+        )
+    )
+    await db_session.commit()
+
+
+async def test_renewed_certificate_is_not_renewed_again(db_session, automation, monkeypatch):
+    # Renewal leaves the old certificate in Keyfactor, unrevoked and still in
+    # the window; every later run used to issue yet another replacement.
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    await automation.run_auto_renewals(trigger="manual")
+    second = await automation.run_auto_renewals(trigger="manual")
+
+    assert [c["certificate_id"] for c in keyfactor.calls] == [1]
+    assert second["results"][0]["renewed"] == 0
+    assert second["results"][0]["skipped"] == 1
+    # Nothing happened the second time, so no "0 renewed" email either.
+    assert len(automation.email.renewal_reports) == 1
+    runs = await _runs(db_session, RENEWAL_RUN_ACTION)
+    assert runs[0].details["renewals"] == [{"certificate_id": 1, "new_certificate_id": 1001, "thumbprint": "NEW1"}]
+
+
+async def test_schedule_follows_a_certificate_to_its_replacement(db_session, automation, monkeypatch):
+    # A schedule saved for certificate 1 has to cover its replacement when that
+    # one comes due in turn, or it silently stops after one renewal.
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="picked.att.com", days_out=20)
+    await _renewal_config(
+        db_session, armed=True, akv_targets=[], certificates=[{"id": 1, "common_name": "picked.att.com"}]
+    )
+
+    await automation.run_auto_renewals(trigger="manual")
+    # FakeKeyfactor issues id + 1000; pretend a year has passed and it is due.
+    await _cache_cert(db_session, cert_id=1001, cn="picked.att.com", days_out=15)
+    await automation.run_auto_renewals(trigger="manual")
+
+    assert [c["certificate_id"] for c in keyfactor.calls] == [1, 1001]
+
+
+async def test_renewal_done_with_the_renew_button_is_respected(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _record_manual_renewal(db_session, old_id=1, new_id=555)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    result = await automation.run_auto_renewals(trigger="manual")
+
+    assert keyfactor.calls == []
+    assert result["results"][0]["skipped"] == 1
+
+
+async def test_renewal_done_directly_in_keyfactor_is_respected(db_session, automation, monkeypatch):
+    # The portal never saw this renewal; a newer certificate for the same name
+    # that is outside the window is the evidence.
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _cache_cert(db_session, cert_id=2, cn="DUE.att.com", days_out=380)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    await automation.run_auto_renewals(trigger="manual")
+
+    assert keyfactor.calls == []
+    runs = await _runs(db_session, RENEWAL_RUN_ACTION)
+    assert "replacement certificate 2" in runs[0].details["skipped"][0]["reason"]
+
+
+async def test_revoked_replacement_does_not_block_renewal(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _cache_cert(db_session, cert_id=555, cn="due.att.com", days_out=380, revoked=True)
+    await _record_manual_renewal(db_session, old_id=1, new_id=555)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    await automation.run_auto_renewals(trigger="manual")
+
+    assert [c["certificate_id"] for c in keyfactor.calls] == [1]
+
+
+async def test_expired_certificates_are_not_auto_renewed(db_session, automation, monkeypatch):
+    # Long-expired certificates sort first and used to consume the per-run cap.
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="abandoned.att.com", days_out=-90)
+    await _cache_cert(db_session, cert_id=2, cn="due.att.com", days_out=20)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    await automation.run_auto_renewals(trigger="manual")
+
+    assert [c["certificate_id"] for c in keyfactor.calls] == [2]
+
+
+async def test_collection_schedule_only_replaces_the_entry_holding_each_certificate(
+    db_session, automation, monkeypatch
+):
+    # Every renewal used to be imported into every entry, so the last one
+    # renewed ended up in all of them.
+    keyfactor = FakeKeyfactor()
+    vault = _patch_backends(monkeypatch, keyfactor, FakeVault(held={"entry-a": "TP1", "entry-b": "tp2"}))
+    await _cache_cert(db_session, cert_id=1, cn="a.att.com", days_out=10)
+    await _cache_cert(db_session, cert_id=2, cn="b.att.com", days_out=20)
+    await _renewal_config(
+        db_session, armed=True, akv_targets=[{"vault_name": "kv", "certificate_names": ["entry-a", "entry-b"]}]
+    )
+
+    await automation.run_auto_renewals(trigger="manual")
+
+    password = {c["certificate_id"]: c["password"] for c in keyfactor.calls}
+    assert [(i["name"], i["password"]) for i in vault.imports] == [("entry-a", password[1]), ("entry-b", password[2])]
+    report = automation.email.renewal_reports[0]
+    left_alone = {
+        (r["common_name"], e["certificate_name"])
+        for r in report["renewed"]
+        for e in r["akv"]
+        if e["status"] == "skipped"
+    }
+    assert left_alone == {("a.att.com", "entry-b"), ("b.att.com", "entry-a")}
+
+
+async def test_single_certificate_schedule_loads_into_a_new_entry(db_session, automation, monkeypatch):
+    # Naming one certificate is an explicit mapping, so the entry need not exist yet.
+    keyfactor = FakeKeyfactor()
+    vault = _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _renewal_config(db_session, armed=True, certificates=[{"id": 1, "common_name": "due.att.com"}])
+
+    await automation.run_auto_renewals(trigger="manual")
+
+    assert [i["name"] for i in vault.imports] == ["cesdataroutergearsperf-test-att-com"]
+
+
+async def test_scheduled_dry_run_with_nothing_due_sends_no_email(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="safe.att.com", days_out=300)
+    await _renewal_config(db_session, armed=False)
+
+    await automation.run_auto_renewals(trigger="schedule")
+    assert automation.email.renewal_reports == []
+
+    # "Run now" still mails, which is how a dry run validates recipients.
+    await automation.run_auto_renewals(trigger="manual")
+    assert len(automation.email.renewal_reports) == 1
+
+
+async def test_notify_on_renewal_off_sends_no_email(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _renewal_config(db_session, armed=True, notify_on_renewal=False, akv_targets=[])
+
+    result = await automation.run_auto_renewals(trigger="manual")
+
+    assert result["results"][0]["renewed"] == 1
+    assert automation.email.renewal_reports == []
+
+
+async def test_certificate_claimed_by_another_run_is_not_renewed_twice(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    db_session.add(
+        CertificateAutomationClaim(
+            claim_type=RENEW_CERTIFICATE_CLAIM, subject_id=1, claim_date=datetime.now(UTC).date().isoformat()
+        )
+    )
+    await db_session.commit()
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    result = await automation.run_auto_renewals(trigger="manual")
+
+    assert keyfactor.calls == []
+    assert result["results"][0]["skipped"] == 1
+
+
+async def test_failed_renewal_can_be_retried_the_same_day(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor(fail_ids={1})
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+
+    await automation.run_auto_renewals(trigger="manual")
+    keyfactor.fail_ids.clear()
+    second = await automation.run_auto_renewals(trigger="manual")
+
+    assert len(keyfactor.calls) == 2
+    assert second["results"][0]["renewed"] == 1
+
+
+async def test_concurrent_schedulers_run_a_renewal_schedule_once(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=20)
+    await _renewal_config(db_session, armed=True, akv_targets=[])
+    other_worker = CertificateAutomationService(db_session)
+    other_worker.email = automation.email
+    automation._ran_recently = _not_yet
+    other_worker._ran_recently = _not_yet
+
+    await automation.run_auto_renewals(trigger="schedule")
+    await other_worker.run_auto_renewals(trigger="schedule")
+
+    assert len(keyfactor.calls) == 1
+    assert len(automation.email.renewal_reports) == 1
+
+
+# ── Renewed certificates in the expiry report ──────────────────────────
+
+
+async def test_alert_leaves_out_a_certificate_renewed_by_auto_renewal(db_session, automation, monkeypatch):
+    keyfactor = FakeKeyfactor()
+    _patch_backends(monkeypatch, keyfactor)
+    await _cache_cert(db_session, cert_id=1, cn="renewed.att.com", days_out=20)
+    await _cache_cert(db_session, cert_id=2, cn="pending.att.com", days_out=45)
+    await _renewal_config(db_session, armed=True, akv_targets=[], certificates=[{"id": 1}])
+    await automation.run_auto_renewals(trigger="manual")
+    await _add_config(db_session, ALERT_CONFIG_ACTION, _ALERT_RULE)
+
+    await automation.run_expiry_alerts(trigger="manual")
+
+    report = automation.email.expiry_reports[0]
+    assert report["critical"] == []
+    assert [w["common_name"] for w in report["warning"]] == ["pending.att.com"]
+    run = (await _runs(db_session, ALERT_RUN_ACTION))[0]
+    assert run.details["renewed_excluded"] == ["renewed.att.com"]
+    assert "1 already renewed left out" in run.details["summary"]
+
+
+async def test_alert_leaves_out_a_certificate_renewed_with_the_renew_button(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="renewed.att.com", days_out=10)
+    await _record_manual_renewal(db_session, old_id=1, new_id=1001)
+    await _add_config(db_session, ALERT_CONFIG_ACTION, _ALERT_RULE)
+
+    result = await automation.run_expiry_alerts(trigger="manual")
+
+    # Nothing left to report, so nothing is sent.
+    assert result["results"][0]["status"] == "no_certificates_due"
+    assert automation.email.expiry_reports == []
+
+
+async def test_alert_leaves_out_a_certificate_replaced_in_keyfactor(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="replaced.att.com", days_out=10)
+    await _cache_cert(db_session, cert_id=2, cn="replaced.att.com", days_out=380)
+    await _cache_cert(db_session, cert_id=3, cn="expiring.att.com", days_out=10)
+    await _add_config(db_session, ALERT_CONFIG_ACTION, _ALERT_RULE)
+
+    await automation.run_expiry_alerts(trigger="manual")
+
+    assert [c["common_name"] for c in automation.email.expiry_reports[0]["critical"]] == ["expiring.att.com"]
+
+
+async def test_alert_still_reports_a_certificate_whose_replacement_was_revoked(db_session, automation):
+    await _cache_cert(db_session, cert_id=1, cn="due.att.com", days_out=10)
+    await _cache_cert(db_session, cert_id=1001, cn="due.att.com", days_out=380, revoked=True)
+    await _record_manual_renewal(db_session, old_id=1, new_id=1001)
+    await _add_config(db_session, ALERT_CONFIG_ACTION, _ALERT_RULE)
+
+    await automation.run_expiry_alerts(trigger="manual")
+
+    assert [c["common_name"] for c in automation.email.expiry_reports[0]["critical"]] == ["due.att.com"]

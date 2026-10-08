@@ -325,11 +325,15 @@ class UpdateCronJobRequest(BaseModel):
     memory_limit: str | None = Field(default=None, description="Memory limit")
 
 
+# AKS pool names: lowercase letters and digits, starting with a letter (12 chars for Linux).
+NODEPOOL_NAME_PATTERN = r"^[a-z][a-z0-9]{0,11}$"
+
+
 class ScaleNodePoolRequest(BaseModel):
     """Request to scale a node pool."""
 
     cluster_id: str = Field(..., description="Full Azure resource ID of the AKS cluster")
-    nodepool_name: str = Field(..., description="Node pool name")
+    nodepool_name: str = Field(..., pattern=NODEPOOL_NAME_PATTERN, description="Node pool name")
     node_count: int = Field(..., ge=0, le=1000, description="Target node count")
 
 
@@ -337,10 +341,10 @@ class UpdateAutoscalingRequest(BaseModel):
     """Request to update node pool autoscaling."""
 
     cluster_id: str = Field(..., description="Full Azure resource ID of the AKS cluster")
-    nodepool_name: str = Field(..., description="Node pool name")
+    nodepool_name: str = Field(..., pattern=NODEPOOL_NAME_PATTERN, description="Node pool name")
     enable_auto_scaling: bool = Field(..., description="Whether to enable autoscaling")
-    min_count: int | None = Field(default=None, description="Minimum node count")
-    max_count: int | None = Field(default=None, description="Maximum node count")
+    min_count: int | None = Field(default=None, ge=0, le=1000, description="Minimum node count")
+    max_count: int | None = Field(default=None, ge=0, le=1000, description="Maximum node count")
 
 
 class ClusterActionRequest(BaseModel):
@@ -1891,14 +1895,34 @@ async def sync_node_pools_to_db(
 )
 async def scale_node_pool(
     request: ScaleNodePoolRequest,
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    http_request: Request,
+    user: UserContext = Depends(require_capability("aks_nodepool_manage")),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Scale a node pool."""
+    """Start scaling a node pool; Azure applies the change in the background."""
     result = await service.scale_node_pool(
         cluster_id=request.cluster_id,
         nodepool_name=request.nodepool_name,
         node_count=request.node_count,
+    )
+    prev = result.get("previous_count")
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="scale_nodepool",
+        resource_type="nodepool",
+        resource_name=request.nodepool_name,
+        cluster_id=request.cluster_id,
+        namespace="",
+        status="success" if result.get("success") else "failed",
+        details={
+            "summary": f"Scaled node pool {request.nodepool_name} from {prev} to {request.node_count} nodes",
+            "previous_count": prev,
+            "new_count": request.node_count,
+            "error": result.get("error"),
+        },
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Scale failed"))
@@ -1912,16 +1936,42 @@ async def scale_node_pool(
 )
 async def update_node_pool_autoscaling(
     request: UpdateAutoscalingRequest,
-    user: UserContext = Depends(require_role(UserRole.WRITE)),
+    http_request: Request,
+    user: UserContext = Depends(require_capability("aks_nodepool_manage")),
     service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Update autoscaling configuration."""
+    """Turn the cluster autoscaler on or off for a node pool, or change its range."""
     result = await service.update_node_pool_autoscaling(
         cluster_id=request.cluster_id,
         nodepool_name=request.nodepool_name,
         enable_auto_scaling=request.enable_auto_scaling,
         min_count=request.min_count,
         max_count=request.max_count,
+    )
+    change = (
+        f"autoscaling {request.min_count}–{request.max_count} nodes"
+        if request.enable_auto_scaling
+        else "autoscaling off"
+    )
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="update_nodepool_autoscaling",
+        resource_type="nodepool",
+        resource_name=request.nodepool_name,
+        cluster_id=request.cluster_id,
+        namespace="",
+        status="success" if result.get("success") else "failed",
+        details={
+            "summary": f"Set node pool {request.nodepool_name} to {change}",
+            "enable_auto_scaling": request.enable_auto_scaling,
+            "min_count": request.min_count,
+            "max_count": request.max_count,
+            "previous": result.get("previous"),
+            "error": result.get("error"),
+        },
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Update failed"))

@@ -146,12 +146,16 @@ class LeadershipSyncService:
                 triggered_by=triggered_by,
             )
 
-    async def full_sync(self, triggered_by: str = "manual") -> dict:
+    async def full_sync(self, triggered_by: str = "manual", pull_from_azure: bool = False) -> dict:
         """Pull leadership data and persist to DB.
 
         Tries to build the dashboard from the amortized cost DB first
         (consistent with the amortized cost page).  Falls back to live
         Azure Cost Management APIs if no amortized data is available.
+
+        ``pull_from_azure`` (user-initiated "Refresh Data") first runs an
+        incremental amortized sync for the current month, so the snapshot
+        reflects Azure's latest figures rather than just re-aggregating the DB.
 
         Appends a new snapshot instead of deleting old ones so that
         time-series history is preserved.  Records older than
@@ -184,13 +188,33 @@ class LeadershipSyncService:
         try:
             monitored_ids = await get_monitored_subscription_ids()
 
-            # Build from amortized DB first — consistent with the amortized cost page
+            from app.services.amortized_cost_sync_service import AmortizedCostSyncService
+
+            if pull_from_azure:
+                # Non-fatal: if Azure is unavailable or another sync holds the
+                # lock, rebuild from the data already stored. A separate session
+                # keeps the pull's rollbacks away from this sync's status row.
+                try:
+                    from app.core.database import get_db_session
+
+                    async for pull_db in get_db_session():
+                        pull = await AmortizedCostSyncService(pull_db).full_sync(
+                            months=1,
+                            triggered_by=f"{triggered_by} (leadership refresh)"[:100],
+                            rebuild_leadership=False,
+                        )
+                        logger.info("leadership_sync_azure_pull_finished", status=pull.get("status"))
+                        break
+                except Exception as exc:
+                    logger.warning("leadership_sync_azure_pull_failed", error=str(exc)[:300])
+
+            # Build from amortized DB first — consistent with the amortized cost page.
+            # Scope to the monitored set so subscriptions removed from monitoring
+            # (whose historical rows remain) don't inflate leadership totals.
             data = None
             try:
-                from app.services.amortized_cost_sync_service import AmortizedCostSyncService
-
                 amortized_svc = AmortizedCostSyncService(self._db)
-                data = await amortized_svc.build_leadership_dashboard()
+                data = await amortized_svc.build_leadership_dashboard(subscription_ids=monitored_ids or None)
                 if data:
                     logger.info(
                         "leadership_sync_built_from_amortized_db",

@@ -54,6 +54,10 @@ _AKS_RESOURCE_TYPES = {
     "akvs",
 }
 _STALE_RUNNING_MINUTES = 30
+# AKS syncs finish in seconds to a couple of minutes. A job still "running"
+# after this was lost (backend restart, hung call) and must not keep blocking
+# fresh syncs, which reuse a running job with the same key.
+_STALE_AKS_RUNNING_MINUTES = 10
 
 
 def _get_aks_sync_fn(svc, resource_type: str, cluster_id: str | None, namespace: str | None):
@@ -260,7 +264,9 @@ async def enqueue_sync_job(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="WRITE role required to enqueue this sync job",
         )
-    if body.force and not user.is_admin:
+    # AKS resource syncs ignore `force` (each one re-reads the cluster), so the
+    # admin gate applies only to the cost syncs, where it re-pulls everything.
+    if body.force and body.job_type != "aks_resource_sync" and not user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Force sync requires Admin role",
@@ -302,7 +308,8 @@ async def enqueue_sync_job(
         idempotency_key = f"aks:{scope}:{resource_type}:{namespace}"[:120]
 
     if idempotency_key:
-        stale_cutoff = datetime.utcnow() - timedelta(minutes=_STALE_RUNNING_MINUTES)
+        stale_minutes = _STALE_AKS_RUNNING_MINUTES if body.job_type == "aks_resource_sync" else _STALE_RUNNING_MINUTES
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
         await db.execute(
             update(SyncJob)
             .where(

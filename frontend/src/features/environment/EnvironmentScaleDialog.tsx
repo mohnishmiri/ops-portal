@@ -11,6 +11,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { gridStyles, SortableHeader, Spinner, nextSortState, type SortState } from "../../components/gridStyles";
 import type { Deployment } from "../../services/aksApi";
 import type { EnvironmentScaleRequest, EnvironmentScaleResult, StepDetail } from "../../services/environmentApi";
+import { invalidEmails } from "./NotificationFields";
 
 interface Props {
   open: boolean;
@@ -56,6 +57,9 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
   const [customReplica, setCustomReplica] = useState(false);
   const [selectedDeployments, setSelectedDeployments] = useState<string[]>([]);
   const [dryRun, setDryRun] = useState(false);
+  const [notifyMe, setNotifyMe] = useState(true);
+  const [notifyEmails, setNotifyEmails] = useState("");
+  const badNotifyEmails = invalidEmails(notifyEmails);
   const [showConfirm, setShowConfirm] = useState(false);
   const [result, setResult] = useState<EnvironmentScaleResult | null>(null);
 
@@ -145,6 +149,8 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
       deployment_names: scope === "selected" ? selectedDeployments : undefined,
       replica_count: operation === "scale_down" ? 0 : replicaCount,
       dry_run: dryRun,
+      notify: notifyMe,
+      notification_emails: notifyEmails.trim() || undefined,
     };
 
     try {
@@ -519,7 +525,24 @@ const EnvironmentScaleDialog: React.FC<Props> = ({
                 Dry Run (preview changes without executing)
               </label>
 
-              <button onClick={handleSubmit} disabled={isScaling || isLoadingDeployments || (scope === "selected" && selectedDeployments.length === 0)} className="w-full rounded-lg bg-att-500 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-att-600 disabled:opacity-50">
+              {!dryRun && (
+                <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" checked={notifyMe} onChange={(e) => setNotifyMe(e.target.checked)} className="text-att-500 focus:ring-att-400" />
+                    Email me a summary when it finishes
+                  </label>
+                  <input
+                    aria-label="Also email the summary to"
+                    value={notifyEmails}
+                    onChange={(e) => setNotifyEmails(e.target.value)}
+                    placeholder="Also send to (optional): ops-team@att.com, …"
+                    className={`w-full rounded-lg border bg-white px-3 py-1.5 text-sm ${badNotifyEmails.length ? "border-red-300" : "border-gray-300"}`}
+                  />
+                  {badNotifyEmails.length > 0 && <p className="text-xs text-red-600">Not a valid email address: {badNotifyEmails[0]}</p>}
+                </div>
+              )}
+
+              <button onClick={handleSubmit} disabled={isScaling || isLoadingDeployments || (!dryRun && badNotifyEmails.length > 0) || (scope === "selected" && selectedDeployments.length === 0)} className="w-full rounded-lg bg-att-500 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-att-600 disabled:opacity-50">
                 {operation === "scale_down" ? "Scale Down" : "Scale Up"} ({totalTarget} deployments)
               </button>
             </>

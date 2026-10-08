@@ -294,23 +294,35 @@ export interface ScaleHistory {
 
 export interface NodeDetail {
   name: string;
+  pool?: string | null;
+  /** Fields below come from syncs after the node-health change; older rows lack them. */
+  ready?: boolean;
+  unschedulable?: boolean;
+  pressure?: string[];
   pod_count: number;
-  allocatable_cpu: string;
-  allocatable_memory: string;
-  allocatable_pods: string;
+  allocatable_pods: number | string;
+  allocatable_cpu: string | null;
+  allocatable_memory: string | null;
+  zone?: string | null;
+  kubelet_version?: string | null;
+  node_image_version?: string | null;
+  created_at?: string | null;
   labels: Record<string, string>;
 }
 
 export interface NodePoolDetails {
   name: string;
   vm_size: string;
+  /** Live node count (scale-set capacity). */
   count: number;
   min_count: number | null;
   max_count: number | null;
   enable_auto_scaling: boolean;
   mode: string;
   os_type: string;
+  os_sku?: string | null;
   os_disk_size_gb: number;
+  os_disk_type?: string | null;
   kubernetes_version: string;
   provisioning_state: string;
   power_state: string;
@@ -319,7 +331,16 @@ export interface NodePoolDetails {
   node_taints: string[];
   availability_zones: string[];
   node_image_version?: string;
-  total_pods?: number;
+  scale_set_priority?: string | null;
+  scale_down_mode?: string | null;
+  max_surge?: string | null;
+  /** False when the Kubernetes API couldn't be read at the last sync; pod and node figures are then null. */
+  node_details_available?: boolean;
+  node_details_error?: string | null;
+  total_pods?: number | null;
+  pod_capacity?: number | null;
+  ready_nodes?: number | null;
+  cordoned_nodes?: number | null;
   nodes?: NodeDetail[];
 }
 
@@ -327,7 +348,7 @@ export interface ScaleNodePoolResult {
   success: boolean;
   cluster_id: string;
   nodepool_name: string;
-  previous_count: number;
+  previous_count: number | null;
   new_count: number;
   error?: string;
 }
@@ -2076,6 +2097,7 @@ export function useScaleNodePool() {
       queryClient.invalidateQueries({ queryKey: ["aks-nodepools-cached", variables.clusterId] });
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
       queryClient.invalidateQueries({ queryKey: ["aks-scale-history"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }
@@ -2100,6 +2122,7 @@ export function useUpdateAutoscaling() {
       queryClient.invalidateQueries({ queryKey: ["aks-nodepools", variables.clusterId] });
       queryClient.invalidateQueries({ queryKey: ["aks-nodepools-cached", variables.clusterId] });
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
+      queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
   });
 }

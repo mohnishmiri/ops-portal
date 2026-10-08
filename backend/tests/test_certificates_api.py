@@ -6,9 +6,11 @@ override. Covers success, validation failure, upstream auth (401), not-found
 """
 
 import pytest
+from sqlalchemy import select
 
 from app.api.v1.endpoints.certificates import _filter_enabled_collections, _get_service
 from app.core.config import settings
+from app.models.database import AuditLog
 from app.services.keyfactor_service import CertificateServiceError
 from tests.jks_reader import load_jks
 
@@ -787,6 +789,58 @@ async def test_run_alert_config_sends_the_report(app, admin_client, db_session, 
 async def test_run_alert_config_404_for_unknown_rule(app, admin_client):
     resp = await admin_client.post("/api/v1/certificates/alerts/configs/999999/run")
     assert resp.status_code == 404
+
+
+async def test_saving_an_identical_alert_rule_does_not_create_a_second(app, admin_client):
+    # Each stored rule sends its own copy of every report.
+    rule = {
+        "collection_id": 2573,
+        "warning_days": 60,
+        "critical_days": 30,
+        "notification_emails": ["leadership@att.com", "ops@att.com"],
+    }
+    first = await admin_client.post("/api/v1/certificates/alerts/configs", json=rule)
+    again = await admin_client.post(
+        "/api/v1/certificates/alerts/configs",
+        json={**rule, "notification_emails": ["OPS@att.com", "leadership@att.com"]},
+    )
+    different = await admin_client.post("/api/v1/certificates/alerts/configs", json={**rule, "warning_days": 90})
+
+    assert again.json() == {**first.json(), "status": "exists"}
+    assert different.json()["status"] == "created"
+    configs = await admin_client.get("/api/v1/certificates/alerts/configs")
+    assert len(configs.json()) == 2
+
+
+async def test_saving_an_identical_renewal_schedule_does_not_create_a_second(app, admin_client):
+    schedule = {"collection_id": 42, "days_before_expiry": 60, "certificates": [{"id": 7, "common_name": "a"}]}
+    first = await admin_client.post("/api/v1/certificates/auto-renewal/configs", json=schedule)
+    again = await admin_client.post("/api/v1/certificates/auto-renewal/configs", json=schedule)
+    armed = await admin_client.post("/api/v1/certificates/auto-renewal/configs", json={**schedule, "armed": True})
+
+    assert again.json()["id"] == first.json()["id"]
+    assert again.json()["status"] == "exists"
+    assert armed.json()["status"] == "created"
+
+
+async def test_config_delete_cannot_remove_other_audit_rows(app, admin_client, db_session):
+    entry = AuditLog(
+        user_id="someone",
+        action="revoke_certificate",
+        resource_type="certificate",
+        resource_id="1",
+        details={},
+        status="success",
+    )
+    db_session.add(entry)
+    await db_session.commit()
+    await db_session.refresh(entry)
+
+    await admin_client.delete(f"/api/v1/certificates/alerts/configs/{entry.id}")
+    await admin_client.delete(f"/api/v1/certificates/auto-renewal/configs/{entry.id}")
+
+    result = await db_session.execute(select(AuditLog).where(AuditLog.id == entry.id))
+    assert result.scalar_one_or_none() is not None
 
 
 # ── RBAC — destructive/sensitive actions blocked without permission ────

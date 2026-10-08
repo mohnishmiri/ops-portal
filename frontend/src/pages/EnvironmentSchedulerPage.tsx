@@ -302,7 +302,13 @@ const EnvironmentSchedulerPage: React.FC = () => {
 
   const handleUpdateSchedule = useCallback(
     async (id: number, data: Record<string, unknown>) => {
-      await updateSchedule.mutateAsync({ id, ...data } as Parameters<typeof updateSchedule.mutateAsync>[0]);
+      try {
+        await updateSchedule.mutateAsync({ id, ...data } as Parameters<typeof updateSchedule.mutateAsync>[0]);
+      } catch (err) {
+        // e.g. enabling a one-time schedule whose time has passed
+        setToast({ message: apiErrorMessage(err, "Could not update the schedule"), type: "error" });
+        throw err;
+      }
       setToast({ message: "Schedule updated", type: "success" });
     },
     [updateSchedule],

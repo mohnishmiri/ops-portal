@@ -324,6 +324,7 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
     ("aks_cronjob_view", "View CronJobs", "view", ("read", "write"), "aks_operations"),
     ("aks_cronjob_trigger", "Manually trigger a CronJob", "edit", ("write",), "aks_operations"),
     ("aks_deployment_scale", "Scale, restart, and delete deployments", "edit", ("write",), "aks_operations"),
+    ("aks_nodepool_manage", "Scale node pools and change their autoscaling", "edit", ("write",), "aks_operations"),
     ("aks_secret_view", "Reveal Kubernetes secret values", "view", ("write",), "aks_operations"),
     ("aks_secret_update", "Create, update, or delete Kubernetes secrets", "edit", ("write",), "aks_operations"),
     ("aks_workload_view", "View StatefulSets and DaemonSets", "view", ("read", "write"), "aks_operations"),

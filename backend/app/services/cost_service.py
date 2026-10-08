@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
@@ -18,7 +19,6 @@ from urllib.parse import parse_qs, urlparse
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.admin_config import get_effective_cache_ttl_seconds
 from app.core.azure_auth import get_azure_credential
@@ -97,6 +97,84 @@ _DIMENSION_MAP = {
 }
 
 
+def _build_amortized_query(start: date, end: date, dimensions: list[str], *, daily: bool):
+    """Amortized-cost QueryDefinition grouped by raw Azure dimension names.
+
+    ``daily=False`` omits granularity, so Azure returns one row per group for
+    the whole period — used for per-resource attributes such as location.
+    """
+    from azure.mgmt.costmanagement.models import (
+        ExportType,
+        GranularityType,
+        QueryAggregation,
+        QueryDataset,
+        QueryDefinition,
+        QueryGrouping,
+        QueryTimePeriod,
+        TimeframeType,
+    )
+
+    return QueryDefinition(
+        type=ExportType.AMORTIZED_COST,
+        timeframe=TimeframeType.CUSTOM,
+        time_period=QueryTimePeriod(
+            from_property=datetime.combine(start, datetime.min.time()),
+            to=datetime.combine(end, datetime.min.time()),
+        ),
+        dataset=QueryDataset(
+            granularity=GranularityType.DAILY if daily else None,
+            aggregation={"totalCost": QueryAggregation(name="Cost", function="Sum")},
+            grouping=[QueryGrouping(type="Dimension", name=name) for name in dimensions],
+        ),
+    )
+
+
+# Azure Cost Management throttles per entity, tenant and client type, and
+# reports the wait in vendor headers such as
+# ``x-ms-ratelimit-microsoft.costmanagement-entity-retry-after`` rather than
+# the standard ``Retry-After``.
+_MAX_PAGE_ATTEMPTS = 8
+_DEFAULT_THROTTLE_WAIT_SECONDS = 30.0
+_MAX_THROTTLE_WAIT_SECONDS = 120.0
+
+
+def _throttle_wait_seconds(headers) -> float:
+    """Longest wait Azure asked for across every ``*retry-after`` header, plus 1s."""
+    waits: list[float] = []
+    for name, value in (headers or {}).items():
+        if not str(name).lower().endswith("retry-after"):
+            continue
+        try:
+            waits.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    wait = max(waits) if waits else _DEFAULT_THROTTLE_WAIT_SECONDS
+    return min(max(wait, 1.0), _MAX_THROTTLE_WAIT_SECONDS) + 1.0
+
+
+@dataclass
+class AmortizedCostDetail:
+    """One subscription date range fetched by ``query_amortized_cost_detail``."""
+
+    rows: list[dict] = field(default_factory=list)
+    pricing_rows: list[dict] = field(default_factory=list)
+    location_enriched: bool = False
+
+    def daily_totals(self) -> dict[str, float]:
+        """Sum of the resource-level rows per day."""
+        totals: dict[str, float] = defaultdict(float)
+        for row in self.rows:
+            totals[row["date"]] += row["cost"]
+        return dict(totals)
+
+    def reference_daily_totals(self) -> dict[str, float]:
+        """Azure's own daily totals, from the pricing-model query."""
+        totals: dict[str, float] = defaultdict(float)
+        for row in self.pricing_rows:
+            totals[row["date"]] += row["cost"]
+        return dict(totals)
+
+
 class CostService:
     """Service for querying Azure Cost Management API with caching."""
 
@@ -122,242 +200,222 @@ class CostService:
         params = parse_qs(parsed.query)
         return (params.get("$skiptoken") or params.get("skiptoken") or [None])[0]
 
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=2, min=4, max=90),
-        retry=retry_if_exception(lambda exc: not isinstance(exc, ValueError)),
-        reraise=True,
-    )
     async def _execute_cost_query(
         self,
         scope: str,
         query,
     ) -> tuple[list[str], list[list]]:
-        """Execute a cost query against Azure Cost Management API.
+        """Execute a cost query against Azure Cost Management, following every page.
 
         Returns (column_names, rows) so callers can parse by column name.
-        Uses asyncio.to_thread so multiple queries can run truly in parallel.
-        Guarded by a semaphore to prevent Azure API throttling.
-        On HTTP 429, honors Azure's Retry-After header (capped at 90s) so
-        Cost Management's per-subscription rate limit (~10/min) is respected
-        rather than burning through retries in the first 10 seconds.
+        Each page is fetched and retried on its own: when Azure throttles
+        (HTTP 429) part-way through a large result we wait for the time Azure
+        asks for and resume from the same skiptoken. Restarting from page 1
+        re-spent the quota on pages already fetched, so any result larger than
+        ~4 pages (5,000 rows each) could never finish.
         """
-        from azure.core.exceptions import HttpResponseError
-
-        def _sync_query():
-            client = self._get_client()
-            try:
-                try:
-                    result = client.query.usage(scope=scope, parameters=query)
-                except HttpResponseError as exc:
-                    if getattr(exc, "status_code", None) == 429:
-                        retry_after = 30
-                        try:
-                            header_val = exc.response.headers.get("Retry-After") if exc.response else None
-                            if header_val:
-                                retry_after = min(int(header_val), 90)
-                        except (ValueError, AttributeError):
-                            pass
-                        logger.warning(
-                            "azure_cost_throttled_429",
-                            scope=scope,
-                            retry_after_seconds=retry_after,
-                        )
-                        import time
-
-                        time.sleep(retry_after)
-                    raise
-                col_names = [c.name for c in result.columns] if result.columns else []
-                rows = []
+        client = self._get_client()
+        col_names: list[str] = []
+        rows: list[list] = []
+        page_count = 0
+        try:
+            skiptoken: str | None = None
+            while True:
+                result = await self._fetch_cost_query_page(client, scope, query, skiptoken)
+                page_count += 1
+                if not col_names and result.columns:
+                    col_names = [c.name for c in result.columns]
                 if result.rows:
                     rows.extend(result.rows)
                 next_link = getattr(result, "next_link", None)
-                page_count = 1
-                if next_link:
-                    while next_link:
-                        skiptoken = self._extract_skiptoken(next_link)
-                        if not skiptoken:
-                            raise RuntimeError("Azure Cost Management returned nextLink without a skiptoken")
-                        result = client.query.usage(
-                            scope=scope,
-                            parameters=query,
-                            params={"$skiptoken": skiptoken},
-                        )
-                        page_count += 1
-                        if result.rows:
-                            rows.extend(result.rows)
-                        next_link = getattr(result, "next_link", None)
-                    logger.debug(
-                        "cost_query_pagination_complete",
-                        scope=scope,
-                        page_count=page_count,
-                        row_count=len(rows),
-                    )
-                return col_names, rows
-            finally:
-                client.close()
-
-        # Per-subscription rate limit (8 req/min) gates first so one sub's
-        # burst can't starve another. Then the global concurrency cap keeps
-        # process-wide parallelism bounded.
-        await acquire_for_scope(scope)
-        async with AZURE_API_SEMAPHORE:
-            col_names, rows = await asyncio.to_thread(_sync_query)
-        logger.debug("cost_query_result", scope=scope, columns=col_names, row_count=len(rows))
+                if not next_link:
+                    break
+                skiptoken = self._extract_skiptoken(next_link)
+                if not skiptoken:
+                    raise RuntimeError("Azure Cost Management returned nextLink without a skiptoken")
+        finally:
+            client.close()
+        logger.debug(
+            "cost_query_result",
+            scope=scope,
+            columns=col_names,
+            row_count=len(rows),
+            page_count=page_count,
+        )
         return col_names, rows
 
-    async def query_amortized_cost_rows(
+    async def _fetch_cost_query_page(self, client, scope: str, query, skiptoken: str | None):
+        """Fetch one page, retrying throttling (429), 5xx and connection errors.
+
+        The per-subscription token bucket gates every page, not just the first,
+        and the global semaphore is held only while a request is in flight —
+        never while sleeping off a throttle.
+        """
+        from azure.core.exceptions import HttpResponseError, ServiceRequestError, ServiceResponseError
+
+        kwargs = {"params": {"$skiptoken": skiptoken}} if skiptoken else {}
+        for attempt in range(1, _MAX_PAGE_ATTEMPTS + 1):
+            await acquire_for_scope(scope)
+            try:
+                async with AZURE_API_SEMAPHORE:
+                    return await asyncio.to_thread(client.query.usage, scope=scope, parameters=query, **kwargs)
+            except HttpResponseError as exc:
+                status_code = getattr(exc, "status_code", None) or 0
+                if status_code != 429 and status_code < 500:
+                    raise
+                if attempt == _MAX_PAGE_ATTEMPTS:
+                    raise
+                if status_code == 429:
+                    response = getattr(exc, "response", None)
+                    wait = _throttle_wait_seconds(getattr(response, "headers", None))
+                else:
+                    wait = min(4.0 * 2 ** (attempt - 1), 60.0)
+                logger.warning(
+                    "azure_cost_query_retry",
+                    scope=scope,
+                    status_code=status_code,
+                    attempt=attempt,
+                    wait_seconds=wait,
+                    resuming_page=bool(skiptoken),
+                )
+            except (ServiceRequestError, ServiceResponseError) as exc:
+                if attempt == _MAX_PAGE_ATTEMPTS:
+                    raise
+                wait = min(4.0 * 2 ** (attempt - 1), 60.0)
+                logger.warning(
+                    "azure_cost_query_retry",
+                    scope=scope,
+                    attempt=attempt,
+                    wait_seconds=wait,
+                    error=str(exc)[:200],
+                )
+            await asyncio.sleep(wait)
+        raise RuntimeError("Azure cost query retries exhausted")  # pragma: no cover - loop always returns or raises
+
+    async def query_amortized_cost_detail(
         self,
         scope: str,
         start_date: date,
         end_date: date,
-    ) -> list[dict]:
-        """Query near-real-time amortized cost data via the Cost Management Query API.
+    ) -> AmortizedCostDetail:
+        """Fetch one date range of amortized cost for a subscription.
 
-        Strategy: one 2-dim primary query grouped by [ResourceId, MeterCategory]
-        — every row carries its own ARM resource ID, from which we extract
-        resource_name, resource_group, and resource_type. Plus one enrichment
-        query for ResourceLocation grouped by [Location, ResourceGroup].
+        Azure's Query API allows at most two grouping dimensions, so this
+        issues three queries:
 
-        That's 2 Azure calls per chunk total. The previous implementation
-        issued up to 4 calls per chunk (primary + 2-query 1-dim fallback +
-        2 enrichments), which made hitting Azure's ~10/min per-subscription
-        rate limit nearly automatic on a 12-month sync. If the 2-dim primary
-        fails, the chunk fails — the retry/429-aware logic in
-        ``_execute_cost_query`` handles transient errors, and the
-        per-range failure handling in ``_load_rows_incremental`` keeps
-        other ranges from being blocked.
+          1. Daily cost by [ResourceId, MeterCategory] — the resource-level rows.
+             Name, resource group and type come from the ARM resource ID.
+          2. Daily cost by [PricingModel, ChargeType] — the pricing mix
+             (OnDemand / Reservation / SavingsPlan / Spot). Its daily totals
+             are also Azure's own totals, which the caller compares with the
+             sums of query 1 to prove no rows were lost.
+          3. Period cost by [ResourceId, ResourceLocation] — the exact region of
+             each resource. Best effort: location is metadata, not cost.
+
+        Costs keep Azure's full precision. Rounding each row to cents and
+        dropping the rows that rounded to $0.00 used to discard ~20% of rows
+        and under-report every month.
         """
-
-        async def _safe_query(query, label: str):
-            try:
-                return await self._execute_cost_query(scope, query)
-            except Exception as exc:
-                logger.warning(
-                    "query_amortized_enrichment_failed",
-                    scope=scope,
-                    label=label,
-                    error=str(exc)[:300],
-                )
-                return [], []
-
-        # ── 1. Primary 2-dim query ───────────────────────────────────
-        two_dim_query = _build_cost_query(
-            start_date,
-            end_date,
-            TimeGranularity.DAILY,
-            [GroupByDimension.RESOURCE_ID, GroupByDimension.METER_CATEGORY],
-            cost_type="amortized",
+        primary_cols, primary_rows = await self._execute_cost_query(
+            scope,
+            _build_amortized_query(start_date, end_date, ["ResourceId", "MeterCategory"], daily=True),
         )
-        primary_cols, primary_rows = await self._execute_cost_query(scope, two_dim_query)
-        logger.debug(
-            "query_amortized_2dim_result",
-            scope=scope,
-            columns=primary_cols,
-            row_count=len(primary_rows),
+        pricing_cols, pricing_rows = await self._execute_cost_query(
+            scope,
+            _build_amortized_query(start_date, end_date, ["PricingModel", "ChargeType"], daily=True),
         )
 
-        # ── 2. ResourceLocation enrichment (best-effort, parallel) ───
-        # ResourceType is already extracted from the ResourceId path in the
-        # primary rows below; no separate type query needed. When ResourceType
-        # is missing (e.g. some reservation charges), the drilldown UI falls
-        # back to MeterCategory.
-        location_query = _build_cost_query(
-            start_date,
-            end_date,
-            TimeGranularity.DAILY,
-            [GroupByDimension.LOCATION, GroupByDimension.RESOURCE_GROUP],
-            cost_type="amortized",
-        )
-        loc_cols, loc_rows = await _safe_query(location_query, "location")
+        location_by_resource: dict[str, str] = {}
+        location_enriched = False
+        try:
+            loc_cols, loc_rows = await self._execute_cost_query(
+                scope,
+                _build_amortized_query(start_date, end_date, ["ResourceId", "ResourceLocation"], daily=False),
+            )
+            loc_idx = {name: i for i, name in enumerate(loc_cols)}
+            rid_i, loc_i = loc_idx.get("ResourceId"), loc_idx.get("ResourceLocation")
+            if rid_i is not None and loc_i is not None:
+                for row in loc_rows:
+                    rid, loc = str(row[rid_i] or "").lower(), str(row[loc_i] or "")
+                    if rid and loc:
+                        location_by_resource[rid] = loc
+                location_enriched = True
+        except Exception as exc:
+            logger.warning(
+                "query_amortized_location_failed",
+                scope=scope,
+                start=start_date.isoformat(),
+                end=end_date.isoformat(),
+                error=str(exc)[:300],
+            )
 
-        # ── 2. Parse primary rows ────────────────────────────────────
-        parsed: list[dict] = []
-        if primary_cols and primary_rows:
-            col_idx = {name: i for i, name in enumerate(primary_cols)}
-            cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
-            date_i = col_idx.get("UsageDate", col_idx.get("BillingPeriod", -1))
-            meter_i = col_idx.get("MeterCategory", col_idx.get("ServiceName"))
-            rid_i = col_idx.get("ResourceId")
-            rg_i = col_idx.get("ResourceGroup")
+        detail = AmortizedCostDetail(location_enriched=location_enriched)
 
-            for row in primary_rows:
-                cost_val = Decimal(str(row[cost_i])).quantize(Decimal("0.01"))
-                if cost_val == 0:
-                    continue
+        col_idx = {name: i for i, name in enumerate(primary_cols)}
+        cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
+        date_i = col_idx.get("UsageDate", col_idx.get("BillingPeriod", -1))
+        meter_i = col_idx.get("MeterCategory", col_idx.get("ServiceName"))
+        rid_i = col_idx.get("ResourceId")
+        cur_i = col_idx.get("Currency")
+        for row in primary_rows:
+            cost = float(row[cost_i] or 0)
+            if cost == 0:
+                continue
+            meter_cat = str(row[meter_i] or "") if meter_i is not None and meter_i < len(row) else ""
+            rid = str(row[rid_i] or "") if rid_i is not None and rid_i < len(row) else ""
+            resource_name, rg_name, resource_type = self._parse_resource_id(rid) if rid else ("", "", "")
+            detail.rows.append(
+                {
+                    "date": self._parse_query_row_date(row, date_i, start_date).isoformat(),
+                    "cost": cost,
+                    "meter_category": meter_cat,
+                    "meter_subcategory": "",
+                    "meter_name": "",
+                    "resource_group": rg_name,
+                    "resource_name": resource_name,
+                    "resource_type": resource_type,
+                    "resource_location": location_by_resource.get(rid.lower(), ""),
+                    "subscription_name": "",
+                    "subscription_id": "",
+                    "service_name": meter_cat,
+                    # Pricing model and charge type live in the daily pricing
+                    # rollup; they cannot be attributed to individual rows.
+                    "charge_type": "",
+                    "pricing_model": "",
+                    "publisher_type": "",
+                    "frequency": "",
+                    "currency": str(row[cur_i] or "USD") if cur_i is not None and cur_i < len(row) else "USD",
+                }
+            )
 
-                row_date = self._parse_query_row_date(row, date_i, start_date)
-                meter_cat = str(row[meter_i]) if meter_i is not None and meter_i < len(row) else "Unknown"
-
-                resource_name = ""
-                rg_name = ""
-                resource_type = ""
-
-                rid_val = str(row[rid_i]) if rid_i is not None and rid_i < len(row) else ""
-                if rid_val:
-                    resource_name, rg_name, resource_type = self._parse_resource_id(rid_val)
-
-                if not rg_name and rg_i is not None and rg_i < len(row):
-                    rg_name = str(row[rg_i])
-
-                parsed.append(
-                    {
-                        "date": row_date.isoformat(),
-                        "cost": float(cost_val),
-                        "meter_category": meter_cat,
-                        "meter_subcategory": "",
-                        "meter_name": "",
-                        "resource_group": rg_name,
-                        "resource_name": resource_name,
-                        "resource_type": resource_type,
-                        "resource_location": "",
-                        "subscription_name": "",
-                        "subscription_id": "",
-                        "service_name": meter_cat,
-                        "charge_type": "Usage",
-                        "pricing_model": "",
-                        "publisher_type": "Azure",
-                        "frequency": "UsageBased",
-                        "currency": "USD",
-                    }
-                )
-
-        # ── 3. Build resource-location lookup (RG → dominant loc) ────
-        rg_loc_cost: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        if loc_cols and loc_rows:
-            col_idx = {name: i for i, name in enumerate(loc_cols)}
-            cost_i = col_idx.get("Cost", col_idx.get("PreTaxCost", 0))
-            loc_i = col_idx.get("ResourceLocation")
-            rg_i = col_idx.get("ResourceGroup")
-
-            for row in loc_rows:
-                cost_val = float(Decimal(str(row[cost_i])).quantize(Decimal("0.01")))
-                if cost_val == 0:
-                    continue
-                loc = str(row[loc_i]) if loc_i is not None and loc_i < len(row) else ""
-                rg = str(row[rg_i]) if rg_i is not None and rg_i < len(row) else ""
-                if rg and loc:
-                    rg_loc_cost[rg][loc] += cost_val
-
-        rg_loc_map: dict[str, str] = {}
-        for rg, loc_costs in rg_loc_cost.items():
-            rg_loc_map[rg] = max(loc_costs, key=loc_costs.get)
-
-        # ── 4. Enrich rows with location ─────────────────────────────
-        for p in parsed:
-            rg = p["resource_group"]
-            if rg and not p["resource_location"]:
-                p["resource_location"] = rg_loc_map.get(rg, "")
+        p_idx = {name: i for i, name in enumerate(pricing_cols)}
+        p_cost_i = p_idx.get("Cost", p_idx.get("PreTaxCost", 0))
+        p_date_i = p_idx.get("UsageDate", -1)
+        pm_i, ct_i, p_cur_i = p_idx.get("PricingModel"), p_idx.get("ChargeType"), p_idx.get("Currency")
+        for row in pricing_rows:
+            cost = float(row[p_cost_i] or 0)
+            if cost == 0:
+                continue
+            detail.pricing_rows.append(
+                {
+                    "date": self._parse_query_row_date(row, p_date_i, start_date).isoformat(),
+                    "pricing_model": str(row[pm_i] or "") if pm_i is not None else "",
+                    "charge_type": str(row[ct_i] or "") if ct_i is not None else "",
+                    "cost": cost,
+                    "currency": str(row[p_cur_i] or "USD") if p_cur_i is not None else "USD",
+                }
+            )
 
         logger.info(
-            "query_amortized_cost_rows_loaded",
+            "query_amortized_cost_detail_loaded",
             scope=scope,
             start=start_date.isoformat(),
             end=end_date.isoformat(),
-            row_count=len(parsed),
-            azure_calls=2,
+            row_count=len(detail.rows),
+            pricing_rows=len(detail.pricing_rows),
+            location_enriched=location_enriched,
         )
-        return parsed
+        return detail
 
     @staticmethod
     def _parse_resource_id(resource_id: str) -> tuple[str, str, str]:

@@ -1202,6 +1202,51 @@ class AlertConfigRequest(BaseModel):
     notify_channel: str = Field(default="email", description="Delivery channel; only email is implemented")
 
 
+_ALERT_IDENTITY_KEYS = ("collection_id", "enabled", "warning_days", "critical_days", "notification_emails")
+_RENEWAL_IDENTITY_KEYS = (
+    "collection_id",
+    "enabled",
+    "armed",
+    "days_before_expiry",
+    "notify_on_renewal",
+    "notification_emails",
+    "certificates",
+    "akv_targets",
+)
+
+
+def _config_fingerprint(details: dict[str, Any], keys: tuple[str, ...]) -> str:
+    import json
+
+    normalized: dict[str, Any] = {}
+    for key in keys:
+        value = details.get(key)
+        if key == "notification_emails":
+            value = sorted({e.strip().lower() for e in value or [] if isinstance(e, str) and e.strip()})
+        elif key == "certificates":
+            value = sorted(c.get("id") for c in value or [] if isinstance(c, dict))
+        normalized[key] = value
+    return json.dumps(normalized, sort_keys=True, default=str)
+
+
+async def _find_identical_config(
+    db: AsyncSession, action: str, details: dict[str, Any], keys: tuple[str, ...]
+) -> int | None:
+    """Id of a stored config equal to ``details`` on ``keys``.
+
+    Each stored rule sends its own copy of every report, so saving the same
+    rule twice means every recipient gets every email twice.
+    """
+    result = await db.execute(
+        select(AuditLog).where(AuditLog.action == action).where(AuditLog.resource_type == "certificate_config")
+    )
+    wanted = _config_fingerprint(details, keys)
+    for entry in result.scalars().all():
+        if isinstance(entry.details, dict) and _config_fingerprint(entry.details, keys) == wanted:
+            return entry.id
+    return None
+
+
 @router.get("/auto-renewal/configs")
 async def list_auto_renewal_configs(
     user: UserContext = Depends(get_current_user),
@@ -1270,33 +1315,42 @@ async def create_auto_renewal_config(
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Create or update an auto-renewal configuration."""
+    """Create an auto-renewal configuration (an identical existing one is returned instead)."""
     certificates = [c.model_dump() for c in payload.certificates]
     scope = f"{len(certificates)} certificate(s)" if certificates else "entire collection"
+    details = {
+        "page": "CertificatesPage",
+        "feature": "auto_renewal",
+        "collection_id": payload.collection_id,
+        "collection_name": payload.collection_name,
+        "enabled": payload.enabled,
+        "armed": payload.armed,
+        "days_before_expiry": payload.days_before_expiry,
+        "notify_on_renewal": payload.notify_on_renewal,
+        "notification_emails": payload.notification_emails,
+        "certificates": certificates,
+        "certificate_count": len(certificates),
+        "akv_targets": [t.model_dump() for t in payload.akv_targets],
+        "summary": (
+            f"Auto-renewal config ({scope}): {payload.days_before_expiry} days before expiry, "
+            f"{'armed' if payload.armed else 'dry run'}"
+        ),
+    }
+    existing_id = await _find_identical_config(db, "cert_auto_renewal_config", details, _RENEWAL_IDENTITY_KEYS)
+    if existing_id is not None:
+        return {
+            "id": existing_id,
+            "status": "exists",
+            "days_before_expiry": payload.days_before_expiry,
+            "armed": payload.armed,
+        }
     entry = AuditLog(
         user_id=user.user_id,
         user_email=user.email,
         action="cert_auto_renewal_config",
         resource_type="certificate_config",
         resource_id=str(payload.collection_id),
-        details={
-            "page": "CertificatesPage",
-            "feature": "auto_renewal",
-            "collection_id": payload.collection_id,
-            "collection_name": payload.collection_name,
-            "enabled": payload.enabled,
-            "armed": payload.armed,
-            "days_before_expiry": payload.days_before_expiry,
-            "notify_on_renewal": payload.notify_on_renewal,
-            "notification_emails": payload.notification_emails,
-            "certificates": certificates,
-            "certificate_count": len(certificates),
-            "akv_targets": [t.model_dump() for t in payload.akv_targets],
-            "summary": (
-                f"Auto-renewal config ({scope}): {payload.days_before_expiry} days before expiry, "
-                f"{'armed' if payload.armed else 'dry run'}"
-            ),
-        },
+        details=details,
         ip_address=request.client.host if request.client else None,
         status="success",
     )
@@ -1320,7 +1374,10 @@ async def delete_auto_renewal_config(
     """Delete an auto-renewal configuration."""
     from sqlalchemy import delete
 
-    await db.execute(delete(AuditLog).where(AuditLog.id == config_id))
+    # Scoped to config rows: the id alone would let this delete any audit entry.
+    await db.execute(
+        delete(AuditLog).where(AuditLog.id == config_id).where(AuditLog.action == "cert_auto_renewal_config")
+    )
     await db.commit()
     return {"id": config_id, "status": "deleted"}
 
@@ -1356,7 +1413,9 @@ async def run_auto_renewal_config(
         trigger="manual",
         actor=user.email or user.user_id,
     )
-    return {"status": "completed", "config_id": config_id, **outcome}
+    if outcome.get("renewed"):
+        _schedule_sync(outcome.get("collection_id"), triggered_by="auto_renewal")
+    return {"status": "completed", **outcome}
 
 
 @router.post("/alerts/configs/{config_id}/run")
@@ -1429,25 +1488,34 @@ async def create_alert_config(
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Create a certificate expiry alert configuration."""
+    """Create a certificate expiry alert configuration (an identical existing one is returned instead)."""
+    details = {
+        "page": "CertificatesPage",
+        "feature": "expiry_alerts",
+        "collection_id": payload.collection_id,
+        "collection_name": payload.collection_name,
+        "enabled": payload.enabled,
+        "warning_days": payload.warning_days,
+        "critical_days": payload.critical_days,
+        "notification_emails": payload.notification_emails,
+        "notify_channel": payload.notify_channel,
+        "summary": f"Alert config: warn {payload.warning_days}d, critical {payload.critical_days}d",
+    }
+    existing_id = await _find_identical_config(db, "cert_alert_config", details, _ALERT_IDENTITY_KEYS)
+    if existing_id is not None:
+        return {
+            "id": existing_id,
+            "status": "exists",
+            "warning_days": payload.warning_days,
+            "critical_days": payload.critical_days,
+        }
     entry = AuditLog(
         user_id=user.user_id,
         user_email=user.email,
         action="cert_alert_config",
         resource_type="certificate_config",
         resource_id=str(payload.collection_id or "all"),
-        details={
-            "page": "CertificatesPage",
-            "feature": "expiry_alerts",
-            "collection_id": payload.collection_id,
-            "collection_name": payload.collection_name,
-            "enabled": payload.enabled,
-            "warning_days": payload.warning_days,
-            "critical_days": payload.critical_days,
-            "notification_emails": payload.notification_emails,
-            "notify_channel": payload.notify_channel,
-            "summary": f"Alert config: warn {payload.warning_days}d, critical {payload.critical_days}d",
-        },
+        details=details,
         ip_address=request.client.host if request.client else None,
         status="success",
     )
@@ -1471,7 +1539,8 @@ async def delete_alert_config(
     """Delete an alert configuration."""
     from sqlalchemy import delete
 
-    await db.execute(delete(AuditLog).where(AuditLog.id == config_id))
+    # Scoped to config rows: the id alone would let this delete any audit entry.
+    await db.execute(delete(AuditLog).where(AuditLog.id == config_id).where(AuditLog.action == "cert_alert_config"))
     await db.commit()
     return {"id": config_id, "status": "deleted"}
 
@@ -1842,7 +1911,13 @@ async def renew_certificate(
         resource_id=str(certificate_id),
         summary=f"Renewed {cert_label}",
         outcome="success",
-        details={"thumbprint": result.get("thumbprint"), "common_name": cert_cn},
+        # new_certificate_id is how auto-renewal knows this certificate was
+        # already replaced and follows a schedule on to the new one.
+        details={
+            "thumbprint": result.get("thumbprint"),
+            "common_name": cert_cn,
+            "new_certificate_id": result.get("certificate_id"),
+        },
     )
     # A PFX-mode renewal is the only moment the new key exists in the response;
     # escrowing it here is what makes later loads into further vaults possible.

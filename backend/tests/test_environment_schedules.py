@@ -116,13 +116,15 @@ FRIDAY_9AM = datetime(2026, 10, 9, 9, 0)
 
 
 def test_weekday_cron_runs_monday_to_friday():
-    schedule = SimpleNamespace(schedule_type="cron", cron_expression="0 8 * * 1-5", timezone="UTC")
+    schedule = SimpleNamespace(schedule_type="cron", cron_expression="0 8 * * 1-5", timezone="UTC", start_date=None)
     # The old reading (0=Mon) made "1-5" Tue–Sat, so the next run was Saturday.
     assert scheduler_service._compute_env_schedule_next_run(schedule, FRIDAY_9AM) == datetime(2026, 10, 12, 8, 0)
 
 
 def test_weekday_cron_respects_the_schedule_timezone():
-    schedule = SimpleNamespace(schedule_type="cron", cron_expression="0 8 * * 1-5", timezone="America/Chicago")
+    schedule = SimpleNamespace(
+        schedule_type="cron", cron_expression="0 8 * * 1-5", timezone="America/Chicago", start_date=None
+    )
     # 08:00 CDT on Monday is 13:00 UTC.
     assert scheduler_service._compute_env_schedule_next_run(schedule, FRIDAY_9AM + timedelta(hours=6)) == datetime(
         2026, 10, 12, 13, 0
@@ -152,19 +154,33 @@ async def test_realign_moves_future_runs_to_the_correct_day_once(factory, monkey
 
     shifted = await _add(factory, _schedule(next_run_at=wrong_saturday))
     already_due = await _add(factory, _schedule(job_name="due", next_run_at=due))
-    daily = await _add(factory, _schedule(job_name="daily", schedule_type="daily", next_run_at=wrong_saturday))
+    # A daily schedule whose stored run drifted off its 06:30 start time.
+    daily = await _add(
+        factory,
+        _schedule(
+            job_name="daily",
+            schedule_type="daily",
+            cron_expression=None,
+            start_date=datetime(2026, 1, 1, 6, 30),
+            next_run_at=wrong_saturday,
+        ),
+    )
     invalid = await _add(factory, _schedule(job_name="bad", cron_expression="not a cron", next_run_at=wrong_saturday))
     disabled = await _add(factory, _schedule(job_name="off", is_enabled=False, next_run_at=wrong_saturday))
 
-    assert await scheduler_service.realign_env_cron_schedules() == 1
-    assert await scheduler_service.realign_env_cron_schedules() == 0  # idempotent
+    assert await scheduler_service.realign_env_schedule_next_runs() == 2
+    assert await scheduler_service.realign_env_schedule_next_runs() == 0  # idempotent
 
     async with factory() as db:
         rows = {s.id: s for s in (await db.execute(select(EnvironmentSchedule))).scalars().all()}
     corrected = rows[shifted].next_run_at
     assert corrected.weekday() < 5 and corrected.hour == 8 and now < corrected <= now + timedelta(days=4)
     assert rows[already_due].next_run_at == due
-    for untouched in (daily, invalid, disabled):
+    realigned_daily = rows[daily].next_run_at
+    assert (realigned_daily.hour, realigned_daily.minute) == (6, 30) and now < realigned_daily <= now + timedelta(
+        days=1
+    )
+    for untouched in (invalid, disabled):
         assert rows[untouched].next_run_at == wrong_saturday
 
 
@@ -199,14 +215,16 @@ async def test_background_run_finishes_the_schedule_and_notifies(factory, monkey
         schedule = await service.load_schedule_for_run(schedule_id)
         _, execution = await service.begin_scheduled_sequence(schedule, user_id="clicker", user_email="ops@example.com")
 
-    notified: list[str] = []
+    from app.services import environment_notifications
 
-    async def _notify(self, schedule, result):
-        notified.append(result["status"])
+    notified: list = []
+
+    async def _notify(recipients, report):
+        notified.append((recipients, report.status, report.trigger))
 
     monkeypatch.setattr(database, "get_db_session", _sessions_from(factory))
     monkeypatch.setattr(env_module, "get_aks_operations_service", lambda db: FakeAks())
-    monkeypatch.setattr(EnvironmentScalingService, "_send_schedule_notification", _notify)
+    monkeypatch.setattr(environment_notifications, "send_run_email", _notify)
 
     await env_module._run_sequence_in_background(
         sequence_id=seq_id,
@@ -221,7 +239,15 @@ async def test_background_run_finishes_the_schedule_and_notifies(factory, monkey
         stored_execution = await db.get(EnvironmentExecutionHistory, execution.id)
     assert stored_execution.status == "completed"
     assert stored_schedule.last_run_status == "completed"
-    assert notified == ["completed"]
+    await environment_notifications.wait_for_pending_emails()
+    # The schedule's creator and the person who pressed Run now.
+    assert notified == [
+        (
+            ["creator@example.com", "ops@example.com"],
+            "completed",
+            'Run now of schedule "weekday-start" by ops@example.com',
+        )
+    ]
 
 
 @pytest.mark.anyio

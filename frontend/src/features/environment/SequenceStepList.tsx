@@ -31,6 +31,7 @@ export const DEFAULT_FIXED_WAIT_SECONDS = 30;
 export const WAIT_OPTIONS: { value: SequenceStep["wait_condition"]; label: string }[] = [
   { value: "pods_ready", label: "Wait until pods ready" },
   { value: "deployment_available", label: "Wait until available" },
+  { value: "pods_terminated", label: "Wait until pods stopped" },
   { value: "fixed_time", label: "Wait a fixed time" },
   { value: "skip", label: "Don't wait" },
 ];
@@ -253,6 +254,16 @@ export const SequenceStepList: React.FC<StepListProps> = ({
         const showBefore = effectiveDrop === idx;
         const showAfter = effectiveDrop === steps.length && idx === steps.length - 1;
         const waits = !isShutdown && step.wait_condition !== "skip";
+        // A startup may also scale deployments down (even to 0) to free
+        // capacity before scaling others up.
+        const stops = !isShutdown && step.replicas === 0;
+        const scalesDown = !isShutdown && from != null && step.replicas < from;
+        const podWait = ["pods_ready", "deployment_available", "health_endpoint"].includes(step.wait_condition);
+        const waitOptions = WAIT_OPTIONS.filter(
+          (w) =>
+            w.value === step.wait_condition ||
+            (stops ? w.value !== "pods_ready" && w.value !== "deployment_available" : w.value !== "pods_terminated" || scalesDown),
+        );
 
         return (
           <div
@@ -333,6 +344,14 @@ export const SequenceStepList: React.FC<StepListProps> = ({
                       Scale {occurrence} of {of}
                     </span>
                   )}
+                  {(stops || scalesDown) && (
+                    <span
+                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${stops ? "bg-red-50 text-red-700 ring-red-200" : "bg-orange-50 text-orange-700 ring-orange-200"}`}
+                      title={stops ? `This step stops ${name} (0 pods)` : `This step scales ${name} down from ${from} to ${step.replicas} pods`}
+                    >
+                      {stops ? "Stops deployment" : "Scale down"}
+                    </span>
+                  )}
                   {missing && (
                     <span
                       className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200"
@@ -394,11 +413,17 @@ export const SequenceStepList: React.FC<StepListProps> = ({
                     Scale{from != null && <span className="font-mono text-gray-500">{from} →</span>}
                     <NumberField
                       value={step.replicas}
-                      min={1}
+                      min={0}
                       max={MAX_REPLICAS}
                       stepper
                       ariaLabel={`Replicas for step ${idx + 1}`}
-                      onCommit={(n) => update(step.uid, { replicas: n })}
+                      onCommit={(n) => {
+                        const changes: Partial<SequenceStep> = { replicas: n };
+                        // "Pods ready" means nothing at 0 pods; wait for them to stop instead.
+                        if (n === 0 && podWait) changes.wait_condition = "pods_terminated";
+                        if (n > 0 && step.replicas === 0 && step.wait_condition === "pods_terminated") changes.wait_condition = "pods_ready";
+                        update(step.uid, changes);
+                      }}
                     />
                     pods
                   </span>
@@ -417,10 +442,10 @@ export const SequenceStepList: React.FC<StepListProps> = ({
                       className={selectCls}
                       aria-label={`Wait condition for step ${idx + 1}`}
                     >
-                      {WAIT_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
+                      {waitOptions.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
                     </select>
                   </label>
-                  {waits && step.wait_condition !== "fixed_time" && (
+                  {waits && podWait && step.replicas > 0 && (
                     <span className="flex items-center gap-1.5" title="Start the next step once this share of the pods is ready; the rest keep starting in the background.">
                       until
                       <NumberField
@@ -440,7 +465,9 @@ export const SequenceStepList: React.FC<StepListProps> = ({
                       title={
                         step.wait_condition === "fixed_time"
                           ? "Seconds to wait before the next step"
-                          : "Fail only if no additional pod becomes ready for this long. The clock restarts each time another pod is ready (up to 2 hours per step), so large scale-ups are not failed while they are still coming up."
+                          : step.wait_condition === "pods_terminated"
+                            ? "Fail only if no pod finishes stopping for this long. The clock restarts each time another pod is gone."
+                            : "Fail only if no additional pod becomes ready for this long. The clock restarts each time another pod is ready (up to 2 hours per step), so large scale-ups are not failed while they are still coming up."
                       }
                     >
                       {step.wait_condition === "fixed_time" ? "for" : "fail if stuck for"}

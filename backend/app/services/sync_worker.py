@@ -210,8 +210,13 @@ async def _run_job(job: SyncJob) -> tuple[str, str | None, dict | None]:
         async with session_factory() as session:
             svc = LeadershipSyncService(session)
 
+            # Queued leadership jobs are user-initiated "Refresh Data" clicks
+            # (the scheduler calls the service directly), so pull from Azure first.
             async def _run_leadership() -> dict:
-                return await svc.full_sync(triggered_by=triggered_by)
+                return await svc.full_sync(
+                    triggered_by=triggered_by,
+                    pull_from_azure=bool(payload.get("pull_from_azure", True)),
+                )
 
             return await _await_full_sync_result(job, _run_leadership)
 

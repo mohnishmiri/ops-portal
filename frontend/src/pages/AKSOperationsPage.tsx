@@ -22,8 +22,6 @@ import {
   useDeploymentStatusPoll,
   usePodMetrics,
 
-  useNodePools,
-  useCachedNodePools,
   useScaleDeployment,
   useRestartDeployment,
   useCreateDeployment,
@@ -38,8 +36,6 @@ import {
   useCronJobDetail,
   useConfigMapDetail,
   useCachedCronJobs,
-  useScaleNodePool,
-  useUpdateAutoscaling,
   useStartCluster,
   useStopCluster,
   useScaleHistory,
@@ -57,8 +53,6 @@ import {
   CronJob,
   CronJobDetail,
   ConfigMapDetail,
-  NodePoolDetails,
-  NodeDetail,
   PodLogSearchResult,
 } from "../services/aksApi";
 import { useAksLiveWatch } from "../hooks/useAksLiveWatch";
@@ -83,6 +77,7 @@ import { DeploymentDetailModal } from "../features/aks/DeploymentDetailModal";
 import { PodDetailModal } from "../features/aks/PodDetailModal";
 import { DownloadLogsButton, LogArchiveProgress, useLogArchiveDownload } from "../features/aks/LogArchiveDownload";
 import { AkvSyncTab } from "../features/aks/AkvSyncTab";
+import { NodePoolsTab } from "../features/aks/NodePoolsTab";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { formatAxiosError } from "../services/apiErrors";
 import {
@@ -275,21 +270,10 @@ const AKSOperationsPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("clusters");
   // KPI tiles filter the grid beneath them; clicking an active tile again clears it.
   const [clusterTile, setClusterTile] = useState<"all" | "running" | "with-nodes" | "region">("all");
-  const [poolTile, setPoolTile] = useState<"all" | "with-nodes" | "autoscaling" | "system">("all");
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
   const [scaleDialog, setScaleDialog] = useState<{ deployment: Deployment; replicas: number } | null>(null);
   const [statusPollBurst, setStatusPollBurst] = useState(false); // 5s poll during active mutations
-  const [nodePoolScaleDialog, setNodePoolScaleDialog] = useState<{
-    pool: NodePoolDetails;
-    nodeCount: number;
-  } | null>(null);
-  const [autoscaleDialog, setAutoscaleDialog] = useState<{
-    pool: NodePoolDetails;
-    enable: boolean;
-    minCount: number;
-    maxCount: number;
-  } | null>(null);
 
   // CronJob CRUD dialogs
   const [createCronJobDialog, setCreateCronJobDialog] = useState(false);
@@ -370,16 +354,6 @@ const AKSOperationsPage: React.FC = () => {
     onConfirm: () => void;
   } | null>(null);
 
-  // Node pool expanded rows (by pool name)
-  const [expandedPools, setExpandedPools] = useState<Set<string>>(new Set());
-  const togglePoolExpand = useCallback((poolName: string) => {
-    setExpandedPools(prev => {
-      const next = new Set(prev);
-      if (next.has(poolName)) next.delete(poolName); else next.add(poolName);
-      return next;
-    });
-  }, []);
-
   // Load only the data needed for the active tab — avoids parallel K8s/Azure storms.
   const clusterScopedTabs = new Set<TabKey>([
     "nodepools", "deployments", "pods", "cronjobs", "jobs",
@@ -389,7 +363,6 @@ const AKSOperationsPage: React.FC = () => {
   const loadDeployments = !!selectedCluster && activeTab === "deployments";
   const loadPodMetrics = !!selectedCluster && activeTab === "pods";
   const loadCronJobs = !!selectedCluster && activeTab === "cronjobs";
-  const loadNodePools = !!selectedCluster && activeTab === "nodepools";
   const loadScaleHistory = activeTab === "history";
 
   // Queries — use DB-cached clusters for fast load (auto-refresh only on clusters tab)
@@ -431,17 +404,12 @@ const AKSOperationsPage: React.FC = () => {
     30,
     loadScaleHistory
   );
-  const { data: nodePoolsData, isFetching: fetchingNodePools, isPlaceholderData: nodePoolsArePlaceholder, isError: nodePoolsError, error: nodePoolsErr } = useCachedNodePools(
-    selectedCluster?.id || "",
-    loadNodePools
-  );
   const { data: namespacesData, isFetching: fetchingNamespaces, isPlaceholderData: namespacesArePlaceholder } =
     useAksNamespaces(selectedCluster?.id, !!selectedCluster);
   const namespacesPending = fetchingNamespaces && namespacesArePlaceholder;
   const loadingDeployments = fetchingDeployments && deploymentsArePlaceholder;
   const loadingPodMetrics = fetchingPods && podsArePlaceholder;
   const loadingCronJobs = fetchingCronJobs && cronJobsArePlaceholder;
-  const loadingNodePools = fetchingNodePools && nodePoolsArePlaceholder;
 
   const namespaceOptions = useMemo(() => {
     return [...(namespacesData?.namespaces || [])].sort();
@@ -488,11 +456,6 @@ const AKSOperationsPage: React.FC = () => {
     namespace: selectedNamespace || undefined,
     enabled: loadCronJobs,
   });
-  const nodePoolsRefresh = useAksBackgroundSync({
-    resourceType: "nodepools",
-    clusterId: selectedCluster?.id,
-    enabled: loadNodePools,
-  });
 
   // Mutations
   const scaleDeploymentMutation = useScaleDeployment();
@@ -506,8 +469,6 @@ const AKSOperationsPage: React.FC = () => {
   const deleteCronJobMutation = useDeleteCronJob();
   const triggerCronJobMutation = useTriggerCronJob();
   const deletePodMutation = useDeletePod();
-  const scaleNodePoolMutation = useScaleNodePool();
-  const updateAutoscalingMutation = useUpdateAutoscaling();
   const startClusterMutation = useStartCluster();
   const stopClusterMutation = useStopCluster();
 
@@ -900,40 +861,6 @@ const AKSOperationsPage: React.FC = () => {
     }
   };
 
-  // Handle Node Pool Scale
-  const handleNodePoolScale = async () => {
-    if (!nodePoolScaleDialog || !selectedCluster) return;
-    try {
-      await scaleNodePoolMutation.mutateAsync({
-        clusterId: selectedCluster.id,
-        nodepoolName: nodePoolScaleDialog.pool.name,
-        nodeCount: nodePoolScaleDialog.nodeCount,
-      });
-      showToast(`Scaled node pool ${nodePoolScaleDialog.pool.name} to ${nodePoolScaleDialog.nodeCount} nodes`);
-    } catch (e: any) {
-      showToast(e?.response?.data?.detail || "Node pool scale failed", "error");
-    }
-    setNodePoolScaleDialog(null);
-  };
-
-  // Handle Autoscaling Update
-  const handleAutoscalingUpdate = async () => {
-    if (!autoscaleDialog || !selectedCluster) return;
-    try {
-      await updateAutoscalingMutation.mutateAsync({
-        clusterId: selectedCluster.id,
-        nodepoolName: autoscaleDialog.pool.name,
-        enableAutoScaling: autoscaleDialog.enable,
-        minCount: autoscaleDialog.enable ? autoscaleDialog.minCount : undefined,
-        maxCount: autoscaleDialog.enable ? autoscaleDialog.maxCount : undefined,
-      });
-      showToast(`Autoscaling ${autoscaleDialog.enable ? "enabled" : "disabled"} for ${autoscaleDialog.pool.name}`);
-    } catch (e: any) {
-      showToast(e?.response?.data?.detail || "Autoscaling update failed", "error");
-    }
-    setAutoscaleDialog(null);
-  };
-
   // Handle Cluster Start
   const handleStartCluster = async (cluster: AKSCluster) => {
     try {
@@ -1062,11 +989,6 @@ const AKSOperationsPage: React.FC = () => {
     c.name.toLowerCase().includes(q) || c.namespace.toLowerCase().includes(q) || c.schedule.includes(q), []);
   const cjsPag = useSearchPagination(allCJs, searchCJsFn);
 
-  const allPools = nodePoolsData?.node_pools || [];
-  const searchPoolsFn = useCallback((p: NodePoolDetails, q: string) =>
-    p.name.toLowerCase().includes(q) || p.vm_size.toLowerCase().includes(q) || p.mode.toLowerCase().includes(q) || (p.node_image_version || "").toLowerCase().includes(q), []);
-  const poolsPag = useSearchPagination(allPools, searchPoolsFn);
-
   const allHistory = scaleHistoryData?.history || [];
   const searchHistoryFn = useCallback((h: typeof allHistory[0], q: string) =>
     h.cluster_name.toLowerCase().includes(q) || h.deployment_name.toLowerCase().includes(q) || h.namespace.toLowerCase().includes(q) || h.user_email.toLowerCase().includes(q), []);
@@ -1076,13 +998,11 @@ const AKSOperationsPage: React.FC = () => {
   type DepSortKey = "name" | "namespace" | "image" | "version" | "replicas" | "status";
   type PodSortKey = "pod_name" | "namespace" | "phase" | "node" | "cpu" | "memory" | "restarts" | "started";
   type CJSortKey = "name" | "namespace" | "schedule" | "suspended" | "last_schedule_time";
-  type NPSortKey = "name" | "mode" | "vm_size" | "count" | "total_pods" | "autoscaling" | "node_image" | "labels" | "provisioning_state";
   type HistSortKey = "timestamp" | "cluster_name" | "deployment_name" | "action" | "change" | "user_email";
 
   const [depSort, setDepSort] = useState<SortState<DepSortKey>>({ key: "name", direction: "asc" });
   const [podSort, setPodSort] = useState<SortState<PodSortKey>>({ key: "pod_name", direction: "asc" });
   const [cjSort, setCjSort] = useState<SortState<CJSortKey>>({ key: "name", direction: "asc" });
-  const [npSort, setNpSort] = useState<SortState<NPSortKey>>({ key: "name", direction: "asc" });
   const [histSort, setHistSort] = useState<SortState<HistSortKey>>({ key: "timestamp", direction: "desc" });
 
   // Generic sort helper
@@ -1143,41 +1063,6 @@ const AKSOperationsPage: React.FC = () => {
   }, []);
   const sortedCJs = useMemo(() => sortItems(cjsPag.filtered, cjSort.key, cjSort.direction, cjAccessor), [cjsPag.filtered, cjSort, cjAccessor, sortItems]);
   const pagedSortedCJs = useMemo(() => sortedCJs.slice((cjsPag.page - 1) * PAGE_SIZE, cjsPag.page * PAGE_SIZE), [sortedCJs, cjsPag.page]);
-
-  const npAccessor = useCallback((p: NodePoolDetails, key: string): string | number => {
-    switch (key) {
-      case "autoscaling": return p.enable_auto_scaling ? 0 : 1;
-      case "node_image": return (p.node_image_version || "").toLowerCase();
-      case "labels": return Object.keys(p.node_labels || {}).length;
-      case "name": return p.name.toLowerCase();
-      case "mode": return p.mode.toLowerCase();
-      case "vm_size": return p.vm_size.toLowerCase();
-      case "count": return p.count;
-      case "total_pods": return p.total_pods || 0;
-      case "provisioning_state": return p.provisioning_state.toLowerCase();
-      default: return "";
-    }
-  }, []);
-  const tileFilteredPools = useMemo(
-    () =>
-      poolsPag.filtered.filter((p) =>
-        poolTile === "with-nodes" ? p.count > 0
-        : poolTile === "autoscaling" ? p.enable_auto_scaling
-        : poolTile === "system" ? p.mode === "System"
-        : true
-      ),
-    [poolsPag.filtered, poolTile]
-  );
-  const poolTotalPages = Math.max(1, Math.ceil(tileFilteredPools.length / PAGE_SIZE));
-  const poolPage = Math.min(poolsPag.page, poolTotalPages);
-  const sortedPools = useMemo(() => sortItems(tileFilteredPools, npSort.key, npSort.direction, npAccessor), [tileFilteredPools, npSort, npAccessor, sortItems]);
-  const pagedSortedPools = useMemo(() => sortedPools.slice((poolPage - 1) * PAGE_SIZE, poolPage * PAGE_SIZE), [sortedPools, poolPage]);
-  const togglePoolTile = (tile: typeof poolTile) => {
-    setPoolTile((prev) => (prev === tile ? "all" : tile));
-    poolsPag.setPage(1);
-  };
-  const poolTileLabel =
-    poolTile === "with-nodes" ? "Pools with nodes" : poolTile === "autoscaling" ? "Autoscaling pools" : poolTile === "system" ? "System pools" : null;
 
   const histAccessor = useCallback((h: typeof allHistory[0], key: string): string | number => {
     switch (key) {
@@ -2655,431 +2540,6 @@ const AKSOperationsPage: React.FC = () => {
     );
   };
 
-  // ── Render Node Pools Tab ─────────────────────────────────────────────
-
-  const renderNodePoolsTab = () => {
-    const { search: npSearch, setSearch: setNpSearch, setPage: setNpPage } = poolsPag;
-    const filteredPools = tileFilteredPools;
-    const npPage = poolPage;
-    const npTotalPages = poolTotalPages;
-    const pagedPools = pagedSortedPools;
-
-    return (
-    <div className="space-y-4">
-      {/* Header with Sync / Refresh buttons */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-        <h2 className="text-xl font-semibold text-gray-800">
-          Node Pools {selectedCluster && `- ${selectedCluster.name}`}
-        </h2>
-        {selectedCluster && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => nodePoolsRefresh.start(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
-            >
-              {Icons.refresh(nodePoolsRefresh.isRunning ? "w-4 h-4 animate-spin" : "w-4 h-4")}
-              Sync from Azure
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Source & Last Sync Info */}
-      {selectedCluster && nodePoolsData && (
-        <div className="flex items-center gap-3">
-          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-            nodePoolsData.source === "db" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
-          }`}>
-            Source: {nodePoolsData.source === "db" ? "Database" : "Azure Live"}
-          </span>
-          {nodePoolsData.last_sync && (
-            <span className="text-sm text-gray-500">
-              Last synced: {formatDate(nodePoolsData.last_sync)}
-            </span>
-          )}
-          {!nodePoolsData.last_sync && (
-            <span className="text-sm text-yellow-600">
-              Not synced yet — cached table will update after background refresh
-            </span>
-          )}
-          <BackgroundRefreshStatus sync={nodePoolsRefresh} />
-        </div>
-      )}
-
-      {!selectedCluster ? (
-        <div className="text-center py-16 text-gray-500">
-          Select a cluster from the Clusters tab to manage node pools
-        </div>
-      ) : nodePoolsError ? (
-        <div className="text-center py-12">
-          <div className="text-red-600 font-medium mb-2">{Icons.warning("w-6 h-6 mx-auto mb-2")}Failed to load node pools</div>
-          <div className="text-sm text-gray-500 max-w-md mx-auto">{(nodePoolsErr as Error)?.message || "Could not connect to the cluster. Check credentials and cluster state."}</div>
-        </div>
-      ) : loadingNodePools ? (
-        <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading node pools…</div>
-      ) : (
-        <>
-          {/* Summary Stats Row */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricCard
-              title="Total Pools"
-              value={poolsPag.filtered.length}
-              icon={Icons.cluster("h-5 w-5")}
-              tone="blue"
-              onClick={() => togglePoolTile("all")}
-              actionLabel="Show all node pools"
-            />
-            <MetricCard
-              title="Total Nodes"
-              value={poolsPag.filtered.reduce((sum, p) => sum + p.count, 0)}
-              icon={MetricCardIcons.server()}
-              tone="green"
-              onClick={() => togglePoolTile("with-nodes")}
-              active={poolTile === "with-nodes"}
-              actionLabel="Show node pools that have nodes"
-            />
-            <MetricCard
-              title="Autoscaling"
-              value={poolsPag.filtered.filter((p) => p.enable_auto_scaling).length}
-              icon={Icons.scale("h-5 w-5")}
-              tone="purple"
-              onClick={() => togglePoolTile("autoscaling")}
-              active={poolTile === "autoscaling"}
-              actionLabel="Show autoscaling node pools"
-            />
-            <MetricCard
-              title="System Pools"
-              value={poolsPag.filtered.filter((p) => p.mode === "System").length}
-              icon={MetricCardIcons.layers()}
-              tone="orange"
-              onClick={() => togglePoolTile("system")}
-              active={poolTile === "system"}
-              actionLabel="Show system node pools"
-            />
-          </div>
-          <TileFilterNotice label={poolTileLabel} onClear={() => togglePoolTile("all")} />
-
-          {/* Node Pools Table */}
-          <div className={gridStyles.shell}>
-            <GridSearchBar search={npSearch} onSearch={setNpSearch} onPage={setNpPage} totalItems={allPools.length} shownItems={filteredPools.length} placeholder="Search node pools..." />
-            <table className={gridStyles.table}>
-              <thead className={gridStyles.head}>
-                <tr>
-                  <th className={`${gridStyles.headerCell} w-8`}></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="Name" active={npSort.key === "name"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "name"))} /></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="Mode" active={npSort.key === "mode"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "mode"))} /></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="VM Size" active={npSort.key === "vm_size"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "vm_size"))} /></th>
-                  <th className={gridStyles.headerCellCenter}><SortableHeader label="Nodes" active={npSort.key === "count"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "count"))} align="center" /></th>
-                  <th className={gridStyles.headerCellCenter}><SortableHeader label="Pods" active={npSort.key === "total_pods"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "total_pods"))} align="center" /></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="Autoscaling" active={npSort.key === "autoscaling"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "autoscaling"))} /></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="Node Image" active={npSort.key === "node_image"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "node_image"))} /></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="Labels" active={npSort.key === "labels"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "labels"))} /></th>
-                  <th className={gridStyles.headerCell}><SortableHeader label="State" active={npSort.key === "provisioning_state"} direction={npSort.direction} onClick={() => setNpSort(nextSortState(npSort, "provisioning_state"))} /></th>
-                  <th className={gridStyles.headerCellCenter}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagedPools.map((pool) => (
-                  <React.Fragment key={pool.name}>
-                    {/* Main Row */}
-                    <tr className={`${gridStyles.row} transition-colors`}>
-                      {/* Expand toggle */}
-                      <td className={gridStyles.cell}>
-                        <button
-                          onClick={() => togglePoolExpand(pool.name)}
-                          className="text-gray-400 hover:text-gray-600"
-                          title={expandedPools.has(pool.name) ? "Collapse" : "Expand details"}
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-4 h-4 transition-transform ${expandedPools.has(pool.name) ? "rotate-90" : ""}`}>
-                            <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
-                          </svg>
-                        </button>
-                      </td>
-                      {/* Name */}
-                      <td className={gridStyles.strongCell}>
-                        {pool.name}
-                      </td>
-                      {/* Mode badge */}
-                      <td className={gridStyles.cell}>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                          pool.mode === "System" ? "bg-purple-100 text-purple-800" : "bg-blue-100 text-blue-800"
-                        }`}>
-                          {pool.mode}
-                        </span>
-                      </td>
-                      {/* VM Size */}
-                      <td className={gridStyles.monoCell}>{pool.vm_size}</td>
-                      {/* Nodes */}
-                      <td className={`${gridStyles.centerCell} font-bold text-gray-800`}>{pool.count}</td>
-                      {/* Pods */}
-                      <td className={`${gridStyles.centerCell} font-bold text-blue-700`}>{pool.total_pods ?? "-"}</td>
-                      {/* Autoscaling */}
-                      <td className={gridStyles.cell}>
-                        {pool.enable_auto_scaling ? (
-                          <span className="text-green-700 text-xs font-medium">
-                            {pool.min_count} – {pool.max_count}
-                          </span>
-                        ) : (
-                          <span className="text-gray-400 text-xs">Off</span>
-                        )}
-                      </td>
-                      {/* Node Image */}
-                      <td className={gridStyles.cell}>
-                        {pool.node_image_version ? (
-                          <span className="font-mono text-[10px] text-gray-600 truncate block max-w-[180px]" title={pool.node_image_version}>{pool.node_image_version}</span>
-                        ) : (
-                          <span className="text-gray-400 text-xs">-</span>
-                        )}
-                      </td>
-                      {/* Labels */}
-                      <td className={gridStyles.cell}>
-                        {pool.node_labels && Object.keys(pool.node_labels).length > 0 ? (
-                          <div className="flex flex-wrap gap-1 max-w-[200px]">
-                            {Object.entries(pool.node_labels).map(([k, v]) => (
-                              <span key={k} className="text-[10px] bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full whitespace-nowrap">
-                                {k}: {v}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-gray-400 text-xs">-</span>
-                        )}
-                      </td>
-                      {/* State */}
-                      <td className={gridStyles.cell}>
-                        <span className={`inline-flex items-center gap-1 text-xs font-medium ${
-                          pool.power_state === "Running" ? "text-green-600" : "text-red-600"
-                        }`}>
-                          <span className={`w-2 h-2 rounded-full ${pool.power_state === "Running" ? "bg-green-500" : "bg-red-500"}`} />
-                          {pool.power_state}
-                        </span>
-                      </td>
-                      {/* Actions */}
-                      <td className={gridStyles.centerCell}>
-                        {canWrite && (
-                        <div className="flex items-center justify-center gap-1">
-                          <button
-                            onClick={() => setNodePoolScaleDialog({ pool, nodeCount: pool.count })}
-                            className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
-                            title="Scale Node Pool"
-                          >
-                            {Icons.scale()}
-                          </button>
-                          <button
-                            onClick={() =>
-                              setAutoscaleDialog({
-                                pool,
-                                enable: pool.enable_auto_scaling,
-                                minCount: pool.min_count || 1,
-                                maxCount: pool.max_count || pool.count + 3,
-                              })
-                            }
-                            className="p-2 text-purple-600 hover:bg-purple-50 rounded-lg"
-                            title="Configure Autoscaling"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={20} height={20}>
-                              <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                            </svg>
-                          </button>
-                        </div>
-                        )}
-                      </td>
-                    </tr>
-
-                    {/* Expanded Detail Row */}
-                    {expandedPools.has(pool.name) && (
-                      <tr>
-                        <td colSpan={11} className="bg-gray-50 px-6 py-4">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            {/* Left: Pool properties */}
-                            <div className="space-y-2">
-                              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Pool Details</h4>
-                              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                                <span className="text-gray-500">OS Type</span>
-                                <span className="text-gray-800">{pool.os_type}</span>
-                                <span className="text-gray-500">Max Pods</span>
-                                <span className="text-gray-800">{pool.max_pods}</span>
-                                <span className="text-gray-500">K8s Version</span>
-                                <span className="text-gray-800">{pool.kubernetes_version}</span>
-                                <span className="text-gray-500">Provisioning</span>
-                                <span className={`font-medium ${pool.provisioning_state === "Succeeded" ? "text-green-600" : pool.provisioning_state === "Failed" ? "text-red-600" : "text-yellow-600"}`}>
-                                  {pool.provisioning_state}
-                                </span>
-                                {pool.availability_zones && pool.availability_zones.length > 0 && (
-                                  <>
-                                    <span className="text-gray-500">Zones</span>
-                                    <span className="text-gray-800">{pool.availability_zones.join(", ")}</span>
-                                  </>
-                                )}
-                              </div>
-                              {pool.node_taints && pool.node_taints.length > 0 && (
-                                <div className="mt-2">
-                                  <span className="text-xs text-gray-500">Taints: </span>
-                                  <span className="text-xs text-gray-700">{pool.node_taints.join(", ")}</span>
-                                </div>
-                              )}
-                            </div>
-
-                            {/* Right: Nodes */}
-                            <div>
-                              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                                Nodes ({pool.nodes?.length ?? 0})
-                              </h4>
-                              {pool.nodes && pool.nodes.length > 0 ? (
-                                <div className="space-y-1 max-h-36 overflow-y-auto">
-                                  {pool.nodes.map((node) => (
-                                    <div key={node.name} className="flex items-center justify-between bg-white px-3 py-1.5 rounded border text-xs">
-                                      <span className="font-mono text-gray-700 truncate max-w-[160px]" title={node.name}>{node.name}</span>
-                                      <div className="flex items-center gap-3 text-gray-500">
-                                        <span><strong className="text-blue-600">{node.pod_count}</strong> pods</span>
-                                        <span>{node.allocatable_cpu} cpu</span>
-                                        <span>{node.allocatable_memory} mem</span>
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="text-xs text-gray-400 italic">No node details available</div>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-                {pagedPools.length === 0 && (
-                  <tr><td colSpan={11} className="text-center py-8 text-gray-500">No node pools found</td></tr>
-                )}
-              </tbody>
-            </table>
-            <GridPager page={npPage} totalPages={npTotalPages} onPage={setNpPage} />
-          </div>
-
-          {/* Scale Node Pool Dialog */}
-          {nodePoolScaleDialog && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-              <div className="bg-white rounded-lg p-6 w-96">
-                <h3 className="text-lg font-semibold mb-4">Scale Node Pool</h3>
-                <p className="text-gray-600 mb-4">
-                  Scale <strong>{nodePoolScaleDialog.pool.name}</strong> (currently {nodePoolScaleDialog.pool.count} nodes)
-                </p>
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Node Count</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={1000}
-                    value={nodePoolScaleDialog.nodeCount}
-                    onChange={(e) =>
-                      setNodePoolScaleDialog({ ...nodePoolScaleDialog, nodeCount: parseInt(e.target.value) || 0 })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg"
-                  />
-                  {nodePoolScaleDialog.pool.enable_auto_scaling && (
-                    <p className="text-xs text-yellow-600 mt-1">
-                      Note: Autoscaling is enabled (min: {nodePoolScaleDialog.pool.min_count}, max: {nodePoolScaleDialog.pool.max_count}). Bounds will be adjusted if needed.
-                    </p>
-                  )}
-                </div>
-                <div className="flex justify-end gap-3">
-                  <button
-                    onClick={() => setNodePoolScaleDialog(null)}
-                    className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleNodePoolScale}
-                    disabled={scaleNodePoolMutation.isPending}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                  >
-                    {scaleNodePoolMutation.isPending ? "Scaling..." : "Scale"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Autoscaling Config Dialog */}
-          {autoscaleDialog && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-              <div className="bg-white rounded-lg p-6 w-96">
-                <h3 className="text-lg font-semibold mb-4">Configure Autoscaling</h3>
-                <p className="text-gray-600 mb-4">
-                  Pool: <strong>{autoscaleDialog.pool.name}</strong>
-                </p>
-                <div className="space-y-4">
-                  <div className="flex items-center gap-3">
-                    <label className="text-sm font-medium text-gray-700">Enable Autoscaling</label>
-                    <button
-                      onClick={() => setAutoscaleDialog({ ...autoscaleDialog, enable: !autoscaleDialog.enable })}
-                      className={`relative w-12 h-6 rounded-full transition-colors ${
-                        autoscaleDialog.enable ? "bg-green-500" : "bg-gray-300"
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
-                          autoscaleDialog.enable ? "translate-x-6" : ""
-                        }`}
-                      />
-                    </button>
-                  </div>
-                  {autoscaleDialog.enable && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Min Nodes</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={autoscaleDialog.maxCount}
-                          value={autoscaleDialog.minCount}
-                          onChange={(e) =>
-                            setAutoscaleDialog({ ...autoscaleDialog, minCount: parseInt(e.target.value) || 1 })
-                          }
-                          className="w-full px-3 py-2 border rounded-lg"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Max Nodes</label>
-                        <input
-                          type="number"
-                          min={autoscaleDialog.minCount}
-                          max={1000}
-                          value={autoscaleDialog.maxCount}
-                          onChange={(e) =>
-                            setAutoscaleDialog({ ...autoscaleDialog, maxCount: parseInt(e.target.value) || 1 })
-                          }
-                          className="w-full px-3 py-2 border rounded-lg"
-                        />
-                      </div>
-                    </>
-                  )}
-                </div>
-                <div className="flex justify-end gap-3 mt-6">
-                  <button
-                    onClick={() => setAutoscaleDialog(null)}
-                    className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleAutoscalingUpdate}
-                    disabled={updateAutoscalingMutation.isPending}
-                    className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
-                  >
-                    {updateAutoscalingMutation.isPending ? "Updating..." : "Update"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-    );
-  };
-
   // ── Render Scale History Tab ────────────────────────────────────────
 
   const renderHistoryTab = () => {
@@ -3190,7 +2650,19 @@ const AKSOperationsPage: React.FC = () => {
 
         {/* Tab Content */}
         {activeTab === "clusters" && renderClustersTab()}
-        {activeTab === "nodepools" && renderNodePoolsTab()}
+        {activeTab === "nodepools" && (
+          selectedCluster ? (
+            <NodePoolsTab
+              key={selectedCluster.id}
+              cluster={selectedCluster}
+              showToast={showToast}
+              formatDate={formatDate}
+              canManage={canWrite && hasCapability("AKS_NODEPOOL_MANAGE")}
+            />
+          ) : (
+            <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>
+          )
+        )}
         {activeTab === "deployments" && renderDeploymentsTab()}
         {activeTab === "pods" && renderPodMetricsTab()}
         {activeTab === "cronjobs" && renderCronJobsTab()}

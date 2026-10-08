@@ -10,15 +10,19 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { gridStyles, SortableHeader, type SortState, nextSortState } from "../../components/gridStyles";
-import { StatusBadge } from "./executionStatus";
+import { StatusBadge, apiErrorMessage } from "./executionStatus";
 import { SequenceExecutionPanel } from "./SequenceRunPanels";
-import type {
-  EnvironmentSchedule,
-  EnvironmentSequence,
-  EnvironmentScaleResult,
-  ExecutionHistory,
-  ScheduleCreateRequest,
-  StepDetail,
+import { NotificationFields, invalidEmails } from "./NotificationFields";
+import {
+  fetchSchedulePreview,
+  type EnvironmentSchedule,
+  type EnvironmentSequence,
+  type EnvironmentScaleResult,
+  type ExecutionHistory,
+  type NotifyOn,
+  type SchedulePreview,
+  type ScheduleCreateRequest,
+  type StepDetail,
 } from "../../services/environmentApi";
 
 interface Props {
@@ -142,9 +146,53 @@ const ScheduleManagement: React.FC<Props> = ({
     timezone: "UTC",
     is_enabled: true,
     retry_count: 3,
+    notify_on: "always",
   };
 
   const [form, setForm] = useState<ScheduleCreateRequest>(defaultForm);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState<{ data: SchedulePreview | null; error: string | null; loading: boolean }>({
+    data: null,
+    error: null,
+    loading: false,
+  });
+
+  // The next runs, computed by the server with the same rules the scheduler uses.
+  useEffect(() => {
+    if (!showForm) return;
+    const needsStart = form.schedule_type !== "cron";
+    if ((form.schedule_type === "cron" && !form.cron_expression) || (needsStart && !form.start_date)) {
+      setPreview({ data: null, error: null, loading: false });
+      return;
+    }
+    let cancelled = false;
+    setPreview((p) => ({ ...p, loading: true }));
+    const timer = setTimeout(() => {
+      fetchSchedulePreview({
+        schedule_type: form.schedule_type,
+        cron_expression: form.cron_expression,
+        timezone: form.timezone ?? "UTC",
+        start_date: form.start_date,
+        end_date: form.end_date,
+      })
+        .then((data) => !cancelled && setPreview({ data, error: null, loading: false }))
+        .catch((err) => !cancelled && setPreview({ data: null, error: apiErrorMessage(err, "Could not compute the next runs"), loading: false }));
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [showForm, form.schedule_type, form.cron_expression, form.timezone, form.start_date, form.end_date]);
+
+  const formBlockers: string[] = [];
+  if (!form.job_name.trim()) formBlockers.push("Enter a job name.");
+  if (form.schedule_type === "cron" && !form.cron_expression?.trim()) formBlockers.push("Enter a cron expression.");
+  if (form.schedule_type !== "cron" && !form.start_date) {
+    formBlockers.push(form.schedule_type === "one_time" ? "Choose when it should run." : "Choose the start date and time; it sets the time of day the schedule runs.");
+  }
+  if (invalidEmails(form.failure_notification).length) formBlockers.push(`Fix the notification address: ${invalidEmails(form.failure_notification)[0]}`);
+  if (preview.error) formBlockers.push(preview.error);
 
   const filtered = schedules.filter(
     (s) =>
@@ -167,14 +215,35 @@ const ScheduleManagement: React.FC<Props> = ({
   const paginated = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   const handleSubmit = async () => {
-    if (editingId) {
-      await onUpdate(editingId, { ...form, cluster_id: clusterId });
-    } else {
-      await onCreate({ ...form, cluster_id: clusterId });
+    if (formBlockers.length) {
+      setFormError(formBlockers[0]);
+      return;
     }
-    setShowForm(false);
-    setEditingId(null);
-    setForm(defaultForm);
+    setSaving(true);
+    setFormError(null);
+    try {
+      if (editingId) {
+        // Explicit nulls clear an end date, the extra recipients or the sequence link.
+        await onUpdate(editingId, {
+          ...form,
+          cluster_id: clusterId,
+          cron_expression: form.schedule_type === "cron" ? form.cron_expression : null,
+          start_date: form.start_date || null,
+          end_date: form.end_date || null,
+          failure_notification: form.failure_notification?.trim() || null,
+          sequence_id: form.sequence_id ?? null,
+        } as Partial<ScheduleCreateRequest>);
+      } else {
+        await onCreate({ ...form, cluster_id: clusterId, failure_notification: form.failure_notification?.trim() || undefined });
+      }
+      setShowForm(false);
+      setEditingId(null);
+      setForm(defaultForm);
+    } catch (err) {
+      setFormError(apiErrorMessage(err, "Could not save the schedule"));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleEdit = (s: EnvironmentSchedule) => {
@@ -193,19 +262,26 @@ const ScheduleManagement: React.FC<Props> = ({
       is_enabled: s.is_enabled,
       retry_count: s.retry_count,
       failure_notification: s.failure_notification || undefined,
+      notify_on: s.notify_on ?? "always",
       sequence_id: s.sequence_id || undefined,
     });
+    setFormError(null);
     setShowForm(true);
   };
 
   const handleCancelForm = () => {
+    setFormError(null);
     setShowForm(false);
     setEditingId(null);
     setForm(defaultForm);
   };
 
   const handleToggle = async (s: EnvironmentSchedule) => {
-    await onUpdate(s.id, { is_enabled: !s.is_enabled });
+    try {
+      await onUpdate(s.id, { is_enabled: !s.is_enabled });
+    } catch {
+      /* the page shows the reason, e.g. a one-time schedule whose time has passed */
+    }
   };
 
   return (
@@ -326,11 +402,11 @@ const ScheduleManagement: React.FC<Props> = ({
                 <div>
                   <label className="text-xs font-semibold text-gray-600">Schedule Type</label>
                   <select value={form.schedule_type} onChange={(e) => setForm({ ...form, schedule_type: e.target.value as ScheduleCreateRequest["schedule_type"] })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
-                    <option value="one_time">One Time</option>
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly (every 7 days)</option>
-                    <option value="monthly">Monthly (every 30 days)</option>
-                    <option value="cron">Cron Expression (advanced)</option>
+                    <option value="one_time">One time</option>
+                    <option value="daily">Daily (at the start time)</option>
+                    <option value="weekly">Weekly (on the start date's weekday)</option>
+                    <option value="monthly">Monthly (on the start date's day)</option>
+                    <option value="cron">Cron expression (advanced)</option>
                   </select>
                 </div>
                 <div>
@@ -353,13 +429,40 @@ const ScheduleManagement: React.FC<Props> = ({
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-semibold text-gray-600">Start Date <span className="text-gray-400 font-normal">(optional)</span></label>
-                  <input type="datetime-local" value={form.start_date || ""} onChange={(e) => setForm({ ...form, start_date: e.target.value || undefined })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+                  <label htmlFor="sched-start" className="text-xs font-semibold text-gray-600">
+                    {form.schedule_type === "one_time" ? "Run at" : "Start"}{" "}
+                    <span className="font-normal text-gray-400">
+                      ({form.schedule_type === "cron" ? "optional, " : ""}{form.timezone} time)
+                    </span>
+                  </label>
+                  <input id="sched-start" type="datetime-local" value={form.start_date || ""} onChange={(e) => setForm({ ...form, start_date: e.target.value || undefined })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+                  {["daily", "weekly", "monthly"].includes(form.schedule_type) && (
+                    <p className="mt-1 text-xs text-gray-400">
+                      {form.schedule_type === "daily" ? "Runs every day at this time." : form.schedule_type === "weekly" ? "Runs every week on this weekday at this time." : "Runs every month on this day at this time (the 29th–31st run on the month's last day when it is shorter)."}
+                    </p>
+                  )}
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-gray-600">End Date <span className="text-gray-400 font-normal">(optional)</span></label>
-                  <input type="datetime-local" value={form.end_date || ""} onChange={(e) => setForm({ ...form, end_date: e.target.value || undefined })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+                  <label htmlFor="sched-end" className="text-xs font-semibold text-gray-600">End <span className="text-gray-400 font-normal">(optional, {form.timezone} time)</span></label>
+                  <input id="sched-end" type="datetime-local" value={form.end_date || ""} onChange={(e) => setForm({ ...form, end_date: e.target.value || undefined })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-att-100 bg-att-50/50 px-4 py-3" aria-live="polite">
+                <p className="text-xs font-semibold text-gray-600">Next runs</p>
+                {preview.loading ? (
+                  <p className="mt-1 text-xs text-gray-400">Calculating…</p>
+                ) : preview.error ? (
+                  <p className="mt-1 text-xs text-red-600">{preview.error}</p>
+                ) : preview.data && preview.data.runs.length > 0 ? (
+                  <ul className="mt-1 space-y-0.5 text-xs text-gray-700">
+                    {preview.data.runs.map((r) => <li key={r.utc} className="font-mono">{r.local}</li>)}
+                  </ul>
+                ) : preview.data ? (
+                  <p className="mt-1 text-xs text-amber-700">No upcoming runs (check the start and end dates).</p>
+                ) : (
+                  <p className="mt-1 text-xs text-gray-400">{form.schedule_type === "cron" ? "Enter a cron expression to see when it will run." : "Choose a start date and time to see when it will run."}</p>
+                )}
               </div>
             </div>
 
@@ -369,20 +472,18 @@ const ScheduleManagement: React.FC<Props> = ({
                 <span className="flex h-6 w-6 items-center justify-center rounded-full bg-att-100 text-xs font-bold text-att-700">3</span>
                 <h5 className="text-sm font-semibold text-gray-700">Settings</h5>
               </div>
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-gray-600">Job Name</label>
-                  <input value={form.job_name} onChange={(e) => setForm({ ...form, job_name: e.target.value })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder="e.g. Dev Morning Scale Up" />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-gray-600">Retry on Failure</label>
-                  <input type="number" min={0} max={10} value={form.retry_count ?? 3} onChange={(e) => setForm({ ...form, retry_count: parseInt(e.target.value) || 3 })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-gray-600">Notify on Failure</label>
-                  <input value={form.failure_notification || ""} onChange={(e) => setForm({ ...form, failure_notification: e.target.value || undefined })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder="email@att.com" />
-                </div>
+              <div>
+                <label htmlFor="sched-name" className="text-xs font-semibold text-gray-600">Job Name</label>
+                <input id="sched-name" value={form.job_name} onChange={(e) => setForm({ ...form, job_name: e.target.value })} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm md:w-1/2" placeholder="e.g. Dev Morning Scale Up" />
               </div>
+              <NotificationFields
+                idPrefix="sched"
+                notifyOn={(form.notify_on ?? "always") as NotifyOn}
+                onNotifyOnChange={(v) => setForm({ ...form, notify_on: v })}
+                emails={form.failure_notification ?? ""}
+                onEmailsChange={(v) => setForm({ ...form, failure_notification: v || undefined })}
+                alwaysIncluded="The schedule's owner (and whoever presses Run now)"
+              />
             </div>
 
             {/* Summary preview */}
@@ -397,9 +498,10 @@ const ScheduleManagement: React.FC<Props> = ({
           </div>
 
           {/* Form footer */}
-          <div className="flex justify-end gap-2 border-t border-gray-200 px-6 py-4">
+          <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-4">
+            {formError && <p className="mr-auto text-sm text-red-600" role="alert">{formError}</p>}
             <button onClick={handleCancelForm} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
-            <button onClick={handleSubmit} disabled={!form.job_name || isLoading} className="rounded-lg bg-att-500 px-5 py-2 text-sm font-medium text-white hover:bg-att-600 disabled:opacity-50">{editingId ? "Update Schedule" : "Create Schedule"}</button>
+            <button onClick={handleSubmit} disabled={!form.job_name || isLoading || saving} className="rounded-lg bg-att-500 px-5 py-2 text-sm font-medium text-white hover:bg-att-600 disabled:opacity-50">{saving ? "Saving…" : editingId ? "Update Schedule" : "Create Schedule"}</button>
           </div>
         </div>
       )}
@@ -562,7 +664,14 @@ const ScheduleManagement: React.FC<Props> = ({
                     {s.operation === "scale_up" ? "Scale Up" : "Scale Down"}
                   </span>
                 </td>
-                <td className={gridStyles.cell}>{s.schedule_type.replace(/_/g, " ")}</td>
+                <td className={gridStyles.cell}>
+                  <span className="text-sm">{s.schedule_description ?? s.schedule_type.replace(/_/g, " ")}</span>
+                  {s.notify_on === "never" ? (
+                    <span className="block text-[11px] text-gray-400">No emails</span>
+                  ) : s.notify_on === "failure" ? (
+                    <span className="block text-[11px] text-gray-400">Emails on failure</span>
+                  ) : null}
+                </td>
                 <td className={gridStyles.centerCell}>{s.replica_count}</td>
                 <td className={gridStyles.centerCell}>
                   {canWrite ? (
@@ -586,7 +695,15 @@ const ScheduleManagement: React.FC<Props> = ({
                   )}
                 </td>
                 <td className={gridStyles.cell}>
-                  {s.next_run_at ? <span className="text-xs">{new Date(s.next_run_at).toLocaleString()}</span> : <span className="text-xs text-gray-400">-</span>}
+                  {s.next_run_at && s.is_enabled ? (
+                    <span className="text-xs" title={s.next_run_at_utc ? `${new Date(s.next_run_at_utc).toUTCString()}` : undefined}>
+                      {/* next_run_at is wall-clock time in the schedule's timezone */}
+                      {new Date(s.next_run_at).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      <span className="block text-[11px] text-gray-400">{s.timezone}</span>
+                    </span>
+                  ) : (
+                    <span className="text-xs text-gray-400">-</span>
+                  )}
                 </td>
                 <td className={gridStyles.centerCell}>
                   {!canWrite ? <span className="text-xs text-gray-400">—</span> : (
