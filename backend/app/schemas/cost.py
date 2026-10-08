@@ -222,8 +222,20 @@ class PricingMixItem(BaseModel):
     pct: float
 
 
+# Bump when the leadership payload's KPIs change meaning or shape. Snapshots and
+# cached pages written by an older release carry a lower version (or none) and
+# are rebuilt instead of served — otherwise a deploy keeps showing the old KPIs
+# until the next sync, and machines sharing a Redis cache feed each other.
+LEADERSHIP_SCHEMA_VERSION = 2
+
+
 class LeadershipDashboard(BaseModel):
     """Leadership-ready dashboard response."""
+
+    schema_version: int = Field(
+        default=1,
+        description="Payload version; anything below LEADERSHIP_SCHEMA_VERSION is outdated",
+    )
 
     kpis: list[KPIMetric]
     cost_trend: list[CostDataPoint]

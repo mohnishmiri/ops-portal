@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.db_cache import cache_manager
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.cost import (
+    LEADERSHIP_SCHEMA_VERSION,
     CostByGroup,
     CostDataPoint,
     CostTrendDirection,
@@ -162,6 +163,7 @@ def _demo_leadership_dashboard() -> LeadershipDashboard:
         )
 
     return LeadershipDashboard(
+        schema_version=LEADERSHIP_SCHEMA_VERSION,
         kpis=kpis,
         cost_trend=data_points,
         top_spenders=top_spenders,
@@ -356,6 +358,7 @@ class DashboardService:
 
         logger.info("leadership_live_step", step="returning_live_data")
         return LeadershipDashboard(
+            schema_version=LEADERSHIP_SCHEMA_VERSION,
             kpis=kpis,
             cost_trend=current.data_points,
             top_spenders=breakdown.breakdown[:10],

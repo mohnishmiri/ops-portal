@@ -21,13 +21,16 @@ from app.core.admin_config import get_cache_enabled, get_effective_cache_ttl_sec
 from app.core.db_cache import cache_manager
 from app.core.subscription_resolver import get_monitored_subscription_ids
 from app.models.database import LeadershipDashboardSnapshot, LeadershipSyncStatus
+from app.schemas.cost import LEADERSHIP_SCHEMA_VERSION
 from app.services.dashboard_service import DashboardService
 
 logger = structlog.get_logger(__name__)
 
 STALE_HOURS = 6
 RUNNING_SYNC_TIMEOUT_MINUTES = 90
-LEADERSHIP_DASHBOARD_CACHE_KEY = "pagecache:leadership:dashboard:all"
+# Versioned so a cached payload from an older release is never read back.
+LEADERSHIP_CACHE_PREFIX = f"pagecache:leadership:v{LEADERSHIP_SCHEMA_VERSION}:dashboard"
+LEADERSHIP_DASHBOARD_CACHE_KEY = f"{LEADERSHIP_CACHE_PREFIX}:all"
 SNAPSHOT_RETENTION_DAYS = 90
 
 
@@ -41,7 +44,12 @@ def leadership_dashboard_cache_key(subscription_ids: list[str] | None = None) ->
         return LEADERSHIP_DASHBOARD_CACHE_KEY
     scope = ",".join(sorted(subscription_ids))
     digest = hashlib.md5(scope.encode()).hexdigest()[:12]
-    return f"pagecache:leadership:dashboard:{digest}"
+    return f"{LEADERSHIP_CACHE_PREFIX}:{digest}"
+
+
+def is_current_leadership_payload(payload: dict) -> bool:
+    """False for a payload written by an older release (different KPIs)."""
+    return int(payload.get("schema_version") or 1) >= LEADERSHIP_SCHEMA_VERSION
 
 
 def leadership_snapshot_scope_key(subscription_ids: list[str] | None) -> str:
@@ -86,7 +94,11 @@ class LeadershipSyncService:
         return expired
 
     async def is_data_stale(self) -> bool:
-        """Return True when the DB has no data or hasn't been refreshed recently."""
+        """Return True when the DB has no data, hasn't been refreshed recently,
+        or the latest snapshot was built by an older release."""
+        snapshot = await self.get_dashboard_from_db()
+        if snapshot is not None and not is_current_leadership_payload(snapshot):
+            return True
         result = await self._db.execute(
             select(LeadershipSyncStatus)
             .where(LeadershipSyncStatus.status == "completed")

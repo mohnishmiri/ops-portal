@@ -19,6 +19,7 @@ from app.core.subscription_resolver import get_monitored_subscription_ids
 from app.core.subscription_scope import get_scoped_subscription_ids
 from app.models.auth import UserContext, UserRole
 from app.models.cost import (
+    LEADERSHIP_SCHEMA_VERSION,
     LeadershipAdvisorRequest,
     LeadershipAdvisorResponse,
     LeadershipDashboard,
@@ -30,6 +31,7 @@ from app.services.leadership_advisor_service import LeadershipAdvisorService
 from app.services.leadership_sync_service import (
     LEADERSHIP_DASHBOARD_CACHE_KEY,
     LeadershipSyncService,
+    is_current_leadership_payload,
     leadership_dashboard_cache_key,
 )
 
@@ -113,16 +115,18 @@ async def leadership_dashboard(
         cached_payload = await cache_manager.get_cached(cache_key)
         if cached_payload:
             try:
-                return await _cache_and_return_leadership_dashboard(
-                    dashboard=LeadershipDashboard.model_validate_json(cached_payload),
-                    cache_key=cache_key,
-                    db=None,
-                    cache_enabled=False,
-                    source="cache",
-                    refresh=refresh,
-                    started=started,
-                    scoped_count=len(scoped_ids),
-                )
+                cached_dashboard = LeadershipDashboard.model_validate_json(cached_payload)
+                if cached_dashboard.schema_version >= LEADERSHIP_SCHEMA_VERSION:
+                    return await _cache_and_return_leadership_dashboard(
+                        dashboard=cached_dashboard,
+                        cache_key=cache_key,
+                        db=None,
+                        cache_enabled=False,
+                        source="cache",
+                        refresh=refresh,
+                        started=started,
+                        scoped_count=len(scoped_ids),
+                    )
             except Exception:
                 pass
 
@@ -147,6 +151,11 @@ async def leadership_dashboard(
                 )
 
         cached = await sync_svc.get_dashboard_from_db(subscription_ids=partial_scope_ids)
+        if cached and not is_current_leadership_payload(cached):
+            # Snapshot from an older release (old KPI set). Never show it: build
+            # from the amortized DB now; the stale check below queues a rebuild.
+            logger.info("leadership_snapshot_outdated", schema_version=cached.get("schema_version"))
+            cached = await sync_svc.get_dashboard_from_amortized(list(scoped_ids))
         if cached:
             cached.pop("_source", None)
             cached.pop("_scope", None)

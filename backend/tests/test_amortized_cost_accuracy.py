@@ -24,10 +24,14 @@ from app.models.database import (
     AmortizedCostRecord,
     AmortizedCostSyncStatus,
     AmortizedCostWeeklySummary,
+    LeadershipDashboardSnapshot,
+    LeadershipSyncStatus,
 )
+from app.schemas.cost import LEADERSHIP_SCHEMA_VERSION
 from app.services import amortized_cost_sync_service as module
 from app.services.amortized_cost_sync_service import AmortizedCostSyncService
 from app.services.cost_service import AmortizedCostDetail, CostService, _throttle_wait_seconds
+from app.services.leadership_sync_service import LeadershipSyncService
 
 AS_OF = date(2026, 10, 8)  # "today" in UTC for every test
 PROD, NONPROD = "sub-prod-0000", "sub-nprd-0000"
@@ -40,6 +44,8 @@ _TABLES = (
     AmortizedCostDailySummary,
     AmortizedCostWeeklySummary,
     AmortizedCostMonthlySummary,
+    LeadershipDashboardSnapshot,
+    LeadershipSyncStatus,
 )
 
 
@@ -492,6 +498,7 @@ async def test_leadership_compares_like_for_like_days(db):
     assert kpis["Last Month Spend"].change_pct == 7.5  # vs August's $2,790
     assert dashboard.data_through == date(2026, 10, 7)
     assert dashboard.preliminary_from == date(2026, 10, 5)
+    assert dashboard.schema_version == LEADERSHIP_SCHEMA_VERSION
     assert max(p.date for p in dashboard.cost_trend) == date(2026, 10, 7)
     assert dashboard.top_spenders[0].percentage_of_total == 100.0
 
@@ -561,6 +568,30 @@ async def test_leadership_merges_stale_guid_names_into_one_series(db):
     await db.commit()
     dashboard = await AmortizedCostSyncService(db).build_leadership_dashboard(subscription_ids=[NONPROD])
     assert {p.group_value for p in dashboard.cost_trend} == {"ACC-NPRD-1"}
+
+
+@pytest.mark.anyio
+async def test_snapshot_from_an_older_release_counts_as_stale(db):
+    from datetime import datetime
+
+    now = datetime.utcnow()
+    db.add(LeadershipSyncStatus(status="completed", started_at=now, completed_at=now, triggered_by="scheduler"))
+    old_payload = '{"kpis": [{"name": "Current Month So Far"}], "report_date": "2026-10-08T05:26:00"}'
+    db.add(LeadershipDashboardSnapshot(snapshot_date=now, payload=old_payload, environment="ALL", synced_at=now))
+    await db.commit()
+    service = LeadershipSyncService(db)
+
+    # Synced minutes ago, but built by the old code: must be rebuilt, not served.
+    assert await service.is_data_stale() is True
+
+    fresh = f'{{"schema_version": {LEADERSHIP_SCHEMA_VERSION}, "kpis": []}}'
+    db.add(
+        LeadershipDashboardSnapshot(
+            snapshot_date=now + timedelta(seconds=1), payload=fresh, environment="ALL", synced_at=now
+        )
+    )
+    await db.commit()
+    assert await service.is_data_stale() is False
 
 
 # ── Azure fetch layer ─────────────────────────────────────────────────

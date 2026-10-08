@@ -1241,6 +1241,12 @@ interface InsightMetricsProps {
   trendData: NonProdVsProdTrend | undefined;
 }
 
+// Tile rows fill the width whatever the count: the insight row has 3 tiles until
+// pricing data has synced, and a snapshot from an older release carries 2 KPIs.
+// (Literal class names so Tailwind keeps them.)
+const LG_COLS = ["lg:grid-cols-1", "lg:grid-cols-1", "lg:grid-cols-2", "lg:grid-cols-3", "lg:grid-cols-4"];
+const lgCols = (count: number) => LG_COLS[Math.min(Math.max(count, 1), 4)];
+
 const COMMITMENT_MODELS = new Set(["Reservation", "SavingsPlan"]);
 const PRICING_LABELS: Record<string, string> = { SavingsPlan: "Savings Plan", OnDemand: "On-demand" };
 
@@ -1335,9 +1341,10 @@ const InsightMetrics: React.FC<InsightMetricsProps> = ({ dashboard, optimization
   }, [dashboard, optimization, trendData]);
 
   if (!cards.length && !optimizationLoading) return null;
+  const tileCount = cards.length + (optimizationLoading && !optimization ? 1 : 0);
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div data-testid="insight-tiles" className={`grid grid-cols-1 sm:grid-cols-2 ${lgCols(tileCount)} gap-4`}>
       {cards.map((card) => (
         <MetricCard
           key={card.title}
@@ -1570,7 +1577,7 @@ const LeadershipDashboard: React.FC = () => {
       />
 
       {/* KPI Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div data-testid="kpi-tiles" className={`grid grid-cols-1 sm:grid-cols-2 ${lgCols(dashboard.kpis.length)} gap-4`}>
         {dashboard.kpis.map((kpi) => (
           <KPICard key={kpi.name} metric={kpi} />
         ))}

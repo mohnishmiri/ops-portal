@@ -35,10 +35,22 @@ usage() {
   exit 1
 }
 
-# Read the current version from pyproject.toml as the canonical source
+# Read the current version from pyproject.toml as the canonical source.
+# POSIX [[:space:]] instead of \s — BSD sed (macOS) doesn't support \s.
 current_version() {
-  grep -E '^version\s*=' "$PYPROJECT" | head -1 | sed 's/version\s*=\s*"\(.*\)"/\1/'
+  grep -E '^version[[:space:]]*=' "$PYPROJECT" | head -1 | sed 's/version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/'
 }
+
+# In-place sed that works with both GNU sed (Linux/Git Bash) and BSD sed
+# (macOS), which requires a backup-suffix argument after -i.
+sed_inplace() {
+  sed -i.bak "$1" "$2"
+  rm -f "$2.bak"
+}
+
+# Matches any X.Y.Z so files that have drifted from pyproject.toml are
+# brought back in sync rather than silently skipped.
+SEMVER_RE='[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*'
 
 bump_semver() {
   local version="$1"
@@ -105,21 +117,20 @@ echo ""
 # ---------------------------------------------------------------------------
 
 # backend/pyproject.toml
-sed -i "s/^version = \"${CURRENT}\"/version = \"${NEW_VERSION}\"/" "$PYPROJECT"
+sed_inplace "s/^version = \"${SEMVER_RE}\"/version = \"${NEW_VERSION}\"/" "$PYPROJECT"
 echo "  [updated] backend/pyproject.toml"
 
 # frontend/package.json  (only the top-level "version" field)
-# Use a targeted replacement: match the exact value on the version line.
-sed -i "s/\"version\": \"${CURRENT}\"/\"version\": \"${NEW_VERSION}\"/" "$PACKAGE_JSON"
+sed_inplace "s/^  \"version\": \"${SEMVER_RE}\"/  \"version\": \"${NEW_VERSION}\"/" "$PACKAGE_JSON"
 echo "  [updated] frontend/package.json"
 
 # frontend/src/App.tsx  (APP_VERSION constant rendered in the UI footer)
-sed -i "s/const APP_VERSION = \"${CURRENT}\"/const APP_VERSION = \"${NEW_VERSION}\"/" "$APP_TSX"
+sed_inplace "s/const APP_VERSION = \"${SEMVER_RE}\"/const APP_VERSION = \"${NEW_VERSION}\"/" "$APP_TSX"
 echo "  [updated] frontend/src/App.tsx"
 
 # helm/ops-portal/Chart.yaml  (version + appVersion)
-sed -i "s/^version: ${CURRENT}$/version: ${NEW_VERSION}/" "$CHART_YAML"
-sed -i "s/^appVersion: \"${CURRENT}\"$/appVersion: \"${NEW_VERSION}\"/" "$CHART_YAML"
+sed_inplace "s/^version: ${SEMVER_RE}$/version: ${NEW_VERSION}/" "$CHART_YAML"
+sed_inplace "s/^appVersion: \"${SEMVER_RE}\"$/appVersion: \"${NEW_VERSION}\"/" "$CHART_YAML"
 echo "  [updated] helm/ops-portal/Chart.yaml"
 
 # ---------------------------------------------------------------------------
@@ -128,7 +139,7 @@ echo "  [updated] helm/ops-portal/Chart.yaml"
 
 echo ""
 echo "Verification:"
-grep -E '^version\s*=' "$PYPROJECT"  | head -1 | sed 's/^/  pyproject.toml  : /'
+grep -E '^version[[:space:]]*=' "$PYPROJECT"  | head -1 | sed 's/^/  pyproject.toml  : /'
 grep '"version"' "$PACKAGE_JSON"     | head -1 | sed 's/^/  package.json    : /'
 grep 'APP_VERSION' "$APP_TSX"        | head -1 | sed 's/^/  App.tsx         : /'
 grep -E '^version:|^appVersion:' "$CHART_YAML" | sed 's/^/  Chart.yaml      : /'

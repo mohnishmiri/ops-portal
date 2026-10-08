@@ -63,7 +63,7 @@ const queryClient = new QueryClient({
 
 // ── Brand ──────────────────────────────────────────────────────────────────────
 
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.3.11";
 const BRAND_LOGO_PATH = "/att-globe.svg?v=20260413c";
 
 const BrandMark: React.FC<{ sizeClassName?: string; imageClassName?: string }> = ({

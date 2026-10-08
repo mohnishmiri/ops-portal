@@ -1922,6 +1922,7 @@ class AmortizedCostSyncService:
         partial month to a full one reported a fake ~-78% drop a week in.
         """
         from app.schemas.cost import (
+            LEADERSHIP_SCHEMA_VERSION,
             CostByGroup,
             CostDataPoint,
             CostTrendDirection,
@@ -2182,6 +2183,7 @@ class AmortizedCostSyncService:
         ]
 
         return LeadershipDashboard(
+            schema_version=LEADERSHIP_SCHEMA_VERSION,
             kpis=kpis,
             cost_trend=cost_trend,
             top_spenders=top_spenders,

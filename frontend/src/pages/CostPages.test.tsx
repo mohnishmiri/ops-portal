@@ -283,6 +283,28 @@ describe("LeadershipDashboard (Cost Forecast)", () => {
     expect(screen.getByText("Data through Oct 7, 2026 (UTC)")).toBeInTheDocument();
   });
 
+  it("fills each tile row even when a payload carries fewer tiles", async () => {
+    // A snapshot from an older release: two KPIs, no pricing mix.
+    const legacy = {
+      ...structuredClone(LEADERSHIP),
+      kpis: [
+        { name: "Current Month So Far", value: "44485", unit: "USD", trend: "down", change_pct: -77.3, description: "Month-to-date" },
+        { name: "Month-over-Month Change", value: -77.3, unit: "%", trend: "down", change_pct: -77.3, description: "vs previous month" },
+      ],
+      pricing_mix: [],
+      data_quality: [],
+    };
+    vi.mocked(apiClient.get).mockImplementation(async (url: string) =>
+      (url === "/dashboards/leadership" ? { data: legacy } : routeGet(url)) as never,
+    );
+    renderPage(<LeadershipDashboard />);
+
+    expect(await screen.findByText("Current Month So Far")).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-tiles").className).toContain("lg:grid-cols-2");
+    await screen.findByText("$2,062/yr");
+    expect(screen.getByTestId("insight-tiles").className).toContain("lg:grid-cols-3");
+  });
+
   it("surfaces missing data and shows commitment coverage and savings without fake deltas", async () => {
     renderPage(<LeadershipDashboard />);
 
