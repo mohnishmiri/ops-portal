@@ -12,31 +12,26 @@ import { DetailGrid, GridFilterSelect, type GridColumn } from "./DetailGrid";
 import {
   apiErrorDetail,
   ConditionsGrid,
+  formatBytes,
+  formatCores,
   type EventFilter,
   EventsGrid,
   formatAge,
   KeyValueGrid,
   PodStatusBadge,
   ReadyBadge,
+  ResourceUsage,
   Truncate,
 } from "./detailShared";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type Section = "overview" | "pods" | "events" | "labels";
-// For these node conditions "False" means healthy.
-const NODE_PRESSURE_CONDITIONS = ["MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable"] as const;
+// Ready is a node's only "good when True" condition; the rest (pressure, and
+// node-problem-detector's KubeletProblem, FrequentContainerdRestart, ...) report problems.
+const nodeConditionHealthy = (c: { type: string; status: string }) => (c.type === "Ready" ? c.status === "True" : c.status === "False");
 type PodFilter = "active" | "all" | "not-ready" | "finished";
 
-export function formatCores(millicores: number): string {
-  if (!millicores) return "0";
-  return millicores < 1000 ? `${millicores}m` : `${(millicores / 1000).toFixed(millicores % 1000 ? 2 : 0)} cores`;
-}
-
-export function formatBytes(bytes: number): string {
-  if (!bytes) return "0";
-  const gib = bytes / 2 ** 30;
-  return gib >= 1 ? `${gib.toFixed(1)} GiB` : `${Math.round(bytes / 2 ** 20)} MiB`;
-}
+export { formatBytes, formatCores } from "./detailShared";
 
 const pct = (value: number | null | undefined) => (value == null ? "—" : `${value}%`);
 const tone = (value: number | null | undefined) => (value == null ? "slate" : value >= 90 ? "red" : value >= 75 ? "amber" : "green");
@@ -78,8 +73,18 @@ function PodsGrid({
       render: (p) => <span className={`font-mono text-xs ${!p.terminated && p.ready_containers < p.total_containers ? "font-semibold text-amber-700" : "text-slate-700"}`}>{p.ready_containers}/{p.total_containers}</span>,
     },
     { key: "restarts", header: "Restarts", align: "center", sortValue: (p) => p.restarts, render: (p) => <span className={p.restarts ? "font-semibold text-red-600" : "text-slate-600"}>{p.restarts}</span> },
-    { key: "cpu", header: "CPU Request", sortValue: (p) => p.cpu_request_m, render: (p) => <span className="whitespace-nowrap text-xs text-slate-700">{formatCores(p.cpu_request_m)}</span> },
-    { key: "memory", header: "Memory Request", sortValue: (p) => p.memory_request_bytes, render: (p) => <span className="whitespace-nowrap text-xs text-slate-700">{formatBytes(p.memory_request_bytes)}</span> },
+    {
+      key: "cpu",
+      header: "CPU",
+      sortValue: (p) => p.cpu_usage_m ?? p.cpu_request_m / 1e6,
+      render: (p) => <ResourceUsage kind="cpu" used={p.cpu_usage_m} request={p.cpu_request_m} limit={p.cpu_limit_m} />,
+    },
+    {
+      key: "memory",
+      header: "Memory",
+      sortValue: (p) => p.memory_usage_bytes ?? p.memory_request_bytes / 1e6,
+      render: (p) => <ResourceUsage kind="memory" used={p.memory_usage_bytes} request={p.memory_request_bytes} limit={p.memory_limit_bytes} />,
+    },
     {
       key: "owner",
       header: "Owner",
@@ -114,6 +119,46 @@ function PodsGrid({
       initialSort={{ key: sortKey, direction: sortKey === "name" ? "asc" : "desc" }}
       defaultPageSize={25}
     />
+  );
+}
+
+/** Used, requested, and limit shares of allocatable CPU and memory, side by side. */
+function AllocationCard({ detail }: { detail: KubernetesNodeDetail }) {
+  const rows = (kind: "cpu" | "memory") => {
+    const cpu = kind === "cpu";
+    return [
+      { label: "In use", pct: cpu ? detail.usage?.cpu_pct : detail.usage?.memory_pct, value: detail.usage ? (cpu ? formatCores(detail.usage.cpu_m) : formatBytes(detail.usage.memory_bytes)) : null, color: "bg-att-600" },
+      { label: "Requested", pct: cpu ? detail.allocated.cpu_request_pct : detail.allocated.memory_request_pct, value: cpu ? formatCores(detail.allocated.cpu_request_m) : formatBytes(detail.allocated.memory_request_bytes), color: "bg-att-300" },
+      { label: "Limits", pct: cpu ? detail.allocated.cpu_limit_pct : detail.allocated.memory_limit_pct, value: cpu ? formatCores(detail.allocated.cpu_limit_m) : formatBytes(detail.allocated.memory_limit_bytes), color: "bg-slate-300" },
+    ];
+  };
+  return (
+    <DetailCard title="Usage vs Requests" subtitle="Share of the node's allocatable resources. Requests are what the scheduler reserves; usage is what pods actually consume.">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        {(["cpu", "memory"] as const).map((kind) => (
+          <div key={kind}>
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              {kind === "cpu" ? `CPU · ${formatCores(detail.allocatable.cpu_m)} allocatable` : `Memory · ${formatBytes(detail.allocatable.memory_bytes)} allocatable`}
+            </h4>
+            <div className="space-y-2">
+              {rows(kind).map((r) => (
+                <div key={r.label} className="grid grid-cols-[5.5rem_1fr_7.5rem] items-center gap-3 text-xs">
+                  <span className="text-slate-600">{r.label}</span>
+                  <div className="h-2.5 rounded-full bg-slate-100" aria-hidden>
+                    {r.pct != null && <div className={`h-2.5 rounded-full ${r.color}`} style={{ width: `${Math.min(100, r.pct)}%` }} />}
+                  </div>
+                  <span className="text-right tabular-nums text-slate-700">
+                    {r.pct != null ? <span className="font-semibold">{r.pct}%</span> : "—"}
+                    {r.value ? <span className="text-slate-500"> · {r.value}</span> : null}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      {!detail.usage && <p className="mt-3 text-xs text-slate-500">Live usage is unavailable: metrics-server isn't reporting for this cluster.</p>}
+    </DetailCard>
   );
 }
 
@@ -209,24 +254,34 @@ export function NodeDetailModal({
               actionLabel="Show the pods on this node"
             />
             <MetricCard
-              title="CPU Requested"
-              value={pct(detail.allocated.cpu_request_pct)}
-              subtitle={`${formatCores(detail.allocated.cpu_request_m)} of ${formatCores(detail.allocatable.cpu_m)}${detail.usage?.cpu_pct != null ? ` · ${detail.usage.cpu_pct}% in use` : ""}`}
+              title={detail.usage ? "CPU" : "CPU Requested"}
+              value={pct(detail.usage ? detail.usage.cpu_pct : detail.allocated.cpu_request_pct)}
+              subtitle={
+                detail.usage
+                  ? `${formatCores(detail.usage.cpu_m)} of ${formatCores(detail.allocatable.cpu_m)} in use · ${pct(detail.allocated.cpu_request_pct)} requested`
+                  : `${formatCores(detail.allocated.cpu_request_m)} of ${formatCores(detail.allocatable.cpu_m)} · live usage unavailable`
+              }
               icon={MetricCardIcons.activity()}
-              tone={tone(detail.allocated.cpu_request_pct)}
+              tone={tone(detail.usage ? detail.usage.cpu_pct : detail.allocated.cpu_request_pct)}
               onClick={() => showPods("active", "cpu")}
-              actionLabel="Show pods by CPU request"
+              actionLabel="Show pods by CPU use"
             />
             <MetricCard
-              title="Memory Requested"
-              value={pct(detail.allocated.memory_request_pct)}
-              subtitle={`${formatBytes(detail.allocated.memory_request_bytes)} of ${formatBytes(detail.allocatable.memory_bytes)}${detail.usage?.memory_pct != null ? ` · ${detail.usage.memory_pct}% in use` : ""}`}
+              title={detail.usage ? "Memory" : "Memory Requested"}
+              value={pct(detail.usage ? detail.usage.memory_pct : detail.allocated.memory_request_pct)}
+              subtitle={
+                detail.usage
+                  ? `${formatBytes(detail.usage.memory_bytes)} of ${formatBytes(detail.allocatable.memory_bytes)} in use · ${pct(detail.allocated.memory_request_pct)} requested`
+                  : `${formatBytes(detail.allocated.memory_request_bytes)} of ${formatBytes(detail.allocatable.memory_bytes)} · live usage unavailable`
+              }
               icon={MetricCardIcons.server()}
-              tone={tone(detail.allocated.memory_request_pct)}
+              tone={tone(detail.usage ? detail.usage.memory_pct : detail.allocated.memory_request_pct)}
               onClick={() => showPods("active", "memory")}
-              actionLabel="Show pods by memory request"
+              actionLabel="Show pods by memory use"
             />
           </KpiRow>
+
+          <AllocationCard detail={detail} />
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <DetailCard title="System">
@@ -257,7 +312,7 @@ export function NodeDetailModal({
               />
             </DetailCard>
           </div>
-          <ConditionsGrid conditions={detail.conditions} formatDate={formatDate} healthyWhenFalse={NODE_PRESSURE_CONDITIONS} />
+          <ConditionsGrid conditions={detail.conditions} formatDate={formatDate} isHealthy={nodeConditionHealthy} />
         </>
       )}
 

@@ -17,9 +17,12 @@ import {
   type EventFilter,
   EventsGrid,
   formatAge,
+  formatBytes,
+  formatCores,
   KeyValueGrid,
   PodStatusBadge,
   ReadyBadge,
+  ResourceUsage,
   splitImage,
   Truncate,
   YamlViewer,
@@ -180,6 +183,18 @@ function ContainersGrid({
       render: (c) => <span className={c.restart_count > 0 ? "font-semibold text-red-600" : "text-slate-600"}>{c.restart_count}</span>,
     },
     {
+      key: "cpu",
+      header: "CPU",
+      sortValue: (c) => c.cpu_usage_m ?? -1,
+      render: (c) => <ResourceUsage kind="cpu" used={c.cpu_usage_m} request={c.cpu_request_m} limit={c.cpu_limit_m} />,
+    },
+    {
+      key: "memory",
+      header: "Memory",
+      sortValue: (c) => c.memory_usage_bytes ?? -1,
+      render: (c) => <ResourceUsage kind="memory" used={c.memory_usage_bytes} request={c.memory_request_bytes} limit={c.memory_limit_bytes} />,
+    },
+    {
       key: "last",
       header: "Last Termination",
       render: (c) => {
@@ -275,6 +290,18 @@ function Overview({
   const fmt = (v: string | null | undefined) => (v ? formatDate(v) : null);
   const failing = POD_FAILURE.test(pod.status);
   const allReady = pod.total_containers > 0 && pod.ready_containers === pod.total_containers;
+  const sum = (key: "cpu_request_m" | "cpu_limit_m" | "memory_request_bytes" | "memory_limit_bytes") =>
+    pod.containers.reduce((n, c) => n + (c[key] ?? 0), 0);
+  const usage = (used: number | null | undefined, request: number, limit: number, fmtValue: (v: number) => string) => ({
+    value: used != null ? fmtValue(used) : "—",
+    subtitle:
+      used == null
+        ? pod.usage_available === false ? "metrics-server isn't reporting" : "No live sample yet"
+        : [request ? `${Math.round((used / request) * 100)}% of ${fmtValue(request)} requested` : "No request", limit ? `limit ${fmtValue(limit)}` : "no limit"].join(" · "),
+    tone: (used == null ? "slate" : limit && used / limit >= 0.9 ? "red" : request && used > request ? "amber" : "green") as "slate" | "red" | "amber" | "green",
+  });
+  const cpu = usage(pod.cpu_usage_m, sum("cpu_request_m"), sum("cpu_limit_m"), formatCores);
+  const memory = usage(pod.memory_usage_bytes, sum("memory_request_bytes"), sum("memory_limit_bytes"), formatBytes);
   return (
     <>
       {pod.status_message && (
@@ -284,21 +311,12 @@ function Overview({
         <MetricCard
           title="Status"
           value={pod.status}
-          subtitle={`Phase ${pod.phase ?? "unknown"}`}
+          subtitle={`${pod.ready_containers}/${pod.total_containers} containers ready · Phase ${pod.phase ?? "unknown"}`}
           icon={MetricCardIcons.activity()}
-          tone={pod.status === "Running" ? "green" : failing ? "red" : "amber"}
+          tone={pod.status === "Running" && allReady ? "green" : failing ? "red" : "amber"}
           valueClassName="text-xl"
           onClick={() => onShow("events", hasWarnings ? "Warning" : "all")}
           actionLabel="Show the events behind this status"
-        />
-        <MetricCard
-          title="Containers Ready"
-          value={`${pod.ready_containers}/${pod.total_containers}`}
-          subtitle={pod.init_containers.length ? `${pod.init_containers.length} init container${pod.init_containers.length === 1 ? "" : "s"}` : "No init containers"}
-          icon={MetricCardIcons.checkCircle()}
-          tone={allReady ? "green" : "amber"}
-          onClick={() => onShow("containers")}
-          actionLabel="Show containers"
         />
         <MetricCard
           title="Restarts"
@@ -310,13 +328,22 @@ function Overview({
           actionLabel="Show containers and their last termination"
         />
         <MetricCard
-          title="Age"
-          value={formatAge(pod.started_at ?? pod.created_at)}
-          subtitle={pod.started_at ? `Started ${formatDate(pod.started_at)}` : "Not started"}
-          icon={MetricCardIcons.calendar()}
-          tone="att"
-          onClick={() => onShow("events", "all")}
-          actionLabel="Show what has happened to this pod"
+          title="CPU"
+          value={cpu.value}
+          subtitle={cpu.subtitle}
+          icon={MetricCardIcons.chart()}
+          tone={cpu.tone}
+          onClick={() => onShow("containers")}
+          actionLabel="Show CPU use per container"
+        />
+        <MetricCard
+          title="Memory"
+          value={memory.value}
+          subtitle={memory.subtitle}
+          icon={MetricCardIcons.server()}
+          tone={memory.tone}
+          onClick={() => onShow("containers")}
+          actionLabel="Show memory use per container"
         />
       </KpiRow>
 
@@ -330,6 +357,7 @@ function Overview({
               { label: "Pod IP", value: pod.pod_ips.length > 1 ? pod.pod_ips.join(", ") : pod.pod_ip, mono: true },
               { label: "Host IP", value: pod.host_ip, mono: true },
               { label: "Created", value: fmt(pod.created_at) },
+              { label: "Started", value: pod.started_at ? `${formatDate(pod.started_at)} (${formatAge(pod.started_at)})` : "Not started" },
               pod.deletion_timestamp && { label: "Deletion Requested", value: fmt(pod.deletion_timestamp) },
             ]}
           />

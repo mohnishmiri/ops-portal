@@ -312,3 +312,17 @@ export function TileFilterNotice({ label, onClear }: { label: string | null; onC
     </div>
   );
 }
+
+/** A labelled percentage bar: amber from 75%, red from 90%. */
+export function PercentMeter({ label, pct, title }: { label: string; pct: number | null | undefined; title?: string }) {
+  const color = pct == null ? "" : pct >= 90 ? "bg-red-500" : pct >= 75 ? "bg-amber-500" : "bg-att-500";
+  return (
+    <div title={title} className="grid grid-cols-[3.25rem_1fr_2.5rem] items-center gap-2 text-[11px]">
+      <span className="text-slate-500">{label}</span>
+      <div className="h-1.5 rounded-full bg-slate-100" aria-hidden>
+        {pct != null && <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />}
+      </div>
+      <span className="text-right font-semibold tabular-nums text-slate-700">{pct != null ? `${Math.round(pct)}%` : "—"}</span>
+    </div>
+  );
+}

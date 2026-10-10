@@ -3,7 +3,7 @@
  * "Download all logs" action.
  */
 
-import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -276,6 +276,28 @@ describe("PodDetailModal", () => {
     );
     return { onViewLogs };
   }
+
+  it("shows the pod's live CPU and memory against its requests", () => {
+    const withUsage = {
+      ...podDetail,
+      usage_available: true,
+      cpu_usage_m: 150,
+      memory_usage_bytes: 200 * 2 ** 20,
+      containers: [{ ...podDetail.containers[0], cpu_usage_m: 150, memory_usage_bytes: 200 * 2 ** 20, cpu_request_m: 100, cpu_limit_m: 500, memory_request_bytes: 128 * 2 ** 20, memory_limit_bytes: 256 * 2 ** 20 }],
+    };
+    setup();
+    (aksApi.usePodDetail as any).mockReturnValue({ data: withUsage, isLoading: false, isError: false });
+    cleanup();
+    render(<PodDetailModal clusterId={CLUSTER_ID} namespace="apps" name="web-7b9c-a" formatDate={(v) => v} logDownload={useDownload().current} onViewLogs={vi.fn()} onClose={vi.fn()} />);
+
+    const cpu = screen.getByRole("button", { name: "Show CPU use per container" });
+    expect(within(cpu).getByText("150m")).toBeTruthy();
+    expect(within(cpu).getByText("150% of 100m requested · limit 500m")).toBeTruthy();
+    const memory = screen.getByRole("button", { name: "Show memory use per container" });
+    expect(within(memory).getByText("200 MiB")).toBeTruthy();
+    fireEvent.click(cpu);
+    expect(screen.getByTitle("Using 150m · request 100m · limit 500m")).toBeTruthy();
+  });
 
   it("shows the controlling Deployment and each container's last termination", () => {
     setup();

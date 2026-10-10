@@ -9,7 +9,7 @@ import React, { useState } from "react";
 import { MetricCard, MetricCardIcons } from "../../components/MetricCard";
 import { JobDetail, JobPod } from "../../services/aksApi";
 import { DetailGrid, GridFilterSelect, type GridColumn } from "./DetailGrid";
-import { ageMs, ConditionsGrid, DetailIcons, KeyValueGrid, Truncate } from "./detailShared";
+import { ageMs, ConditionsGrid, DetailIcons, KeyValueGrid, ResourceUsage, Truncate } from "./detailShared";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type Section = "overview" | "pods" | "metadata";
@@ -78,6 +78,18 @@ function JobPodsGrid({
       align: "center",
       sortValue: (p) => p.restarts,
       render: (p) => <span className={p.restarts > 0 ? "font-semibold text-red-600" : "text-slate-600"}>{p.restarts}</span>,
+    },
+    {
+      key: "cpu",
+      header: "CPU",
+      sortValue: (p) => p.cpu_usage_m ?? -1,
+      render: (p) => <ResourceUsage kind="cpu" used={p.cpu_usage_m} request={p.cpu_request_m} limit={p.cpu_limit_m} />,
+    },
+    {
+      key: "memory",
+      header: "Memory",
+      sortValue: (p) => p.memory_usage_bytes ?? -1,
+      render: (p) => <ResourceUsage kind="memory" used={p.memory_usage_bytes} request={p.memory_request_bytes} limit={p.memory_limit_bytes} />,
     },
     { key: "started", header: "Started", sortValue: (p) => ageMs(p.started_at), render: (p) => <span className="whitespace-nowrap text-xs text-slate-600">{p.started_at ? formatDate(p.started_at) : "—"}</span> },
     {

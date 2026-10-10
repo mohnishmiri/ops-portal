@@ -85,6 +85,58 @@ export function ageMs(iso: string | null | undefined): number {
   return Number.isNaN(t) ? Number.MAX_SAFE_INTEGER : Date.now() - t;
 }
 
+export function formatCores(millicores: number): string {
+  if (!millicores) return "0";
+  if (millicores < 1000) return `${millicores}m`;
+  return millicores === 1000 ? "1 core" : `${(millicores / 1000).toFixed(millicores % 1000 ? 2 : 0)} cores`;
+}
+
+export function formatBytes(bytes: number): string {
+  if (!bytes) return "0";
+  const gib = bytes / 2 ** 30;
+  return gib >= 1 ? `${gib.toFixed(1)} GiB` : `${Math.round(bytes / 2 ** 20)} MiB`;
+}
+
+/**
+ * Live usage of one resource against what the pod asked for: "12m / 250m req"
+ * with a bar of usage as a share of the request (or the limit when there's no
+ * request). Amber past the request, red near the limit.
+ */
+export function ResourceUsage({
+  kind,
+  used,
+  request,
+  limit,
+}: {
+  kind: "cpu" | "memory";
+  used: number | null | undefined;
+  request?: number | null;
+  limit?: number | null;
+}) {
+  const fmt = kind === "cpu" ? formatCores : formatBytes;
+  const base = request || limit || 0;
+  const pct = used != null && base ? (used / base) * 100 : null;
+  const nearLimit = used != null && !!limit && used / limit >= 0.9;
+  const color = nearLimit ? "bg-red-500" : request && pct != null && pct > 100 ? "bg-amber-500" : "bg-att-500";
+  const title =
+    used == null
+      ? "No live usage: metrics-server has no sample for this pod."
+      : [`Using ${fmt(used)}`, request ? `request ${fmt(request)}` : "no request", limit ? `limit ${fmt(limit)}` : "no limit"].join(" · ");
+  return (
+    <div className="min-w-[6.5rem]" title={title}>
+      <div className="whitespace-nowrap text-xs">
+        <span className="font-semibold text-slate-800">{used != null ? fmt(used) : "—"}</span>
+        {base > 0 && <span className="text-slate-500"> / {fmt(base)} {request ? "req" : "lim"}</span>}
+      </div>
+      {pct != null && (
+        <div className="mt-1 h-1.5 w-full rounded-full bg-slate-100" aria-hidden>
+          <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${Math.min(100, pct)}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function apiErrorDetail(e: unknown, fallback: string): string {
   const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   return typeof detail === "string" ? detail : fallback;
@@ -199,6 +251,18 @@ export function WorkloadPodsGrid({
       align: "center",
       sortValue: (p) => p.restarts,
       render: (p) => <span className={p.restarts > 0 ? "font-semibold text-red-600" : "text-slate-600"}>{p.restarts}</span>,
+    },
+    {
+      key: "cpu",
+      header: "CPU",
+      sortValue: (p) => p.cpu_usage_m ?? -1,
+      render: (p) => <ResourceUsage kind="cpu" used={p.cpu_usage_m} request={p.cpu_request_m} limit={p.cpu_limit_m} />,
+    },
+    {
+      key: "memory",
+      header: "Memory",
+      sortValue: (p) => p.memory_usage_bytes ?? -1,
+      render: (p) => <ResourceUsage kind="memory" used={p.memory_usage_bytes} request={p.memory_request_bytes} limit={p.memory_limit_bytes} />,
     },
     { key: "node", header: "Node", sortValue: (p) => p.node ?? "", render: (p) => <Truncate value={p.node} className="text-xs" maxWidth="max-w-[16rem]" /> },
     { key: "ip", header: "Pod IP", sortValue: (p) => p.pod_ip ?? "", render: (p) => <span className="whitespace-nowrap font-mono text-xs">{p.pod_ip ?? "—"}</span> },
@@ -327,14 +391,14 @@ export function EventsGrid({
 export function ConditionsGrid({
   conditions,
   formatDate,
-  healthyWhenFalse = [],
+  isHealthy = (c) => c.status === "True",
 }: {
   conditions: WorkloadCondition[];
   formatDate: (v: string) => string;
-  /** Condition types where "False" is the healthy state, e.g. a node's MemoryPressure. */
-  healthyWhenFalse?: readonly string[];
+  /** Whether a condition is in its good state; a node's problem conditions are healthy when "False". */
+  isHealthy?: (condition: WorkloadCondition) => boolean;
 }) {
-  const healthy = (c: WorkloadCondition) => (healthyWhenFalse.includes(c.type) ? c.status === "False" : c.status === "True");
+  const healthy = isHealthy;
   const columns: GridColumn<WorkloadCondition>[] = [
     { key: "type", header: "Condition", sortValue: (c) => c.type, render: (c) => <span className="whitespace-nowrap font-medium text-slate-800">{c.type}</span> },
     {

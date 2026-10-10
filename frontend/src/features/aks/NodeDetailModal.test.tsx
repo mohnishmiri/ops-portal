@@ -2,7 +2,7 @@
  * Node detail: what the scheduler has committed on the node, and the pods on it.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -65,7 +65,7 @@ const DETAIL: aksApi.KubernetesNodeDetail = {
   taints: ["CriticalAddonsOnly=true:NoSchedule"],
   labels: { "kubernetes.azure.com/agentpool": "np" },
   annotations: {},
-  pods: [pod("web-1"), pod("api-1", { ready: false, ready_containers: 0, status: "CrashLoopBackOff", restarts: 7 }), pod("job-1", { terminated: true, status: "Completed", phase: "Succeeded" })],
+  pods: [pod("web-1", { cpu_usage_m: 12, memory_usage_bytes: 100 * 2 ** 20 }), pod("api-1", { ready: false, ready_containers: 0, status: "CrashLoopBackOff", restarts: 7 }), pod("job-1", { terminated: true, status: "Completed", phase: "Succeeded" })],
   events: [],
 };
 
@@ -76,13 +76,45 @@ function renderModal(onOpenPod = vi.fn()) {
 }
 
 describe("NodeDetailModal", () => {
-  it("shows what the node has committed against what it can allocate", () => {
+  it("leads with live usage and shows what pods have requested", () => {
     renderModal();
 
-    expect(screen.getByText("65.8%")).toBeTruthy();
-    expect(screen.getByText("1.25 cores of 1.90 cores · 31.6% in use")).toBeTruthy();
+    const cpu = screen.getByRole("button", { name: "Show pods by CPU use" });
+    expect(within(cpu).getByText("31.6%")).toBeTruthy();
+    expect(within(cpu).getByText("600m of 1.90 cores in use · 65.8% requested")).toBeTruthy();
     expect(screen.getByText("2/30")).toBeTruthy();
+    expect(screen.getByText("Usage vs Requests")).toBeTruthy();
     expect(screen.getByText("Ubuntu 22.04.5 LTS")).toBeTruthy();
+  });
+
+  it("falls back to requested shares without metrics-server", () => {
+    (aksApi.useNodeDetail as any).mockReturnValue({ data: { ...DETAIL, usage: null }, isLoading: false, isError: false });
+    render(<NodeDetailModal clusterId="c1" name="aks-np-1" formatDate={(v) => v} onClose={vi.fn()} />);
+
+    expect(screen.getByText("CPU Requested")).toBeTruthy();
+    expect(screen.getByText("1.25 cores of 1.90 cores · live usage unavailable")).toBeTruthy();
+    expect(screen.getByText(/metrics-server isn't reporting for this cluster/)).toBeTruthy();
+  });
+
+  it("colours node problem conditions by their meaning", () => {
+    (aksApi.useNodeDetail as any).mockReturnValue({
+      data: {
+        ...DETAIL,
+        conditions: [
+          { type: "Ready", status: "True", reason: "KubeletReady", message: "ok", last_transition_time: null },
+          { type: "KubeletProblem", status: "False", reason: "KubeletIsUp", message: "kubelet service is up", last_transition_time: null },
+          { type: "DiskPressure", status: "True", reason: "KubeletHasDiskPressure", message: "disk", last_transition_time: null },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    });
+    render(<NodeDetailModal clusterId="c1" name="aks-np-1" formatDate={(v) => v} onClose={vi.fn()} />);
+
+    const badge = (reason: string) => within(screen.getByText(reason).closest("tr")!).getAllByText(/True|False/)[0].className;
+    expect(badge("KubeletReady")).toContain("green");
+    expect(badge("KubeletIsUp")).toContain("green"); // False is healthy for a problem condition
+    expect(badge("KubeletHasDiskPressure")).toContain("amber");
   });
 
   it("lists the pods on the node and opens one", () => {

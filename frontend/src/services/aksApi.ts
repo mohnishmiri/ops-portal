@@ -15,6 +15,8 @@ import apiClient from "./apiClient";
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface AKSCluster {
+  /** Current CPU / memory working set across the cluster's nodes (AKS platform metrics). */
+  utilisation?: { cpu_pct: number | null; memory_pct: number | null; at: string | null; source: string } | null;
   id: string;
   name: string;
   subscription_id: string;
@@ -154,8 +156,10 @@ export interface PodMetrics {
   namespace: string;
   pod_name: string;
   containers: ContainerMetrics[];
-  total_cpu_millicores: number;
-  total_memory_mb: number;
+  /** Live usage from metrics-server; null when it has no sample for the pod. */
+  total_cpu_millicores: number | null;
+  total_memory_mb: number | null;
+  usage_available?: boolean;
   phase?: string;
   node?: string;
   qos_class?: string;
@@ -175,8 +179,8 @@ export interface PodMetrics {
 
 export interface ContainerMetrics {
   name: string;
-  cpu_millicores: number;
-  memory_mb: number;
+  cpu_millicores: number | null;
+  memory_mb: number | null;
   state?: string;
   cpu_request?: string;
   cpu_limit?: string;
@@ -530,6 +534,8 @@ export interface KubernetesNodeDetail {
   labels: Record<string, string>;
   annotations: Record<string, string>;
   pods: NodePodRow[];
+  /** False when metrics-server couldn't be read for the node's pods. */
+  pod_usage_available?: boolean;
   events: WorkloadEvent[];
 }
 
@@ -823,6 +829,13 @@ export interface JobPod {
   started_at: string | null;
   restarts: number;
   containers: string[];
+  /** Scheduler-style requests/limits and live usage (metrics-server); usage is null when not measured. */
+  cpu_request_m?: number;
+  cpu_limit_m?: number;
+  memory_request_bytes?: number;
+  memory_limit_bytes?: number;
+  cpu_usage_m?: number | null;
+  memory_usage_bytes?: number | null;
 }
 
 export interface JobCondition {
@@ -3540,6 +3553,13 @@ export interface WorkloadPod {
   restarts: number;
   containers: string[];
   revision: string | null;
+  /** Scheduler-style requests/limits and live usage (metrics-server); usage is null when not measured. */
+  cpu_request_m?: number;
+  cpu_limit_m?: number;
+  memory_request_bytes?: number;
+  memory_limit_bytes?: number;
+  cpu_usage_m?: number | null;
+  memory_usage_bytes?: number | null;
 }
 
 export interface WorkloadRevision {
@@ -3930,6 +3950,13 @@ export interface PodContainerDetail {
   memory_limit: string;
   probes: Partial<Record<"liveness" | "readiness" | "startup", string>>;
   volume_mounts: { name: string; mount_path: string; read_only: boolean; sub_path: string | null }[];
+  /** Scheduler-style requests/limits and live usage (metrics-server); usage is null when not measured. */
+  cpu_request_m?: number;
+  cpu_limit_m?: number;
+  memory_request_bytes?: number;
+  memory_limit_bytes?: number;
+  cpu_usage_m?: number | null;
+  memory_usage_bytes?: number | null;
 }
 
 export interface PodVolumeClaim {
@@ -3955,6 +3982,10 @@ export interface PodVolume {
 }
 
 export interface PodDetail {
+  /** Live usage of the whole pod; usage_available is false when metrics-server can't be read. */
+  usage_available?: boolean;
+  cpu_usage_m?: number | null;
+  memory_usage_bytes?: number | null;
   name: string;
   namespace: string;
   uid: string;

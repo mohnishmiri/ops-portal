@@ -60,6 +60,7 @@ import {
   AKS_PAGE_SIZE as PAGE_SIZE,
   GridPager,
   GridSearchBar,
+  PercentMeter,
   TileFilterNotice,
   useSearchPagination,
 } from "../features/aks/aksGridShared";
@@ -900,6 +901,14 @@ const AKSOperationsPage: React.FC = () => {
     const runningClusters = filteredClusterInventory.filter((cluster) => cluster.power_state === "Running");
     const succeededClusters = filteredClusterInventory.filter((cluster) => cluster.provisioning_state === "Succeeded");
     const totalNodes = filteredClusterInventory.reduce((sum, cluster) => sum + (cluster.node_count || 0), 0);
+    // Cluster-wide CPU / memory in use, weighting each running cluster by its node count.
+    const inUse = (metric: "cpu_pct" | "memory_pct") => {
+      const measured = filteredClusterInventory.filter((c) => c.power_state === "Running" && c.utilisation?.[metric] != null && c.node_count);
+      const weight = measured.reduce((n, c) => n + c.node_count, 0);
+      return weight ? Math.round((measured.reduce((n, c) => n + (c.utilisation![metric] as number) * c.node_count, 0) / weight) * 10) / 10 : null;
+    };
+    const cpuInUse = inUse("cpu_pct");
+    const memoryInUse = inUse("memory_pct");
 
     const locationCounts = filteredClusterInventory.reduce((acc, cluster) => {
       acc[cluster.location] = (acc[cluster.location] || 0) + 1;
@@ -943,6 +952,8 @@ const AKSOperationsPage: React.FC = () => {
       runningClusters: runningClusters.length,
       succeededClusters: succeededClusters.length,
       totalNodes,
+      cpuInUse,
+      memoryInUse,
       locations: Object.keys(locationCounts).length,
       dominantLocation: locationData[0],
       locationData,
@@ -1247,7 +1258,11 @@ const AKSOperationsPage: React.FC = () => {
         <MetricCard
           title="Total Nodes"
           value={clustersPending ? <Spinner className="h-6 w-6" /> : clusterOverview.totalNodes}
-          subtitle="Combined worker footprint across filtered inventory"
+          subtitle={
+            clusterOverview.cpuInUse != null || clusterOverview.memoryInUse != null
+              ? `CPU ${clusterOverview.cpuInUse ?? "—"}% · memory ${clusterOverview.memoryInUse ?? "—"}% in use`
+              : "Combined worker footprint across filtered inventory"
+          }
           icon={MetricCardIcons.server()}
           tone="blue"
           onClick={() => toggleClusterTile("with-nodes")}
@@ -1309,6 +1324,12 @@ const AKSOperationsPage: React.FC = () => {
                         {cluster.power_state || "Unknown"}
                       </span>
                     </div>
+                    {cluster.power_state === "Running" && (
+                      <div className="space-y-1 pt-1">
+                        <PercentMeter label="CPU" pct={cluster.utilisation?.cpu_pct} title="CPU in use across the cluster's nodes (AKS metrics, 5-minute average)" />
+                        <PercentMeter label="Memory" pct={cluster.utilisation?.memory_pct} title="Memory working set across the cluster's nodes (AKS metrics, 5-minute average)" />
+                      </div>
+                    )}
                   </div>
                 }
                 meta={
@@ -2027,6 +2048,11 @@ const AKSOperationsPage: React.FC = () => {
         <div className="flex items-center justify-center gap-2 py-8 text-gray-500"><Spinner className="h-4 w-4" />Loading pod metrics…</div>
       ) : (
         <>
+          {allPods.length > 0 && allPods.every((p) => p.usage_available === false) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              Live CPU and memory usage is unavailable: metrics-server isn&apos;t reporting for this cluster. Requests and limits are still shown.
+            </div>
+          )}
           {/* Pod Table with Search */}
           <div className={gridStyles.shell}>
           <GridSearchBar search={pSearch} onSearch={setPSearch} onPage={setPPage} totalItems={allPods.length} shownItems={filteredPods.length} placeholder="Search pods..." />
@@ -2050,18 +2076,14 @@ const AKSOperationsPage: React.FC = () => {
                   <tr><td colSpan={9} className="py-6 text-center text-sm text-gray-400">No pods match your search</td></tr>
                 )}
                 {pagedPods.map((pod) => {
-                  const cpuPct = pod.total_cpu_limit && pod.total_cpu_limit > 0
-                    ? Math.round((pod.total_cpu_millicores / pod.total_cpu_limit) * 100)
-                    : null;
-                  const cpuReqPct = pod.total_cpu_request && pod.total_cpu_request > 0
-                    ? Math.round((pod.total_cpu_millicores / pod.total_cpu_request) * 100)
-                    : null;
-                  const memPct = pod.total_memory_limit_mb && pod.total_memory_limit_mb > 0
-                    ? Math.round((pod.total_memory_mb / pod.total_memory_limit_mb) * 100)
-                    : null;
-                  const memReqPct = pod.total_memory_request_mb && pod.total_memory_request_mb > 0
-                    ? Math.round((pod.total_memory_mb / pod.total_memory_request_mb) * 100)
-                    : null;
+                  // Usage is null when metrics-server has no sample — never shown as 0.
+                  const cpuUse = pod.total_cpu_millicores;
+                  const memUse = pod.total_memory_mb;
+                  const share = (used: number | null, of: number | null | undefined) => (used != null && of ? Math.round((used / of) * 100) : null);
+                  const cpuPct = share(cpuUse, pod.total_cpu_limit);
+                  const cpuReqPct = share(cpuUse, pod.total_cpu_request);
+                  const memPct = share(memUse, pod.total_memory_limit_mb);
+                  const memReqPct = share(memUse, pod.total_memory_request_mb);
                   const barPct = (pct: number | null) => pct !== null ? Math.min(pct, 100) : 0;
                   const barColor = (pct: number | null) =>
                     pct === null ? "bg-gray-200" : pct > 90 ? "bg-red-500" : pct > 70 ? "bg-orange-400" : "bg-blue-500";
@@ -2093,7 +2115,7 @@ const AKSOperationsPage: React.FC = () => {
                     {/* CPU column with bar */}
                     <td className={gridStyles.cell}>
                       <div className="flex items-center gap-2 font-mono text-[11px]">
-                        <span className={cpuPct !== null && cpuPct > 80 ? "text-red-600 font-bold" : "text-gray-800"}>{Math.round(pod.total_cpu_millicores)}m</span>
+                        <span className={cpuPct !== null && cpuPct > 80 ? "text-red-600 font-bold" : "text-gray-800"}>{cpuUse != null ? `${Math.round(cpuUse)}m` : "—"}</span>
                         <span className="text-gray-400">/</span>
                         <span className="text-gray-500">{pod.total_cpu_request != null ? `${pod.total_cpu_request}m` : "—"}</span>
                         <span className="text-gray-400">/</span>
@@ -2111,7 +2133,7 @@ const AKSOperationsPage: React.FC = () => {
                     {/* Memory column with bar */}
                     <td className={gridStyles.cell}>
                       <div className="flex items-center gap-2 font-mono text-[11px]">
-                        <span className={memPct !== null && memPct > 80 ? "text-red-600 font-bold" : "text-gray-800"}>{Math.round(pod.total_memory_mb)}MB</span>
+                        <span className={memPct !== null && memPct > 80 ? "text-red-600 font-bold" : "text-gray-800"}>{memUse != null ? `${Math.round(memUse)}MB` : "—"}</span>
                         <span className="text-gray-400">/</span>
                         <span className="text-gray-500">{pod.total_memory_request_mb != null ? `${Math.round(pod.total_memory_request_mb)}MB` : "—"}</span>
                         <span className="text-gray-400">/</span>
@@ -3237,10 +3259,11 @@ const AKSOperationsPage: React.FC = () => {
         const memUsed = pod.total_memory_mb;
         const memReq = pod.total_memory_request_mb || 0;
         const memLim = pod.total_memory_limit_mb || 0;
-        const cpuPctOfLim = cpuLim > 0 ? Math.round((cpuUsed / cpuLim) * 100) : null;
-        const memPctOfLim = memLim > 0 ? Math.round((memUsed / memLim) * 100) : null;
-        const cpuPctOfReq = cpuReq > 0 ? Math.round((cpuUsed / cpuReq) * 100) : null;
-        const memPctOfReq = memReq > 0 ? Math.round((memUsed / memReq) * 100) : null;
+        const ofTotal = (used: number | null, of: number) => (used != null && of > 0 ? Math.round((used / of) * 100) : null);
+        const cpuPctOfLim = ofTotal(cpuUsed, cpuLim);
+        const memPctOfLim = ofTotal(memUsed, memLim);
+        const cpuPctOfReq = ofTotal(cpuUsed, cpuReq);
+        const memPctOfReq = ofTotal(memUsed, memReq);
 
         const gaugeColor = (pct: number | null) => !pct ? "#6b7280" : pct > 80 ? "#ef4444" : pct > 60 ? "#f59e0b" : "#10b981";
         const gaugeLabel = (pct: number | null) => !pct ? "N/A" : `${pct}%`;
@@ -3298,7 +3321,7 @@ const AKSOperationsPage: React.FC = () => {
                   <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
                     <div className="bg-blue-50 rounded-lg p-2">
                       <div className="text-gray-500">Used</div>
-                      <div className="font-bold text-blue-700">{Math.round(cpuUsed)}m</div>
+                      <div className="font-bold text-blue-700">{cpuUsed != null ? `${Math.round(cpuUsed)}m` : "—"}</div>
                     </div>
                     <div className="bg-green-50 rounded-lg p-2">
                       <div className="text-gray-500">Request</div>
@@ -3332,7 +3355,7 @@ const AKSOperationsPage: React.FC = () => {
                   <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
                     <div className="bg-blue-50 rounded-lg p-2">
                       <div className="text-gray-500">Used</div>
-                      <div className="font-bold text-blue-700">{Math.round(memUsed)}MB</div>
+                      <div className="font-bold text-blue-700">{memUsed != null ? `${Math.round(memUsed)}MB` : "—"}</div>
                     </div>
                     <div className="bg-green-50 rounded-lg p-2">
                       <div className="text-gray-500">Request</div>
@@ -3369,8 +3392,8 @@ const AKSOperationsPage: React.FC = () => {
                       </thead>
                       <tbody>
                         {pod.containers.map((c) => {
-                          const cCpuPct = c.cpu_limit_m && c.cpu_limit_m > 0 ? Math.round((c.cpu_millicores / c.cpu_limit_m) * 100) : null;
-                          const cMemPct = c.memory_limit_mb && c.memory_limit_mb > 0 ? Math.round((c.memory_mb / c.memory_limit_mb) * 100) : null;
+                          const cCpuPct = c.cpu_millicores != null && c.cpu_limit_m > 0 ? Math.round((c.cpu_millicores / c.cpu_limit_m) * 100) : null;
+                          const cMemPct = c.memory_mb != null && c.memory_limit_mb > 0 ? Math.round((c.memory_mb / c.memory_limit_mb) * 100) : null;
                           return (
                             <tr key={c.name} className={gridStyles.row}>
                               <td className={`${gridStyles.cell} font-mono font-medium text-xs`}>{c.name}</td>
@@ -3379,10 +3402,10 @@ const AKSOperationsPage: React.FC = () => {
                                   c.state === "running" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"
                                 }`}>{c.state || "unknown"}</span>
                               </td>
-                              <td className={`${gridStyles.cell} text-right font-mono text-xs`}>{Math.round(c.cpu_millicores)}m</td>
+                              <td className={`${gridStyles.cell} text-right font-mono text-xs`}>{c.cpu_millicores != null ? `${Math.round(c.cpu_millicores)}m` : "—"}</td>
                               <td className={`${gridStyles.cell} text-right font-mono text-xs text-gray-500`}>{c.cpu_request || "—"}</td>
                               <td className={`${gridStyles.cell} text-right font-mono text-xs text-gray-500`}>{c.cpu_limit || "—"}</td>
-                              <td className={`${gridStyles.cell} text-right font-mono text-xs`}>{Math.round(c.memory_mb)}MB</td>
+                              <td className={`${gridStyles.cell} text-right font-mono text-xs`}>{c.memory_mb != null ? `${Math.round(c.memory_mb)}MB` : "—"}</td>
                               <td className={`${gridStyles.cell} text-right font-mono text-xs text-gray-500`}>{c.memory_request || "—"}</td>
                               <td className={`${gridStyles.cell} text-right font-mono text-xs text-gray-500`}>{c.memory_limit || "—"}</td>
                               <td className={gridStyles.centerCell}>

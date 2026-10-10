@@ -17,6 +17,7 @@ from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 
 from app.services.data_cache_service import TTL, CacheKeys, data_cache
+from app.services.k8s_usage import attach_pod_usage, pod_requests, read_pod_usage
 
 logger = structlog.get_logger(__name__)
 
@@ -243,6 +244,7 @@ def serialize_pod(pod: Any) -> dict[str, Any]:
         "containers": [cs.name for cs in statuses] or [c.name for c in (pod.spec.containers or [])],
         # StatefulSet/DaemonSet pods carry controller-revision-hash; Deployment pods carry pod-template-hash.
         "revision": labels.get("controller-revision-hash") or labels.get("pod-template-hash"),
+        **pod_requests(pod),
     }
 
 
@@ -376,7 +378,8 @@ class AKSWorkloadOperationsMixin:
         except ApiException as e:
             logger.warning("workload_pods_failed", namespace=namespace, error=str(e))
             return []
-        return [serialize_pod(p) for p in pod_list.items if _owned_by(p.metadata, uid)]
+        rows = [serialize_pod(p) for p in pod_list.items if _owned_by(p.metadata, uid)]
+        return attach_pod_usage(rows, await read_pod_usage(core_v1, namespace) if rows else None)
 
     async def _workload_revisions(self, apps_v1: Any, namespace: str, selector: str | None, uid: str) -> list[dict]:
         try:

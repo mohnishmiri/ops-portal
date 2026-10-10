@@ -9,16 +9,15 @@ node's events. Live usage from metrics-server is added when it's installed.
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 from typing import Any
 
 import structlog
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
-from kubernetes.utils import parse_quantity
 
 from app.services.aks_detail_operations import _annotations, _conditions
 from app.services.aks_workload_operations import _iso, newest_events, serialize_event, serialize_pod
+from app.services.k8s_usage import attach_pod_usage, pod_requests, read_pod_usage, to_bytes, to_millicores
 
 logger = structlog.get_logger(__name__)
 
@@ -26,49 +25,13 @@ PRESSURE_CONDITIONS = ("MemoryPressure", "DiskPressure", "PIDPressure", "Network
 TERMINATED_PHASES = ("Succeeded", "Failed")
 
 
-def _quantity(value: Any) -> Decimal:
-    try:
-        return parse_quantity(value) if value not in (None, "") else Decimal(0)
-    except ValueError:
-        return Decimal(0)
-
-
-def to_millicores(value: Any) -> int:
-    return int(_quantity(value) * 1000)
-
-
-def to_bytes(value: Any) -> int:
-    return int(_quantity(value))
-
-
 def _resource_block(resources: dict[str, Any] | None) -> dict[str, Any]:
     resources = resources or {}
     return {
         "cpu_m": to_millicores(resources.get("cpu")),
         "memory_bytes": to_bytes(resources.get("memory")),
-        "pods": int(_quantity(resources.get("pods"))),
+        "pods": to_bytes(resources.get("pods")),  # a plain count
         "ephemeral_storage_bytes": to_bytes(resources.get("ephemeral-storage")),
-    }
-
-
-def _container_resources(container: Any, kind: str) -> dict[str, Any]:
-    return (getattr(container.resources, kind, None) or {}) if container.resources else {}
-
-
-def pod_requests(pod: Any) -> dict[str, int]:
-    """Requests and limits as the scheduler counts them: max(sum of containers, largest init container)."""
-    containers = pod.spec.containers or []
-    init = pod.spec.init_containers or []
-
-    def effective(kind: str, resource: str, convert: Any) -> int:
-        app = sum(convert(_container_resources(c, kind).get(resource)) for c in containers)
-        return max(app, max((convert(_container_resources(c, kind).get(resource)) for c in init), default=0))
-
-    return {
-        "cpu_request_m": effective("requests", "cpu", to_millicores),
-        "cpu_limit_m": effective("limits", "cpu", to_millicores),
-        "memory_request_bytes": effective("requests", "memory", to_bytes),
-        "memory_limit_bytes": effective("limits", "memory", to_bytes),
     }
 
 
@@ -92,7 +55,11 @@ def _percent(part: int, whole: int) -> float | None:
 
 
 def serialize_node_detail(
-    node: Any, pods: list[Any], events: list[dict[str, Any]], usage: dict[str, Any] | None
+    node: Any,
+    pods: list[Any],
+    events: list[dict[str, Any]],
+    usage: dict[str, Any] | None,
+    pod_usage: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     meta, spec, status = node.metadata, node.spec, node.status
     labels = dict(meta.labels or {})
@@ -100,7 +67,9 @@ def serialize_node_detail(
     condition_status = {c["type"]: c["status"] for c in conditions}
     info = status.node_info
     allocatable = _resource_block(status.allocatable)
-    pod_rows = sorted((serialize_node_pod(p) for p in pods), key=lambda p: (p["namespace"], p["pod_name"]))
+    pod_rows = attach_pod_usage(
+        sorted((serialize_node_pod(p) for p in pods), key=lambda p: (p["namespace"], p["pod_name"])), pod_usage
+    )
     active = [p for p in pod_rows if not p["terminated"]]
     requested = {
         "cpu_request_m": sum(p["cpu_request_m"] for p in active),
@@ -190,11 +159,14 @@ class AKSNodeOperationsMixin:
                 return []
             return newest_events([serialize_event(ev) for ev in result.items])
 
-        pods, events, usage = await asyncio.gather(
+        pods, events, usage, pod_usage = await asyncio.gather(
             asyncio.to_thread(
                 core_v1.list_pod_for_all_namespaces, field_selector=f"spec.nodeName={name}", _request_timeout=(5, 60)
             ),
             _events(),
             self._node_usage(core_v1, name, _resource_block(node.status.allocatable)),
+            read_pod_usage(core_v1),
         )
-        return serialize_node_detail(node, list(pods.items), events, usage)
+        detail = serialize_node_detail(node, list(pods.items), events, usage, pod_usage)
+        detail["pod_usage_available"] = pod_usage is not None
+        return detail

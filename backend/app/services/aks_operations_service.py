@@ -49,11 +49,24 @@ from app.services.data_cache_service import (
     CacheKeys,
     data_cache,
 )
+from app.services.k8s_usage import attach_pod_usage, pod_requests, read_pod_usage
 
 # Suppress InsecureRequestWarning for private-link AKS endpoints
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = structlog.get_logger(__name__)
+
+
+def apply_pod_metrics_usage(pod_data: dict[str, Any], usage: dict[tuple[str, str], dict[str, Any]] | None) -> None:
+    """Set a Pod Metrics row's usage from metrics-server (None when it has no sample)."""
+    sample = (usage or {}).get((pod_data["namespace"], pod_data["pod_name"]))
+    pod_data["usage_available"] = sample is not None
+    pod_data["total_cpu_millicores"] = sample["cpu_m"] if sample else None
+    pod_data["total_memory_mb"] = round(sample["memory_bytes"] / 2**20, 1) if sample else None
+    for container in pod_data["containers"]:
+        c = (sample or {}).get("containers", {}).get(container["name"]) if sample else None
+        container["cpu_millicores"] = c["cpu_m"] if c else None
+        container["memory_mb"] = round(c["memory_bytes"] / 2**20, 1) if c else None
 
 
 def _refresh_k8s_bearer(configuration: k8s_client.Configuration) -> None:
@@ -267,6 +280,7 @@ class AKSOperationsService(
             except Exception as e:
                 logger.error("cluster_list_failed", subscription_id=sub["id"], error=str(e))
 
+        await self.attach_cluster_utilisation(clusters)
         logger.info("cluster_discovery_complete", total=len(clusters))
         return clusters
 
@@ -1019,19 +1033,22 @@ class AKSOperationsService(
                             "cpu_limit_m": cpu_lim_m,
                             "memory_request_mb": mem_req_mb,
                             "memory_limit_mb": mem_lim_mb,
-                            "cpu_millicores": cpu_req_m,
-                            "memory_mb": mem_req_mb,
+                            # Usage, filled from metrics-server below; None when it isn't reporting.
+                            "cpu_millicores": None,
+                            "memory_mb": None,
                         }
                     )
                     pod_data["total_cpu_request"] += cpu_req_m
                     pod_data["total_cpu_limit"] += cpu_lim_m
                     pod_data["total_memory_request_mb"] += mem_req_mb
                     pod_data["total_memory_limit_mb"] += mem_lim_mb
-                    pod_data["total_cpu_millicores"] += cpu_req_m
-                    pod_data["total_memory_mb"] += mem_req_mb
                     pod_data["total_restarts"] += restarts
 
                 pods.append(pod_data)
+
+            usage = await read_pod_usage(core_v1, namespace) if pods else None
+            for pod_data in pods:
+                apply_pod_metrics_usage(pod_data, usage)
 
         except TimeoutError:
             logger.warning(
@@ -1060,8 +1077,9 @@ class AKSOperationsService(
                     "total_cpu_limit": 0.0,
                     "total_memory_request_mb": 0.0,
                     "total_memory_limit_mb": 0.0,
-                    "total_cpu_millicores": 0.0,
-                    "total_memory_mb": 0.0,
+                    "total_cpu_millicores": None,
+                    "total_memory_mb": None,
+                    "usage_available": False,
                     "total_restarts": p.get("restarts", 0),
                 }
                 for p in db_pods
@@ -1754,9 +1772,10 @@ class AKSOperationsService(
                     "started_at": (pod.status.start_time.isoformat() if pod.status.start_time else None),
                     "restarts": sum(cs.restart_count or 0 for cs in statuses),
                     "containers": [cs.name for cs in statuses] or [c.name for c in (pod.spec.containers or [])],
+                    **pod_requests(pod),
                 }
             )
-        return pods
+        return attach_pod_usage(pods, await read_pod_usage(core_v1, namespace) if pods else None)
 
     async def delete_job(
         self,

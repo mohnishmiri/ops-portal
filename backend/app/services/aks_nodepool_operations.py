@@ -27,8 +27,8 @@ from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, func, select
 
 from app.models.database import AzureResourceInventory
-from app.services.aks_node_operations import to_bytes, to_millicores
 from app.services.data_cache_service import TTL, CacheKeys, data_cache
+from app.services.k8s_usage import json_pod_requests, to_bytes, to_millicores
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +44,9 @@ PRESSURE_CONDITIONS = ("MemoryPressure", "DiskPressure", "PIDPressure")
 # Azure Monitor platform metrics of the pool's scale set (averaged across its VMs).
 CPU_METRIC = "Percentage CPU"
 MEMORY_METRIC = "Available Memory Percentage"
+# AKS platform metrics on the managed cluster: averaged across its nodes.
+CLUSTER_CPU_METRIC = "node_cpu_usage_percentage"
+CLUSTER_MEMORY_METRIC = "node_memory_working_set_percentage"
 UTILISATION_LOOKBACK = timedelta(minutes=20)
 UTILISATION_TIMEOUT_SECONDS = 20
 # range → (lookback, grain) for the utilisation history chart.
@@ -103,25 +106,6 @@ def _int(value: Any) -> int:
 
 def _pct(part: float | None, whole: float) -> float | None:
     return round(part * 100 / whole, 1) if part is not None and whole else None
-
-
-def json_pod_requests(pod: dict[str, Any]) -> tuple[int, int]:
-    """(CPU millicores, memory bytes) a pod requests, as the scheduler counts: max(containers, largest init)."""
-    spec = pod.get("spec") or {}
-
-    def request(container: dict[str, Any], resource: str) -> Any:
-        return ((container.get("resources") or {}).get("requests") or {}).get(resource)
-
-    containers, init = spec.get("containers") or [], spec.get("initContainers") or []
-    cpu = max(
-        sum(to_millicores(request(c, "cpu")) for c in containers),
-        max((to_millicores(request(c, "cpu")) for c in init), default=0),
-    )
-    memory = max(
-        sum(to_bytes(request(c, "memory")) for c in containers),
-        max((to_bytes(request(c, "memory")) for c in init), default=0),
-    )
-    return cpu, memory
 
 
 def serialize_pool_node(
@@ -269,6 +253,14 @@ def utilisation_series(points: dict[str, list[Any]]) -> list[dict[str, Any]]:
         row["memory_avg"] = round(100 - p.average, 1) if p.average is not None else None
         row["memory_max"] = round(100 - p.minimum, 1) if getattr(p, "minimum", None) is not None else None
     return [rows[k] for k in sorted(rows)]
+
+
+def latest_average(points: list[Any]) -> tuple[float | None, str | None]:
+    """The newest non-empty average and its timestamp."""
+    for p in reversed(points):
+        if p.average is not None:
+            return round(p.average, 1), p.time_stamp.isoformat()
+    return None, None
 
 
 def summarize_series(series: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -548,6 +540,37 @@ class AKSNodePoolOperationsMixin:
             logger.warning("node_pool_utilisation_timeout", pools=len(scale_sets))
             return {}
         return {pool: value for pool, value in results if value}
+
+    async def attach_cluster_utilisation(self, clusters: list[dict[str, Any]]) -> None:
+        """Set each running cluster's ``utilisation`` from its AKS platform metrics (Azure Monitor)."""
+
+        async def _one(cluster: dict[str, Any]) -> None:
+            cluster["utilisation"] = None
+            if cluster.get("power_state") != "Running":
+                return
+            try:
+                client = MonitorManagementClient(self.credential, cluster["subscription_id"])  # type: ignore[attr-defined]
+                response = await asyncio.to_thread(
+                    client.metrics.list,
+                    cluster["id"],
+                    timespan=_timespan(UTILISATION_LOOKBACK),
+                    interval="PT5M",
+                    metricnames=f"{CLUSTER_CPU_METRIC},{CLUSTER_MEMORY_METRIC}",
+                    aggregation="Average",
+                )
+            except Exception as e:
+                logger.warning("cluster_utilisation_failed", cluster=cluster.get("name"), error=str(e)[:200])
+                return
+            points = _metric_points(response)
+            cpu, at = latest_average(points.get(CLUSTER_CPU_METRIC, []))
+            memory, _ = latest_average(points.get(CLUSTER_MEMORY_METRIC, []))
+            if cpu is not None or memory is not None:
+                cluster["utilisation"] = {"cpu_pct": cpu, "memory_pct": memory, "at": at, "source": "azure-monitor"}
+
+        try:
+            await asyncio.wait_for(asyncio.gather(*(_one(c) for c in clusters)), timeout=UTILISATION_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("cluster_utilisation_timeout", clusters=len(clusters))
 
     async def get_node_pool_metrics(
         self, cluster_id: str, nodepool_name: str, range_key: str = "24h"

@@ -26,6 +26,7 @@ from app.services.aks_workload_operations import (
     serialize_pod,
     workload_status,
 )
+from app.services.k8s_usage import attach_pod_usage, read_pod_usage, to_bytes, to_millicores
 
 logger = structlog.get_logger(__name__)
 
@@ -425,6 +426,24 @@ def serialize_hpa(hpa: Any) -> dict[str, Any]:
 # ── Service mixin ─────────────────────────────────────────────────────
 
 
+def attach_container_usage(
+    detail: dict[str, Any], usage: dict[tuple[str, str], dict[str, Any]] | None, key: tuple[str, str]
+) -> None:
+    """Live usage per container and for the pod, with numeric requests and limits to compare against."""
+    sample = (usage or {}).get(key)
+    detail["usage_available"] = usage is not None
+    detail["cpu_usage_m"] = sample["cpu_m"] if sample else None
+    detail["memory_usage_bytes"] = sample["memory_bytes"] if sample else None
+    for c in detail.get("containers") or []:
+        used = (sample or {}).get("containers", {}).get(c["name"]) if sample else None
+        c["cpu_usage_m"] = used["cpu_m"] if used else None
+        c["memory_usage_bytes"] = used["memory_bytes"] if used else None
+        c["cpu_request_m"] = to_millicores(c.get("cpu_request"))
+        c["cpu_limit_m"] = to_millicores(c.get("cpu_limit"))
+        c["memory_request_bytes"] = to_bytes(c.get("memory_request"))
+        c["memory_limit_bytes"] = to_bytes(c.get("memory_limit"))
+
+
 class AKSDetailOperationsMixin:
     """Deployment and Pod detail, plus the ownership lookups the log archive reuses."""
 
@@ -517,6 +536,7 @@ class AKSDetailOperationsMixin:
             row = serialize_pod(pod)
             row["revision"] = revision_by_hash.get(row["revision"], row["revision"])
             pod_rows.append(row)
+        attach_pod_usage(pod_rows, await read_pod_usage(core_v1, namespace) if pod_rows else None)
 
         detail.update(
             {
@@ -535,8 +555,9 @@ class AKSDetailOperationsMixin:
         pod = await asyncio.to_thread(core_v1.read_namespaced_pod, name, namespace)
         detail = serialize_pod_detail(pod)
         claim_volumes = [v for v in detail["volumes"] if v["type"] == "PersistentVolumeClaim" and v["source"]]
-        events, *claims = await asyncio.gather(
+        events, usage, *claims = await asyncio.gather(
             self._workload_events(core_v1, namespace, "Pod", name),  # type: ignore[attr-defined]
+            read_pod_usage(core_v1, namespace, name),
             *(
                 self._soft(
                     asyncio.to_thread(core_v1.read_namespaced_persistent_volume_claim, v["source"], namespace),
@@ -549,6 +570,7 @@ class AKSDetailOperationsMixin:
             ),
         )
         detail["events"] = events
+        attach_container_usage(detail, usage, (namespace, name))
         for volume, pvc in zip(claim_volumes, claims, strict=True):
             volume["claim"] = serialize_claim(pvc) if pvc else None
 
