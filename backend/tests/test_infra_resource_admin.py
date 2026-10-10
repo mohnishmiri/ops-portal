@@ -343,3 +343,87 @@ async def test_disks_only_grow():
 def test_history_grains_cover_the_ui_ranges():
     assert set(admin_module.HISTORY_GRAINS) >= {1, 6, 24, 168}
     assert all(timedelta(hours=h) > timedelta(0) for h in admin_module.HISTORY_GRAINS)
+
+
+# ── PG database sizes ──────────────────────────────────────────────────
+
+
+def _pg_client():
+    return SimpleNamespace(
+        databases=SimpleNamespace(
+            list_by_server=lambda rg, name: [
+                SimpleNamespace(name="postgres", charset="UTF8", collation="en_US.utf8"),
+                SimpleNamespace(name="OpsPortal", charset="UTF8", collation="en_US.utf8"),
+                SimpleNamespace(name="newdb", charset="UTF8", collation="en_US.utf8"),
+            ]
+        ),
+        firewall_rules=SimpleNamespace(
+            list_by_server=lambda rg, name: [
+                SimpleNamespace(name="AllowAzure", start_ip_address="0.0.0.0", end_ip_address="0.0.0.0")
+            ]
+        ),
+        servers=SimpleNamespace(get=lambda rg, name: SimpleNamespace(storage=SimpleNamespace(storage_size_gb=32))),
+    )
+
+
+def _series(db, values):
+    start = datetime(2026, 10, 4, 0, 0)
+    return SimpleNamespace(
+        metadatavalues=[SimpleNamespace(name=SimpleNamespace(value="databasename"), value=db)],
+        data=[SimpleNamespace(time_stamp=start + timedelta(hours=i), average=v) for i, v in enumerate(values)],
+    )
+
+
+@pytest.mark.anyio
+async def test_pg_overview_adds_database_sizes_and_storage():
+    calls = []
+
+    def _list(resource_id, **kwargs):
+        calls.append(kwargs)
+        if kwargs["metricnames"] == "database_size_bytes":
+            series = [_series("opsportal", [7_103_998_999, None, 7_800_912_919]), _series("postgres", [7_978_007] * 2)]
+            return SimpleNamespace(value=[SimpleNamespace(timeseries=series)])
+
+        def metric(name, value):
+            data = [SimpleNamespace(average=value)]
+            return SimpleNamespace(name=SimpleNamespace(value=name), timeseries=[SimpleNamespace(data=data)])
+
+        return SimpleNamespace(
+            value=[
+                metric("storage_used", 13_926_389_623.0),
+                metric("storage_percent", 41.574),
+                metric("storage_free", 19_575_367_816.0),
+            ]
+        )
+
+    service = InfraResourceAdminService(None)
+    service._pg = lambda _sub: _pg_client()
+    service._monitor = lambda _sub: SimpleNamespace(metrics=SimpleNamespace(list=_list))
+    overview = await service.pg_overview(NPRD, "rg", "pg-1")
+
+    # Largest first; names match case-insensitively; a database with no metric yet keeps null sizes.
+    assert [d["name"] for d in overview["databases"]] == ["OpsPortal", "postgres", "newdb"]
+    ops = overview["databases"][0]
+    assert (ops["size_bytes"], ops["size_7d_ago_bytes"]) == (7_800_912_919, 7_103_998_999)
+    assert overview["databases"][2].get("size_bytes") is None
+    assert overview["storage"]["provisioned_gb"] == 32
+    assert overview["storage"]["used_bytes"] == 13_926_389_623
+    assert overview["storage"]["percent"] == 41.57
+    assert overview["storage"]["databases_total_bytes"] == 7_800_912_919 + 7_978_007
+    # Split by database with a high "top" — the default 10 series would drop databases.
+    assert calls[0]["filter"] == "DatabaseName eq '*'" and calls[0]["top"] >= 100
+
+
+@pytest.mark.anyio
+async def test_pg_overview_still_lists_databases_when_metrics_fail():
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("AuthorizationFailed")
+
+    service = InfraResourceAdminService(None)
+    service._pg = lambda _sub: _pg_client()
+    service._monitor = lambda _sub: SimpleNamespace(metrics=SimpleNamespace(list=_fail))
+    overview = await service.pg_overview(NPRD, "rg", "pg-1")
+
+    assert len(overview["databases"]) == 3
+    assert "AuthorizationFailed" in overview["size_error"]
+    assert overview["storage"]["used_bytes"] is None

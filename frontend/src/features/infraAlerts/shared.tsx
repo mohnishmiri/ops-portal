@@ -333,6 +333,20 @@ export const EXPIRY_TYPE_ORDER: ExpiryAlertType[] = ["itservices_domain", "mech_
 
 // ── Misc ──────────────────────────────────────────────────────────────
 
+/** 7800912919 -> "7.3 GB" (binary units, the way Azure and PostgreSQL report sizes). */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = Math.abs(bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text = unit === 0 ? String(value) : value >= 100 ? value.toFixed(0) : value.toFixed(1);
+  return `${bytes < 0 ? "-" : ""}${text} ${units[unit]}`;
+}
+
 export function humanize(key: string): string {
   return key
     .replace(/^_+/, "")

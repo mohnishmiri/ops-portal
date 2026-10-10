@@ -111,9 +111,34 @@ export interface BootDiagnostics {
   size_bytes?: number;
 }
 
+export interface PGDatabase {
+  name: string;
+  charset: string | null;
+  collation: string | null;
+  /** From the Azure Monitor metric database_size_bytes; absent until Azure reports it. */
+  size_bytes?: number | null;
+  size_at?: string | null;
+  /** Earliest reading in the last 7 days, for growth. */
+  size_7d_ago_bytes?: number | null;
+  size_7d_ago_at?: string | null;
+}
+
+export interface PGStorage {
+  provisioned_gb: number | null;
+  used_bytes: number | null;
+  free_bytes: number | null;
+  percent: number | null;
+  backup_bytes: number | null;
+  txlogs_bytes: number | null;
+  databases_total_bytes: number | null;
+}
+
 export interface PGOverview {
-  databases: { name: string; charset: string | null; collation: string | null }[];
+  databases: PGDatabase[];
   firewall_rules: { name: string; start_ip: string; end_ip: string }[];
+  storage?: PGStorage;
+  /** Why sizes are missing, when Azure Monitor could not be read. */
+  size_error?: string | null;
 }
 
 export const TERMINAL_RUN_STATES: RunState[] = ["Succeeded", "Failed", "TimedOut", "Canceled"];

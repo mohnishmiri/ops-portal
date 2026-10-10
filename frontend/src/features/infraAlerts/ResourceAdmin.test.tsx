@@ -17,7 +17,9 @@ vi.mock("../../services/infraResourceAdminApi", async (importOriginal) => {
 
 import type { ManagedDisk, VMInfo } from "../../services/infraAlertApi";
 import * as admin from "../../services/infraResourceAdminApi";
-import { RunCommandPanel, TagEditor, UtilizationPanel, VMDisksGrid } from "./ResourceAdmin";
+import { PGDatabasesPanel, RunCommandPanel, TagEditor, UtilizationPanel, VMDisksGrid } from "./ResourceAdmin";
+import { formatBytes } from "./shared";
+import type { PGFlexServer } from "../../services/infraAlertApi";
 
 globalThis.ResizeObserver ??= class {
   observe() {}
@@ -65,7 +67,7 @@ describe("VMDisksGrid", () => {
     render(<VMDisksGrid vm={vm} disks={[disk("attcc-eastus2-prf1-db-data-q7cud1d2-u02", 8192)]} onOpenDisk={onOpen} />);
     const rows = screen.getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["OS disk", "Data · LUN 0", "Data · LUN 1", "Data · LUN 2"]);
-    expect(screen.getByText(/4 attached · 20,608 GB total/)).toBeTruthy();
+    expect(screen.getByText(/Disks · 20,608 GB total/)).toBeTruthy();
     // Joined with the disk inventory where it is synced.
     expect(within(rows[2]).getByText("PremiumV2_LRS")).toBeTruthy();
     fireEvent.click(within(rows[2]).getByRole("button", { name: "attcc-eastus2-prf1-db-data-q7cud1d2-u02" }));
@@ -157,5 +159,55 @@ describe("UtilizationPanel", () => {
     expect(hooks.useMetricsHistory).toHaveBeenLastCalledWith("vm", "sub-1", "RG", "vm", 168);
     fireEvent.click(screen.getByRole("button", { name: "Table" }));
     expect(screen.getByText("Readings")).toBeTruthy();
+  });
+});
+
+describe("PGDatabasesPanel", () => {
+  const server = { id: "pg-1", name: "attcc-eastus2-prf1-db-psqlfs", resource_group: "rg", subscription_id: "sub-1", state: "Ready" } as unknown as PGFlexServer;
+
+  it("lists databases largest first with size, share and 7-day growth, plus server storage", () => {
+    hooks.usePGOverview.mockReturnValue(
+      query({
+        databases: [
+          { name: "postgres", charset: "UTF8", collation: "en_US.utf8", size_bytes: 7_978_007, size_7d_ago_bytes: 7_978_007, size_at: "2026-10-10T21:29:00+00:00" },
+          { name: "opsportal", charset: "UTF8", collation: "en_US.utf8", size_bytes: 7_800_912_919, size_7d_ago_bytes: 7_103_998_999, size_at: "2026-10-10T21:29:00+00:00" },
+          { name: "azure_sys", charset: "UTF8", collation: "en_US.utf8", size_bytes: 8_436_759, size_7d_ago_bytes: 8_436_759 },
+          { name: "newdb", charset: "UTF8", collation: "en_US.utf8" },
+        ],
+        firewall_rules: [{ name: "AllowAllAzureServicesAndResourcesWithinAzureIps", start_ip: "0.0.0.0", end_ip: "0.0.0.0" }],
+        storage: { provisioned_gb: 32, used_bytes: 13_926_389_623, free_bytes: 19_575_367_816, percent: 41.57, backup_bytes: 85_138_174_902, txlogs_bytes: 603_979_776, databases_total_bytes: 7_817_327_685 },
+        size_error: null,
+      }),
+    );
+    render(<PGDatabasesPanel server={server} formatDate={(v) => v} />);
+
+    expect(screen.getByText(/13.0 GB used of 32 GB provisioned/)).toBeTruthy();
+    expect(screen.getByText("41.6%")).toBeTruthy();
+    const dbGrid = screen.getByText(/^Databases ·/).closest("section, div.overflow-hidden") ?? document.body;
+    const rows = within(dbGrid as HTMLElement).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["opsportal", "azure_sysAzure system", "postgresDefault", "newdb"]);
+    expect(within(rows[0]).getByText("7.3 GB")).toBeTruthy();
+    expect(within(rows[0]).getByText("+665 MB (+9.8%)")).toBeTruthy();
+    expect(within(rows[2]).getByText("no change")).toBeTruthy();
+    expect(within(rows[3]).getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getByText(/allows Azure services/)).toBeTruthy();
+  });
+
+  it("still lists databases when sizes cannot be read", () => {
+    hooks.usePGOverview.mockReturnValue(
+      query({ databases: [{ name: "appdb", charset: "UTF8", collation: "C" }], firewall_rules: [], storage: undefined, size_error: "AuthorizationFailed" }),
+    );
+    render(<PGDatabasesPanel server={server} formatDate={(v) => v} />);
+    expect(screen.getByText(/Database sizes could not be read from Azure Monitor: AuthorizationFailed/)).toBeTruthy();
+    expect(screen.getByText("appdb")).toBeTruthy();
+  });
+});
+
+describe("formatBytes", () => {
+  it("uses binary units like Azure and PostgreSQL", () => {
+    expect(formatBytes(7_800_912_919)).toBe("7.3 GB");
+    expect(formatBytes(679_017_495)).toBe("648 MB");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(null)).toBe("—");
   });
 });

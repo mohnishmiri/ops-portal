@@ -686,9 +686,64 @@ class InfraResourceAdminService:
 
     # ── PG Flexible Server ─────────────────────────────────────────────
 
+    def _pg_storage_metrics(self, subscription_id: str, resource_id: str) -> dict[str, Any]:
+        """Blocking Azure Monitor reads: per-database size (now and 7 days ago) and server storage."""
+        monitor = self._monitor(subscription_id)
+        end = datetime.utcnow()
+
+        def span(delta: timedelta) -> str:
+            return f"{end - delta:%Y-%m-%dT%H:%M:%S}Z/{end:%Y-%m-%dT%H:%M:%S}Z"
+
+        # database_size_bytes is split by the DatabaseName dimension; "top" defaults
+        # to 10 series, which would drop databases on busier servers.
+        sizes = monitor.metrics.list(
+            resource_id,
+            timespan=span(timedelta(days=7)),
+            interval="PT1H",
+            metricnames="database_size_bytes",
+            aggregation="Average",
+            filter="DatabaseName eq '*'",
+            top=500,
+        )
+        databases: dict[str, dict[str, Any]] = {}
+        for item in sizes.value:
+            for series in item.timeseries or []:
+                name = next(
+                    (m.value for m in series.metadatavalues or [] if (m.name.value or "").lower() == "databasename"),
+                    None,
+                )
+                points = [(p.time_stamp, p.average) for p in series.data or [] if p.average is not None]
+                if not name or not points:
+                    continue
+                points.sort(key=lambda p: p[0])
+                databases[name.lower()] = {
+                    "size_bytes": int(points[-1][1]),
+                    "size_at": points[-1][0].isoformat(),
+                    "size_7d_ago_bytes": int(points[0][1]),
+                    "size_7d_ago_at": points[0][0].isoformat(),
+                }
+
+        storage = monitor.metrics.list(
+            resource_id,
+            timespan=span(timedelta(hours=3)),
+            interval="PT15M",
+            metricnames="storage_used,storage_free,storage_percent,backup_storage_used,txlogs_storage_used",
+            aggregation="Average",
+        )
+        server: dict[str, Any] = {}
+        for item in storage.value:
+            latest = None
+            for series in item.timeseries or []:
+                for point in series.data or []:
+                    if point.average is not None:
+                        latest = point.average
+            server[item.name.value] = latest
+        return {"databases": databases, "server": server}
+
     async def pg_overview(self, subscription_id: str, resource_group: str, server_name: str) -> dict:
-        """Databases and firewall rules of a PG Flexible Server (read only)."""
+        """Databases (with sizes from Azure Monitor), firewall rules and storage of a PG Flexible Server."""
         client = self._pg(subscription_id)
+        resource_id = _arm_id(subscription_id, resource_group, "Microsoft.DBforPostgreSQL/flexibleServers", server_name)
 
         def _read() -> dict:
             databases = [
@@ -699,12 +754,42 @@ class InfraResourceAdminService:
                 {"name": r.name, "start_ip": r.start_ip_address, "end_ip": r.end_ip_address}
                 for r in client.firewall_rules.list_by_server(resource_group, server_name)
             ]
-            return {
-                "databases": sorted(databases, key=lambda d: d["name"]),
-                "firewall_rules": sorted(rules, key=lambda r: r["name"]),
-            }
+            server = client.servers.get(resource_group, server_name)
+            provisioned = server.storage.storage_size_gb if server.storage else None
+            return {"databases": databases, "firewall_rules": rules, "provisioned_gb": provisioned}
+
+        async def _metrics() -> dict[str, Any] | Exception:
+            try:
+                return await asyncio.to_thread(self._pg_storage_metrics, subscription_id, resource_id)
+            except Exception as exc:  # sizes are extra; the lists still matter without them
+                logger.warning("pg_size_metrics_failed", server=server_name, error=str(exc)[:300])
+                return exc
 
         try:
-            return await asyncio.to_thread(_read)
+            listing, metrics = await asyncio.gather(asyncio.to_thread(_read), _metrics())
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Could not read the server: {str(exc)[:300]}")
+
+        sizes = metrics["databases"] if isinstance(metrics, dict) else {}
+        server_metrics = metrics["server"] if isinstance(metrics, dict) else {}
+        databases = [{**d, **sizes.get(d["name"].lower(), {})} for d in listing["databases"]]
+        databases.sort(key=lambda d: (-(d.get("size_bytes") or -1), d["name"]))
+
+        def _bytes(metric: str) -> int | None:
+            value = server_metrics.get(metric)
+            return int(value) if value is not None else None
+
+        return {
+            "databases": databases,
+            "firewall_rules": sorted(listing["firewall_rules"], key=lambda r: r["name"]),
+            "storage": {
+                "provisioned_gb": listing["provisioned_gb"],
+                "used_bytes": _bytes("storage_used"),
+                "free_bytes": _bytes("storage_free"),
+                "percent": _round(server_metrics.get("storage_percent")),
+                "backup_bytes": _bytes("backup_storage_used"),
+                "txlogs_bytes": _bytes("txlogs_storage_used"),
+                "databases_total_bytes": sum(d.get("size_bytes") or 0 for d in databases) or None,
+            },
+            "size_error": str(metrics)[:300] if isinstance(metrics, Exception) else None,
+        }

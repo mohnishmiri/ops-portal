@@ -19,6 +19,7 @@ import {
   azurePortalUrl,
   type MetricKind,
   type MetricsPoint,
+  type PGDatabase,
   type PGOverview,
   type RunHistoryItem,
   TERMINAL_RUN_STATES,
@@ -38,7 +39,7 @@ import {
 } from "../../services/infraResourceAdminApi";
 import { DetailGrid, type GridColumn } from "../aks/DetailGrid";
 import { DetailCard, PropertyList } from "../aks/ResourceDetailShell";
-import { InfraIcons } from "./shared";
+import { formatBytes, InfraIcons } from "./shared";
 
 export const METRIC_COLORS: Record<string, string> = {
   cpu: "#2e80ac",
@@ -408,7 +409,7 @@ export function VMDisksGrid({ vm, disks, onOpenDisk }: { vm: VMInfo & Record<str
   ];
   return (
     <DetailGrid
-      title={`Disks · ${rows.length} attached · ${total.toLocaleString()} GB total`}
+      title={`Disks · ${total.toLocaleString()} GB total`}
       rows={rows}
       columns={columns}
       rowKey={(r) => `${r.role}-${r.lun ?? ""}-${r.name}`}
@@ -920,42 +921,151 @@ export function VMAdminPanel({
 
 // ── PG Flexible Server ────────────────────────────────────────────────
 
-export function PGDatabasesPanel({ server }: { server: PGFlexServer }) {
+const SYSTEM_DATABASES = new Set(["azure_sys", "azure_maintenance"]);
+
+function StorageTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-xl border border-att-100 bg-white px-3 py-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="mt-0.5 text-base font-bold text-slate-900">{value}</p>
+      {hint && <p className="text-[11px] text-slate-500">{hint}</p>}
+    </div>
+  );
+}
+
+function growthText(db: PGDatabase): { text: string; tone: string } {
+  if (db.size_bytes == null) return { text: "—", tone: "text-slate-400" };
+  if (db.size_7d_ago_bytes == null) return { text: "new", tone: "text-slate-500" };
+  const delta = db.size_bytes - db.size_7d_ago_bytes;
+  if (Math.abs(delta) < 1024 * 1024) return { text: "no change", tone: "text-slate-500" };
+  const pct = db.size_7d_ago_bytes ? (delta / db.size_7d_ago_bytes) * 100 : 0;
+  return {
+    text: `${delta > 0 ? "+" : "−"}${formatBytes(Math.abs(delta))} (${delta > 0 ? "+" : "−"}${Math.abs(pct).toFixed(1)}%)`,
+    tone: delta > 0 ? "font-semibold text-slate-800" : "text-green-700",
+  };
+}
+
+export function PGDatabasesPanel({ server, formatDate }: { server: PGFlexServer; formatDate: (value: string) => string }) {
   const overview = usePGOverview(server.subscription_id, server.resource_group, server.name, true);
   if (overview.isLoading) {
     return (
       <p className="flex items-center gap-2 py-10 text-sm text-slate-500">
-        <Spinner /> Reading databases and firewall rules…
+        <Spinner /> Reading databases, sizes and firewall rules…
       </p>
     );
   }
   if (overview.isError) return <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{apiErrorMessage(overview.error, "Could not read the server")}</p>;
-  type Db = PGOverview["databases"][number];
   type Rule = PGOverview["firewall_rules"][number];
-  const allowsAzure = (overview.data?.firewall_rules ?? []).some((r) => r.start_ip === "0.0.0.0" && r.end_ip === "0.0.0.0");
-  const openToAll = (overview.data?.firewall_rules ?? []).some((r) => r.start_ip === "0.0.0.0" && r.end_ip === "255.255.255.255");
+  const data = overview.data;
+  const databases = data?.databases ?? [];
+  const storage = data?.storage;
+  const total = storage?.databases_total_bytes ?? databases.reduce((sum, d) => sum + (d.size_bytes || 0), 0);
+  const sizedAt = databases.map((d) => d.size_at).filter(Boolean).sort().pop();
+  const provisionedBytes = storage?.provisioned_gb ? storage.provisioned_gb * 1024 ** 3 : null;
+  const percent = storage?.percent ?? (storage?.used_bytes != null && provisionedBytes ? (storage.used_bytes / provisionedBytes) * 100 : null);
+  const allowsAzure = (data?.firewall_rules ?? []).some((r) => r.start_ip === "0.0.0.0" && r.end_ip === "0.0.0.0");
+  const openToAll = (data?.firewall_rules ?? []).some((r) => r.start_ip === "0.0.0.0" && r.end_ip === "255.255.255.255");
+
+  const columns: GridColumn<PGDatabase>[] = [
+    {
+      key: "name",
+      header: "Database",
+      sortValue: (d) => d.name,
+      render: (d) => (
+        <span className="flex items-center gap-2">
+          <span className="font-mono text-xs font-semibold">{d.name}</span>
+          {SYSTEM_DATABASES.has(d.name) && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-500">Azure system</span>}
+          {d.name === "postgres" && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-500">Default</span>}
+        </span>
+      ),
+    },
+    {
+      key: "size",
+      header: "Size",
+      align: "right",
+      sortValue: (d) => d.size_bytes ?? -1,
+      render: (d) => <span className="whitespace-nowrap text-xs font-semibold text-slate-900" title={d.size_bytes != null ? `${d.size_bytes.toLocaleString()} bytes` : "Not reported yet"}>{formatBytes(d.size_bytes)}</span>,
+    },
+    {
+      key: "share",
+      header: "Share of databases",
+      sortValue: (d) => d.size_bytes ?? -1,
+      render: (d) => {
+        if (d.size_bytes == null || !total) return <span className="text-xs text-slate-400">—</span>;
+        const share = (d.size_bytes / total) * 100;
+        return (
+          <div className="flex w-40 items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+              <div className="h-full rounded-full" style={{ width: `${Math.max(1, share)}%`, background: METRIC_COLORS.storage }} />
+            </div>
+            <span className="w-10 text-right text-xs text-slate-600">{share < 1 ? "<1" : share.toFixed(0)}%</span>
+          </div>
+        );
+      },
+    },
+    {
+      key: "growth",
+      header: "7-day change",
+      align: "right",
+      sortValue: (d) => (d.size_bytes != null && d.size_7d_ago_bytes != null ? d.size_bytes - d.size_7d_ago_bytes : -Infinity),
+      render: (d) => {
+        const growth = growthText(d);
+        return (
+          <span className={`whitespace-nowrap text-xs ${growth.tone}`} title={d.size_7d_ago_at ? `Compared with ${formatDate(d.size_7d_ago_at)}` : undefined}>
+            {growth.text}
+          </span>
+        );
+      },
+    },
+    { key: "encoding", header: "Encoding", sortValue: (d) => `${d.charset ?? ""} ${d.collation ?? ""}`, render: (d) => <span className="text-xs text-slate-600">{[d.charset, d.collation].filter(Boolean).join(" · ") || "—"}</span> },
+  ];
+
   return (
     <div className="space-y-5">
-      <DetailGrid<Db>
-        title={`Databases (${overview.data?.databases.length ?? 0})`}
-        rows={overview.data?.databases ?? []}
-        columns={[
-          { key: "name", header: "Database", sortValue: (d) => d.name, render: (d) => <span className="font-mono text-xs font-semibold">{d.name}</span> },
-          { key: "charset", header: "Charset", sortValue: (d) => d.charset ?? "", render: (d) => <span className="text-xs">{d.charset ?? "—"}</span> },
-          { key: "collation", header: "Collation", sortValue: (d) => d.collation ?? "", render: (d) => <span className="text-xs">{d.collation ?? "—"}</span> },
-        ]}
+      <DetailCard
+        title="Storage"
+        subtitle={storage?.used_bytes != null ? "Server storage from Azure Monitor. Used includes data, transaction logs (WAL), temporary files and server logs." : "Storage metrics are not available for this server."}
+      >
+        {percent != null && (
+          <div className="mb-3">
+            <div className="mb-1 flex items-baseline justify-between text-sm">
+              <span className="font-semibold text-slate-800">
+                {formatBytes(storage?.used_bytes)} used{storage?.provisioned_gb ? ` of ${storage.provisioned_gb} GB provisioned` : ""}
+              </span>
+              <span className={`font-semibold ${percent >= 90 ? "text-red-600" : percent >= 80 ? "text-amber-700" : "text-slate-700"}`}>{percent.toFixed(1)}%</span>
+            </div>
+            <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
+              <div className="h-full rounded-full" style={{ width: `${Math.min(100, percent)}%`, background: percent >= 90 ? CRITICAL_COLOR : percent >= 80 ? WARNING_COLOR : METRIC_COLORS.storage }} />
+            </div>
+          </div>
+        )}
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StorageTile label="Databases total" value={formatBytes(total || null)} hint={`${databases.length} databases`} />
+          <StorageTile label="Free" value={formatBytes(storage?.free_bytes)} hint="before storage auto-grow or a resize is needed" />
+          <StorageTile label="Transaction logs" value={formatBytes(storage?.txlogs_bytes)} hint="WAL kept on the server" />
+          <StorageTile label="Backups" value={formatBytes(storage?.backup_bytes)} hint="billed separately, not in provisioned storage" />
+        </div>
+      </DetailCard>
+
+      {data?.size_error && (
+        <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">Database sizes could not be read from Azure Monitor: {data.size_error}</p>
+      )}
+      <DetailGrid<PGDatabase>
+        title={`Databases${total ? ` · ${formatBytes(total)}` : ""}${sizedAt ? ` · sizes as of ${formatDate(sizedAt)}` : ""}`}
+        rows={databases}
+        columns={columns}
         rowKey={(d) => d.name}
         searchText={(d) => d.name}
         searchPlaceholder="Search databases…"
-        initialSort={{ key: "name", direction: "asc" }}
+        initialSort={{ key: "size", direction: "desc" }}
         emptyText="No databases."
       />
       {openToAll && (
         <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">A firewall rule allows every IPv4 address (0.0.0.0 – 255.255.255.255).</p>
       )}
       <DetailGrid<Rule>
-        title={`Firewall rules (${overview.data?.firewall_rules.length ?? 0})${allowsAzure ? " · allows Azure services" : ""}`}
-        rows={overview.data?.firewall_rules ?? []}
+        title={`Firewall rules${allowsAzure ? " · allows Azure services" : ""}`}
+        rows={data?.firewall_rules ?? []}
         columns={[
           { key: "name", header: "Rule", sortValue: (r) => r.name, render: (r) => <span className="font-mono text-xs">{r.name}</span> },
           { key: "start", header: "Start IP", sortValue: (r) => r.start_ip, render: (r) => <span className="font-mono text-xs">{r.start_ip}</span> },

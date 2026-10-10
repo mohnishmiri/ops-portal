@@ -1429,7 +1429,7 @@ function PGResourceDetail({ server, config, alerts, props }: { server: PGFlexSer
           }
         />
       )}
-      {tab === "databases" && <PGDatabasesPanel server={server} />}
+      {tab === "databases" && <PGDatabasesPanel server={server} formatDate={props.formatDate} />}
       {tab === "admin" && (
         <PGAdminPanel
           server={server}
