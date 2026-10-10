@@ -28,7 +28,9 @@ const STEPS: { key: Step; label: string }[] = [
 ];
 
 const MAX_NODES = 1000;
-const TAINT_EFFECTS = ["NoSchedule", "PreferNoSchedule", "NoExecute"] as const;
+export const TAINT_EFFECTS = ["NoSchedule", "PreferNoSchedule", "NoExecute"] as const;
+/** The Azure portal's OS disk sizes; "" leaves the size to Azure. */
+const DISK_SIZES = [128, 256, 512, 1024, 2048];
 const OS_SKUS = {
   Linux: [
     { value: "Ubuntu", label: "Ubuntu Linux" },
@@ -40,11 +42,11 @@ const OS_SKUS = {
   ],
 } as const;
 
-interface KV {
+export interface KV {
   key: string;
   value: string;
 }
-interface TaintRow extends KV {
+export interface TaintRow extends KV {
   effect: string;
 }
 
@@ -131,7 +133,7 @@ const RESERVED_DOMAINS = ["kubernetes.azure.com", "kubernetes.io", "k8s.io"];
 const TAG_FORBIDDEN = /[<>%&\\?/]/;
 const whole = (v: string) => /^\d+$/.test(v.trim());
 
-function labelKeyError(key: string): string | null {
+export function labelKeyError(key: string): string | null {
   const match = LABEL_KEY_RE.exec(key);
   if (!match) return "Not a valid Kubernetes label key.";
   const prefix = match[1] ?? "";
@@ -139,6 +141,35 @@ function labelKeyError(key: string): string | null {
     return "This domain is reserved by Kubernetes or AKS.";
   }
   return null;
+}
+
+/** Label and taint rows as Kubernetes and AKS accept them; empty rows are ignored. */
+export function validateLabelsAndTaints(labels: KV[], taints: TaintRow[]): { labels?: string; taints?: string } {
+  const errors: { labels?: string; taints?: string } = {};
+  const labelKeys = new Set<string>();
+  for (const { key, value } of labels) {
+    if (!key && !value) continue;
+    const keyError = labelKeyError(key);
+    if (keyError) errors.labels = `${key || "(empty key)"}: ${keyError}`;
+    else if (!LABEL_VALUE_RE.test(value)) errors.labels = `${key}: not a valid label value.`;
+    else if (labelKeys.has(key)) errors.labels = `${key} is set twice.`;
+    labelKeys.add(key);
+  }
+  const taintKeys = new Set<string>();
+  for (const { key, value, effect } of taints) {
+    if (!key && !value && !effect) continue;
+    if (!LABEL_KEY_RE.test(key)) errors.taints = `${key || "(empty key)"}: not a valid taint key.`;
+    else if (!LABEL_VALUE_RE.test(value)) errors.taints = `${key}: not a valid taint value.`;
+    else if (!effect) errors.taints = `${key}: choose an effect.`;
+    else if (taintKeys.has(`${key}:${effect}`)) errors.taints = `${key} with effect ${effect} is set twice.`;
+    taintKeys.add(`${key}:${effect}`);
+  }
+  return errors;
+}
+
+/** "key=value:Effect" strings for the API. */
+export function taintStrings(rows: TaintRow[]): string[] {
+  return rows.filter((t) => t.key).map((t) => `${t.key.trim()}${t.value ? `=${t.value.trim()}` : ""}:${t.effect}`);
 }
 
 /** Subnet IPs a node reserves: classic Azure CNI gives every pod a VNet IP. */
@@ -163,7 +194,7 @@ export function defaultForm(options: NodePoolCreateOptions): NodePoolForm {
     spot: false,
     vmSize: options.defaults.vm_size ?? "",
     osDiskType: "",
-    osDiskSize: String(options.defaults.os_disk_size_gb || 128),
+    osDiskSize: "",
     scaleMethod: "auto",
     nodeCount: "1",
     minCount: "1",
@@ -202,11 +233,11 @@ export function validateForm(form: NodePoolForm, options: NodePoolCreateOptions)
     if (missing.length) errors.zones = `${sizeLabel(size.name)} isn't offered in zone ${missing.join(", ")} here.`;
   }
 
-  const disk = Number(form.osDiskSize);
-  if (!whole(form.osDiskSize) || disk < 30 || disk > 2048) errors.osDiskSize = "Use 30–2048 GiB.";
+  const disk = form.osDiskSize ? Number(form.osDiskSize) : null;
+  if (disk !== null && !DISK_SIZES.includes(disk)) errors.osDiskSize = "Choose a disk size.";
   else if (form.osDiskType === "Ephemeral" && size) {
     if (!size.ephemeral_os_disk) errors.osDiskType = `${sizeLabel(size.name)} doesn't support ephemeral OS disks.`;
-    else if (disk > size.max_ephemeral_os_disk_gb) errors.osDiskSize = `An ephemeral OS disk on this size can be at most ${size.max_ephemeral_os_disk_gb} GiB.`;
+    else if (disk !== null && disk > size.max_ephemeral_os_disk_gb) errors.osDiskSize = `An ephemeral OS disk on this size can be at most ${size.max_ephemeral_os_disk_gb} GiB.`;
   }
 
   const floor = form.mode === "System" ? 1 : 0;
@@ -225,21 +256,7 @@ export function validateForm(form: NodePoolForm, options: NodePoolCreateOptions)
   if (form.surgeMode === "percent" && !(whole(form.surgeValue) && Number(form.surgeValue) >= 1 && Number(form.surgeValue) <= 100)) errors.surgeValue = "Use 1–100%.";
   if (form.surgeMode === "count" && !(whole(form.surgeValue) && Number(form.surgeValue) >= 1 && Number(form.surgeValue) <= 1000)) errors.surgeValue = "Use 1–1000 nodes.";
 
-  const labelKeys = new Set<string>();
-  for (const { key, value } of form.labels) {
-    if (!key && !value) continue;
-    const keyError = labelKeyError(key);
-    if (keyError) errors.labels = `${key || "(empty key)"}: ${keyError}`;
-    else if (!LABEL_VALUE_RE.test(value)) errors.labels = `${key}: not a valid label value.`;
-    else if (labelKeys.has(key)) errors.labels = `${key} is set twice.`;
-    labelKeys.add(key);
-  }
-  for (const { key, value, effect } of form.taints) {
-    if (!key && !value && !effect) continue;
-    if (!LABEL_KEY_RE.test(key)) errors.taints = `${key || "(empty key)"}: not a valid taint key.`;
-    else if (!LABEL_VALUE_RE.test(value)) errors.taints = `${key}: not a valid taint value.`;
-    else if (!effect) errors.taints = `${key}: choose an effect.`;
-  }
+  Object.assign(errors, validateLabelsAndTaints(form.labels, form.taints));
   const tagKeys = new Set<string>();
   for (const { key, value } of form.tags) {
     if (!key && !value) continue;
@@ -272,7 +289,7 @@ export function toPayload(clusterId: string, form: NodePoolForm): CreateNodePool
     spot: form.spot,
     vm_size: form.vmSize,
     os_disk_type: form.osDiskType || null,
-    os_disk_size_gb: Number(form.osDiskSize),
+    os_disk_size_gb: form.osDiskSize ? Number(form.osDiskSize) : null,
     enable_auto_scaling: auto,
     node_count: auto ? null : Number(form.nodeCount),
     min_count: auto ? Number(form.minCount) : null,
@@ -281,7 +298,7 @@ export function toPayload(clusterId: string, form: NodePoolForm): CreateNodePool
     max_surge: form.surgeMode === "default" ? null : form.surgeMode === "percent" ? `${form.surgeValue}%` : form.surgeValue,
     subnet_id: form.subnetId || null,
     node_labels: pairs(form.labels),
-    node_taints: form.taints.filter((t) => t.key).map((t) => `${t.key.trim()}${t.value ? `=${t.value.trim()}` : ""}:${t.effect}`),
+    node_taints: taintStrings(form.taints),
     tags: pairs(form.tags),
   };
 }
@@ -340,7 +357,9 @@ function Radio<V extends string>({ name, value, options, onChange, disabled }: {
   );
 }
 
-function PairsEditor({ rows, onChange, keyLabel, valueLabel, addLabel, effects }: {
+export function PairsEditor({ name, rows, onChange, keyLabel, valueLabel, addLabel, effects }: {
+  /** Names the inputs for screen readers, e.g. "Label" → "Label key 1". */
+  name: string;
   rows: (KV | TaintRow)[];
   onChange: (rows: (KV | TaintRow)[]) => void;
   keyLabel: string;
@@ -360,10 +379,10 @@ function PairsEditor({ rows, onChange, keyLabel, valueLabel, addLabel, effects }
       )}
       {rows.map((row, i) => (
         <div key={i} className={`grid items-center gap-2 ${effects ? "grid-cols-[1fr_1fr_11rem_2rem]" : "grid-cols-[1fr_1fr_2rem]"}`}>
-          <input aria-label={`${keyLabel} ${i + 1}`} value={row.key} onChange={(e) => update(i, { key: e.target.value })} className={inputCls} />
-          <input aria-label={`${valueLabel} ${i + 1}`} value={row.value} onChange={(e) => update(i, { value: e.target.value })} className={inputCls} />
+          <input aria-label={`${name} ${keyLabel.toLowerCase()} ${i + 1}`} value={row.key} onChange={(e) => update(i, { key: e.target.value })} className={inputCls} />
+          <input aria-label={`${name} ${valueLabel.toLowerCase()} ${i + 1}`} value={row.value} onChange={(e) => update(i, { value: e.target.value })} className={inputCls} />
           {effects && (
-            <select aria-label={`Effect ${i + 1}`} value={(row as TaintRow).effect} onChange={(e) => update(i, { effect: e.target.value })} className={inputCls}>
+            <select aria-label={`${name} effect ${i + 1}`} value={(row as TaintRow).effect} onChange={(e) => update(i, { effect: e.target.value })} className={inputCls}>
               <option value="">Select…</option>
               {TAINT_EFFECTS.map((eff) => <option key={eff} value={eff}>{eff}</option>)}
             </select>
@@ -517,7 +536,7 @@ function CreateNodePoolForm({ clusterId, options, onClose, onCreated }: {
   const initialNodes = (auto ? Number(form.minCount) : Number(form.nodeCount)) || 0;
   const peakNodes = (auto ? Number(form.maxCount) : Number(form.nodeCount)) || 0;
   const errorCount = Object.keys(errors).length;
-  const ephemeralFits = !!size?.ephemeral_os_disk && Number(form.osDiskSize) <= (size?.max_ephemeral_os_disk_gb ?? 0);
+  const ephemeralFits = !!size?.ephemeral_os_disk && (!form.osDiskSize || Number(form.osDiskSize) <= size.max_ephemeral_os_disk_gb);
 
   const submit = () =>
     create.mutate(toPayload(clusterId, form), {
@@ -585,7 +604,7 @@ function CreateNodePoolForm({ clusterId, options, onClose, onCreated }: {
                 Use Spot capacity{form.mode === "System" && <span className="text-xs text-slate-400">(User pools only)</span>}
               </label>
             </Row>
-            <Row label="Node size" required error={show("vmSize")} hint={options.vm_sizes_error ?? `${options.vm_sizes.length.toLocaleString()} sizes available to this subscription in ${options.location}.`}>
+            <Row label="Node size" required error={show("vmSize")} hint={options.vm_sizes_error ?? `${options.vm_sizes.length.toLocaleString()} size${options.vm_sizes.length === 1 ? "" : "s"} available to this subscription in ${options.location}.`}>
               {options.vm_sizes.length ? (
                 <VmSizePicker sizes={options.vm_sizes} value={form.vmSize} onChange={(v) => set("vmSize", v)} osType={form.osType} spot={form.spot} />
               ) : (
@@ -600,7 +619,14 @@ function CreateNodePoolForm({ clusterId, options, onClose, onCreated }: {
               </select>
             </Row>
             <Row label="OS disk size (GiB)" htmlFor="np-disksize" required error={show("osDiskSize")} hint={size?.ephemeral_os_disk ? `Ephemeral on this size: up to ${size.max_ephemeral_os_disk_gb} GiB.` : undefined}>
-              <input id="np-disksize" type="number" min={30} max={2048} value={form.osDiskSize} onChange={(e) => set("osDiskSize", e.target.value)} className={inputCls} />
+              <select id="np-disksize" value={form.osDiskSize} onChange={(e) => set("osDiskSize", e.target.value)} className={inputCls}>
+                <option value="">{size ? "Default (based on selected VM)" : "Default (select a VM size)"}</option>
+                {DISK_SIZES.map((gb) => (
+                  <option key={gb} value={String(gb)} disabled={form.osDiskType === "Ephemeral" && !!size && gb > size.max_ephemeral_os_disk_gb}>
+                    {gb}
+                  </option>
+                ))}
+              </select>
             </Row>
             <Row label="Scale method">
               <Radio name="np-scale" value={form.scaleMethod} onChange={(v) => set("scaleMethod", v)} options={[
@@ -658,17 +684,17 @@ function CreateNodePoolForm({ clusterId, options, onClose, onCreated }: {
               )}
             </Row>
             <Row label="Labels" error={show("labels")} hint="Applied to every node in the pool, e.g. nodepool=ruleengine for workload placement.">
-              <PairsEditor rows={form.labels} onChange={(rows) => set("labels", rows as KV[])} keyLabel="Key" valueLabel="Value" addLabel="Add label" />
+              <PairsEditor name="Label" rows={form.labels} onChange={(rows) => set("labels", rows as KV[])} keyLabel="Key" valueLabel="Value" addLabel="Add label" />
             </Row>
             <Row label="Taints" error={show("taints")} hint="Only pods that tolerate a taint are scheduled on these nodes.">
-              <PairsEditor rows={form.taints} onChange={(rows) => set("taints", rows as TaintRow[])} keyLabel="Key" valueLabel="Value" addLabel="Add taint" effects />
+              <PairsEditor name="Taint" rows={form.taints} onChange={(rows) => set("taints", rows as TaintRow[])} keyLabel="Key" valueLabel="Value" addLabel="Add taint" effects />
             </Row>
           </>
         )}
 
         {step === "tags" && (
           <Row label="Tags" error={show("tags")} hint="Azure tags on the pool's scale set, used for cost reporting and policy.">
-            <PairsEditor rows={form.tags} onChange={(rows) => set("tags", rows as KV[])} keyLabel="Name" valueLabel="Value" addLabel="Add tag" />
+            <PairsEditor name="Tag" rows={form.tags} onChange={(rows) => set("tags", rows as KV[])} keyLabel="Name" valueLabel="Value" addLabel="Add tag" />
           </Row>
         )}
 
@@ -704,7 +730,7 @@ function CreateNodePoolForm({ clusterId, options, onClose, onCreated }: {
                   { label: "Node Size", value: size ? `${sizeLabel(size.name)} (${size.vcpus} vCPUs, ${size.memory_gb} GiB)` : form.vmSize },
                   { label: "Availability Zones", value: form.zones.length ? form.zones.join(", ") : "None" },
                   { label: "Priority", value: form.spot ? "Spot (evictable, delete on eviction)" : "Regular" },
-                  { label: "OS Disk", value: `${form.osDiskSize} GiB · ${form.osDiskType || "Default"}` },
+                  { label: "OS Disk", value: `${form.osDiskSize ? `${form.osDiskSize} GiB` : "Default size"} · ${form.osDiskType || "Default type"}` },
                   { label: "Scale", value: auto ? `Autoscale ${form.minCount}–${form.maxCount} nodes` : `${form.nodeCount} nodes (manual)` },
                 ]} />
               </DetailCard>

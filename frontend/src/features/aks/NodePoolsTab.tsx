@@ -21,6 +21,7 @@ import {
   useNodePoolPower,
   useScaleNodePool,
   useUpdateAutoscaling,
+  useUpdateNodePoolLabelsTaints,
 } from "../../services/aksApi";
 import { parseApiDate } from "../../utils/dateFormat";
 import {
@@ -35,7 +36,8 @@ import {
 } from "./aksGridShared";
 import { DetailGrid, GridFilterSelect, type GridColumn } from "./DetailGrid";
 import { apiErrorDetail, DetailIcons, formatAge, iconProps, KeyValueGrid, ReadyBadge, Truncate } from "./detailShared";
-import { CreateNodePoolDialog } from "./CreateNodePoolDialog";
+import { CreateNodePoolDialog, type KV, PairsEditor, type TaintRow, taintStrings, validateLabelsAndTaints } from "./CreateNodePoolDialog";
+import { NodeDetailModal } from "./NodeDetailModal";
 import { ModalShell } from "./K8sResourceModals";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
@@ -253,7 +255,9 @@ export const NodePoolsTab: React.FC<{
   formatDate: (value: string) => string;
   canManage: boolean;
   canCreate: boolean;
-}> = ({ cluster, showToast, formatDate, canManage, canCreate }) => {
+  /** Opens the page's Pod detail for a pod listed on a node. */
+  onOpenPod?: (pod: { namespace: string; pod_name: string }) => void;
+}> = ({ cluster, showToast, formatDate, canManage, canCreate, onOpenPod }) => {
   const [tile, setTile] = useState<Tile>("all");
   const [mode, setMode] = useState<ModeFilter>("all");
   const [selected, setSelected] = useState<string | null>(null);
@@ -621,10 +625,15 @@ export const NodePoolsTab: React.FC<{
         <NodePoolDetailModal
           pool={selectedPool}
           name={selected}
+          clusterId={cluster.id}
           clusterName={cluster.name}
           lastSync={data?.last_sync ?? null}
           formatDate={formatDate}
           isLoading={isLoading}
+          canManage={canManage}
+          showToast={showToast}
+          onOpenPod={onOpenPod}
+          onChanged={() => sync.start(false)}
           onClose={() => setSelected(null)}
         />
       )}
@@ -671,13 +680,27 @@ function parseTaint(taint: string): { key: string; value: string; effect: string
   return { key, value, effect };
 }
 
-function NodesGrid({ pool, filter, onFilterChange }: { pool: NodePoolDetails; filter: NodeFilter; onFilterChange: (f: NodeFilter) => void }) {
+function NodesGrid({ pool, filter, onFilterChange, onOpenNode }: {
+  pool: NodePoolDetails;
+  filter: NodeFilter;
+  onFilterChange: (f: NodeFilter) => void;
+  onOpenNode: (name: string) => void;
+}) {
   const nodes = pool.nodes ?? [];
   const matches = (n: NodeDetail, f: NodeFilter) =>
     f === "not-ready" ? n.ready === false : f === "cordoned" ? !!n.unschedulable : f === "pressure" ? !!n.pressure?.length : true;
   const count = (f: NodeFilter) => nodes.filter((n) => matches(n, f)).length;
   const columns: GridColumn<NodeDetail>[] = [
-    { key: "name", header: "Node", sortValue: (n) => n.name, render: (n) => <Truncate value={n.name} className="font-mono text-xs" maxWidth="max-w-[22rem]" /> },
+    {
+      key: "name",
+      header: "Node",
+      sortValue: (n) => n.name,
+      render: (n) => (
+        <button type="button" onClick={() => onOpenNode(n.name)} className="text-left font-mono text-xs font-medium text-att-700 hover:text-att-900 hover:underline">
+          <Truncate value={n.name} maxWidth="max-w-[22rem]" />
+        </button>
+      ),
+    },
     {
       key: "status",
       header: "Status",
@@ -746,21 +769,32 @@ function NodesGrid({ pool, filter, onFilterChange }: { pool: NodePoolDetails; fi
 export function NodePoolDetailModal({
   pool,
   name,
+  clusterId,
   clusterName,
   lastSync,
   formatDate,
   isLoading,
+  canManage = false,
+  showToast,
+  onOpenPod,
+  onChanged,
   onClose,
 }: {
   pool: NodePoolDetails | undefined;
   name: string;
+  clusterId: string;
   clusterName: string;
   lastSync: string | null;
   formatDate: (value: string) => string;
   isLoading: boolean;
+  canManage?: boolean;
+  showToast?: (msg: string, type?: "success" | "error") => void;
+  onOpenPod?: (pod: { namespace: string; pod_name: string }) => void;
+  onChanged?: () => void;
   onClose: () => void;
 }) {
   const [section, setSection] = useState<DetailSection>("overview");
+  const [nodeName, setNodeName] = useState<string | null>(null);
   const [nodeFilter, setNodeFilter] = useState<NodeFilter>("all");
   const showNodes = (filter: NodeFilter) => {
     setNodeFilter(filter);
@@ -772,147 +806,295 @@ export function NodePoolDetailModal({
   const issues = pool ? poolIssues(pool) : [];
 
   return (
-    <ResourceDetailShell
-      kind="Node Pool"
-      name={name}
-      icon={ResourceKindIcons.nodepool}
-      status={pool && <PoolState pool={pool} />}
-      meta={
-        pool && (
+    <>
+      <ResourceDetailShell
+        kind="Node Pool"
+        name={name}
+        icon={ResourceKindIcons.nodepool}
+        status={pool && <PoolState pool={pool} />}
+        meta={
+          pool && (
+            <>
+              <span>Cluster <span className="font-medium text-slate-700">{clusterName}</span></span>
+              <span className="font-mono">{pool.vm_size}</span>
+              <ModeBadge pool={pool} />
+            </>
+          )
+        }
+        tabs={[
+          { key: "overview", label: "Overview" },
+          { key: "nodes", label: "Nodes", count: pool?.nodes?.length, attention: notReady > 0 },
+          { key: "labels", label: "Labels & Taints", count: pool ? Object.keys(pool.node_labels ?? {}).length + pool.node_taints.length : undefined },
+        ]}
+        activeTab={section}
+        onTabChange={setSection}
+        isLoading={isLoading && !pool}
+        error={!isLoading && !pool ? `Node pool ${name} is no longer in this cluster's inventory.` : null}
+        onClose={onClose}
+      >
+        {pool && section === "overview" && (
           <>
-            <span>Cluster <span className="font-medium text-slate-700">{clusterName}</span></span>
-            <span className="font-mono">{pool.vm_size}</span>
-            <ModeBadge pool={pool} />
+            {isStopped(pool) && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                This pool is stopped: its nodes are deallocated{pool.enable_auto_scaling ? " and its autoscaler is paused" : ""}. Starting it brings back{" "}
+                {pool.count} node{pool.count === 1 ? "" : "s"}.
+              </div>
+            )}
+            {issues.length > 0 && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{issues.join(" · ")}</div>
+            )}
+            {!details && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                Node health and pod counts are unavailable: {pool.node_details_error ?? "the Kubernetes API couldn't be read at the last sync."}
+              </div>
+            )}
+            <KpiRow>
+              <MetricCard
+                title="Nodes"
+                value={details && pool.ready_nodes != null ? `${pool.ready_nodes}/${pool.count}` : pool.count}
+                subtitle={details ? (notReady ? `${notReady} not ready` : "Ready nodes / total") : "Live count from Azure"}
+                icon={MetricCardIcons.server()}
+                tone={notReady ? "amber" : "green"}
+                onClick={() => showNodes(notReady ? "not-ready" : "all")}
+                actionLabel="Show this pool's nodes"
+              />
+              <MetricCard
+                title="Pods"
+                value={details && pool.total_pods != null ? pool.total_pods.toLocaleString() : "—"}
+                subtitle={details && pool.pod_capacity ? `of ${pool.pod_capacity.toLocaleString()} capacity (${Math.round(((pool.total_pods ?? 0) / pool.pod_capacity) * 100)}%)` : `Max ${pool.max_pods} per node`}
+                icon={MetricCardIcons.layers()}
+                tone="att"
+                onClick={() => showNodes("all")}
+                actionLabel="Show pods per node"
+              />
+              <MetricCard
+                title="Autoscaling"
+                value={pool.enable_auto_scaling ? `${pool.min_count}–${pool.max_count}` : "Manual"}
+                subtitle={atAutoscaleMax(pool) ? "At maximum: can't add nodes" : `${pool.count} nodes now`}
+                icon={MetricCardIcons.activity()}
+                tone={atAutoscaleMax(pool) ? "red" : "purple"}
+                onClick={() => showNodes("all")}
+                actionLabel="Show the nodes the autoscaler manages"
+              />
+              <MetricCard
+                title="Kubernetes"
+                value={pool.kubernetes_version || "—"}
+                subtitle={image.released ? `Node image ${image.released.toLocaleDateString(undefined, { month: "short", year: "numeric" })}` : "Node image unknown"}
+                icon={MetricCardIcons.cloud()}
+                tone="indigo"
+                valueClassName="text-xl"
+                onClick={() => showNodes("all")}
+                actionLabel="Show kubelet versions per node"
+              />
+            </KpiRow>
+
+            <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+              <DetailCard title="Configuration">
+                <PropertyList
+                  items={[
+                    { label: "VM Size", value: pool.vm_size, mono: true },
+                    { label: "Mode", value: pool.mode },
+                    { label: "OS", value: [pool.os_type, pool.os_sku].filter(Boolean).join(" · ") },
+                    { label: "OS Disk", value: [pool.os_disk_size_gb ? `${pool.os_disk_size_gb} GB` : null, pool.os_disk_type].filter(Boolean).join(" · ") },
+                    { label: "Max Pods per Node", value: pool.max_pods },
+                    { label: "Availability Zones", value: pool.availability_zones.length ? pool.availability_zones.join(", ") : "None" },
+                    { label: "Priority", value: pool.scale_set_priority },
+                    { label: "Scale-down Mode", value: pool.scale_down_mode },
+                    { label: "Upgrade Max Surge", value: pool.max_surge },
+                  ]}
+                />
+              </DetailCard>
+              <DetailCard title="Status & Versions">
+                <PropertyList
+                  items={[
+                    { label: "Provisioning State", value: pool.provisioning_state },
+                    { label: "Power State", value: pool.power_state },
+                    { label: "Kubernetes Version", value: pool.kubernetes_version, mono: true },
+                    { label: "Node Image Released", value: image.released?.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) },
+                    { label: "Node Image Version", value: pool.node_image_version, mono: true, wide: true },
+                    { label: "Last Synced", value: lastSync ? formatDate(lastSync) : null, wide: true },
+                  ]}
+                />
+              </DetailCard>
+            </div>
           </>
-        )
-      }
-      tabs={[
-        { key: "overview", label: "Overview" },
-        { key: "nodes", label: "Nodes", count: pool?.nodes?.length, attention: notReady > 0 },
-        { key: "labels", label: "Labels & Taints", count: pool ? Object.keys(pool.node_labels ?? {}).length + pool.node_taints.length : undefined },
-      ]}
-      activeTab={section}
-      onTabChange={setSection}
-      isLoading={isLoading && !pool}
-      error={!isLoading && !pool ? `Node pool ${name} is no longer in this cluster's inventory.` : null}
-      onClose={onClose}
-    >
-      {pool && section === "overview" && (
-        <>
-          {isStopped(pool) && (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-              This pool is stopped: its nodes are deallocated{pool.enable_auto_scaling ? " and its autoscaler is paused" : ""}. Starting it brings back{" "}
-              {pool.count} node{pool.count === 1 ? "" : "s"}.
-            </div>
-          )}
-          {issues.length > 0 && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{issues.join(" · ")}</div>
-          )}
-          {!details && (
+        )}
+
+        {pool && section === "nodes" &&
+          (details ? (
+            <NodesGrid pool={pool} filter={nodeFilter} onFilterChange={setNodeFilter} onOpenNode={setNodeName} />
+          ) : (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-              Node health and pod counts are unavailable: {pool.node_details_error ?? "the Kubernetes API couldn't be read at the last sync."}
+              Node details are unavailable: {pool.node_details_error ?? "the Kubernetes API couldn't be read at the last sync."}
             </div>
-          )}
-          <KpiRow>
-            <MetricCard
-              title="Nodes"
-              value={details && pool.ready_nodes != null ? `${pool.ready_nodes}/${pool.count}` : pool.count}
-              subtitle={details ? (notReady ? `${notReady} not ready` : "Ready nodes / total") : "Live count from Azure"}
-              icon={MetricCardIcons.server()}
-              tone={notReady ? "amber" : "green"}
-              onClick={() => showNodes(notReady ? "not-ready" : "all")}
-              actionLabel="Show this pool's nodes"
-            />
-            <MetricCard
-              title="Pods"
-              value={details && pool.total_pods != null ? pool.total_pods.toLocaleString() : "—"}
-              subtitle={details && pool.pod_capacity ? `of ${pool.pod_capacity.toLocaleString()} capacity (${Math.round(((pool.total_pods ?? 0) / pool.pod_capacity) * 100)}%)` : `Max ${pool.max_pods} per node`}
-              icon={MetricCardIcons.layers()}
-              tone="att"
-              onClick={() => showNodes("all")}
-              actionLabel="Show pods per node"
-            />
-            <MetricCard
-              title="Autoscaling"
-              value={pool.enable_auto_scaling ? `${pool.min_count}–${pool.max_count}` : "Manual"}
-              subtitle={atAutoscaleMax(pool) ? "At maximum: can't add nodes" : `${pool.count} nodes now`}
-              icon={MetricCardIcons.activity()}
-              tone={atAutoscaleMax(pool) ? "red" : "purple"}
-              onClick={() => showNodes("all")}
-              actionLabel="Show the nodes the autoscaler manages"
-            />
-            <MetricCard
-              title="Kubernetes"
-              value={pool.kubernetes_version || "—"}
-              subtitle={image.released ? `Node image ${image.released.toLocaleDateString(undefined, { month: "short", year: "numeric" })}` : "Node image unknown"}
-              icon={MetricCardIcons.cloud()}
-              tone="indigo"
-              valueClassName="text-xl"
-              onClick={() => showNodes("all")}
-              actionLabel="Show kubelet versions per node"
-            />
-          </KpiRow>
+          ))}
 
-          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            <DetailCard title="Configuration">
-              <PropertyList
-                items={[
-                  { label: "VM Size", value: pool.vm_size, mono: true },
-                  { label: "Mode", value: pool.mode },
-                  { label: "OS", value: [pool.os_type, pool.os_sku].filter(Boolean).join(" · ") },
-                  { label: "OS Disk", value: [pool.os_disk_size_gb ? `${pool.os_disk_size_gb} GB` : null, pool.os_disk_type].filter(Boolean).join(" · ") },
-                  { label: "Max Pods per Node", value: pool.max_pods },
-                  { label: "Availability Zones", value: pool.availability_zones.length ? pool.availability_zones.join(", ") : "None" },
-                  { label: "Priority", value: pool.scale_set_priority },
-                  { label: "Scale-down Mode", value: pool.scale_down_mode },
-                  { label: "Upgrade Max Surge", value: pool.max_surge },
-                ]}
-              />
-            </DetailCard>
-            <DetailCard title="Status & Versions">
-              <PropertyList
-                items={[
-                  { label: "Provisioning State", value: pool.provisioning_state },
-                  { label: "Power State", value: pool.power_state },
-                  { label: "Kubernetes Version", value: pool.kubernetes_version, mono: true },
-                  { label: "Node Image Released", value: image.released?.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) },
-                  { label: "Node Image Version", value: pool.node_image_version, mono: true, wide: true },
-                  { label: "Last Synced", value: lastSync ? formatDate(lastSync) : null, wide: true },
-                ]}
-              />
-            </DetailCard>
-          </div>
-        </>
+        {pool && section === "labels" && (
+          <LabelsAndTaints pool={pool} clusterId={clusterId} canManage={canManage} showToast={showToast} onChanged={onChanged} />
+        )}
+      </ResourceDetailShell>
+      {nodeName && (
+        <NodeDetailModal clusterId={clusterId} name={nodeName} formatDate={formatDate} onOpenPod={onOpenPod} onClose={() => setNodeName(null)} />
       )}
+    </>
+  );
+}
 
-      {pool && section === "nodes" &&
-        (details ? (
-          <NodesGrid pool={pool} filter={nodeFilter} onFilterChange={setNodeFilter} />
-        ) : (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            Node details are unavailable: {pool.node_details_error ?? "the Kubernetes API couldn't be read at the last sync."}
-          </div>
-        ))}
+// ── Labels & taints ───────────────────────────────────────────────────
 
-      {pool && section === "labels" && (
-        <>
-          <KeyValueGrid title="Node Labels" entries={pool.node_labels ?? {}} emptyText="No labels are set on this pool." />
-          <DetailGrid
-            title="Taints"
-            rows={pool.node_taints.map(parseTaint)}
-            columns={[
-              { key: "key", header: "Key", sortValue: (t) => t.key, render: (t) => <span className="font-mono text-xs text-slate-800">{t.key}</span> },
-              { key: "value", header: "Value", sortValue: (t) => t.value, render: (t) => <span className="font-mono text-xs text-slate-700">{t.value || "—"}</span> },
-              { key: "effect", header: "Effect", sortValue: (t) => t.effect, render: (t) => <span className="text-xs text-slate-700">{t.effect || "—"}</span> },
-            ]}
-            rowKey={(t) => `${t.key}=${t.value}:${t.effect}`}
-            searchText={(t) => `${t.key} ${t.value} ${t.effect}`}
-            searchPlaceholder="Search taints…"
-            emptyText="No taints: any pod can be scheduled on this pool."
-          />
-        </>
+const AKS_MANAGED = "kubernetes.azure.com/";
+
+function LabelsAndTaints({
+  pool,
+  clusterId,
+  canManage,
+  showToast,
+  onChanged,
+}: {
+  pool: NodePoolDetails;
+  clusterId: string;
+  canManage: boolean;
+  showToast?: (msg: string, type?: "success" | "error") => void;
+  onChanged?: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const blocked = isStopped(pool)
+    ? "Start the pool before changing its labels or taints."
+    : pool.provisioning_state && pool.provisioning_state !== "Succeeded"
+      ? `${pool.name} is ${pool.provisioning_state}. Wait for it to finish.`
+      : null;
+
+  if (editing) {
+    return <LabelsAndTaintsEditor pool={pool} clusterId={clusterId} showToast={showToast} onDone={(saved) => { setEditing(false); if (saved) onChanged?.(); }} />;
+  }
+  return (
+    <>
+      {canManage && (
+        <div className="flex items-center justify-end gap-3">
+          {blocked && <span className="text-xs text-slate-500">{blocked}</span>}
+          <button type="button" disabled={!!blocked} onClick={() => setEditing(true)} className={`${btn.primary} disabled:cursor-not-allowed`}>
+            Edit labels &amp; taints
+          </button>
+        </div>
       )}
-    </ResourceDetailShell>
+      <KeyValueGrid title="Node Labels" entries={pool.node_labels ?? {}} emptyText="No labels are set on this pool." />
+      <DetailGrid
+        title="Taints"
+        rows={pool.node_taints.map(parseTaint)}
+        columns={[
+          { key: "key", header: "Key", sortValue: (t) => t.key, render: (t) => <span className="font-mono text-xs text-slate-800">{t.key}</span> },
+          { key: "value", header: "Value", sortValue: (t) => t.value, render: (t) => <span className="font-mono text-xs text-slate-700">{t.value || "—"}</span> },
+          { key: "effect", header: "Effect", sortValue: (t) => t.effect, render: (t) => <span className="text-xs text-slate-700">{t.effect || "—"}</span> },
+        ]}
+        rowKey={(t) => `${t.key}=${t.value}:${t.effect}`}
+        searchText={(t) => `${t.key} ${t.value} ${t.effect}`}
+        searchPlaceholder="Search taints…"
+        emptyText="No taints: any pod can be scheduled on this pool."
+      />
+    </>
+  );
+}
+
+export function LabelsAndTaintsEditor({
+  pool,
+  clusterId,
+  showToast,
+  onDone,
+}: {
+  pool: NodePoolDetails;
+  clusterId: string;
+  showToast?: (msg: string, type?: "success" | "error") => void;
+  onDone: (saved: boolean) => void;
+}) {
+  const current = pool.node_labels ?? {};
+  const managedLabels = Object.entries(current).filter(([k]) => k.startsWith(AKS_MANAGED));
+  const managedTaints = pool.node_taints.filter((t) => t.startsWith(AKS_MANAGED));
+  const [labels, setLabels] = useState<KV[]>(() => Object.entries(current).filter(([k]) => !k.startsWith(AKS_MANAGED)).map(([key, value]) => ({ key, value })));
+  const [taints, setTaints] = useState<TaintRow[]>(() => pool.node_taints.filter((t) => !t.startsWith(AKS_MANAGED)).map(parseTaint));
+  const save = useUpdateNodePoolLabelsTaints();
+
+  const errors = validateLabelsAndTaints(labels, taints);
+  const managedKeyUsed = [...labels, ...taints].find((r) => r.key.startsWith(AKS_MANAGED));
+  const newLabels = Object.fromEntries([...managedLabels, ...labels.filter((l) => l.key).map((l) => [l.key.trim(), l.value.trim()] as [string, string])]);
+  const newTaints = [...managedTaints, ...taintStrings(taints)];
+  const changes = {
+    added: Object.keys(newLabels).filter((k) => !(k in current)),
+    changed: Object.keys(newLabels).filter((k) => k in current && current[k] !== newLabels[k]),
+    removed: Object.keys(current).filter((k) => !(k in newLabels)),
+    taintsAdded: newTaints.filter((t) => !pool.node_taints.includes(t)),
+    taintsRemoved: pool.node_taints.filter((t) => !newTaints.includes(t)),
+  };
+  const changeCount = Object.values(changes).reduce((n, list) => n + list.length, 0);
+  const evicting = changes.taintsAdded.filter((t) => t.endsWith(":NoExecute"));
+  const problem = errors.labels ?? errors.taints ?? (managedKeyUsed ? `${managedKeyUsed.key} is managed by AKS and can't be set here.` : null);
+
+  const submit = () =>
+    save.mutate(
+      { clusterId, nodepoolName: pool.name, labels: newLabels, taints: newTaints },
+      {
+        onSuccess: () => {
+          showToast?.(`Updating labels and taints of ${pool.name}. AKS applies them to its nodes in the background.`);
+          onDone(true);
+        },
+      }
+    );
+
+  return (
+    <DetailCard
+      title="Edit Labels & Taints"
+      subtitle="What you save replaces the pool's labels and taints. AKS applies them to the pool's existing nodes and to new ones."
+    >
+      <div className="space-y-5">
+        {(managedLabels.length > 0 || managedTaints.length > 0) && (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <span className="font-semibold">Managed by AKS (kept as they are):</span>{" "}
+            {[...managedLabels.map(([k, v]) => `${k}=${v}`), ...managedTaints].join(", ")}
+          </div>
+        )}
+        <section>
+          <h4 className="mb-2 text-sm font-semibold text-slate-800">Labels</h4>
+          <PairsEditor name="Label" rows={labels} onChange={(rows) => setLabels(rows as KV[])} keyLabel="Key" valueLabel="Value" addLabel="Add label" />
+          {errors.labels && <p className="mt-1 text-xs text-red-600" role="alert">{errors.labels}</p>}
+        </section>
+        <section>
+          <h4 className="mb-2 text-sm font-semibold text-slate-800">Taints</h4>
+          <PairsEditor name="Taint" rows={taints} onChange={(rows) => setTaints(rows as TaintRow[])} keyLabel="Key" valueLabel="Value" addLabel="Add taint" effects />
+          {errors.taints && <p className="mt-1 text-xs text-red-600" role="alert">{errors.taints}</p>}
+        </section>
+
+        {changeCount > 0 && (
+          <div className="rounded-lg border border-att-100 bg-att-50/60 px-3 py-2 text-sm text-slate-700">
+            <p className="font-semibold">Changes</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+              {changes.added.map((k) => <li key={`a-${k}`}>Add label {k}={newLabels[k]}</li>)}
+              {changes.changed.map((k) => <li key={`c-${k}`}>Change label {k}: {current[k]} → {newLabels[k]}</li>)}
+              {changes.removed.map((k) => <li key={`r-${k}`}>Remove label {k}</li>)}
+              {changes.taintsAdded.map((t) => <li key={`ta-${t}`}>Add taint {t}</li>)}
+              {changes.taintsRemoved.map((t) => <li key={`tr-${t}`}>Remove taint {t}</li>)}
+            </ul>
+          </div>
+        )}
+        {(evicting.length > 0 || changes.removed.length > 0 || changes.changed.length > 0) && (
+          <ul className="list-disc space-y-1 pl-5 text-xs text-amber-800">
+            {evicting.map((t) => (
+              <li key={t}>{parseTaint(t).key} is a NoExecute taint: pods already on these nodes that don't tolerate it are evicted.</li>
+            ))}
+            {(changes.removed.length > 0 || changes.changed.length > 0) && (
+              <li>Pods that select nodes by a removed or changed label can't be scheduled on this pool anymore; pods already running stay.</li>
+            )}
+          </ul>
+        )}
+        {problem && changeCount > 0 && !errors.labels && !errors.taints && <p className="text-xs text-red-600" role="alert">{problem}</p>}
+        {save.isError && <p className="text-sm text-red-600" role="alert">{apiErrorDetail(save.error, "AKS rejected the change.")}</p>}
+
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={() => onDone(false)} className={btn.secondary}>Cancel</button>
+          <button type="button" disabled={!!problem || changeCount === 0 || save.isPending} onClick={submit} className={btn.primary}>
+            {save.isPending ? "Saving..." : changeCount ? `Save ${changeCount} change${changeCount === 1 ? "" : "s"}` : "No changes"}
+          </button>
+        </div>
+      </div>
+    </DetailCard>
   );
 }
 

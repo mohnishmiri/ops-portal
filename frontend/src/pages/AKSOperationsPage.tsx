@@ -2659,6 +2659,7 @@ const AKSOperationsPage: React.FC = () => {
               formatDate={formatDate}
               canManage={canWrite && hasCapability("AKS_NODEPOOL_MANAGE")}
               canCreate={canWrite && hasCapability("AKS_NODEPOOL_CREATE")}
+              onOpenPod={(pod) => setPodDetail({ namespace: pod.namespace, name: pod.pod_name })}
             />
           ) : (
             <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>

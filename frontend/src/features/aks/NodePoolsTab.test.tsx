@@ -18,6 +18,8 @@ vi.mock("../../services/aksApi", async (importOriginal) => ({
   useScaleNodePool: vi.fn(),
   useUpdateAutoscaling: vi.fn(),
   useNodePoolPower: vi.fn(),
+  useNodeDetail: vi.fn(() => ({ data: undefined, isLoading: true, isError: false })),
+  useUpdateNodePoolLabelsTaints: vi.fn(),
 }));
 
 import * as aksApi from "../../services/aksApi";
@@ -86,6 +88,7 @@ const POOLS = [
 const scaleMutate = vi.fn();
 const autoscaleMutate = vi.fn();
 const powerMutate = vi.fn();
+const labelsMutate = vi.fn();
 
 function setup(pools: aksApi.NodePoolDetails[] = POOLS, canManage = true, canCreate = false) {
   (aksApi.useCachedNodePools as any).mockReturnValue({
@@ -97,6 +100,7 @@ function setup(pools: aksApi.NodePoolDetails[] = POOLS, canManage = true, canCre
   (aksApi.useScaleNodePool as any).mockReturnValue({ mutate: scaleMutate, isPending: false });
   (aksApi.useUpdateAutoscaling as any).mockReturnValue({ mutate: autoscaleMutate, isPending: false });
   (aksApi.useNodePoolPower as any).mockReturnValue({ mutate: powerMutate, isPending: false });
+  (aksApi.useUpdateNodePoolLabelsTaints as any).mockReturnValue({ mutate: labelsMutate, isPending: false, isError: false });
   render(<NodePoolsTab cluster={CLUSTER} showToast={vi.fn()} formatDate={(v) => v} canManage={canManage} canCreate={canCreate} />);
 }
 
@@ -107,6 +111,7 @@ describe("NodePoolsTab", () => {
     scaleMutate.mockReset();
     autoscaleMutate.mockReset();
     powerMutate.mockReset();
+    labelsMutate.mockReset();
   });
 
   it("shows pods against capacity and the node image release", () => {
@@ -252,6 +257,73 @@ describe("NodePoolsTab", () => {
 
     expect(screen.getByText("dedicated")).toBeTruthy();
     expect(screen.getByText("NoSchedule")).toBeTruthy();
+  });
+});
+
+describe("node pool labels and taints", () => {
+  beforeEach(() => labelsMutate.mockReset());
+
+  const openLabels = (p: aksApi.NodePoolDetails) => {
+    setup([p]);
+    fireEvent.click(screen.getByRole("button", { name: p.name }));
+    fireEvent.click(screen.getByRole("tab", { name: /Labels & Taints/ }));
+  };
+
+  it("edits labels and taints and keeps the ones AKS manages", () => {
+    openLabels(
+      pool({
+        name: "spotpool",
+        node_labels: { nodepool: "elk", "kubernetes.azure.com/scalesetpriority": "spot" },
+        node_taints: ["kubernetes.azure.com/scalesetpriority=spot:NoSchedule"],
+      })
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit labels & taints" }));
+    expect(screen.getByText(/Managed by AKS/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Label value 1"), { target: { value: "ruleengine" } });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add taint" }));
+    fireEvent.change(screen.getByLabelText("Taint key 1"), { target: { value: "dedicated" } });
+    fireEvent.change(screen.getByLabelText("Taint value 1"), { target: { value: "rules" } });
+    fireEvent.change(screen.getByLabelText("Taint effect 1"), { target: { value: "NoExecute" } });
+
+    expect(screen.getByText("Change label nodepool: elk → ruleengine")).toBeTruthy();
+    expect(screen.getByText(/dedicated is a NoExecute taint/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save 2 changes" }));
+
+    expect(labelsMutate.mock.calls[0][0]).toEqual({
+      clusterId: CLUSTER.id,
+      nodepoolName: "spotpool",
+      labels: { "kubernetes.azure.com/scalesetpriority": "spot", nodepool: "ruleengine" },
+      taints: ["kubernetes.azure.com/scalesetpriority=spot:NoSchedule", "dedicated=rules:NoExecute"],
+    });
+  });
+
+  it("rejects reserved label domains before saving", () => {
+    openLabels(pool({ node_labels: {} }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit labels & taints" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add label" }));
+    fireEvent.change(screen.getByLabelText("Label key 1"), { target: { value: "topology.kubernetes.io/zone" } });
+    fireEvent.change(screen.getByLabelText("Label value 1"), { target: { value: "1" } });
+
+    expect(screen.getByText(/reserved by Kubernetes or AKS/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Save 1 change/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("can't edit a stopped pool", () => {
+    openLabels(pool({ power_state: "Stopped" }));
+
+    expect((screen.getByRole("button", { name: "Edit labels & taints" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Start the pool before changing its labels or taints.")).toBeTruthy();
+  });
+
+  it("opens a node from the pool's node list", () => {
+    setup([pool()]);
+    fireEvent.click(screen.getByRole("button", { name: "userpool" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Nodes/ }));
+    fireEvent.click(screen.getByRole("button", { name: "aks-userpool-1" }));
+
+    expect(aksApi.useNodeDetail).toHaveBeenLastCalledWith(CLUSTER.id, "aks-userpool-1");
   });
 });
 

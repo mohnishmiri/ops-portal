@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from kubernetes.client.rest import ApiException
 
 from app.api.v1.endpoints import aks_operations, sync_jobs
 from app.api.v1.endpoints.aks_operations import _get_service
@@ -19,6 +20,7 @@ from app.auth import get_current_user
 from app.core.database import get_db
 from app.models.database import Permission, Resource, SyncJob
 from app.schemas.auth import UserContext, UserRole
+from app.services import aks_node_operations as node_ops
 from app.services import aks_nodepool_create as np_create
 from app.services import aks_nodepool_operations as np_ops
 from app.services.aks_operations_service import AKSOperationsService
@@ -829,3 +831,277 @@ async def test_read_user_can_view_create_options(app, db_session):
 
     assert resp.status_code == 200
     assert resp.json()["existing_pools"] == ["sys"]
+
+
+# ── Labels and taints ─────────────────────────────────────────────────
+
+SPOT_TAINT = "kubernetes.azure.com/scalesetpriority=spot:NoSchedule"
+
+
+def test_label_and_taint_update_keeps_aks_managed_entries():
+    pool = make_pool(
+        "spot",
+        node_labels={"kubernetes.azure.com/scalesetpriority": "spot", "nodepool": "batch"},
+        node_taints=[SPOT_TAINT, "dedicated=batch:NoSchedule"],
+    )
+
+    labels, taints, diff = np_ops.merge_labels_and_taints(
+        pool, {"nodepool": "rules", "team": "attcc"}, ["dedicated=rules:NoExecute"]
+    )
+
+    assert labels == {"kubernetes.azure.com/scalesetpriority": "spot", "nodepool": "rules", "team": "attcc"}
+    assert taints == [SPOT_TAINT, "dedicated=rules:NoExecute"]
+    assert diff == {
+        "labels_added": ["team"],
+        "labels_removed": [],
+        "labels_changed": ["nodepool"],
+        "taints_added": ["dedicated=rules:NoExecute"],
+        "taints_removed": ["dedicated=batch:NoSchedule"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("labels", "taints", "message"),
+    [
+        ({"kubernetes.azure.com/scalesetpriority": "regular"}, [], "managed by AKS"),
+        ({}, ["kubernetes.azure.com/mode=x:NoSchedule"], "managed by AKS"),
+        ({"topology.kubernetes.io/zone": "1"}, [], "reserved by Kubernetes or AKS"),
+        ({"nodepool": "bad value!"}, [], "isn't a valid Kubernetes label value"),
+        ({}, ["a=b:NoSchedule", "a=c:NoSchedule"], "is set twice"),
+        ({"nodepool": "elk"}, [], "already has these labels and taints"),
+    ],
+)
+def test_invalid_label_or_taint_update(labels, taints, message):
+    pool = make_pool(node_labels={"nodepool": "elk", "kubernetes.azure.com/scalesetpriority": "spot"}, node_taints=[])
+
+    with pytest.raises(np_ops.NodePoolChangeError, match=message):
+        np_ops.merge_labels_and_taints(pool, labels, taints)
+
+
+async def test_clearing_labels_and_taints_sends_empty_values(azure):
+    azure.pools["manual"].node_taints = ["dedicated=x:NoSchedule"]
+
+    result = await service_with().update_node_pool_labels_taints(CLUSTER_ID, "manual", {}, [])
+
+    sent = azure.updates[0][1]
+    assert result["success"] is True
+    assert (sent.node_labels, sent.node_taints) == ({}, [])
+    assert result["changes"]["labels_removed"] == ["nodepool"]
+
+
+async def test_labels_of_a_stopped_pool_cannot_change(azure):
+    azure.pools["manual"].power_state = SimpleNamespace(code="Stopped")
+
+    result = await service_with().update_node_pool_labels_taints(CLUSTER_ID, "manual", {"nodepool": "x"}, [])
+
+    assert "Start it before changing its labels or taints" in result["error"]
+    assert azure.updates == []
+
+
+class FakeMetadataService:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def update_node_pool_labels_taints(self, cluster_id, nodepool_name, labels, taints):
+        self.calls.append((nodepool_name, labels, taints))
+        return {
+            "success": True,
+            "changes": {
+                "labels_added": ["team"],
+                "labels_changed": [],
+                "labels_removed": [],
+                "taints_added": [],
+                "taints_removed": [],
+            },
+        }
+
+
+LT_BODY = {"cluster_id": CLUSTER_ID, "nodepool_name": "manual", "node_labels": {"team": "attcc"}, "node_taints": []}
+
+
+async def test_read_user_cannot_edit_labels_and_taints(app, db_session):
+    await _seed_manage(db_session)
+    service = FakeMetadataService()
+
+    async with client(app, db_session, make_user(UserRole.READ), service) as ac:
+        resp = await ac.post("/api/v1/aks/nodepools/labels-taints", json=LT_BODY)
+
+    assert resp.status_code == 403
+    assert service.calls == []
+
+
+async def test_label_and_taint_edit_is_audited(app, db_session):
+    aks_operations._in_memory_audit_log.clear()
+    await _seed_manage(db_session)
+    service = FakeMetadataService()
+
+    async with client(app, db_session, make_user(UserRole.WRITE), service) as ac:
+        resp = await ac.post("/api/v1/aks/nodepools/labels-taints", json=LT_BODY)
+
+    entries = [e for e in aks_operations._in_memory_audit_log if e["action"] == "update_nodepool_labels_taints"]
+    aks_operations._in_memory_audit_log.clear()
+    assert resp.status_code == 200
+    assert service.calls == [("manual", {"team": "attcc"}, [])]
+    assert entries[0]["details"]["summary"] == "Updated labels and taints of node pool manual (1 label(s) added)"
+
+
+async def test_default_os_disk_size_is_left_to_azure(create_env):
+    await service_with().create_node_pool(CLUSTER_ID, spec(os_disk_size_gb=None))
+
+    assert create_env.updates[0][1].os_disk_size_gb is None
+
+
+# ── Node detail ───────────────────────────────────────────────────────
+
+
+def make_k8s_pod(
+    name,
+    *,
+    node="aks-np-1",
+    phase="Running",
+    cpu="250m",
+    memory="256Mi",
+    init_cpu=None,
+    owner=("ReplicaSet", "web-abc"),
+):
+    resources = SimpleNamespace(requests={"cpu": cpu, "memory": memory}, limits={"cpu": "1", "memory": "512Mi"})
+    init = (
+        [SimpleNamespace(name="init", resources=SimpleNamespace(requests={"cpu": init_cpu}, limits={}))]
+        if init_cpu
+        else []
+    )
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=name,
+            namespace="apps",
+            labels={},
+            owner_references=[SimpleNamespace(kind=owner[0], name=owner[1], controller=True)],
+        ),
+        spec=SimpleNamespace(
+            node_name=node, containers=[SimpleNamespace(name="app", resources=resources)], init_containers=init
+        ),
+        status=SimpleNamespace(
+            phase=phase,
+            pod_ip="10.0.0.5",
+            start_time=datetime(2026, 10, 1, tzinfo=UTC),
+            qos_class="Burstable",
+            container_statuses=[SimpleNamespace(name="app", ready=phase == "Running", restart_count=1, state=None)],
+            conditions=None,
+            reason=None,
+            init_container_statuses=None,
+        ),
+    )
+
+
+def make_k8s_node():
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="aks-np-1",
+            labels={
+                "kubernetes.azure.com/agentpool": "np",
+                "topology.kubernetes.io/zone": "eastus2-2",
+                "node.kubernetes.io/instance-type": "Standard_B2ms",
+            },
+            annotations={},
+            creation_timestamp=datetime(2026, 10, 1, tzinfo=UTC),
+        ),
+        spec=SimpleNamespace(
+            unschedulable=False,
+            taints=[SimpleNamespace(key="CriticalAddonsOnly", value="true", effect="NoSchedule")],
+            provider_id="azure:///x",
+            pod_cidr=None,
+        ),
+        status=SimpleNamespace(
+            conditions=[
+                SimpleNamespace(
+                    type="Ready", status="True", reason="KubeletReady", message="ok", last_transition_time=None
+                ),
+                SimpleNamespace(
+                    type="MemoryPressure", status="False", reason=None, message=None, last_transition_time=None
+                ),
+            ],
+            allocatable={"cpu": "1900m", "memory": "7Gi", "pods": "30", "ephemeral-storage": "100Gi"},
+            capacity={"cpu": "2", "memory": "8Gi", "pods": "30"},
+            node_info=SimpleNamespace(
+                os_image="Ubuntu 22.04.5 LTS",
+                kernel_version="5.15.0",
+                container_runtime_version="containerd://1.7",
+                kubelet_version="v1.36.3",
+                kube_proxy_version="v1.36.3",
+                architecture="amd64",
+                operating_system="linux",
+            ),
+            addresses=[SimpleNamespace(type="InternalIP", address="10.224.0.4")],
+        ),
+    )
+
+
+def test_node_detail_counts_what_the_scheduler_counts():
+    pods = [
+        make_k8s_pod("web-1"),
+        make_k8s_pod("migrate-1", init_cpu="1"),  # init container needs more than the app
+        make_k8s_pod("job-1", phase="Succeeded", cpu="4"),  # finished: holds nothing
+    ]
+
+    detail = node_ops.serialize_node_detail(make_k8s_node(), pods, events=[], usage=None)
+
+    assert detail["ready"] is True and detail["pool"] == "np"
+    assert detail["taints"] == ["CriticalAddonsOnly=true:NoSchedule"]
+    assert detail["allocatable"]["cpu_m"] == 1900
+    assert detail["allocated"]["pods"] == 2
+    assert detail["allocated"]["cpu_request_m"] == 1250
+    assert detail["allocated"]["cpu_request_pct"] == 65.8
+    pod = next(p for p in detail["pods"] if p["pod_name"] == "migrate-1")
+    assert (pod["cpu_request_m"], pod["memory_request_bytes"], pod["owner_kind"]) == (1000, 256 * 2**20, "ReplicaSet")
+    assert next(p for p in detail["pods"] if p["pod_name"] == "job-1")["terminated"] is True
+
+
+async def test_node_detail_without_metrics_server():
+    class Core:
+        api_client = None
+
+        def read_node(self, name, **kwargs):
+            return make_k8s_node()
+
+        def list_pod_for_all_namespaces(self, **kwargs):
+            assert kwargs["field_selector"] == "spec.nodeName=aks-np-1"
+            return SimpleNamespace(items=[make_k8s_pod("web-1")])
+
+        def list_event_for_all_namespaces(self, **kwargs):
+            raise ApiException(status=403, reason="Forbidden")
+
+    svc = service_with(Core())
+
+    async def _no_metrics(core_v1, name, allocatable):
+        return None
+
+    svc._node_usage = _no_metrics
+    detail = await svc.get_node_detail(CLUSTER_ID, "aks-np-1")
+
+    assert detail["usage"] is None
+    assert detail["events"] == []
+    assert [p["pod_name"] for p in detail["pods"]] == ["web-1"]
+
+
+class FakeNodeService:
+    async def get_node_detail(self, cluster_id, name):
+        raise ApiException(status=404, reason="Not Found")
+
+
+async def test_missing_node_is_404(app, db_session):
+    res = Resource(resource_type="operation", resource_name="aks_pod_view", description="x", is_system=True)
+    db_session.add(res)
+    await db_session.commit()
+    await db_session.refresh(res)
+    db_session.add(
+        Permission(
+            subject_type="role", subject_id="read", resource_id=res.id, permission_type="view", environment_scope="all"
+        )
+    )
+    await db_session.commit()
+
+    async with client(app, db_session, make_user(UserRole.READ), FakeNodeService()) as ac:
+        resp = await ac.get("/api/v1/aks/nodes/detail", params={"cluster_id": CLUSTER_ID, "name": "aks-np-9"})
+
+    assert resp.status_code == 404
+    assert "aks-np-9" in resp.json()["detail"]

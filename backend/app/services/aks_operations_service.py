@@ -39,6 +39,7 @@ from app.models.database import (
 from app.services.aks_akvs_operations import AKSAkvsOperationsMixin
 from app.services.aks_detail_operations import AKSDetailOperationsMixin
 from app.services.aks_log_archive import AKSLogArchiveMixin
+from app.services.aks_node_operations import AKSNodeOperationsMixin
 from app.services.aks_nodepool_create import AKSNodePoolCreateMixin
 from app.services.aks_nodepool_operations import AKSNodePoolOperationsMixin
 from app.services.aks_resource_operations import AKSResourceOperationsMixin
@@ -68,6 +69,7 @@ class AKSOperationsService(
     AKSLogArchiveMixin,
     AKSNodePoolOperationsMixin,
     AKSNodePoolCreateMixin,
+    AKSNodeOperationsMixin,
 ):
     """
     Enterprise AKS Operations Service.

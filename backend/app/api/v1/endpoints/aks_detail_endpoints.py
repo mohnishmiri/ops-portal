@@ -66,6 +66,23 @@ def register_detail_routes(router, *, get_service, write_audit):
             logger.error("get_pod_detail_failed", name=name, namespace=namespace, error=str(e))
             raise HTTPException(status_code=502, detail="Failed to connect to cluster.") from e
 
+    @router.get("/nodes/detail", summary="Node detail: health, capacity, pods on the node, and events")
+    async def get_node_detail(
+        cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+        name: str = Query(..., max_length=253, pattern=K8S_NAME_PATTERN),
+        user: UserContext = Depends(view_pods),
+        service=Depends(get_service),
+    ) -> dict:
+        try:
+            return await service.get_node_detail(cluster_id, name)
+        except ApiException as e:
+            if e.status == 404:
+                raise HTTPException(status_code=404, detail=f"Node '{name}' was not found in this cluster.") from e
+            raise _workload_api_error(e, label="Node", name=name, namespace="") from e
+        except Exception as e:
+            logger.error("get_node_detail_failed", node=name, error=str(e))
+            raise HTTPException(status_code=502, detail="Failed to connect to cluster.") from e
+
     @router.post(
         "/logs/archive",
         summary="Download complete pod logs as a ZIP archive",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import Counter
 from datetime import datetime
 from typing import Any
@@ -38,8 +39,19 @@ MAX_NODES_PER_POOL = 1000
 PRESSURE_CONDITIONS = ("MemoryPressure", "DiskPressure", "PIDPressure")
 
 
+TAINT_EFFECTS = ("NoSchedule", "PreferNoSchedule", "NoExecute")
+# Label/taint keys AKS manages itself (e.g. the Spot taint); they can't be set or changed.
+AKS_MANAGED_PREFIX = "kubernetes.azure.com/"
+# AKS and Kubernetes reserve these label domains and reject pools that set them.
+RESERVED_LABEL_DOMAINS = ("kubernetes.azure.com", "kubernetes.io", "k8s.io")
+_LABEL_NAME = r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?"
+_DNS_PREFIX = r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
+LABEL_KEY_RE = re.compile(rf"^(?:(?P<prefix>{_DNS_PREFIX})/)?{_LABEL_NAME}$")
+LABEL_VALUE_RE = re.compile(rf"^(?:{_LABEL_NAME})?$")
+
+
 class NodePoolChangeError(ValueError):
-    """A scale or autoscaling change that Azure would reject or that changes nothing."""
+    """A node pool change that Azure would reject or that changes nothing."""
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────
@@ -222,6 +234,88 @@ def check_power_request(cluster: Any, pool: Any, start: bool) -> None:
         raise NodePoolChangeError(
             f"{pool.name} is {pool.provisioning_state}. Wait for it to finish before stopping the pool."
         )
+
+
+def label_key_error(key: str) -> str | None:
+    match = LABEL_KEY_RE.match(key)
+    if not match or len(key) > 316:
+        return f"Label key '{key}' isn't a valid Kubernetes label key."
+    prefix = match.group("prefix") or ""
+    if prefix and any(prefix == d or prefix.endswith(f".{d}") for d in RESERVED_LABEL_DOMAINS):
+        return f"Label key '{key}' uses a domain reserved by Kubernetes or AKS."
+    return None
+
+
+def parse_taint(taint: str) -> tuple[str, str, str] | None:
+    """'key=value:Effect' → (key, value, effect); None when malformed."""
+    head, sep, effect = taint.rpartition(":")
+    if not sep:
+        return None
+    key, _, value = head.partition("=")
+    return key, value, effect
+
+
+def check_labels_and_taints(labels: dict[str, str], taints: list[str]) -> None:
+    """Kubernetes syntax and AKS's reserved domains for node pool labels and taints."""
+    for key, value in labels.items():
+        error = label_key_error(key)
+        if error:
+            raise NodePoolChangeError(error)
+        if not LABEL_VALUE_RE.match(value):
+            raise NodePoolChangeError(f"Label value '{value}' for {key} isn't a valid Kubernetes label value.")
+    seen: set[tuple[str, str]] = set()
+    for taint in taints:
+        parsed = parse_taint(taint)
+        if not parsed or not LABEL_KEY_RE.match(parsed[0]) or not LABEL_VALUE_RE.match(parsed[1]):
+            raise NodePoolChangeError(f"Taint '{taint}' must look like key=value:Effect.")
+        if parsed[2] not in TAINT_EFFECTS:
+            raise NodePoolChangeError(f"Taint effect must be one of {', '.join(TAINT_EFFECTS)}.")
+        if (parsed[0], parsed[2]) in seen:
+            raise NodePoolChangeError(f"Taint {parsed[0]} with effect {parsed[2]} is set twice.")
+        seen.add((parsed[0], parsed[2]))
+
+
+def _aks_managed(key: str) -> bool:
+    return key.startswith(AKS_MANAGED_PREFIX)
+
+
+def _taint_key(taint: str) -> str:
+    parsed = parse_taint(taint)
+    return parsed[0] if parsed else taint
+
+
+def merge_labels_and_taints(
+    pool: Any, labels: dict[str, str], taints: list[str]
+) -> tuple[dict[str, str], list[str], dict[str, list[str]]]:
+    """The pool's new labels and taints: the user's, plus the AKS-managed ones it already has.
+
+    Updating a pool replaces its labels and taints, so AKS-managed entries (such
+    as the Spot taint) are carried over unchanged. Returns (labels, taints, diff).
+    """
+    current_labels = dict(pool.node_labels or {})
+    current_taints = list(pool.node_taints or [])
+    for key, value in labels.items():
+        if _aks_managed(key) and current_labels.get(key) != value:
+            raise NodePoolChangeError(f"Label {key} is managed by AKS and can't be changed.")
+    for taint in taints:
+        if _aks_managed(_taint_key(taint)) and taint not in current_taints:
+            raise NodePoolChangeError(f"Taint {taint} is managed by AKS and can't be changed.")
+    user_labels = {k: v for k, v in labels.items() if not _aks_managed(k)}
+    user_taints = [t for t in dict.fromkeys(taints) if not _aks_managed(_taint_key(t))]
+    check_labels_and_taints(user_labels, user_taints)
+
+    new_labels = {**{k: v for k, v in current_labels.items() if _aks_managed(k)}, **user_labels}
+    new_taints = [t for t in current_taints if _aks_managed(_taint_key(t))] + user_taints
+    diff = {
+        "labels_added": sorted(k for k in new_labels if k not in current_labels),
+        "labels_removed": sorted(k for k in current_labels if k not in new_labels),
+        "labels_changed": sorted(k for k in new_labels if k in current_labels and current_labels[k] != new_labels[k]),
+        "taints_added": [t for t in new_taints if t not in current_taints],
+        "taints_removed": [t for t in current_taints if t not in new_taints],
+    }
+    if not any(diff.values()):
+        raise NodePoolChangeError(f"{pool.name} already has these labels and taints.")
+    return new_labels, new_taints, diff
 
 
 def azure_error_message(exc: Exception) -> str:
@@ -432,6 +526,39 @@ class AKSNodePoolOperationsMixin:
         logger.info("node_pool_power_initiated", cluster=cluster_name, nodepool=nodepool_name, action=action)
         await data_cache.invalidate_for_nodepools(cluster_id)
         return {**result, "success": True}
+
+    async def update_node_pool_labels_taints(
+        self, cluster_id: str, nodepool_name: str, labels: dict[str, str], taints: list[str]
+    ) -> dict[str, Any]:
+        """Replace a pool's labels and taints; AKS applies them to its nodes in the background."""
+        result: dict[str, Any] = {"success": False, "cluster_id": cluster_id, "nodepool_name": nodepool_name}
+        try:
+            subscription_id, resource_group, cluster_name = cluster_parts(cluster_id)
+            aks_client = ContainerServiceClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+            pool = await asyncio.to_thread(aks_client.agent_pools.get, resource_group, cluster_name, nodepool_name)
+            if _power(pool) == "Stopped":
+                raise NodePoolChangeError(f"{pool.name} is stopped. Start it before changing its labels or taints.")
+            if pool.provisioning_state != "Succeeded":
+                raise NodePoolChangeError(f"{pool.name} is {pool.provisioning_state}. Wait for it to finish.")
+            new_labels, new_taints, diff = merge_labels_and_taints(pool, labels, taints)
+            result["changes"] = diff
+            # Empty values (not None) so removing the last label or taint clears it.
+            pool.node_labels = new_labels
+            pool.node_taints = new_taints
+            await asyncio.to_thread(
+                aks_client.agent_pools.begin_create_or_update, resource_group, cluster_name, nodepool_name, pool
+            )
+        except NodePoolChangeError as e:
+            return {**result, "error": str(e)}
+        except Exception as e:
+            logger.error("node_pool_labels_taints_failed", nodepool=nodepool_name, error=str(e))
+            return {**result, "error": azure_error_message(e)}
+
+        logger.info(
+            "node_pool_labels_taints_updated", cluster=cluster_name, nodepool=nodepool_name, **result["changes"]
+        )
+        await data_cache.invalidate_for_nodepools(cluster_id)
+        return {**result, "success": True, "node_labels": new_labels, "node_taints": new_taints}
 
     # ── DB inventory ───────────────────────────────────────────────────
 

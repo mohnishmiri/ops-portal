@@ -152,6 +152,19 @@ describe("CreateNodePoolDialog", () => {
     expect(screen.getByRole("option", { name: /Default \(based on selected VM: Ephemeral\)/ })).toBeTruthy();
   });
 
+  it("offers the portal's disk sizes and leaves Default to Azure", () => {
+    renderDialog();
+
+    const disk = screen.getByLabelText(/OS disk size/) as HTMLSelectElement;
+    expect(Array.from(disk.options).map((o) => o.text)).toEqual(["Default (based on selected VM)", "128", "256", "512", "1024", "2048"]);
+    expect(toPayload(CLUSTER_ID, valid()).os_disk_size_gb).toBeNull();
+
+    // An ephemeral OS disk must fit the size's cache or temp disk (200 GiB for D8s v3 here).
+    fireEvent.change(screen.getByLabelText(/OS disk type/), { target: { value: "Ephemeral" } });
+    const disabled = Array.from(disk.options).filter((o) => o.disabled).map((o) => o.text);
+    expect(disabled).toEqual(["256", "512", "1024", "2048"]);
+  });
+
   it("shows the subnet IPs a pool will need", () => {
     renderDialog();
 

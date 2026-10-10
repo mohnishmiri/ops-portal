@@ -368,7 +368,9 @@ class CreateNodePoolRequest(BaseModel):
     spot: bool = Field(default=False, description="Azure Spot capacity (evictable; User pools only)")
     vm_size: str = Field(..., pattern=r"^Standard_[A-Za-z0-9_]{2,60}$")
     os_disk_type: Literal["Managed", "Ephemeral"] | None = Field(default=None, description="None lets Azure choose")
-    os_disk_size_gb: int = Field(default=128, ge=30, le=2048)
+    os_disk_size_gb: int | None = Field(
+        default=None, ge=30, le=2048, description="None uses Azure's default for the VM size"
+    )
     enable_auto_scaling: bool = True
     node_count: int | None = Field(default=None, ge=0, le=1000, description="Manual scale only")
     min_count: int | None = Field(default=None, ge=0, le=1000)
@@ -379,6 +381,15 @@ class CreateNodePoolRequest(BaseModel):
     node_labels: dict[str, str] = Field(default_factory=dict, max_length=50)
     node_taints: list[str] = Field(default_factory=list, max_length=20)
     tags: dict[str, str] = Field(default_factory=dict, max_length=50)
+
+
+class NodePoolLabelsTaintsRequest(BaseModel):
+    """A node pool's complete set of labels and taints (replaces the current ones)."""
+
+    cluster_id: str = Field(..., description="Full Azure resource ID of the AKS cluster")
+    nodepool_name: str = Field(..., pattern=NODEPOOL_NAME_PATTERN, description="Node pool name")
+    node_labels: dict[str, str] = Field(default_factory=dict, max_length=50)
+    node_taints: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ClusterActionRequest(BaseModel):
@@ -2060,6 +2071,54 @@ async def stop_node_pool(
 ) -> dict:
     """Deallocate a User pool's nodes; its pods are evicted and its autoscaler pauses."""
     return await _set_node_pool_power(request, http_request, user, service, db, start=False)
+
+
+@router.post("/nodepools/labels-taints", summary="Replace a node pool's labels and taints")
+async def update_node_pool_labels_taints(
+    request: NodePoolLabelsTaintsRequest,
+    http_request: Request,
+    user: UserContext = Depends(require_capability("aks_nodepool_manage")),
+    service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """AKS-managed entries (e.g. the Spot taint) are kept; AKS applies the change to the pool's nodes."""
+    result = await service.update_node_pool_labels_taints(
+        request.cluster_id, request.nodepool_name, request.node_labels, request.node_taints
+    )
+    changes = result.get("changes") or {}
+    parts = [
+        f"{len(changes[k])} {label}"
+        for k, label in (
+            ("labels_added", "label(s) added"),
+            ("labels_changed", "label(s) changed"),
+            ("labels_removed", "label(s) removed"),
+            ("taints_added", "taint(s) added"),
+            ("taints_removed", "taint(s) removed"),
+        )
+        if changes.get(k)
+    ]
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="update_nodepool_labels_taints",
+        resource_type="nodepool",
+        resource_name=request.nodepool_name,
+        cluster_id=request.cluster_id,
+        namespace="",
+        status="success" if result.get("success") else "failed",
+        details={
+            "summary": f"Updated labels and taints of node pool {request.nodepool_name}"
+            + (f" ({', '.join(parts)})" if parts else ""),
+            "changes": changes,
+            "node_labels": request.node_labels,
+            "node_taints": request.node_taints,
+            "error": result.get("error"),
+        },
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Label and taint update failed"))
+    return result
 
 
 @router.get("/nodepools/options", summary="What a new node pool can use in this cluster")

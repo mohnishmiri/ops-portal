@@ -324,7 +324,17 @@ export function EventsGrid({
   );
 }
 
-export function ConditionsGrid({ conditions, formatDate }: { conditions: WorkloadCondition[]; formatDate: (v: string) => string }) {
+export function ConditionsGrid({
+  conditions,
+  formatDate,
+  healthyWhenFalse = [],
+}: {
+  conditions: WorkloadCondition[];
+  formatDate: (v: string) => string;
+  /** Condition types where "False" is the healthy state, e.g. a node's MemoryPressure. */
+  healthyWhenFalse?: readonly string[];
+}) {
+  const healthy = (c: WorkloadCondition) => (healthyWhenFalse.includes(c.type) ? c.status === "False" : c.status === "True");
   const columns: GridColumn<WorkloadCondition>[] = [
     { key: "type", header: "Condition", sortValue: (c) => c.type, render: (c) => <span className="whitespace-nowrap font-medium text-slate-800">{c.type}</span> },
     {
@@ -332,7 +342,7 @@ export function ConditionsGrid({ conditions, formatDate }: { conditions: Workloa
       header: "Status",
       sortValue: (c) => c.status,
       render: (c) => (
-        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${c.status === "True" ? "bg-green-100 text-green-700" : c.status === "False" ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-600"}`}>
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${c.status === "Unknown" ? "bg-slate-100 text-slate-600" : healthy(c) ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-800"}`}>
           {c.status}
         </span>
       ),

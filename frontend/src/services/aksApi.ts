@@ -403,7 +403,8 @@ export interface CreateNodePoolPayload {
   spot: boolean;
   vm_size: string;
   os_disk_type: "Managed" | "Ephemeral" | null;
-  os_disk_size_gb: number;
+  /** null: Azure's default for the VM size. */
+  os_disk_size_gb: number | null;
   enable_auto_scaling: boolean;
   node_count: number | null;
   min_count: number | null;
@@ -414,6 +415,71 @@ export interface CreateNodePoolPayload {
   node_labels: Record<string, string>;
   node_taints: string[];
   tags: Record<string, string>;
+}
+
+export interface NodeResources {
+  cpu_m: number;
+  memory_bytes: number;
+  pods: number;
+  ephemeral_storage_bytes: number;
+}
+
+export interface NodePodRow extends WorkloadPod {
+  cpu_request_m: number;
+  cpu_limit_m: number;
+  memory_request_bytes: number;
+  memory_limit_bytes: number;
+  ready_containers: number;
+  total_containers: number;
+  owner_kind: string | null;
+  owner_name: string | null;
+  qos_class: string | null;
+  terminated: boolean;
+}
+
+/** GET /aks/nodes/detail — `kubectl describe node`, plus usage from metrics-server when installed. */
+export interface KubernetesNodeDetail {
+  name: string;
+  pool: string | null;
+  ready: boolean;
+  unschedulable: boolean;
+  pressure: string[];
+  created_at: string | null;
+  zone: string | null;
+  instance_type: string | null;
+  node_image_version: string | null;
+  provider_id: string | null;
+  pod_cidr: string | null;
+  addresses: { type: string; address: string }[];
+  system: {
+    os_image: string | null;
+    kernel_version: string | null;
+    container_runtime: string | null;
+    kubelet_version: string | null;
+    kube_proxy_version: string | null;
+    architecture: string | null;
+    operating_system: string | null;
+  };
+  capacity: NodeResources;
+  allocatable: NodeResources;
+  allocated: {
+    pods: number;
+    cpu_request_m: number;
+    cpu_limit_m: number;
+    memory_request_bytes: number;
+    memory_limit_bytes: number;
+    cpu_request_pct: number | null;
+    memory_request_pct: number | null;
+    cpu_limit_pct: number | null;
+    memory_limit_pct: number | null;
+  };
+  usage: { cpu_m: number; memory_bytes: number; cpu_pct: number | null; memory_pct: number | null; timestamp: string | null } | null;
+  conditions: WorkloadCondition[];
+  taints: string[];
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  pods: NodePodRow[];
+  events: WorkloadEvent[];
 }
 
 export interface ScaleNodePoolResult {
@@ -2241,6 +2307,38 @@ export function useNodePoolPower() {
         nodepool_name: nodepoolName,
       });
       return data as { success: boolean; node_count?: number };
+    },
+    onSuccess: (_data, vars) => invalidateNodePools(queryClient, vars.clusterId),
+  });
+}
+
+export function useNodeDetail(clusterId: string, name: string | null) {
+  return useQuery({
+    queryKey: ["aks-node-detail", clusterId, name],
+    queryFn: async () => {
+      const { data } = await apiClient.get(`${API_PREFIX}/nodes/detail`, { params: { cluster_id: clusterId, name }, timeout: 60000 });
+      return data as KubernetesNodeDetail;
+    },
+    enabled: !!clusterId && !!name,
+    staleTime: 10_000,
+    refetchInterval: safeInterval(30_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** Replace a node pool's labels and taints (AKS-managed entries are kept by the backend). */
+export function useUpdateNodePoolLabelsTaints() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (p: { clusterId: string; nodepoolName: string; labels: Record<string, string>; taints: string[] }) => {
+      const { data } = await apiClient.post(`${API_PREFIX}/nodepools/labels-taints`, {
+        cluster_id: p.clusterId,
+        nodepool_name: p.nodepoolName,
+        node_labels: p.labels,
+        node_taints: p.taints,
+      });
+      return data as { success: boolean; changes: Record<string, string[]> };
     },
     onSuccess: (_data, vars) => invalidateNodePools(queryClient, vars.clusterId),
   });

@@ -31,6 +31,7 @@ from app.services.aks_nodepool_operations import (
     MAX_NODES_PER_POOL,
     NodePoolChangeError,
     azure_error_message,
+    check_labels_and_taints,
     cluster_parts,
 )
 from app.services.data_cache_service import CacheKeys, data_cache
@@ -42,14 +43,6 @@ MAX_POOLS_PER_CLUSTER = 100
 MAX_NODES_PER_CLUSTER = 5000
 LINUX_OS_SKUS = ("Ubuntu", "AzureLinux")
 WINDOWS_OS_SKUS = ("Windows2022", "Windows2019")
-TAINT_EFFECTS = ("NoSchedule", "PreferNoSchedule", "NoExecute")
-# AKS reserves these label domains for itself and rejects pools that set them.
-RESERVED_LABEL_DOMAINS = ("kubernetes.azure.com", "kubernetes.io", "k8s.io")
-
-_LABEL_NAME = r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?"
-_DNS_PREFIX = r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
-LABEL_KEY_RE = re.compile(rf"^(?:(?P<prefix>{_DNS_PREFIX})/)?{_LABEL_NAME}$")
-LABEL_VALUE_RE = re.compile(rf"^(?:{_LABEL_NAME})?$")
 TAG_NAME_FORBIDDEN = set("<>%&\\?/")
 LINUX_NAME_RE = re.compile(r"^[a-z][a-z0-9]{0,11}$")
 WINDOWS_NAME_RE = re.compile(r"^[a-z][a-z0-9]{0,5}$")
@@ -130,25 +123,6 @@ def subnet_name(subnet_id: str | None) -> str | None:
     return subnet_id.rstrip("/").rsplit("/", 1)[-1] if subnet_id else None
 
 
-def _label_key_error(key: str) -> str | None:
-    match = LABEL_KEY_RE.match(key)
-    if not match or len(key) > 316:
-        return f"Label key '{key}' isn't a valid Kubernetes label key."
-    prefix = match.group("prefix") or ""
-    if prefix and any(prefix == d or prefix.endswith(f".{d}") for d in RESERVED_LABEL_DOMAINS):
-        return f"Label key '{key}' uses a domain reserved by Kubernetes or AKS."
-    return None
-
-
-def parse_taint(taint: str) -> tuple[str, str, str] | None:
-    """'key=value:Effect' → (key, value, effect); None when malformed."""
-    head, sep, effect = taint.rpartition(":")
-    if not sep:
-        return None
-    key, _, value = head.partition("=")
-    return key, value, effect
-
-
 def check_create_request(spec: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
     """Validate a create request; returns the resolved values. Raises NodePoolChangeError."""
     name = spec["name"]
@@ -211,7 +185,7 @@ def check_create_request(spec: dict[str, Any], options: dict[str, Any]) -> dict[
         if spec.get("os_disk_type") == "Ephemeral":
             if not size["ephemeral_os_disk"]:
                 raise NodePoolChangeError(f"{size['name']} doesn't support ephemeral OS disks. Use Managed.")
-            if spec["os_disk_size_gb"] > size["max_ephemeral_os_disk_gb"]:
+            if spec.get("os_disk_size_gb") and spec["os_disk_size_gb"] > size["max_ephemeral_os_disk_gb"]:
                 raise NodePoolChangeError(
                     f"An ephemeral OS disk on {size['name']} can be at most {size['max_ephemeral_os_disk_gb']} GiB."
                 )
@@ -246,19 +220,8 @@ def check_create_request(spec: dict[str, Any], options: dict[str, Any]) -> dict[
         )
 
     labels = dict(spec.get("node_labels") or {})
-    for key, value in labels.items():
-        error = _label_key_error(key)
-        if error:
-            raise NodePoolChangeError(error)
-        if not LABEL_VALUE_RE.match(value):
-            raise NodePoolChangeError(f"Label value '{value}' for {key} isn't a valid Kubernetes label value.")
     taints = list(spec.get("node_taints") or [])
-    for taint in taints:
-        parsed = parse_taint(taint)
-        if not parsed or not LABEL_KEY_RE.match(parsed[0]) or not LABEL_VALUE_RE.match(parsed[1]):
-            raise NodePoolChangeError(f"Taint '{taint}' must look like key=value:Effect.")
-        if parsed[2] not in TAINT_EFFECTS:
-            raise NodePoolChangeError(f"Taint effect must be one of {', '.join(TAINT_EFFECTS)}.")
+    check_labels_and_taints(labels, taints)
     tags = dict(spec.get("tags") or {})
     for key, value in tags.items():
         if not key or len(key) > 512 or TAG_NAME_FORBIDDEN & set(key):
@@ -290,7 +253,7 @@ def check_create_request(spec: dict[str, Any], options: dict[str, Any]) -> dict[
         "spot": spot,
         "vm_size": size["name"] if size else spec["vm_size"],
         "os_disk_type": spec.get("os_disk_type"),
-        "os_disk_size_gb": spec["os_disk_size_gb"],
+        "os_disk_size_gb": spec.get("os_disk_size_gb"),  # None: Azure's default for the VM size
         "auto": auto,
         "count": count,
         "min_count": min_count,
