@@ -344,6 +344,78 @@ export interface NodePoolDetails {
   nodes?: NodeDetail[];
 }
 
+export interface NodePoolVmSize {
+  name: string;
+  vcpus: number;
+  memory_gb: number;
+  zones: string[];
+  ephemeral_os_disk: boolean;
+  max_ephemeral_os_disk_gb: number;
+  spot: boolean;
+  arch: string;
+  family?: string | null;
+}
+
+export interface NodePoolSubnet {
+  id: string;
+  name: string;
+  free_ips: number | null;
+  total_ips: number | null;
+  pools: string[];
+  pod_subnet: boolean;
+}
+
+/** What a new node pool can use in one cluster (GET /aks/nodepools/options). */
+export interface NodePoolCreateOptions {
+  cluster_name: string;
+  location: string;
+  power_state: string;
+  control_plane_version: string;
+  kubernetes_versions: string[];
+  network_plugin: string | null;
+  network_plugin_mode: string | null;
+  max_pods_limit: number;
+  windows_supported: boolean;
+  existing_pools: string[];
+  total_nodes: number;
+  subnets: NodePoolSubnet[];
+  vm_sizes: NodePoolVmSize[];
+  vm_sizes_error: string | null;
+  zones: string[];
+  defaults: {
+    vm_size: string | null;
+    max_pods: number;
+    max_surge: string | null;
+    availability_zones: string[];
+    os_disk_size_gb: number;
+  };
+  inherited: { source_pool: string | null; encryption_at_host: boolean; fips: boolean };
+}
+
+export interface CreateNodePoolPayload {
+  cluster_id: string;
+  name: string;
+  mode: "User" | "System";
+  os_type: "Linux" | "Windows";
+  os_sku: string;
+  kubernetes_version: string;
+  availability_zones: string[];
+  spot: boolean;
+  vm_size: string;
+  os_disk_type: "Managed" | "Ephemeral" | null;
+  os_disk_size_gb: number;
+  enable_auto_scaling: boolean;
+  node_count: number | null;
+  min_count: number | null;
+  max_count: number | null;
+  max_pods: number;
+  max_surge: string | null;
+  subnet_id: string | null;
+  node_labels: Record<string, string>;
+  node_taints: string[];
+  tags: Record<string, string>;
+}
+
 export interface ScaleNodePoolResult {
   success: boolean;
   cluster_id: string;
@@ -2124,6 +2196,53 @@ export function useUpdateAutoscaling() {
       queryClient.invalidateQueries({ queryKey: ["aks-clusters"] });
       queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
     },
+  });
+}
+
+export function useNodePoolCreateOptions(clusterId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["aks-nodepool-options", clusterId],
+    queryFn: async () => {
+      const { data } = await apiClient.get(`${API_PREFIX}/nodepools/options`, { params: { cluster_id: clusterId }, timeout: 60000 });
+      return data as NodePoolCreateOptions;
+    },
+    enabled: !!clusterId && enabled,
+    staleTime: 5 * 60_000,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
+function invalidateNodePools(queryClient: ReturnType<typeof useQueryClient>, clusterId: string) {
+  queryClient.invalidateQueries({ queryKey: ["aks-nodepools-cached", clusterId] });
+  queryClient.invalidateQueries({ queryKey: ["aks-nodepools", clusterId] });
+  queryClient.invalidateQueries({ queryKey: ["aks-nodepool-options", clusterId] });
+  queryClient.invalidateQueries({ queryKey: ["aks-audit-history"] });
+}
+
+export function useCreateNodePool() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: CreateNodePoolPayload) => {
+      const { data } = await apiClient.post(`${API_PREFIX}/nodepools`, payload, { timeout: 90000 });
+      return data as { success: boolean; nodepool_name: string; inherited_from?: string | null; subnet?: string | null };
+    },
+    onSuccess: (_data, payload) => invalidateNodePools(queryClient, payload.cluster_id),
+  });
+}
+
+/** Start or stop a node pool (Azure applies it in the background). */
+export function useNodePoolPower() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ clusterId, nodepoolName, start }: { clusterId: string; nodepoolName: string; start: boolean }) => {
+      const { data } = await apiClient.post(`${API_PREFIX}/nodepools/${start ? "start" : "stop"}`, {
+        cluster_id: clusterId,
+        nodepool_name: nodepoolName,
+      });
+      return data as { success: boolean; node_count?: number };
+    },
+    onSuccess: (_data, vars) => invalidateNodePools(queryClient, vars.clusterId),
   });
 }
 

@@ -18,6 +18,7 @@ import {
   NodePoolDetails,
   useAksBackgroundSync,
   useCachedNodePools,
+  useNodePoolPower,
   useScaleNodePool,
   useUpdateAutoscaling,
 } from "../../services/aksApi";
@@ -34,6 +35,7 @@ import {
 } from "./aksGridShared";
 import { DetailGrid, GridFilterSelect, type GridColumn } from "./DetailGrid";
 import { apiErrorDetail, DetailIcons, formatAge, iconProps, KeyValueGrid, ReadyBadge, Truncate } from "./detailShared";
+import { CreateNodePoolDialog } from "./CreateNodePoolDialog";
 import { ModalShell } from "./K8sResourceModals";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
@@ -96,9 +98,11 @@ function formatDuration(ms: number): string {
 const hasNodeDetails = (p: NodePoolDetails) => p.node_details_available !== false;
 const isSystem = (p: NodePoolDetails) => p.mode === "System";
 const atAutoscaleMax = (p: NodePoolDetails) => p.enable_auto_scaling && !!p.max_count && p.count >= p.max_count;
+const isStopped = (p: NodePoolDetails) => p.power_state === "Stopped";
 const registeredNodes = (p: NodePoolDetails) => p.nodes?.length ?? 0;
+// A stopped pool's nodes are deallocated on purpose, so they don't count as not ready.
 const notReadyNodes = (p: NodePoolDetails) =>
-  hasNodeDetails(p) && p.ready_nodes != null ? Math.max(0, registeredNodes(p) - p.ready_nodes) : 0;
+  !isStopped(p) && hasNodeDetails(p) && p.ready_nodes != null ? Math.max(0, registeredNodes(p) - p.ready_nodes) : 0;
 
 /** What an operator should look at for this pool; empty when it's healthy. */
 export function poolIssues(p: NodePoolDetails): string[] {
@@ -106,7 +110,6 @@ export function poolIssues(p: NodePoolDetails): string[] {
   if (p.provisioning_state && p.provisioning_state !== "Succeeded") {
     issues.push(p.provisioning_state === "Failed" ? "Provisioning failed" : `${p.provisioning_state} in progress`);
   }
-  if (p.power_state && p.power_state !== "Running") issues.push(`Power state ${p.power_state}`);
   const notReady = notReadyNodes(p);
   if (notReady) issues.push(`${notReady} node${notReady === 1 ? "" : "s"} not ready`);
   if (p.cordoned_nodes) issues.push(`${p.cordoned_nodes} cordoned`);
@@ -120,6 +123,8 @@ export function poolIssues(p: NodePoolDetails): string[] {
 const ActionIcons = {
   view: DetailIcons.view,
   scale: <svg {...iconProps}><polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" /></svg>,
+  start: <svg {...iconProps}><polygon points="6 4 20 12 6 20 6 4" /></svg>,
+  stop: <svg {...iconProps}><rect x="6" y="6" width="12" height="12" rx="1" /></svg>,
   autoscale: <svg {...iconProps}><line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" /></svg>,
 };
 
@@ -165,16 +170,20 @@ function UsageBar({ pct, color = usageColor(pct) }: { pct: number; color?: strin
 function NodesCell({ pool }: { pool: NodePoolDetails }) {
   const notReady = notReadyNodes(pool);
   const underPressure = (pool.nodes ?? []).filter((n) => n.pressure?.length).length;
+  const health = isStopped(pool)
+    ? { text: "Stopped", tone: "text-slate-500" }
+    : hasNodeDetails(pool) && pool.ready_nodes != null && registeredNodes(pool) > 0
+      ? notReady ? { text: `${notReady} not ready`, tone: "text-amber-700" } : { text: "All ready", tone: "text-green-700" }
+      : null;
   return (
-    <div className="min-w-[5rem]">
-      <div className="text-sm font-semibold text-slate-800">{pool.count}</div>
-      {hasNodeDetails(pool) && pool.ready_nodes != null && registeredNodes(pool) > 0 && (
-        <div className={`whitespace-nowrap text-[11px] font-medium ${notReady ? "text-amber-700" : "text-green-700"}`}>
-          {notReady ? `${notReady} not ready` : "All ready"}
-        </div>
-      )}
+    <div className="min-w-[8rem]">
+      <div className="flex items-baseline gap-2 whitespace-nowrap">
+        <span className={`text-sm font-semibold ${isStopped(pool) ? "text-slate-400" : "text-slate-800"}`}>{pool.count}</span>
+        {health && <span className={`text-[11px] font-medium ${health.tone}`}>{health.text}</span>}
+      </div>
       {!!pool.cordoned_nodes && <div className="whitespace-nowrap text-[11px] font-medium text-amber-700">{pool.cordoned_nodes} cordoned</div>}
       {!!underPressure && <div className="whitespace-nowrap text-[11px] font-medium text-red-700">{underPressure} under pressure</div>}
+      <AutoscaleCell pool={pool} />
     </div>
   );
 }
@@ -200,14 +209,14 @@ function PodsCell({ pool }: { pool: NodePoolDetails }) {
 }
 
 function AutoscaleCell({ pool }: { pool: NodePoolDetails }) {
-  if (!pool.enable_auto_scaling) return <span className="text-xs text-slate-500">Manual</span>;
+  if (!pool.enable_auto_scaling) return <div className="mt-0.5 text-[11px] text-slate-500">Manual scale</div>;
   const min = pool.min_count ?? 0;
   const max = pool.max_count ?? 0;
   const pct = max > min ? ((pool.count - min) / (max - min)) * 100 : 100;
   return (
-    <div className="min-w-[7rem]" title={`${pool.count} nodes; autoscaler range ${min}–${max}`}>
-      <div className="flex items-center gap-2 whitespace-nowrap text-xs">
-        <span className="font-medium text-slate-700">{min}–{max}</span>
+    <div className="mt-0.5" title={`${pool.count} nodes; autoscaler range ${min}–${max}`}>
+      <div className="flex items-center gap-2 whitespace-nowrap text-[11px]">
+        <span className="text-slate-600">Autoscale {min}–{max}</span>
         {atAutoscaleMax(pool) && <span className="rounded bg-red-100 px-1.5 text-[10px] font-semibold text-red-700">At max</span>}
       </div>
       {/* Red only at the maximum, where the autoscaler can't add nodes. */}
@@ -216,19 +225,25 @@ function AutoscaleCell({ pool }: { pool: NodePoolDetails }) {
   );
 }
 
-function NodeImageCell({ value }: { value: string | null | undefined }) {
-  const { version, released } = nodeImageVersion(value);
+function VersionCell({ pool }: { pool: NodePoolDetails }) {
+  const { version, released } = nodeImageVersion(pool.node_image_version);
   return (
-    <div title={value ?? undefined}>
-      <div className="whitespace-nowrap font-mono text-xs text-slate-700">{version}</div>
-      {released && (
-        <div className="whitespace-nowrap text-[11px] text-slate-500">
-          {released.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}
-        </div>
-      )}
+    <div
+      title={
+        pool.node_image_version
+          ? `Node image ${pool.node_image_version}${released ? `, released ${released.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}` : ""}`
+          : undefined
+      }
+    >
+      <div className="whitespace-nowrap font-mono text-xs font-semibold text-slate-800">{pool.kubernetes_version || "—"}</div>
+      <div className="whitespace-nowrap text-[11px] text-slate-500">Image {version}</div>
     </div>
   );
 }
+
+// Pinned so the actions stay visible when the grid scrolls sideways.
+const stickyHead = "sticky right-0 z-10 bg-att-50";
+const stickyCell = "sticky right-0 bg-white shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.15)]";
 
 // ── Tab ───────────────────────────────────────────────────────────────
 
@@ -237,12 +252,15 @@ export const NodePoolsTab: React.FC<{
   showToast: (msg: string, type?: "success" | "error") => void;
   formatDate: (value: string) => string;
   canManage: boolean;
-}> = ({ cluster, showToast, formatDate, canManage }) => {
+  canCreate: boolean;
+}> = ({ cluster, showToast, formatDate, canManage, canCreate }) => {
   const [tile, setTile] = useState<Tile>("all");
   const [mode, setMode] = useState<ModeFilter>("all");
   const [selected, setSelected] = useState<string | null>(null);
   const [scalePool, setScalePool] = useState<NodePoolDetails | null>(null);
   const [autoscalePool, setAutoscalePool] = useState<NodePoolDetails | null>(null);
+  const [powerPool, setPowerPool] = useState<NodePoolDetails | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const { data, isFetching, isPlaceholderData, isError, error } = useCachedNodePools(cluster.id);
   // Pool configuration comes from Azure and changes slowly; once a minute is
@@ -250,6 +268,8 @@ export const NodePoolsTab: React.FC<{
   const sync = useAksBackgroundSync({ resourceType: "nodepools", clusterId: cluster.id, throttleMs: 60_000 });
   const scaleMut = useScaleNodePool();
   const autoscaleMut = useUpdateAutoscaling();
+  const powerMut = useNodePoolPower();
+  const clusterRunning = !cluster.power_state || cluster.power_state === "Running";
   const isLoading = isFetching && isPlaceholderData;
 
   const pools = useMemo(() => data?.node_pools ?? [], [data]);
@@ -259,7 +279,8 @@ export const NodePoolsTab: React.FC<{
     const withDetails = pools.filter(hasNodeDetails);
     return {
       system: pools.filter(isSystem).length,
-      nodes: pools.reduce((n, p) => n + p.count, 0),
+      nodes: pools.filter((p) => !isStopped(p)).reduce((n, p) => n + p.count, 0),
+      stopped: pools.filter(isStopped).length,
       pods: withDetails.reduce((n, p) => n + (p.total_pods ?? 0), 0),
       notReady: pools.reduce((n, p) => n + notReadyNodes(p), 0),
       nodeDetails: withDetails.length > 0,
@@ -288,8 +309,7 @@ export const NodePoolsTab: React.FC<{
       case "count": return p.count;
       case "autoscaling": return p.enable_auto_scaling ? p.max_count ?? 0 : -1;
       case "pods": return p.total_pods ?? -1;
-      case "kubernetes": return p.kubernetes_version ?? "";
-      case "image": return p.node_image_version ?? "";
+      case "version": return `${p.kubernetes_version ?? ""} ${p.node_image_version ?? ""}`;
       case "zones": return p.availability_zones.join(",");
       case "state": return poolIssues(p).length ? 0 : 1;
       default: return p.name.toLowerCase();
@@ -356,6 +376,30 @@ export const NodePoolsTab: React.FC<{
       }
     );
 
+  const submitPower = (pool: NodePoolDetails, start: boolean) =>
+    powerMut.mutate(
+      { clusterId: cluster.id, nodepoolName: pool.name, start },
+      {
+        onSuccess: () => {
+          showToast(
+            start
+              ? `Starting ${pool.name}. Azure brings its nodes back in the background; this can take several minutes.`
+              : `Stopping ${pool.name}. Azure deallocates its nodes in the background; this can take several minutes.`
+          );
+          setPowerPool(null);
+          sync.start(false);
+        },
+        onError: (e) => showToast(apiErrorDetail(e, `Failed to ${start ? "start" : "stop"} ${pool.name}`), "error"),
+      }
+    );
+
+  const powerBlocked = (pool: NodePoolDetails): string | null => {
+    if (!clusterRunning) return "The cluster is stopped. Start the cluster first.";
+    if (!isStopped(pool) && isSystem(pool)) return "System node pools can't be stopped.";
+    if (pool.provisioning_state && pool.provisioning_state !== "Succeeded") return `${pool.name} is ${pool.provisioning_state}. Wait for it to finish.`;
+    return null;
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -377,6 +421,18 @@ export const NodePoolsTab: React.FC<{
               { value: "User", label: `User (${pools.length - kpis.system})` },
             ]}
           />
+          {canCreate && (
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              disabled={!clusterRunning}
+              title={clusterRunning ? "Add a node pool to this cluster" : "Start the cluster before adding node pools"}
+              className="flex items-center gap-2 rounded-lg border border-att-300 bg-white px-4 py-2 text-sm font-medium text-att-700 hover:bg-att-50 disabled:opacity-50"
+            >
+              <svg {...iconProps}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+              Add node pool
+            </button>
+          )}
           <SyncFromKubernetesButton sync={sync} label="Sync from Azure" title="Read the node pools from Azure and the cluster now" />
         </div>
       </div>
@@ -405,7 +461,7 @@ export const NodePoolsTab: React.FC<{
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard title="Node Pools" value={pools.length} subtitle={`${kpis.system} System · ${pools.length - kpis.system} User`} icon={MetricCardIcons.layers()} tone="att"
+        <MetricCard title="Node Pools" value={pools.length} subtitle={`${kpis.system} System · ${pools.length - kpis.system} User${kpis.stopped ? ` · ${kpis.stopped} stopped` : ""}`} icon={MetricCardIcons.layers()} tone="att"
           onClick={() => { setTile("all"); setMode("all"); setPage(1); }} actionLabel="Show all node pools" />
         <MetricCard
           title="Nodes"
@@ -459,19 +515,16 @@ export const NodePoolsTab: React.FC<{
                 <th className={gridStyles.headerCell}>{header("Name", "name")}</th>
                 <th className={gridStyles.headerCell}>{header("VM Size", "vm_size")}</th>
                 <th className={gridStyles.headerCell}>{header("Nodes", "count")}</th>
-                <th className={gridStyles.headerCell}>{header("Autoscaling", "autoscaling")}</th>
-                <th className={gridStyles.headerCell}>{header("Pods / Capacity", "pods")}</th>
-                <th className={gridStyles.headerCell}>{header("Kubernetes", "kubernetes")}</th>
-                <th className={gridStyles.headerCell}>{header("Node Image", "image")}</th>
-                <th className={gridStyles.headerCell}>{header("Zones", "zones")}</th>
+                <th className={gridStyles.headerCell}>{header("Pods", "pods")}</th>
+                <th className={gridStyles.headerCell}>{header("Version", "version")}</th>
                 <th className={gridStyles.headerCell}>{header("State", "state")}</th>
-                <th className={gridStyles.headerCellCenter}>Actions</th>
+                <th className={`${gridStyles.headerCellCenter} ${stickyHead}`}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {paged.length === 0 && (
                 <GridStateRow
-                  colSpan={10}
+                  colSpan={7}
                   isLoading={isLoading}
                   emptyText={
                     !data?.last_sync ? "Not synced yet. Reading the node pools from Azure..." : pools.length === 0 ? "This cluster has no node pools." : "No node pools match the current filters"
@@ -498,17 +551,19 @@ export const NodePoolsTab: React.FC<{
                         </div>
                       )}
                     </td>
-                    <td className={gridStyles.cell}><span className="whitespace-nowrap font-mono text-xs text-slate-700">{pool.vm_size}</span></td>
+                    <td className={gridStyles.cell}>
+                      <div className="whitespace-nowrap font-mono text-xs text-slate-700">{pool.vm_size}</div>
+                      <div className="whitespace-nowrap text-[11px] text-slate-500">
+                        {pool.availability_zones.length ? `Zones ${pool.availability_zones.join(", ")}` : "No zones"}
+                      </div>
+                    </td>
                     <td className={gridStyles.cell}><NodesCell pool={pool} /></td>
-                    <td className={gridStyles.cell}><AutoscaleCell pool={pool} /></td>
                     <td className={gridStyles.cell}><PodsCell pool={pool} /></td>
-                    <td className={gridStyles.cell}><span className="whitespace-nowrap font-mono text-xs text-slate-700">{pool.kubernetes_version || "—"}</span></td>
-                    <td className={gridStyles.cell}><NodeImageCell value={pool.node_image_version} /></td>
-                    <td className={gridStyles.cell}><span className="whitespace-nowrap text-xs text-slate-600">{pool.availability_zones.length ? pool.availability_zones.join(", ") : "—"}</span></td>
+                    <td className={gridStyles.cell}><VersionCell pool={pool} /></td>
                     <td className={gridStyles.cell}>
                       <div title={issues.join("\n") || undefined}><PoolState pool={pool} /></div>
                     </td>
-                    <td className={gridStyles.centerCell}>
+                    <td className={`${gridStyles.centerCell} ${stickyCell}`}>
                       <div className="flex items-center justify-center gap-1">
                         <button type="button" title="View details" onClick={() => setSelected(pool.name)} className={`${iconBtn} text-blue-600 hover:bg-blue-50`}>
                           {ActionIcons.view}
@@ -517,16 +572,37 @@ export const NodePoolsTab: React.FC<{
                           <>
                             <button
                               type="button"
-                              title={pool.enable_auto_scaling ? "Autoscaling manages this pool's size. Change the range or turn autoscaling off first." : "Scale node pool"}
+                              title={
+                                isStopped(pool) ? "Start the pool before changing its size."
+                                : pool.enable_auto_scaling ? "Autoscaling manages this pool's size. Change the range or turn autoscaling off first."
+                                : "Scale node pool"
+                              }
                               aria-label="Scale node pool"
-                              disabled={pool.enable_auto_scaling}
+                              disabled={pool.enable_auto_scaling || isStopped(pool)}
                               onClick={() => setScalePool(pool)}
                               className={`${iconBtn} text-att-600 hover:bg-att-50`}
                             >
                               {ActionIcons.scale}
                             </button>
-                            <button type="button" title="Configure autoscaling" onClick={() => setAutoscalePool(pool)} className={`${iconBtn} text-purple-600 hover:bg-purple-50`}>
+                            <button
+                              type="button"
+                              title={isStopped(pool) ? "Start the pool before changing its autoscaling." : "Configure autoscaling"}
+                              aria-label="Configure autoscaling"
+                              disabled={isStopped(pool)}
+                              onClick={() => setAutoscalePool(pool)}
+                              className={`${iconBtn} text-purple-600 hover:bg-purple-50`}
+                            >
                               {ActionIcons.autoscale}
+                            </button>
+                            <button
+                              type="button"
+                              title={powerBlocked(pool) ?? (isStopped(pool) ? "Start node pool" : "Stop node pool")}
+                              aria-label={isStopped(pool) ? "Start node pool" : "Stop node pool"}
+                              disabled={!!powerBlocked(pool)}
+                              onClick={() => setPowerPool(pool)}
+                              className={`${iconBtn} ${isStopped(pool) ? "text-green-600 hover:bg-green-50" : "text-red-600 hover:bg-red-50"}`}
+                            >
+                              {isStopped(pool) ? ActionIcons.start : ActionIcons.stop}
                             </button>
                           </>
                         )}
@@ -554,6 +630,26 @@ export const NodePoolsTab: React.FC<{
       )}
       {scalePool && (
         <ScaleNodePoolDialog pool={scalePool} busy={scaleMut.isPending} onClose={() => setScalePool(null)} onSubmit={(n) => submitScale(scalePool, n)} />
+      )}
+      {powerPool && (
+        <PowerDialog
+          pool={powerPool}
+          busy={powerMut.isPending}
+          onClose={() => setPowerPool(null)}
+          onSubmit={() => submitPower(powerPool, isStopped(powerPool))}
+        />
+      )}
+      {creating && (
+        <CreateNodePoolDialog
+          clusterId={cluster.id}
+          clusterName={cluster.name}
+          onClose={() => setCreating(false)}
+          onCreated={(name) => {
+            showToast(`Creating node pool ${name}. Azure provisions it in the background; it usually takes several minutes.`);
+            setCreating(false);
+            sync.start(false);
+          }}
+        />
       )}
       {autoscalePool && (
         <AutoscaleDialog
@@ -703,6 +799,12 @@ export function NodePoolDetailModal({
     >
       {pool && section === "overview" && (
         <>
+          {isStopped(pool) && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              This pool is stopped: its nodes are deallocated{pool.enable_auto_scaling ? " and its autoscaler is paused" : ""}. Starting it brings back{" "}
+              {pool.count} node{pool.count === 1 ? "" : "s"}.
+            </div>
+          )}
           {issues.length > 0 && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{issues.join(" · ")}</div>
           )}
@@ -825,6 +927,67 @@ const btn = {
 
 const minNodes = (pool: NodePoolDetails) => (isSystem(pool) ? 1 : 0);
 const wholeNumber = (v: string) => /^\d+$/.test(v.trim());
+
+export function PowerDialog({
+  pool,
+  busy,
+  onClose,
+  onSubmit,
+}: {
+  pool: NodePoolDetails;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const start = isStopped(pool);
+  const pods = !start && hasNodeDetails(pool) ? pool.total_pods : null;
+  return (
+    <ModalShell title={`${start ? "Start" : "Stop"} ${pool.name}`} onClose={onClose}>
+      <div className="space-y-4">
+        {start ? (
+          <p className="text-sm text-gray-600">
+            Azure brings back the pool's {pool.count} {pool.vm_size} node{pool.count === 1 ? "" : "s"}
+            {pool.enable_auto_scaling ? ` and resumes autoscaling between ${pool.min_count} and ${pool.max_count} nodes` : ""}. Pods waiting
+            for these nodes are scheduled once they're ready.
+          </p>
+        ) : pool.count === 0 ? (
+          <p className="text-sm text-gray-600">
+            This pool has no nodes right now.{" "}
+            {pool.enable_auto_scaling
+              ? "Stopping it pauses its autoscaler, so it won't add nodes for pending pods until you start it again."
+              : "Stopping it keeps it at zero nodes until you start it again."}
+          </p>
+        ) : (
+          <>
+            <p className="text-sm text-gray-600">
+              Azure deallocates all {pool.count} node{pool.count === 1 ? "" : "s"} in this pool. You stop paying for their compute, and the pool keeps its
+              settings so you can start it again.
+            </p>
+            <ul className="list-disc space-y-1 pl-5 text-sm text-amber-800">
+              <li>
+                {pods ? `Its ${pods.toLocaleString()} running pod${pods === 1 ? " is" : "s are"}` : "Its pods are"} evicted. Pods that can't run on another pool stay
+                pending until you start it.
+              </li>
+              {pool.enable_auto_scaling && <li>Autoscaling is paused while the pool is stopped.</li>}
+            </ul>
+          </>
+        )}
+        <p className="text-xs text-slate-500">Azure applies the change in the background, which can take several minutes.</p>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className={btn.secondary}>Cancel</button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onSubmit}
+            className={start ? btn.primary : "rounded-lg bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-50"}
+          >
+            {busy ? (start ? "Starting..." : "Stopping...") : start ? "Start" : "Stop"}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
 
 export function ScaleNodePoolDialog({
   pool,

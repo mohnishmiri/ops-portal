@@ -19,10 +19,12 @@ from app.auth import get_current_user
 from app.core.database import get_db
 from app.models.database import Permission, Resource, SyncJob
 from app.schemas.auth import UserContext, UserRole
+from app.services import aks_nodepool_create as np_create
 from app.services import aks_nodepool_operations as np_ops
 from app.services.aks_operations_service import AKSOperationsService
 
 CLUSTER_ID = "/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.ContainerService/managedClusters/aks-prod-01"
+SUBNET_ID = "/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/aks-snet"
 
 
 # ── Builders ──────────────────────────────────────────────────────────
@@ -53,6 +55,25 @@ def make_pool(name="userpool", *, mode="User", count=3, auto=False, min_count=No
         "scale_set_priority": None,
         "scale_down_mode": None,
         "upgrade_settings": SimpleNamespace(max_surge="10%"),
+        "vnet_subnet_id": SUBNET_ID,
+        "pod_subnet_id": None,
+        "enable_encryption_at_host": None,
+        "enable_fips": False,
+    }
+    fields.update(extra)
+    return SimpleNamespace(**fields)
+
+
+def make_cluster(power="Running", **extra):
+    fields = {
+        "node_resource_group": "MC_rg",
+        "power_state": SimpleNamespace(code=power),
+        "location": "eastus2",
+        "current_kubernetes_version": "1.34.1",
+        "kubernetes_version": "1.34",
+        "network_profile": SimpleNamespace(network_plugin="azure", network_plugin_mode=None),
+        "windows_profile": None,
+        "node_provisioning_profile": None,
     }
     fields.update(extra)
     return SimpleNamespace(**fields)
@@ -179,7 +200,8 @@ class FakeAgentPools:
         return self.pools[name]
 
     def begin_create_or_update(self, resource_group, cluster_name, name, pool):
-        self.updates.append((name, SimpleNamespace(**vars(pool))))
+        # A snapshot of existing pools (mutated in place); new SDK models as sent.
+        self.updates.append((name, SimpleNamespace(**vars(pool)) if isinstance(pool, SimpleNamespace) else pool))
 
 
 @pytest.fixture
@@ -191,11 +213,13 @@ def azure(monkeypatch):
             make_pool("auto", count=5, auto=True, min_count=1, max_count=10),
         ]
     )
+    agent_pools.cluster = make_cluster()
     client = SimpleNamespace(
         agent_pools=agent_pools,
-        managed_clusters=SimpleNamespace(get=lambda rg, name: SimpleNamespace(node_resource_group="MC_rg")),
+        managed_clusters=SimpleNamespace(get=lambda rg, name: agent_pools.cluster),
     )
     monkeypatch.setattr(np_ops, "ContainerServiceClient", lambda credential, subscription: client)
+    monkeypatch.setattr(np_create, "ContainerServiceClient", lambda credential, subscription: client)
     monkeypatch.setattr(AKSOperationsService, "credential", None, raising=False)
     monkeypatch.setattr(np_ops.data_cache, "invalidate_for_nodepools", _noop)
     return agent_pools
@@ -445,3 +469,363 @@ async def test_non_admin_can_request_an_immediate_aks_sync(app, db_engine, db_se
     assert resp.status_code in (200, 201, 202)
     assert resp.json()["job_id"] == 41
     assert started == [41]
+
+
+# ── Start / stop ──────────────────────────────────────────────────────
+
+
+async def test_stop_user_pool(azure):
+    result = await service_with().set_node_pool_power(CLUSTER_ID, "manual", start=False)
+
+    assert result["success"] is True
+    assert azure.updates[0][0] == "manual"
+    assert azure.updates[0][1].power_state.code == "Stopped"
+
+
+async def test_start_stopped_pool(azure):
+    azure.pools["manual"].power_state = SimpleNamespace(code="Stopped")
+
+    result = await service_with().set_node_pool_power(CLUSTER_ID, "manual", start=True)
+
+    assert result["success"] is True
+    assert azure.updates[0][1].power_state.code == "Running"
+
+
+@pytest.mark.parametrize(
+    ("pool", "start", "setup", "message"),
+    [
+        ("sys", False, None, "System pools can't be stopped"),
+        ("manual", True, None, "already running"),
+        ("manual", False, "cluster-stopped", "Start the cluster"),
+        ("manual", False, "scaling", "Wait for it to finish"),
+        ("manual", False, "nap", "node auto-provisioning"),
+    ],
+)
+async def test_power_change_is_rejected_before_azure(azure, pool, start, setup, message):
+    if setup == "cluster-stopped":
+        azure.cluster = make_cluster(power="Stopped")
+    elif setup == "scaling":
+        azure.pools[pool].provisioning_state = "Scaling"
+    elif setup == "nap":
+        azure.cluster = make_cluster(node_provisioning_profile=SimpleNamespace(mode="Auto"))
+
+    result = await service_with().set_node_pool_power(CLUSTER_ID, pool, start=start)
+
+    assert result["success"] is False
+    assert message in result["error"]
+    assert azure.updates == []
+
+
+async def test_stopped_pool_cannot_be_resized(azure):
+    azure.pools["manual"].power_state = SimpleNamespace(code="Stopped")
+
+    result = await service_with().scale_node_pool(CLUSTER_ID, "manual", 5)
+
+    assert "Start it before changing its size" in result["error"]
+    assert azure.updates == []
+
+
+# ── Create ────────────────────────────────────────────────────────────
+
+
+def make_sku(
+    name, *, vcpus=8, memory=32, zones=("1", "2", "3"), ephemeral=True, cache_gb=200, spot=True, restricted=False
+):
+    caps = {
+        "vCPUs": str(vcpus),
+        "MemoryGB": str(memory),
+        "EphemeralOSDiskSupported": str(ephemeral),
+        "CachedDiskBytes": str(cache_gb * 2**30),
+        "MaxResourceVolumeMB": "65536",
+        "LowPriorityCapable": str(spot),
+        "CpuArchitectureType": "x64",
+    }
+    restrictions = (
+        [SimpleNamespace(type="Location", reason_code="NotAvailableForSubscription", restriction_info=None)]
+        if restricted
+        else []
+    )
+    return SimpleNamespace(
+        resource_type="virtualMachines",
+        name=name,
+        family="standardDSv3Family",
+        capabilities=[SimpleNamespace(name=k, value=v) for k, v in caps.items()],
+        location_info=[SimpleNamespace(location="eastus2", zones=list(zones))],
+        restrictions=restrictions,
+    )
+
+
+SKUS = [
+    make_sku("Standard_D8s_v3"),
+    make_sku("Standard_D32s_v3", vcpus=32, memory=128, cache_gb=800),
+    make_sku("Standard_D2_v2", zones=("1",), ephemeral=False, spot=False),
+    make_sku("Standard_A1", vcpus=1, memory=2),
+    make_sku("Standard_M416", vcpus=416, memory=11400, restricted=True),
+]
+
+
+@pytest.fixture
+def create_env(azure, monkeypatch):
+    azure.pools["sys"].enable_encryption_at_host = True
+    usage = {"used": 196, "limit": 4091}
+    compute = SimpleNamespace(resource_skus=SimpleNamespace(list=lambda **_kwargs: SKUS))
+    network = SimpleNamespace(
+        virtual_networks=SimpleNamespace(
+            list_usage=lambda rg, vnet: [
+                SimpleNamespace(id=SUBNET_ID, current_value=usage["used"], limit=usage["limit"])
+            ]
+        )
+    )
+
+    async def _get_or_fetch(key, ttl, fetch_fn):
+        return await fetch_fn(), "live"
+
+    monkeypatch.setattr(np_create, "ComputeManagementClient", lambda credential, subscription: compute)
+    monkeypatch.setattr(np_create, "NetworkManagementClient", lambda credential, subscription: network)
+    monkeypatch.setattr(np_create.data_cache, "get_or_fetch", _get_or_fetch)
+    monkeypatch.setattr(np_create.data_cache, "invalidate_for_nodepools", _noop)
+    azure.usage = usage
+    return azure
+
+
+def spec(**overrides):
+    base = {
+        "name": "rules",
+        "mode": "User",
+        "os_type": "Linux",
+        "os_sku": "Ubuntu",
+        "kubernetes_version": "1.34.1",
+        "availability_zones": ["1", "2", "3"],
+        "spot": False,
+        "vm_size": "Standard_D32s_v3",
+        "os_disk_type": "Ephemeral",
+        "os_disk_size_gb": 512,
+        "enable_auto_scaling": True,
+        "node_count": None,
+        "min_count": 1,
+        "max_count": 200,
+        "max_pods": 50,
+        "max_surge": "33%",
+        "subnet_id": None,
+        "node_labels": {"nodepool": "ruleengine"},
+        "node_taints": ["dedicated=rules:NoSchedule"],
+        "tags": {"team": "attcc"},
+    }
+    return {**base, **overrides}
+
+
+async def test_create_options_describe_what_azure_allows(create_env):
+    options = await service_with().get_node_pool_create_options(CLUSTER_ID)
+
+    sizes = {s["name"]: s for s in options["vm_sizes"]}
+    # Sizes under 2 vCPUs and sizes the subscription can't deploy are left out.
+    assert set(sizes) == {"Standard_D8s_v3", "Standard_D32s_v3", "Standard_D2_v2"}
+    assert sizes["Standard_D32s_v3"]["max_ephemeral_os_disk_gb"] == 800
+    assert options["subnets"] == [
+        {
+            "id": SUBNET_ID,
+            "name": "aks-snet",
+            "free_ips": 3895,
+            "total_ips": 4091,
+            "pools": ["sys", "manual", "auto"],
+            "pod_subnet": False,
+        }
+    ]
+    assert options["kubernetes_versions"] == ["1.34.1"]
+    assert options["inherited"] == {"source_pool": "sys", "encryption_at_host": True, "fips": False}
+    assert options["defaults"]["max_surge"] == "10%"
+    assert options["power_state"] == "Running"
+
+
+async def test_create_pool_on_the_clusters_subnet(create_env):
+    result = await service_with().create_node_pool(CLUSTER_ID, spec())
+
+    name, pool = create_env.updates[0]
+    assert result["success"] is True
+    assert name == "rules"
+    assert (pool.vm_size, pool.mode, pool.count, pool.min_count, pool.max_count) == (
+        "Standard_D32s_v3",
+        "User",
+        1,
+        1,
+        200,
+    )
+    assert pool.vnet_subnet_id == SUBNET_ID
+    assert pool.enable_encryption_at_host is True  # follows the system pool
+    assert pool.enable_node_public_ip is False
+    assert pool.upgrade_settings.max_surge == "33%"
+    assert pool.node_taints == ["dedicated=rules:NoSchedule"]
+    assert pool.orchestrator_version == "1.34.1"
+    assert result["inherited_from"] == "sys"
+
+
+async def test_create_spot_pool(create_env):
+    await service_with().create_node_pool(CLUSTER_ID, spec(spot=True, vm_size="Standard_D8s_v3", os_disk_size_gb=128))
+
+    pool = create_env.updates[0][1]
+    assert (pool.scale_set_priority, pool.scale_set_eviction_policy, pool.spot_max_price) == ("Spot", "Delete", -1)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"name": "manual"}, "already has a node pool named manual"),
+        ({"name": "toolongforlinux1"}, "1–12 lowercase"),
+        ({"vm_size": "Standard_M416"}, "isn't available to this subscription"),
+        ({"vm_size": "Standard_D2_v2", "os_disk_type": None}, "isn't offered in zone(s) 1, 2, 3"),
+        ({"os_disk_size_gb": 1024}, "can be at most 800 GiB"),
+        ({"mode": "System", "spot": True}, "Spot node pools must be User pools"),
+        (
+            {"spot": True, "vm_size": "Standard_D2_v2", "availability_zones": ["1"], "os_disk_type": None},
+            "can't run as Spot",
+        ),
+        ({"os_type": "Windows", "name": "win"}, "wasn't created with Windows support"),
+        ({"kubernetes_version": "1.35.0"}, "isn't available for new pools"),
+        ({"min_count": 5, "max_count": 2}, "can't be greater than the maximum"),
+        ({"enable_auto_scaling": False, "node_count": None}, "Set the node count"),
+        ({"node_labels": {"kubernetes.azure.com/mode": "user"}}, "reserved by Kubernetes or AKS"),
+        ({"node_labels": {"bad key": "x"}}, "isn't a valid Kubernetes label key"),
+        ({"node_taints": ["dedicated=rules"]}, "key=value:Effect"),
+        ({"node_taints": ["dedicated=rules:Sometimes"]}, "Taint effect must be one of"),
+        ({"tags": {"a/b": "x"}}, "Tag name 'a/b'"),
+        ({"subnet_id": SUBNET_ID.replace("aks-snet", "db-snet")}, "already use"),
+    ],
+)
+async def test_invalid_create_is_rejected_before_azure(create_env, overrides, message):
+    result = await service_with().create_node_pool(CLUSTER_ID, spec(**overrides))
+
+    assert result["success"] is False
+    assert message in result["error"]
+    assert create_env.updates == []
+
+
+async def test_create_is_rejected_when_the_subnet_is_out_of_ips(create_env):
+    create_env.usage["used"] = 4091 - 40  # 40 free; 1 node with 50 pods needs 51
+
+    result = await service_with().create_node_pool(CLUSTER_ID, spec())
+
+    assert "has 40 free IPs" in result["error"]
+    assert create_env.updates == []
+
+
+async def test_create_on_a_stopped_cluster_is_rejected(create_env):
+    create_env.cluster = make_cluster(power="Stopped")
+
+    result = await service_with().create_node_pool(CLUSTER_ID, spec())
+
+    assert "Start it before adding node pools" in result["error"]
+
+
+async def test_create_without_vm_size_data_still_validates_the_rest(create_env, monkeypatch):
+    def _denied(credential, subscription):
+        raise PermissionError("AuthorizationFailed")
+
+    monkeypatch.setattr(np_create, "ComputeManagementClient", _denied)
+
+    options = await service_with().get_node_pool_create_options(CLUSTER_ID)
+    result = await service_with().create_node_pool(CLUSTER_ID, spec(name="manual"))
+
+    assert options["vm_sizes"] == [] and "enter a size by name" in options["vm_sizes_error"]
+    assert "already has a node pool" in result["error"]
+
+
+# ── API: create and power permissions ─────────────────────────────────
+
+
+class FakeLifecycleService:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def create_node_pool(self, cluster_id, spec):
+        self.calls.append(("create", spec["name"], spec["vm_size"]))
+        return {"success": True, "nodepool_name": spec["name"], "inherited_from": "sys", "subnet": "aks-snet"}
+
+    async def set_node_pool_power(self, cluster_id, nodepool_name, start):
+        self.calls.append(("power", nodepool_name, start))
+        return {"success": True, "node_count": 3}
+
+    async def get_node_pool_create_options(self, cluster_id):
+        return {"vm_sizes": [], "existing_pools": ["sys"]}
+
+
+async def _seed(db_session, capability: str) -> None:
+    res = Resource(resource_type="operation", resource_name=capability, description="x", is_system=True)
+    db_session.add(res)
+    await db_session.commit()
+    await db_session.refresh(res)
+    db_session.add(
+        Permission(
+            subject_type="role", subject_id="write", resource_id=res.id, permission_type="edit", environment_scope="all"
+        )
+    )
+    await db_session.commit()
+
+
+CREATE_BODY = {
+    "cluster_id": CLUSTER_ID,
+    "name": "rules",
+    "vm_size": "Standard_D32s_v3",
+    "min_count": 1,
+    "max_count": 20,
+}
+
+
+async def test_read_user_cannot_create_node_pool(app, db_session):
+    await _seed(db_session, "aks_nodepool_create")
+    service = FakeLifecycleService()
+
+    async with client(app, db_session, make_user(UserRole.READ), service) as ac:
+        resp = await ac.post("/api/v1/aks/nodepools", json=CREATE_BODY)
+
+    assert resp.status_code == 403
+    assert service.calls == []
+
+
+async def test_create_node_pool_is_audited(app, db_session):
+    aks_operations._in_memory_audit_log.clear()
+    await _seed(db_session, "aks_nodepool_create")
+    service = FakeLifecycleService()
+
+    async with client(app, db_session, make_user(UserRole.WRITE), service) as ac:
+        resp = await ac.post("/api/v1/aks/nodepools", json=CREATE_BODY)
+
+    entries = [e for e in aks_operations._in_memory_audit_log if e["action"] == "create_nodepool"]
+    aks_operations._in_memory_audit_log.clear()
+    assert resp.status_code == 200
+    assert service.calls == [("create", "rules", "Standard_D32s_v3")]
+    assert entries[0]["details"]["summary"] == "Created node pool rules (User, Standard_D32s_v3, autoscaling 1–20)"
+    assert entries[0]["details"]["inherited_from"] == "sys"
+
+
+async def test_stop_node_pool_is_audited(app, db_session):
+    aks_operations._in_memory_audit_log.clear()
+    await _seed_manage(db_session)
+    service = FakeLifecycleService()
+
+    async with client(app, db_session, make_user(UserRole.WRITE), service) as ac:
+        resp = await ac.post("/api/v1/aks/nodepools/stop", json={"cluster_id": CLUSTER_ID, "nodepool_name": "manual"})
+
+    entries = [e for e in aks_operations._in_memory_audit_log if e["action"] == "stop_nodepool"]
+    aks_operations._in_memory_audit_log.clear()
+    assert resp.status_code == 200
+    assert service.calls == [("power", "manual", False)]
+    assert entries[0]["status"] == "success"
+
+
+async def test_read_user_cannot_start_node_pool(app, db_session):
+    await _seed_manage(db_session)
+    service = FakeLifecycleService()
+
+    async with client(app, db_session, make_user(UserRole.READ), service) as ac:
+        resp = await ac.post("/api/v1/aks/nodepools/start", json={"cluster_id": CLUSTER_ID, "nodepool_name": "manual"})
+
+    assert resp.status_code == 403
+    assert service.calls == []
+
+
+async def test_read_user_can_view_create_options(app, db_session):
+    async with client(app, db_session, make_user(UserRole.READ), FakeLifecycleService()) as ac:
+        resp = await ac.get("/api/v1/aks/nodepools/options", params={"cluster_id": CLUSTER_ID})
+
+    assert resp.status_code == 200
+    assert resp.json()["existing_pools"] == ["sys"]

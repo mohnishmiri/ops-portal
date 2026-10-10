@@ -17,6 +17,7 @@ vi.mock("../../services/aksApi", async (importOriginal) => ({
   useAksBackgroundSync: vi.fn(() => ({ isRunning: false, isRetrying: false, error: null, start: vi.fn() })),
   useScaleNodePool: vi.fn(),
   useUpdateAutoscaling: vi.fn(),
+  useNodePoolPower: vi.fn(),
 }));
 
 import * as aksApi from "../../services/aksApi";
@@ -84,8 +85,9 @@ const POOLS = [
 
 const scaleMutate = vi.fn();
 const autoscaleMutate = vi.fn();
+const powerMutate = vi.fn();
 
-function setup(pools: aksApi.NodePoolDetails[] = POOLS, canManage = true) {
+function setup(pools: aksApi.NodePoolDetails[] = POOLS, canManage = true, canCreate = false) {
   (aksApi.useCachedNodePools as any).mockReturnValue({
     data: { source: "db", last_sync: new Date().toISOString(), node_pools: pools, count: pools.length },
     isFetching: false,
@@ -94,7 +96,8 @@ function setup(pools: aksApi.NodePoolDetails[] = POOLS, canManage = true) {
   });
   (aksApi.useScaleNodePool as any).mockReturnValue({ mutate: scaleMutate, isPending: false });
   (aksApi.useUpdateAutoscaling as any).mockReturnValue({ mutate: autoscaleMutate, isPending: false });
-  render(<NodePoolsTab cluster={CLUSTER} showToast={vi.fn()} formatDate={(v) => v} canManage={canManage} />);
+  (aksApi.useNodePoolPower as any).mockReturnValue({ mutate: powerMutate, isPending: false });
+  render(<NodePoolsTab cluster={CLUSTER} showToast={vi.fn()} formatDate={(v) => v} canManage={canManage} canCreate={canCreate} />);
 }
 
 const rows = () => screen.getAllByRole("row").slice(1);
@@ -103,6 +106,7 @@ describe("NodePoolsTab", () => {
   beforeEach(() => {
     scaleMutate.mockReset();
     autoscaleMutate.mockReset();
+    powerMutate.mockReset();
   });
 
   it("shows pods against capacity and the node image release", () => {
@@ -111,7 +115,9 @@ describe("NodePoolsTab", () => {
     const row = rows()[0];
     expect(within(row).getByText("Standard_D32s_v3")).toBeTruthy();
     expect(within(row).getByText("/ 60")).toBeTruthy();
-    expect(within(row).getByText("202602.13.0")).toBeTruthy();
+    expect(within(row).getByText("Image 202602.13.0")).toBeTruthy();
+    expect(within(row).getByTitle(/released 13 Feb 2026|released Feb 13, 2026/)).toBeTruthy();
+    expect(within(row).getByText("Zones 1, 2, 3")).toBeTruthy();
     expect(within(row).getByText("All ready")).toBeTruthy();
   });
 
@@ -135,7 +141,8 @@ describe("NodePoolsTab", () => {
     });
     (aksApi.useScaleNodePool as any).mockReturnValue({ mutate: scaleMutate, isPending: false });
     (aksApi.useUpdateAutoscaling as any).mockReturnValue({ mutate: autoscaleMutate, isPending: false });
-    render(<NodePoolsTab cluster={CLUSTER} showToast={vi.fn()} formatDate={(v) => v} canManage />);
+    (aksApi.useNodePoolPower as any).mockReturnValue({ mutate: powerMutate, isPending: false });
+    render(<NodePoolsTab cluster={CLUSTER} showToast={vi.fn()} formatDate={(v) => v} canManage canCreate={false} />);
 
     expect(screen.getByText(/This data is 2 h 17 min old: no sync has completed since then/)).toBeTruthy();
     expect(screen.getByText(/A sync is running now/)).toBeTruthy();
@@ -180,6 +187,42 @@ describe("NodePoolsTab", () => {
     fireEvent.click(save);
 
     expect(autoscaleMutate.mock.calls[0][0]).toMatchObject({ nodepoolName: "syspool", enableAutoScaling: true, minCount: 3, maxCount: 12 });
+  });
+
+  it("stops a User pool after confirming, but never a System pool", () => {
+    setup();
+    const [batch, sys] = rows();
+    expect((within(sys).getByLabelText("Stop node pool") as HTMLButtonElement).disabled).toBe(true);
+    expect(within(sys).getByLabelText("Stop node pool").getAttribute("title")).toBe("System node pools can't be stopped.");
+
+    fireEvent.click(within(batch).getByLabelText("Stop node pool"));
+    expect(screen.getByText(/Its 300 running pods are evicted/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+
+    expect(powerMutate.mock.calls[0][0]).toEqual({ clusterId: CLUSTER.id, nodepoolName: "batch", start: false });
+  });
+
+  it("treats a stopped pool as stopped, not unhealthy", () => {
+    setup([pool({ name: "batch", power_state: "Stopped", count: 4, enable_auto_scaling: true, min_count: 0, max_count: 20, ready_nodes: 0 }), pool()]);
+    const [batch] = rows();
+
+    expect(within(batch).getAllByText("Stopped").length).toBeGreaterThan(0);
+    expect(within(batch).queryByText("All ready")).toBeNull();
+    expect((within(batch).getByLabelText("Scale node pool") as HTMLButtonElement).disabled).toBe(true);
+    expect((within(batch).getByLabelText("Configure autoscaling") as HTMLButtonElement).disabled).toBe(true);
+    // Nodes counts only running pools; the stopped pool isn't an attention item.
+    expect(screen.getByRole("button", { name: "Show node pools that have nodes" }).textContent).toContain("2");
+    expect(screen.getByText("All pools healthy")).toBeTruthy();
+    expect(screen.getByText(/1 System|0 System/).textContent).toContain("1 stopped");
+
+    fireEvent.click(within(batch).getByLabelText("Start node pool"));
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(powerMutate.mock.calls[0][0]).toMatchObject({ nodepoolName: "batch", start: true });
+  });
+
+  it("offers Add node pool only to users who can create pools", () => {
+    setup(POOLS, true, false);
+    expect(screen.queryByRole("button", { name: /Add node pool/ })).toBeNull();
   });
 
   it("hides changes from users who can't manage node pools", () => {

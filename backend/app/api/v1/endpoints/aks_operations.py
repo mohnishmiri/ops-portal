@@ -11,6 +11,7 @@ Full management interface for Azure Kubernetes Service operations:
 
 from collections import deque
 from datetime import UTC, datetime
+from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
@@ -345,6 +346,39 @@ class UpdateAutoscalingRequest(BaseModel):
     enable_auto_scaling: bool = Field(..., description="Whether to enable autoscaling")
     min_count: int | None = Field(default=None, ge=0, le=1000, description="Minimum node count")
     max_count: int | None = Field(default=None, ge=0, le=1000, description="Maximum node count")
+
+
+class NodePoolActionRequest(BaseModel):
+    """Request to start or stop a node pool."""
+
+    cluster_id: str = Field(..., description="Full Azure resource ID of the AKS cluster")
+    nodepool_name: str = Field(..., pattern=NODEPOOL_NAME_PATTERN, description="Node pool name")
+
+
+class CreateNodePoolRequest(BaseModel):
+    """A new node pool, with the fields of the Azure portal's "Add a node pool" form."""
+
+    cluster_id: str = Field(..., description="Full Azure resource ID of the AKS cluster")
+    name: str = Field(..., pattern=NODEPOOL_NAME_PATTERN, description="Node pool name (Windows: 6 characters)")
+    mode: Literal["User", "System"] = "User"
+    os_type: Literal["Linux", "Windows"] = "Linux"
+    os_sku: Literal["Ubuntu", "AzureLinux", "Windows2022", "Windows2019"] | None = None
+    kubernetes_version: str | None = Field(default=None, pattern=r"^\d+\.\d+(\.\d+)?$")
+    availability_zones: list[Literal["1", "2", "3"]] = Field(default_factory=list, max_length=3)
+    spot: bool = Field(default=False, description="Azure Spot capacity (evictable; User pools only)")
+    vm_size: str = Field(..., pattern=r"^Standard_[A-Za-z0-9_]{2,60}$")
+    os_disk_type: Literal["Managed", "Ephemeral"] | None = Field(default=None, description="None lets Azure choose")
+    os_disk_size_gb: int = Field(default=128, ge=30, le=2048)
+    enable_auto_scaling: bool = True
+    node_count: int | None = Field(default=None, ge=0, le=1000, description="Manual scale only")
+    min_count: int | None = Field(default=None, ge=0, le=1000)
+    max_count: int | None = Field(default=None, ge=1, le=1000)
+    max_pods: int = Field(default=30, ge=10, le=250)
+    max_surge: str | None = Field(default=None, pattern=r"^([1-9]\d?%|100%|[1-9]\d{0,3})$")
+    subnet_id: str | None = Field(default=None, max_length=1024, description="One the cluster's pools already use")
+    node_labels: dict[str, str] = Field(default_factory=dict, max_length=50)
+    node_taints: list[str] = Field(default_factory=list, max_length=20)
+    tags: dict[str, str] = Field(default_factory=dict, max_length=50)
 
 
 class ClusterActionRequest(BaseModel):
@@ -1975,6 +2009,111 @@ async def update_node_pool_autoscaling(
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Update failed"))
+    return result
+
+
+async def _set_node_pool_power(
+    request: NodePoolActionRequest, http_request: Request, user: UserContext, service, db, *, start: bool
+) -> dict:
+    result = await service.set_node_pool_power(request.cluster_id, request.nodepool_name, start=start)
+    verb = "Started" if start else "Stopped"
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="start_nodepool" if start else "stop_nodepool",
+        resource_type="nodepool",
+        resource_name=request.nodepool_name,
+        cluster_id=request.cluster_id,
+        namespace="",
+        status="success" if result.get("success") else "failed",
+        details={
+            "summary": f"{verb} node pool {request.nodepool_name}",
+            "node_count": result.get("node_count"),
+            "error": result.get("error"),
+        },
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Node pool power change failed"))
+    return result
+
+
+@router.post("/nodepools/start", summary="Start a stopped node pool")
+async def start_node_pool(
+    request: NodePoolActionRequest,
+    http_request: Request,
+    user: UserContext = Depends(require_capability("aks_nodepool_manage")),
+    service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Bring a stopped pool's nodes back; its cluster autoscaler resumes."""
+    return await _set_node_pool_power(request, http_request, user, service, db, start=True)
+
+
+@router.post("/nodepools/stop", summary="Stop a node pool")
+async def stop_node_pool(
+    request: NodePoolActionRequest,
+    http_request: Request,
+    user: UserContext = Depends(require_capability("aks_nodepool_manage")),
+    service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Deallocate a User pool's nodes; its pods are evicted and its autoscaler pauses."""
+    return await _set_node_pool_power(request, http_request, user, service, db, start=False)
+
+
+@router.get("/nodepools/options", summary="What a new node pool can use in this cluster")
+async def get_node_pool_create_options(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    user: UserContext = Depends(get_current_user),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """VM sizes in the cluster's region, Kubernetes versions, subnets with free IPs, and the defaults existing pools use."""
+    try:
+        return await service.get_node_pool_create_options(cluster_id)
+    except Exception as e:
+        logger.error("node_pool_options_failed", cluster_id=cluster_id, error=str(e))
+        raise HTTPException(
+            status_code=502, detail="Unable to read the cluster's node pool settings from Azure."
+        ) from e
+
+
+@router.post("/nodepools", summary="Create a node pool")
+async def create_node_pool(
+    request: CreateNodePoolRequest,
+    http_request: Request,
+    user: UserContext = Depends(require_capability("aks_nodepool_create")),
+    service: AKSOperationsService = Depends(_get_service),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Validate and start creating a node pool; Azure provisions it in the background."""
+    spec = request.model_dump(exclude={"cluster_id"})
+    result = await service.create_node_pool(request.cluster_id, spec)
+    scale = (
+        f"autoscaling {request.min_count}–{request.max_count}"
+        if request.enable_auto_scaling
+        else f"{request.node_count} nodes"
+    )
+    await _write_aks_audit_log(
+        db,
+        request=http_request,
+        user=user,
+        action="create_nodepool",
+        resource_type="nodepool",
+        resource_name=request.name,
+        cluster_id=request.cluster_id,
+        namespace="",
+        status="success" if result.get("success") else "failed",
+        details={
+            "summary": f"Created node pool {request.name} ({request.mode}, {request.vm_size}, {scale})",
+            "request": spec,
+            "inherited_from": result.get("inherited_from"),
+            "subnet": result.get("subnet"),
+            "error": result.get("error"),
+        },
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Node pool creation failed"))
     return result
 
 

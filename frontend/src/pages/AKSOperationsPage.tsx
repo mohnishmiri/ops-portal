@@ -2658,6 +2658,7 @@ const AKSOperationsPage: React.FC = () => {
               showToast={showToast}
               formatDate={formatDate}
               canManage={canWrite && hasCapability("AKS_NODEPOOL_MANAGE")}
+              canCreate={canWrite && hasCapability("AKS_NODEPOOL_CREATE")}
             />
           ) : (
             <p className="text-sm text-gray-500 py-8">Select a cluster on the Clusters tab to continue.</p>

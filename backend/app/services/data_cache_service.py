@@ -143,6 +143,10 @@ class CacheKeys:
         return f"{CacheKeys.PREFIX}:namespaces:{_hash_params(cluster_id)}"
 
     @staticmethod
+    def vm_sizes(subscription_id: str, location: str) -> str:
+        return f"{CacheKeys.PREFIX}:vmsizes:{_hash_params(subscription_id, location.lower())}"
+
+    @staticmethod
     def subscriptions(subscription_ids: list[str] | None = None) -> str:
         h = _hash_params(sorted(subscription_ids) if subscription_ids else [])
         return f"{CacheKeys.PREFIX}:subscriptions:{h}"

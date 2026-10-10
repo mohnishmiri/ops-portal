@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 from azure.mgmt.containerservice import ContainerServiceClient
+from azure.mgmt.containerservice.models import PowerState
 from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, func, select
 
@@ -156,7 +157,18 @@ def build_node_pool(
     }
 
 
+def _power(resource: Any) -> str:
+    return resource.power_state.code if resource.power_state else "Running"
+
+
+def _check_not_stopped(pool: Any) -> None:
+    # Resizing a stopped pool is unsupported and confuses the cluster autoscaler.
+    if _power(pool) == "Stopped":
+        raise NodePoolChangeError(f"{pool.name} is stopped. Start it before changing its size.")
+
+
 def check_scale_request(pool: Any, node_count: int) -> None:
+    _check_not_stopped(pool)
     if pool.enable_auto_scaling:
         raise NodePoolChangeError(
             f"The cluster autoscaler manages {pool.name} ({pool.min_count}–{pool.max_count} nodes). "
@@ -169,6 +181,7 @@ def check_scale_request(pool: Any, node_count: int) -> None:
 
 
 def check_autoscaling_request(pool: Any, enable: bool, min_count: int | None, max_count: int | None) -> None:
+    _check_not_stopped(pool)
     if not enable:
         if not pool.enable_auto_scaling:
             raise NodePoolChangeError(f"Autoscaling is already off for {pool.name}.")
@@ -183,6 +196,32 @@ def check_autoscaling_request(pool: Any, enable: bool, min_count: int | None, ma
         raise NodePoolChangeError(f"{pool.name} is a System node pool; its minimum must be at least 1 node.")
     if pool.enable_auto_scaling and (pool.min_count, pool.max_count) == (min_count, max_count):
         raise NodePoolChangeError(f"{pool.name} already autoscales between {min_count} and {max_count} nodes.")
+
+
+def check_power_request(cluster: Any, pool: Any, start: bool) -> None:
+    """Azure's preconditions for starting or stopping a node pool."""
+    if _power(cluster) != "Running":
+        raise NodePoolChangeError(
+            "The cluster is stopped. Start the cluster before starting or stopping its node pools."
+        )
+    nap = getattr(cluster, "node_provisioning_profile", None)
+    if nap is not None and str(getattr(nap, "mode", "") or "").lower() == "auto":
+        raise NodePoolChangeError(
+            "Node pools can't be started or stopped on a cluster that uses node auto-provisioning."
+        )
+    power = _power(pool)
+    if start:
+        if power != "Stopped":
+            raise NodePoolChangeError(f"{pool.name} is already running.")
+        return
+    if (pool.mode or "User") == "System":
+        raise NodePoolChangeError(f"{pool.name} is a System node pool. System pools can't be stopped.")
+    if power == "Stopped":
+        raise NodePoolChangeError(f"{pool.name} is already stopped.")
+    if pool.provisioning_state != "Succeeded":
+        raise NodePoolChangeError(
+            f"{pool.name} is {pool.provisioning_state}. Wait for it to finish before stopping the pool."
+        )
 
 
 def azure_error_message(exc: Exception) -> str:
@@ -355,6 +394,42 @@ class AKSNodePoolOperationsMixin:
             nodepool=nodepool_name,
             enabled=enable_auto_scaling,
         )
+        await data_cache.invalidate_for_nodepools(cluster_id)
+        return {**result, "success": True}
+
+    async def set_node_pool_power(self, cluster_id: str, nodepool_name: str, start: bool) -> dict[str, Any]:
+        """Start or stop a pool's nodes; Azure applies it in the background.
+
+        Stopping deallocates the nodes and pauses the pool's cluster autoscaler;
+        starting brings the nodes back and resumes it.
+        """
+        action = "start" if start else "stop"
+        result: dict[str, Any] = {
+            "success": False,
+            "cluster_id": cluster_id,
+            "nodepool_name": nodepool_name,
+            "action": action,
+        }
+        try:
+            subscription_id, resource_group, cluster_name = cluster_parts(cluster_id)
+            aks_client = ContainerServiceClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+            cluster, pool = await asyncio.gather(
+                asyncio.to_thread(aks_client.managed_clusters.get, resource_group, cluster_name),
+                asyncio.to_thread(aks_client.agent_pools.get, resource_group, cluster_name, nodepool_name),
+            )
+            result["node_count"] = pool.count
+            check_power_request(cluster, pool, start)
+            pool.power_state = PowerState(code="Running" if start else "Stopped")
+            await asyncio.to_thread(
+                aks_client.agent_pools.begin_create_or_update, resource_group, cluster_name, nodepool_name, pool
+            )
+        except NodePoolChangeError as e:
+            return {**result, "error": str(e)}
+        except Exception as e:
+            logger.error("node_pool_power_failed", nodepool=nodepool_name, action=action, error=str(e))
+            return {**result, "error": azure_error_message(e)}
+
+        logger.info("node_pool_power_initiated", cluster=cluster_name, nodepool=nodepool_name, action=action)
         await data_cache.invalidate_for_nodepools(cluster_id)
         return {**result, "success": True}
 
