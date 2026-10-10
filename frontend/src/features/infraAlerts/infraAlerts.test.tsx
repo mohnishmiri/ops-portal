@@ -49,6 +49,16 @@ vi.mock("../../services/infraAlertApi", async (importOriginal) => {
   return { ...actual, ...Object.fromEntries(hooks.map((name) => [name, vi.fn()])) };
 });
 
+vi.mock("../../services/infraResourceAdminApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/infraResourceAdminApi")>();
+  return Object.fromEntries(
+    Object.entries(actual).map(([name, value]) => [
+      name,
+      name.startsWith("use") ? vi.fn(() => ({ data: undefined, isLoading: false, isError: false, mutate: vi.fn(), isPending: false })) : value,
+    ]),
+  );
+});
+
 import * as api from "../../services/infraAlertApi";
 import { EmailChipsInput, ExpiryConfigEditor } from "./ConfigEditors";
 import { InfraAlertDetailHost, type DetailHostProps } from "./DetailViews";
@@ -211,10 +221,16 @@ describe("InfraAlertDetailHost", () => {
     onPower: vi.fn(),
     powerPendingKey: null,
     onToast: vi.fn(),
+    onConfirm: vi.fn(),
+    onDeleteDisk: vi.fn(),
     canWrite: true,
     canPowerVM: true,
     canPowerPG: true,
+    canRunCommand: true,
+    canAdminResources: true,
+    canDeleteDisks: true,
     subscriptionNames: new Map([["sub-2", "ACC-PRD"]]),
+    subscriptionTiers: new Map([["sub-2", "prod" as const]]),
     formatDate: (v: string) => v,
     ...overrides,
   });

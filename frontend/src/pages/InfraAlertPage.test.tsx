@@ -22,12 +22,23 @@ vi.mock("../services/infraAlertApi", async (importOriginal) => {
   return Object.fromEntries(Object.entries(actual).map(([name, value]) => [name, name.startsWith("use") ? vi.fn() : value]));
 });
 
+vi.mock("../services/infraResourceAdminApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/infraResourceAdminApi")>();
+  return Object.fromEntries(
+    Object.entries(actual).map(([name, value]) => [
+      name,
+      name.startsWith("use") ? vi.fn(() => ({ data: undefined, isLoading: false, isError: false, mutate: vi.fn(), isPending: false })) : value,
+    ]),
+  );
+});
+
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import { useSubscriptionScope } from "../contexts/SubscriptionContext";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import * as costApi from "../services/costApi";
 import * as api from "../services/infraAlertApi";
+import * as adminApi from "../services/infraResourceAdminApi";
 import InfraAlertPage from "./InfraAlertPage";
 
 const hooks = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -284,6 +295,27 @@ describe("InfraAlertPage", () => {
       { resource_group: vm.resource_group, vm_name: vm.name, subscription_id: SUB_PRD },
       expect.anything(),
     );
+  });
+
+  it("resource tiles focus their grid, and running VMs show live CPU and memory", () => {
+    vi.mocked(adminApi.useResourceUtilization).mockImplementation(
+      (kind) =>
+        ({
+          data: { kind, generated_at: "2026-10-10T21:00:00", items: kind === "vm" ? { [VM_ID.toLowerCase()]: { state: "running", cpu: 93.4, memory: 61 } } : {} },
+          isLoading: false,
+        }) as unknown as ReturnType<typeof adminApi.useResourceUtilization>,
+    );
+    renderPage("/infra-alerts?tab=resources");
+    const vmRow = screen.getByText("Standard_E96ds_v5").closest("tr") as HTMLElement;
+    expect(within(vmRow).getByText("93%")).toBeTruthy();
+    expect(within(vmRow).getByText("critical")).toBeTruthy();
+    expect(within(vmRow).getByText("61%")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show managed disks" }));
+    expect(screen.queryByText("Standard_E96ds_v5")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Managed Disks" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show managed disks" }));
+    expect(screen.getByText("Standard_E96ds_v5")).toBeTruthy();
   });
 
   it("opens the alert an email links to", () => {

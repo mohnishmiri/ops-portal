@@ -66,6 +66,18 @@ import { CopyButton, KeyValueGrid } from "../aks/detailShared";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell } from "../aks/ResourceDetailShell";
 import type { ConfigEditorTarget } from "./ConfigEditors";
 import {
+  type ConfirmRequest,
+  DiskAdminPanel,
+  PGAdminPanel,
+  PGDatabasesPanel,
+  PortalLinkCard,
+  RunCommandPanel,
+  TagEditor,
+  UtilizationPanel,
+  VMAdminPanel,
+  VMDisksGrid,
+} from "./ResourceAdmin";
+import {
   AlertStatusBadge,
   ConfigStateBadge,
   daysLeftText,
@@ -101,12 +113,7 @@ export interface PowerTarget {
   subscription_id?: string;
 }
 
-export interface ConfirmRequest {
-  title: string;
-  message: string;
-  confirmLabel: string;
-  onConfirm: () => void;
-}
+export type { ConfirmRequest };
 
 export interface DetailHostProps {
   target: InfraDetailTarget;
@@ -119,10 +126,17 @@ export interface DetailHostProps {
   onPower: (kind: PowerKind, action: PowerAction, resource: PowerTarget) => void;
   powerPendingKey: string | null;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
+  /** The page's confirmation dialog (shown above the detail view). */
+  onConfirm: (request: ConfirmRequest) => void;
+  onDeleteDisk: (disk: ManagedDisk) => void;
   canWrite: boolean;
   canPowerVM: boolean;
   canPowerPG: boolean;
+  canRunCommand: boolean;
+  canAdminResources: boolean;
+  canDeleteDisks: boolean;
   subscriptionNames: Map<string, string>;
+  subscriptionTiers: Map<string, "prod" | "nonprod">;
   formatDate: (value: string) => string;
 }
 
@@ -614,6 +628,17 @@ function ThresholdAlertDetail({
                 <Timeline entries={alertTimeline(alert)} formatDate={props.formatDate} />
               </DetailCard>
             </div>
+            {config && (
+              <UtilizationPanel
+                kind={kind}
+                subscriptionId={config.subscription_id}
+                resourceGroup={config.resource_group}
+                name={name}
+                formatDate={props.formatDate}
+                only={[metric]}
+                thresholds={{ [metric]: { warning: thresholds.warning, critical: thresholds.critical } }}
+              />
+            )}
             {config && (
               <LiveMetricsCard
                 kind={kind}
@@ -1143,16 +1168,49 @@ function AlertConfigSummary({
   );
 }
 
-function VMResourceDetail({ vm, config, alerts, props }: { vm: VMInfo; config?: VMThresholdConfig; alerts: VMThresholdAlert[]; props: DetailHostProps }) {
-  const [tab, setTab] = useState<ResourceTab>("overview");
+type VMTab = "overview" | "utilization" | "disks" | "run" | "admin" | "alerts" | "tags";
+
+function VMResourceDetail({
+  vm,
+  config,
+  alerts,
+  disks,
+  props,
+}: {
+  vm: VMInfo & Record<string, unknown>;
+  config?: VMThresholdConfig;
+  alerts: VMThresholdAlert[];
+  disks: (ManagedDisk & Record<string, unknown>)[];
+  props: DetailHostProps;
+}) {
+  const [tab, setTab] = useState<VMTab>("overview");
   const open = alerts.filter((a) => a.status !== "resolved");
   const tags = vm.tags ?? {};
+  const target = { name: vm.name, resource_group: vm.resource_group || "", subscription_id: vm.subscription_id };
+  const powerPending = props.powerPendingKey === `vm:${vm.subscription_id}:${vm.name}`;
+  const attachedDisks = disks.filter((d) => String(d.managed_by || "").toLowerCase() === vm.id.toLowerCase());
+  const diskCount = Math.max(attachedDisks.length, (vm.data_disks?.length ?? 0) + (vm.os_disk_name ? 1 : 0));
+  const diskTotal = attachedDisks.reduce((sum, d) => sum + (d.size_gb || 0), 0) ||
+    (vm.os_disk_size_gb || 0) + (vm.data_disks ?? []).reduce((sum, d) => sum + (d.size_gb || 0), 0);
+  const thresholds = config
+    ? {
+        cpu: { warning: config.cpu_warning_threshold, critical: config.cpu_critical_threshold },
+        memory: { warning: config.memory_warning_threshold, critical: config.memory_critical_threshold },
+        disk: { warning: config.disk_warning_threshold, critical: config.disk_critical_threshold },
+      }
+    : undefined;
+  const tier = props.subscriptionTiers.get((vm.subscription_id || "").toLowerCase());
   return (
     <ResourceDetailShell
       kind="Virtual machine"
       name={vm.name}
       icon={InfraIcons.server}
-      status={<PowerStateBadge state={vm.power_state} />}
+      status={
+        <span className="flex items-center gap-1.5">
+          <PowerStateBadge state={vm.power_state} />
+          {tier && <span className={`rounded px-2 py-0.5 text-xs font-semibold ${tier === "prod" ? "bg-red-100 text-red-700" : "bg-blue-100 text-blue-700"}`}>{tier === "prod" ? "Prod" : "Non-Prod"}</span>}
+        </span>
+      }
       meta={
         <>
           <span>{vm.resource_group}</span>
@@ -1161,9 +1219,13 @@ function VMResourceDetail({ vm, config, alerts, props }: { vm: VMInfo; config?: 
           {vm._last_sync && <span className="text-slate-400">Synced {formatRelativeTime(vm._last_sync)}</span>}
         </>
       }
-      actions={<PowerButtons kind="vm" state={vm.power_state} resource={{ name: vm.name, resource_group: vm.resource_group || "", subscription_id: vm.subscription_id }} props={props} />}
+      actions={<PowerButtons kind="vm" state={vm.power_state} resource={target} props={props} />}
       tabs={[
         { key: "overview", label: "Overview" },
+        { key: "utilization", label: "Utilization" },
+        { key: "disks", label: "Disks", count: diskCount },
+        ...(props.canRunCommand ? [{ key: "run" as VMTab, label: "Run command" }] : []),
+        { key: "admin", label: "Administration" },
         { key: "alerts", label: "Alerts", count: alerts.length, attention: open.length > 0 },
         { key: "tags", label: "Tags", count: Object.keys(tags).length },
       ]}
@@ -1174,9 +1236,9 @@ function VMResourceDetail({ vm, config, alerts, props }: { vm: VMInfo; config?: 
       {tab === "overview" && (
         <>
           <KpiRow>
-            <MetricCard title="Power state" value={<PowerStateBadge state={vm.power_state} />} icon={InfraIcons.power} tone={vm.power_state === "running" ? "green" : "slate"} />
-            <MetricCard title="Size" value={vm.vm_size || "—"} icon={InfraIcons.server} tone="att" valueClassName="text-lg" />
-            <MetricCard title="OS" value={(vm.os_type || "—").replace("OperatingSystemTypes.", "")} icon={InfraIcons.shield} tone="indigo" valueClassName="text-lg" />
+            <MetricCard title="Power state" value={<PowerStateBadge state={vm.power_state} />} icon={InfraIcons.power} tone={vm.power_state === "running" ? "green" : "slate"} onClick={() => setTab("admin")} actionLabel="Administration" />
+            <MetricCard title="Size" value={vm.vm_size || "—"} icon={InfraIcons.server} tone="att" valueClassName="text-lg" onClick={() => setTab("admin")} actionLabel="Resize" />
+            <MetricCard title="Disks" value={diskCount} icon={InfraIcons.disk} tone="indigo" subtitle={diskTotal ? `${diskTotal.toLocaleString()} GB total` : undefined} onClick={() => setTab("disks")} actionLabel="Show disks" />
             <MetricCard title="Open alerts" value={open.length} icon={InfraIcons.alert} tone={open.length ? "red" : "green"} onClick={() => setTab("alerts")} actionLabel="Show alerts" />
           </KpiRow>
           {vm.power_state === "running" && vm.subscription_id && (
@@ -1219,12 +1281,15 @@ function VMResourceDetail({ vm, config, alerts, props }: { vm: VMInfo; config?: 
                 { label: "Subscription", value: subName(props.subscriptionNames, vm.subscription_id) },
                 { label: "Location", value: vm.location },
                 { label: "Size", value: vm.vm_size },
+                { label: "OS", value: (vm.os_type || "").replace("OperatingSystemTypes.", "") || null },
                 { label: "Provisioning state", value: vm.provisioning_state },
-                vm.os_disk_name && { label: "OS disk", value: `${vm.os_disk_name}${vm.os_disk_size_gb ? ` (${vm.os_disk_size_gb} GB)` : ""}` },
-                vm.data_disks && vm.data_disks.length > 0 && {
-                  label: "Data disks",
-                  value: vm.data_disks.map((d) => `LUN ${d.lun}: ${d.name}${d.size_gb ? ` (${d.size_gb} GB)` : ""}`).join(" · "),
-                  wide: true,
+                {
+                  label: "Disks",
+                  value: (
+                    <button type="button" onClick={() => setTab("disks")} className="font-medium text-att-700 hover:underline">
+                      {diskCount} disk{diskCount === 1 ? "" : "s"}{diskTotal ? ` · ${diskTotal.toLocaleString()} GB` : ""} — view all
+                    </button>
+                  ),
                 },
                 { label: "Resource ID", value: <Mono value={vm.id} />, wide: true },
                 vm._last_sync && { label: "Last synced", value: props.formatDate(vm._last_sync) },
@@ -1233,14 +1298,36 @@ function VMResourceDetail({ vm, config, alerts, props }: { vm: VMInfo; config?: 
           </DetailCard>
         </>
       )}
+      {tab === "utilization" &&
+        (vm.subscription_id ? (
+          <UtilizationPanel kind="vm" subscriptionId={vm.subscription_id} resourceGroup={vm.resource_group || ""} name={vm.name} thresholds={thresholds} formatDate={props.formatDate} />
+        ) : (
+          <EmptyNote>Subscription unknown — sync resources first.</EmptyNote>
+        ))}
+      {tab === "disks" && <VMDisksGrid vm={vm} disks={disks} onOpenDisk={(disk) => props.onOpen({ kind: "disk", id: disk.id })} />}
+      {tab === "run" && props.canRunCommand && <RunCommandPanel vm={vm} tier={tier} formatDate={props.formatDate} />}
+      {tab === "admin" && (
+        <VMAdminPanel
+          vm={vm}
+          canAdmin={props.canAdminResources}
+          canPower={props.canPowerVM}
+          powerPending={powerPending}
+          onPower={(action) => props.onPower("vm", action, target)}
+          onConfirm={props.onConfirm}
+          onToast={props.onToast}
+        />
+      )}
       {tab === "alerts" && <AlertHistoryGrid rows={alerts} formatDate={props.formatDate} onOpen={(a) => props.onOpen({ kind: "vm-alert", id: a.id })} title={`Alerts for ${vm.name}`} />}
-      {tab === "tags" && <KeyValueGrid title="Tags" entries={tags} emptyText="No tags" />}
+      {tab === "tags" && <TagEditor key={vm.id} resourceId={vm.id} resourceType="virtual_machine" tags={tags} canEdit={props.canAdminResources} onToast={props.onToast} />}
     </ResourceDetailShell>
   );
 }
 
+type PGTab = "overview" | "utilization" | "databases" | "admin" | "alerts" | "tags";
+
 function PGResourceDetail({ server, config, alerts, props }: { server: PGFlexServer; config?: PGFlexServerConfig; alerts: PGFlexServerAlert[]; props: DetailHostProps }) {
-  const [tab, setTab] = useState<ResourceTab>("overview");
+  const [tab, setTab] = useState<PGTab>("overview");
+  const pgTarget = { name: server.name, resource_group: server.resource_group, subscription_id: server.subscription_id };
   const open = alerts.filter((a) => a.status !== "resolved");
   const tags = server.tags ?? {};
   return (
@@ -1257,9 +1344,12 @@ function PGResourceDetail({ server, config, alerts, props }: { server: PGFlexSer
           {server._last_sync && <span className="text-slate-400">Synced {formatRelativeTime(server._last_sync)}</span>}
         </>
       }
-      actions={<PowerButtons kind="pg" state={server.state} resource={{ name: server.name, resource_group: server.resource_group, subscription_id: server.subscription_id }} props={props} />}
+      actions={<PowerButtons kind="pg" state={server.state} resource={pgTarget} props={props} />}
       tabs={[
         { key: "overview", label: "Overview" },
+        { key: "utilization", label: "Utilization" },
+        { key: "databases", label: "Databases & firewall" },
+        { key: "admin", label: "Administration" },
         { key: "alerts", label: "Alerts", count: alerts.length, attention: open.length > 0 },
         { key: "tags", label: "Tags", count: Object.keys(tags).length },
       ]}
@@ -1323,8 +1413,33 @@ function PGResourceDetail({ server, config, alerts, props }: { server: PGFlexSer
           </DetailCard>
         </>
       )}
+      {tab === "utilization" && (
+        <UtilizationPanel
+          kind="pg"
+          subscriptionId={server.subscription_id}
+          resourceGroup={server.resource_group}
+          name={server.name}
+          formatDate={props.formatDate}
+          thresholds={
+            config && {
+              cpu: { warning: config.cpu_warning_threshold, critical: config.cpu_critical_threshold },
+              memory: { warning: config.memory_warning_threshold, critical: config.memory_critical_threshold },
+              storage: { warning: config.storage_warning_threshold, critical: config.storage_critical_threshold },
+            }
+          }
+        />
+      )}
+      {tab === "databases" && <PGDatabasesPanel server={server} />}
+      {tab === "admin" && (
+        <PGAdminPanel
+          server={server}
+          canPower={props.canPowerPG}
+          powerPending={props.powerPendingKey === `pg:${server.subscription_id}:${server.name}`}
+          onPower={(action) => props.onPower("pg", action, pgTarget)}
+        />
+      )}
       {tab === "alerts" && <AlertHistoryGrid rows={alerts} formatDate={props.formatDate} onOpen={(a) => props.onOpen({ kind: "pg-alert", id: a.id })} title={`Alerts for ${server.name}`} />}
-      {tab === "tags" && <KeyValueGrid title="Tags" entries={tags} emptyText="No tags" />}
+      {tab === "tags" && <TagEditor key={server.id} resourceId={server.id} resourceType="pg_flex_server" tags={tags} canEdit={props.canAdminResources} onToast={props.onToast} />}
     </ResourceDetailShell>
   );
 }
@@ -1342,7 +1457,7 @@ function GenericResourceDetail({
   storageConfig?: StorageAlertConfig;
   attachedVm?: VMInfo;
 }) {
-  const [tab, setTab] = useState<"overview" | "tags">("overview");
+  const [tab, setTab] = useState<"overview" | "admin" | "tags">("overview");
   const tags = (resource.tags as Record<string, string> | undefined) ?? {};
   const disk = resource as ManagedDisk & Record<string, unknown>;
   const account = resource as StorageAccount & Record<string, unknown>;
@@ -1369,12 +1484,26 @@ function GenericResourceDetail({
       }
       tabs={[
         { key: "overview", label: "Overview" },
+        { key: "admin", label: "Administration" },
         { key: "tags", label: "Tags", count: Object.keys(tags).length },
       ]}
       activeTab={tab}
       onTabChange={setTab}
       onClose={props.onClose}
     >
+      {tab === "admin" &&
+        (kind === "disk" ? (
+          <DiskAdminPanel
+            disk={disk}
+            canAdmin={props.canAdminResources}
+            canDelete={props.canDeleteDisks}
+            onDelete={() => props.onDeleteDisk(disk)}
+            onConfirm={props.onConfirm}
+            onToast={props.onToast}
+          />
+        ) : (
+          <PortalLinkCard resourceId={resource.id} label="the storage account" />
+        ))}
       {tab === "overview" && (
         <>
           {kind === "disk" ? (
@@ -1411,7 +1540,7 @@ function GenericResourceDetail({
                   )}
                 </div>
               ) : (
-                <p className="text-sm text-slate-600">Not attached to any VM. Unattached disks are still billed — the Resources grid lets you delete it if it is no longer needed.</p>
+                <p className="text-sm text-slate-600">Not attached to any VM. Unattached disks are still billed — delete it from the Administration tab if it is no longer needed.</p>
               )}
             </DetailCard>
           )}
@@ -1442,7 +1571,16 @@ function GenericResourceDetail({
           <AllProperties data={resource} skip={["id", "name", "resource_group", "subscription_id", "location", "managed_by"]} />
         </>
       )}
-      {tab === "tags" && <KeyValueGrid title="Tags" entries={tags} emptyText="No tags" />}
+      {tab === "tags" && (
+        <TagEditor
+          key={resource.id}
+          resourceId={resource.id}
+          resourceType={kind === "disk" ? "managed_disk" : "storage_account"}
+          tags={tags}
+          canEdit={props.canAdminResources}
+          onToast={props.onToast}
+        />
+      )}
     </ResourceDetailShell>
   );
 }
@@ -1718,7 +1856,16 @@ export function InfraAlertDetailHost(props: DetailHostProps) {
       if (!vm) return <NotFound what="Virtual machine" onClose={props.onClose} />;
       const config = vmConfigs.data?.find((c) => lower(c.vm_id) === lower(vm.id));
       const alerts = config ? (vmAlerts.data ?? []).filter((a) => a.config_id === config.id) : [];
-      return <VMResourceDetail key={vm.id} vm={vm} config={config} alerts={alerts} props={props} />;
+      return (
+        <VMResourceDetail
+          key={vm.id}
+          vm={vm as VMInfo & Record<string, unknown>}
+          config={config}
+          alerts={alerts}
+          disks={(disks.data?.resources ?? []) as (ManagedDisk & Record<string, unknown>)[]}
+          props={props}
+        />
+      );
     }
     case "pg-server": {
       const server = pgServers.data?.resources.find((s) => lower(s.id) === lower(target.id));

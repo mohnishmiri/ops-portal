@@ -371,6 +371,22 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
         ("write",),
         "infra_alerts",
     ),
+    # Runs a script as root (Linux) / SYSTEM (Windows) through Azure Run Command —
+    # the VM equivalent of aks_pod_exec, granted the same way. Every run is audited.
+    (
+        "infra_vm_run_command",
+        "Run shell / PowerShell commands on virtual machines (Azure Run Command)",
+        "edit",
+        ("write",),
+        "infra_alerts",
+    ),
+    (
+        "infra_resource_admin",
+        "Resize and redeploy VMs, snapshot and expand disks, and edit resource tags",
+        "edit",
+        ("write",),
+        "infra_alerts",
+    ),
     # Permanently deletes Azure resources from the cost-optimization views.  Previously
     # admin-only while the Cost Forecast and Infrastructure Alerts pages offered the
     # delete to every write user; granted to write for the same reason as power control.

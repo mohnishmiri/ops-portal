@@ -17,6 +17,7 @@ from app.api.v1.endpoints import (
     dashboards,
     environment,
     infra_alerts,
+    infra_resource_admin,
     keyvault,
     notifications,
     optimization,
@@ -73,6 +74,7 @@ api_router.include_router(permissions.router, prefix="/permissions", tags=["perm
 
 # Module 4: Infrastructure Alerts
 api_router.include_router(infra_alerts.router, prefix="/infra-alerts", tags=["infra-alerts"])
+api_router.include_router(infra_resource_admin.router, prefix="/infra-alerts", tags=["infra-alerts"])
 
 # Module 5: Checksum Schedule Management
 api_router.include_router(checksum_schedules.router, prefix="/checksum-schedules", tags=["checksum-schedules"])

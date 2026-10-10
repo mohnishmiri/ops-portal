@@ -50,6 +50,35 @@ except ImportError as _pg_err:
     )
 
 
+def _vm_disk_fields(vm) -> dict[str, Any]:
+    """OS and data disk summary of a VM model (same shape from list and get)."""
+    profile = vm.storage_profile
+    os_disk = profile.os_disk if profile else None
+
+    def _type(disk) -> str | None:
+        managed = getattr(disk, "managed_disk", None)
+        return str(managed.storage_account_type) if managed and managed.storage_account_type else None
+
+    return {
+        "os_disk_name": os_disk.name if os_disk else None,
+        "os_disk_size_gb": os_disk.disk_size_gb if os_disk else None,
+        "os_disk_type": _type(os_disk) if os_disk else None,
+        "data_disks": [
+            {
+                "name": d.name,
+                "size_gb": d.disk_size_gb,
+                "lun": d.lun,
+                "caching": str(d.caching) if d.caching else None,
+                "storage_account_type": _type(d),
+                "managed_disk_id": d.managed_disk.id if d.managed_disk else None,
+            }
+            for d in sorted(profile.data_disks or [], key=lambda d: d.lun)
+        ]
+        if profile
+        else [],
+    }
+
+
 class AzureResourceService:
     """
     Service for listing and caching Azure resources.
@@ -222,6 +251,7 @@ class AzureResourceService:
                             "power_state": power_state,
                             "subscription_id": subscription_id,
                             "resource_type": "virtual_machine",
+                            **_vm_disk_fields(vm),
                         }
                         results.append(vm_data)
                 return results
@@ -275,22 +305,7 @@ class AzureResourceService:
                         if vm.storage_profile and vm.storage_profile.os_disk
                         else None
                     ),
-                    "os_disk_name": (
-                        vm.storage_profile.os_disk.name if vm.storage_profile and vm.storage_profile.os_disk else None
-                    ),
-                    "os_disk_size_gb": (
-                        vm.storage_profile.os_disk.disk_size_gb
-                        if vm.storage_profile and vm.storage_profile.os_disk
-                        else None
-                    ),
-                    "data_disks": (
-                        [
-                            {"name": d.name, "size_gb": d.disk_size_gb, "lun": d.lun}
-                            for d in (vm.storage_profile.data_disks or [])
-                        ]
-                        if vm.storage_profile
-                        else []
-                    ),
+                    **_vm_disk_fields(vm),
                     "provisioning_state": vm.provisioning_state,
                     "power_state": power_state,
                     "tags": dict(vm.tags) if vm.tags else {},

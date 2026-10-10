@@ -90,6 +90,8 @@ import {
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { useAdminSubscriptions } from "../services/costApi";
 import { ConfigEditor, type ConfigEditorTarget } from "../features/infraAlerts/ConfigEditors";
+import { UtilizationBar } from "../features/infraAlerts/ResourceAdmin";
+import { useResourceUtilization } from "../services/infraResourceAdminApi";
 import {
   InfraAlertDetailHost,
   type InfraDetailTarget,
@@ -632,12 +634,20 @@ const InfraAlertPage: React.FC = () => {
   // Gate exactly like the API: the power routes check these capabilities.
   const canPowerVM = canWrite && hasCapability("INFRA_VM_POWER");
   const canPowerPG = canWrite && hasCapability("INFRA_PG_SERVER_POWER");
+  const canRunCommand = canWrite && hasCapability("INFRA_VM_RUN_COMMAND");
+  const canAdminResources = canWrite && hasCapability("INFRA_RESOURCE_ADMIN");
   const { timezone, formatDate } = usePortalTimezone();
   const { availableSubscriptions, effectiveSubscriptionIds } = useSubscriptionScope();
   const scopedSubscriptions = useMemo(
     () => availableSubscriptions.filter((s) => effectiveSubscriptionIds.includes(s.subscription_id)),
     [availableSubscriptions, effectiveSubscriptionIds],
   );
+  // Prod / Non-Prod per subscription — Run Command asks for an extra confirmation on Prod.
+  const subscriptionTiers = useMemo(() => {
+    const map = new Map<string, "prod" | "nonprod">();
+    availableSubscriptions.forEach((s) => s.tier && map.set(s.subscription_id.toLowerCase(), s.tier));
+    return map;
+  }, [availableSubscriptions]);
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTabState] = useState<TabKey>(() => {
     const requested = searchParams.get("tab");
@@ -792,6 +802,13 @@ const InfraAlertPage: React.FC = () => {
   const stopPGServerMut = useStopPGServer();
   const restartPGServerMut = useRestartPGServer();
   const [powerPendingKey, setPowerPendingKey] = useState<string | null>(null);
+  // Resources tab: which resource type the tiles focus, and per-grid state filters.
+  const [resourceView, setResourceView] = useState<"all" | "vm" | "pg" | "storage" | "disk">("all");
+  const [vmStateFilter, setVmStateFilter] = useState<"all" | "running" | "stopped">("all");
+  const [pgStateFilter, setPgStateFilter] = useState<"all" | "running" | "stopped">("all");
+  const [diskStateFilter, setDiskStateFilter] = useState<"all" | "attached" | "unattached">("all");
+  const { data: vmUtilization } = useResourceUtilization("vm", activeTab === "resources");
+  const { data: pgUtilization } = useResourceUtilization("pg", activeTab === "resources");
   const [diskActionTarget, setDiskActionTarget] = useState<string | null>(null);
   const deleteDiskMut = useDeleteUnattachedDisk();
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -868,6 +885,28 @@ const InfraAlertPage: React.FC = () => {
           },
           onError: (e: unknown) => toastError(e, "Failed to delete schedule"),
         }),
+    });
+
+  const requestDeleteDisk = (disk: { name: string; resource_group: string; subscription_id: string }) =>
+    setConfirmDialog({
+      title: "Delete unattached disk?",
+      message: `Permanently delete "${disk.name}" in ${disk.resource_group}? This cannot be undone.`,
+      confirmLabel: "Delete",
+      onConfirm: () => {
+        setDiskActionTarget(disk.name);
+        deleteDiskMut.mutate(
+          { subscription_id: disk.subscription_id, resource_group: disk.resource_group, disk_name: disk.name },
+          {
+            onSuccess: () => {
+              showToast(`Disk '${disk.name}' deleted`);
+              setDetail(null);
+              syncResources.mutate("disk");
+            },
+            onError: (e: unknown) => toastError(e, `Failed to delete disk '${disk.name}'`),
+            onSettled: () => setDiskActionTarget(null),
+          },
+        );
+      },
     });
 
   const powerMutations = {
@@ -1987,10 +2026,16 @@ const InfraAlertPage: React.FC = () => {
           onPower={runPower}
           powerPendingKey={powerPendingKey}
           onToast={showToast}
+          onConfirm={setConfirmDialog}
+          onDeleteDisk={requestDeleteDisk}
           canWrite={canWrite}
           canPowerVM={canPowerVM}
           canPowerPG={canPowerPG}
+          canRunCommand={canRunCommand}
+          canAdminResources={canAdminResources}
+          canDeleteDisks={canCleanupResources}
           subscriptionNames={subNameMap}
+          subscriptionTiers={subscriptionTiers}
           formatDate={formatDate}
         />
       )}
@@ -2043,12 +2088,31 @@ const InfraAlertPage: React.FC = () => {
   // ── Resources Tab ───────────────────────────────────────────────────
 
   function renderResources() {
+    const vmUtil = (id: string) => vmUtilization?.items[id.toLowerCase()];
+    const pgUtil = (id: string) => pgUtilization?.items[id.toLowerCase()];
+    const vmConfigById = new Map(vmConfigs.map((c) => [c.vm_id.toLowerCase(), c]));
+    const pgConfigById = new Map(pgConfigs.map((c) => [c.server_id.toLowerCase(), c]));
+    const isStoppedVm = (state?: string | null) => state === "deallocated" || state === "stopped";
+    const runningVMs = filteredAzureVMs.filter((v) => v.power_state === "running").length;
+    const readyPG = filteredPGServers.filter((p) => p.state === "Ready").length;
+    const unattachedDisks = filteredDisks.filter((d) => d.disk_state === "Unattached");
+    const vmRows = filteredAzureVMs.filter((v) =>
+      vmStateFilter === "all" ? true : vmStateFilter === "running" ? v.power_state === "running" : isStoppedVm(v.power_state),
+    );
+    const pgRows = filteredPGServers.filter((p) =>
+      pgStateFilter === "all" ? true : pgStateFilter === "running" ? p.state === "Ready" : p.state === "Stopped",
+    );
+    const diskRows = filteredDisks.filter((d) =>
+      diskStateFilter === "all" ? true : diskStateFilter === "unattached" ? d.disk_state === "Unattached" : d.disk_state !== "Unattached",
+    );
+    const show = (view: "vm" | "pg" | "storage" | "disk") => resourceView === "all" || resourceView === view;
+    const focus = (view: typeof resourceView) => setResourceView((current) => (current === view ? "all" : view));
     const vmSort = tblSort("vms", "name", "asc");
     const storageSort = tblSort("storageAccounts", "name", "asc");
     const diskSort = tblSort("disks", "name", "asc");
     const pgServerSort = tblSort("pgServers", "name", "asc");
     const { items: pagedVMs, total: totalVMs, page: vmPage } = filterAndPaginate(
-      filteredAzureVMs, tbl("vms").search, tbl("vms").page,
+      vmRows, tbl("vms").search, tbl("vms").page,
       (v) => [v.name, v.resource_group, v.location, v.vm_size, v.power_state],
       vmSort,
       {
@@ -2057,6 +2121,8 @@ const InfraAlertPage: React.FC = () => {
         location: (v) => v.location,
         vm_size: (v) => v.vm_size,
         power_state: (v) => v.power_state,
+        cpu: (v) => vmUtil(v.id)?.cpu ?? null,
+        memory: (v) => vmUtil(v.id)?.memory ?? null,
       },
     );
     const { items: pagedSA, total: totalSA, page: saPage } = filterAndPaginate(
@@ -2074,7 +2140,7 @@ const InfraAlertPage: React.FC = () => {
       },
     );
     const { items: pagedDisks, total: totalDisks, page: diskPage } = filterAndPaginate(
-      filteredDisks, tbl("disks").search, tbl("disks").page,
+      diskRows, tbl("disks").search, tbl("disks").page,
       (d) => [d.name, d.resource_group, d.location, d.sku, d.os_type, d.disk_state],
       diskSort,
       {
@@ -2105,37 +2171,57 @@ const InfraAlertPage: React.FC = () => {
           </select>
         </div>
 
-        {/* Resource Summary */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <StatCard
+        {/* Resource Summary — each tile focuses its grid; click again for everything */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          <MetricCard
             title="Total Resources"
             value={filteredAzureVMs.length + filteredStorageAccounts.length + filteredDisks.length + filteredPGServers.length}
+            subtitle={resourceView === "all" ? "Showing every type" : "Click to show every type"}
             icon={Icons.database("text-blue-600")}
-            color="blue"
+            tone="blue"
+            onClick={() => setResourceView("all")}
+            active={resourceView === "all"}
+            actionLabel="Show every resource type"
           />
-          <StatCard
+          <MetricCard
             title="Virtual Machines"
             value={filteredAzureVMs.length}
+            subtitle={`${runningVMs} running · ${filteredAzureVMs.length - runningVMs} not running`}
             icon={Icons.server("text-green-600")}
-            color="green"
+            tone="green"
+            onClick={() => focus("vm")}
+            active={resourceView === "vm"}
+            actionLabel="Show virtual machines"
           />
-          <StatCard
-            title="Storage Accounts"
-            value={filteredStorageAccounts.length}
-            icon={Icons.database("text-purple-600")}
-            color="purple"
-          />
-          <StatCard
-            title="Managed Disks"
-            value={filteredDisks.length}
-            icon={Icons.database("text-orange-600")}
-            color="orange"
-          />
-          <StatCard
+          <MetricCard
             title="PG Flex Servers"
             value={filteredPGServers.length}
+            subtitle={`${readyPG} ready · ${filteredPGServers.length - readyPG} stopped or other`}
             icon={Icons.database("text-indigo-600")}
-            color="indigo"
+            tone="indigo"
+            onClick={() => focus("pg")}
+            active={resourceView === "pg"}
+            actionLabel="Show PostgreSQL servers"
+          />
+          <MetricCard
+            title="Storage Accounts"
+            value={filteredStorageAccounts.length}
+            subtitle={`${new Set(filteredStorageAccounts.map((a) => a.resource_group)).size} resource groups`}
+            icon={Icons.database("text-purple-600")}
+            tone="purple"
+            onClick={() => focus("storage")}
+            active={resourceView === "storage"}
+            actionLabel="Show storage accounts"
+          />
+          <MetricCard
+            title="Managed Disks"
+            value={filteredDisks.length}
+            subtitle={`${unattachedDisks.length} unattached (still billed)`}
+            icon={Icons.database("text-orange-600")}
+            tone="orange"
+            onClick={() => focus("disk")}
+            active={resourceView === "disk"}
+            actionLabel="Show managed disks"
           />
         </div>
 
@@ -2173,11 +2259,25 @@ const InfraAlertPage: React.FC = () => {
           )}
         </div>
 
+        {show("vm") && (
+        <>
         {/* VMs Table */}
         <div className={gridStyles.shell}>
-          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-800">Virtual Machines</h3>
-            <SearchBar value={tbl("vms").search} onChange={(v) => setTblSearch("vms", v)} placeholder="Search VMs..." />
+          <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-800">Virtual Machines</h3>
+              <p className="text-xs text-gray-500">
+                CPU and memory from Azure Monitor{vmUtilization ? ` · updated ${formatRelativeTime(vmUtilization.generated_at)}` : " · loading…"} · click a VM for charts, disks, commands and admin
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <select value={vmStateFilter} onChange={(e) => setVmStateFilter(e.target.value as typeof vmStateFilter)} className={gridStyles.toolbarInput.replace("w-64", "w-36")} aria-label="Filter VMs by state">
+                <option value="all">All states</option>
+                <option value="running">Running</option>
+                <option value="stopped">Stopped</option>
+              </select>
+              <SearchBar value={tbl("vms").search} onChange={(v) => setTblSearch("vms", v)} placeholder="Search VMs..." />
+            </div>
           </div>
           <table className={gridStyles.table}>
             <thead className={gridStyles.head}>
@@ -2187,6 +2287,8 @@ const InfraAlertPage: React.FC = () => {
                 <th className={gridStyles.headerCell}><SortableHeader label="Location" active={vmSort.key === "location"} direction={vmSort.direction} onClick={() => setTblSort("vms", "location", "asc")} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Size" active={vmSort.key === "vm_size"} direction={vmSort.direction} onClick={() => setTblSort("vms", "vm_size", "asc")} /></th>
                 <th className={gridStyles.headerCell}><SortableHeader label="Status" active={vmSort.key === "power_state"} direction={vmSort.direction} onClick={() => setTblSort("vms", "power_state", "asc")} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="CPU" active={vmSort.key === "cpu"} direction={vmSort.direction} onClick={() => setTblSort("vms", "cpu", "desc")} /></th>
+                <th className={gridStyles.headerCell}><SortableHeader label="Memory" active={vmSort.key === "memory"} direction={vmSort.direction} onClick={() => setTblSort("vms", "memory", "desc")} /></th>
                 <th className={gridStyles.headerCellCenter}>Actions</th>
               </tr>
             </thead>
@@ -2214,6 +2316,12 @@ const InfraAlertPage: React.FC = () => {
                     }`}>
                       {vm.power_state || "Unknown"}
                     </span>
+                  </td>
+                  <td className={gridStyles.cell}>
+                    <UtilizationBar title="CPU" value={vmUtil(vm.id)?.cpu} warning={vmConfigById.get(vm.id.toLowerCase())?.cpu_warning_threshold} critical={vmConfigById.get(vm.id.toLowerCase())?.cpu_critical_threshold} />
+                  </td>
+                  <td className={gridStyles.cell}>
+                    <UtilizationBar title="Memory in use" value={vmUtil(vm.id)?.memory} warning={vmConfigById.get(vm.id.toLowerCase())?.memory_warning_threshold ?? 75} critical={vmConfigById.get(vm.id.toLowerCase())?.memory_critical_threshold} />
                   </td>
                   <td className={gridStyles.centerCell}>
                     <div className="flex justify-center gap-1">
@@ -2246,16 +2354,32 @@ const InfraAlertPage: React.FC = () => {
           )}
           <TablePagination currentPage={vmPage} totalItems={totalVMs} onPageChange={(p) => setTblPage("vms", p)} />
         </div>
+        </>
+        )}
 
+        {show("pg") && (
+        <>
         {/* PG Flex Servers Table */}
         <div className={gridStyles.shell}>
-          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-800">PostgreSQL Flexible Servers</h3>
-            <SearchBar value={tbl("pgServers").search} onChange={(v) => setTblSearch("pgServers", v)} placeholder="Search PG servers..." />
+          <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-800">PostgreSQL Flexible Servers</h3>
+              <p className="text-xs text-gray-500">
+                CPU, memory and storage from Azure Monitor{pgUtilization ? ` · updated ${formatRelativeTime(pgUtilization.generated_at)}` : " · loading…"}
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <select value={pgStateFilter} onChange={(e) => setPgStateFilter(e.target.value as typeof pgStateFilter)} className={gridStyles.toolbarInput.replace("w-64", "w-36")} aria-label="Filter servers by state">
+                <option value="all">All states</option>
+                <option value="running">Ready</option>
+                <option value="stopped">Stopped</option>
+              </select>
+              <SearchBar value={tbl("pgServers").search} onChange={(v) => setTblSearch("pgServers", v)} placeholder="Search PG servers..." />
+            </div>
           </div>
           {(() => {
             const { items: pagedPGServers, total: totalPGServers, page: pgSrvPage } = filterAndPaginate(
-              filteredPGServers, tbl("pgServers").search, tbl("pgServers").page,
+              pgRows, tbl("pgServers").search, tbl("pgServers").page,
               (s) => [s.name, s.resource_group, s.location, s.state, s.version, s.sku_name],
               pgServerSort,
               {
@@ -2265,6 +2389,9 @@ const InfraAlertPage: React.FC = () => {
                 state: (s) => s.state,
                 version: (s) => s.version,
                 sku_name: (s) => s.sku_name,
+                cpu: (s) => pgUtil(s.id)?.cpu ?? null,
+                memory: (s) => pgUtil(s.id)?.memory ?? null,
+                storage: (s) => pgUtil(s.id)?.storage ?? null,
               },
             );
             return (
@@ -2278,6 +2405,9 @@ const InfraAlertPage: React.FC = () => {
                       <th className={gridStyles.headerCell}><SortableHeader label="State" active={pgServerSort.key === "state"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "state", "asc")} /></th>
                       <th className={gridStyles.headerCell}><SortableHeader label="Version" active={pgServerSort.key === "version"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "version", "asc")} /></th>
                       <th className={gridStyles.headerCell}><SortableHeader label="SKU" active={pgServerSort.key === "sku_name"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "sku_name", "asc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="CPU" active={pgServerSort.key === "cpu"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "cpu", "desc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Memory" active={pgServerSort.key === "memory"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "memory", "desc")} /></th>
+                      <th className={gridStyles.headerCell}><SortableHeader label="Storage" active={pgServerSort.key === "storage"} direction={pgServerSort.direction} onClick={() => setTblSort("pgServers", "storage", "desc")} /></th>
                       <th className={gridStyles.headerCellCenter}>Actions</th>
                     </tr>
                   </thead>
@@ -2300,6 +2430,15 @@ const InfraAlertPage: React.FC = () => {
                         </td>
                         <td className={gridStyles.cell}>{server.version || "—"}</td>
                         <td className={gridStyles.cell}>{server.sku_name || "—"}</td>
+                        <td className={gridStyles.cell}>
+                          <UtilizationBar title="CPU" value={pgUtil(server.id)?.cpu} warning={pgConfigById.get(server.id.toLowerCase())?.cpu_warning_threshold} critical={pgConfigById.get(server.id.toLowerCase())?.cpu_critical_threshold} />
+                        </td>
+                        <td className={gridStyles.cell}>
+                          <UtilizationBar title="Memory" value={pgUtil(server.id)?.memory} warning={pgConfigById.get(server.id.toLowerCase())?.memory_warning_threshold ?? 75} critical={pgConfigById.get(server.id.toLowerCase())?.memory_critical_threshold} />
+                        </td>
+                        <td className={gridStyles.cell}>
+                          <UtilizationBar title="Storage used" value={pgUtil(server.id)?.storage} warning={pgConfigById.get(server.id.toLowerCase())?.storage_warning_threshold ?? 80} critical={pgConfigById.get(server.id.toLowerCase())?.storage_critical_threshold ?? 95} />
+                        </td>
                         <td className={gridStyles.centerCell}>
                           <div className="flex justify-center gap-1">
                             {busy && Icons.refresh("animate-spin text-att-600")}
@@ -2334,7 +2473,11 @@ const InfraAlertPage: React.FC = () => {
             );
           })()}
         </div>
+        </>
+        )}
 
+        {show("storage") && (
+        <>
         {/* Storage Accounts Table */}
         <div className={gridStyles.shell}>
           <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
@@ -2378,12 +2521,23 @@ const InfraAlertPage: React.FC = () => {
           )}
           <TablePagination currentPage={saPage} totalItems={totalSA} onPageChange={(p) => setTblPage("storageAccounts", p)} />
         </div>
+        </>
+        )}
 
+        {show("disk") && (
+        <>
         {/* Managed Disks Table with Usage Bars */}
         <div className={gridStyles.shell}>
-          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-lg font-semibold text-gray-800">Managed Disks</h3>
-            <SearchBar value={tbl("disks").search} onChange={(v) => setTblSearch("disks", v)} placeholder="Search disks..." />
+            <div className="flex items-center gap-3">
+              <select value={diskStateFilter} onChange={(e) => setDiskStateFilter(e.target.value as typeof diskStateFilter)} className={gridStyles.toolbarInput.replace("w-64", "w-40")} aria-label="Filter disks by state">
+                <option value="all">All disks</option>
+                <option value="attached">Attached</option>
+                <option value="unattached">Unattached</option>
+              </select>
+              <SearchBar value={tbl("disks").search} onChange={(v) => setTblSearch("disks", v)} placeholder="Search disks..." />
+            </div>
           </div>
           {(() => {
             const maxDiskSize = Math.max(...disks.map(d => d.size_gb || 0), 1);
@@ -2444,37 +2598,7 @@ const InfraAlertPage: React.FC = () => {
                           <td className={gridStyles.centerCell}>
                             {disk.disk_state === "Unattached" && canCleanupResources && (
                               <GridActionButton
-                                onClick={() => {
-                                  setConfirmDialog({
-                                    title: "Delete unattached disk?",
-                                    message: `Permanently delete "${disk.name}" in ${disk.resource_group}? This cannot be undone.`,
-                                    confirmLabel: "Delete",
-                                    onConfirm: () => {
-                                      setDiskActionTarget(disk.name);
-                                      deleteDiskMut.mutate(
-                                        {
-                                          subscription_id: disk.subscription_id,
-                                          resource_group: disk.resource_group,
-                                          disk_name: disk.name,
-                                        },
-                                        {
-                                          onSuccess: () => {
-                                            showToast(`Disk '${disk.name}' deleted successfully`);
-                                            syncResources.mutate("disk");
-                                          },
-                                          onError: (e: unknown) => {
-                                            const detail =
-                                              (e as { response?: { data?: { detail?: string } } })
-                                                ?.response?.data?.detail ||
-                                              `Failed to delete disk '${disk.name}'`;
-                                            showToast(detail, "error");
-                                          },
-                                          onSettled: () => setDiskActionTarget(null),
-                                        }
-                                      );
-                                    },
-                                  });
-                                }}
+                                onClick={() => requestDeleteDisk(disk)}
                                 disabled={diskActionTarget === disk.name}
                                 title="Delete unattached disk"
                                 tone="red"
@@ -2498,9 +2622,11 @@ const InfraAlertPage: React.FC = () => {
           )}
           <TablePagination currentPage={diskPage} totalItems={totalDisks} onPageChange={(p) => setTblPage("disks", p)} />
         </div>
+        </>
+        )}
 
         {/* ── Resource Usage Charts ──────────────────────────────── */}
-        {(disks.length > 0 || storageAccounts.length > 0) && (
+        {(disks.length > 0 || storageAccounts.length > 0) && (resourceView === "all" || resourceView === "disk" || resourceView === "storage") && (
           <div>
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Resource Usage Overview</h3>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

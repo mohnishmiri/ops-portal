@@ -50,6 +50,8 @@ READ_BLOCKED_VIEWS: dict[str, str] = {
     "/api/v1/keyvault/secrets/{name}": "returns a secret's plaintext value",
     "/api/v1/dashboards/admin": "Admin console data",
     "/api/v1/notifications/history": "Admin console data",
+    "/api/v1/infra-alerts/resources/vms/run-command/{run_id}": "VM command output can contain secrets",
+    "/api/v1/infra-alerts/resources/vms/run-command-history": "VM command output can contain secrets",
 }
 
 
