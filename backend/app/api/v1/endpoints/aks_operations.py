@@ -2121,6 +2121,24 @@ async def update_node_pool_labels_taints(
     return result
 
 
+@router.get("/nodepools/metrics", summary="CPU and memory utilisation history of a node pool's scale set")
+async def get_node_pool_metrics(
+    cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
+    nodepool_name: str = Query(..., pattern=NODEPOOL_NAME_PATTERN),
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h", description="How far back to read"),  # noqa: A002
+    user: UserContext = Depends(get_current_user),
+    service: AKSOperationsService = Depends(_get_service),
+) -> dict:
+    """Azure Monitor "Percentage CPU" and memory used (100 - "Available Memory Percentage"), averaged across the VMs."""
+    try:
+        return await service.get_node_pool_metrics(cluster_id, nodepool_name, range)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.error("node_pool_metrics_failed", nodepool=nodepool_name, error=str(e)[:300])
+        raise HTTPException(status_code=502, detail="Unable to read utilisation from Azure Monitor.") from e
+
+
 @router.get("/nodepools/options", summary="What a new node pool can use in this cluster")
 async def get_node_pool_create_options(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),

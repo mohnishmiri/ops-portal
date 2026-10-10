@@ -41,7 +41,7 @@ from app.services.aks_detail_operations import AKSDetailOperationsMixin
 from app.services.aks_log_archive import AKSLogArchiveMixin
 from app.services.aks_node_operations import AKSNodeOperationsMixin
 from app.services.aks_nodepool_create import AKSNodePoolCreateMixin
-from app.services.aks_nodepool_operations import AKSNodePoolOperationsMixin
+from app.services.aks_nodepool_operations import AKSNodePoolOperationsMixin, scale_set_pool_name
 from app.services.aks_resource_operations import AKSResourceOperationsMixin
 from app.services.aks_workload_operations import AKSWorkloadOperationsMixin
 from app.services.data_cache_service import (
@@ -2895,14 +2895,7 @@ class AKSOperationsService(
             for vmss in compute_client.virtual_machine_scale_sets.list(node_resource_group):
                 capacity = (vmss.sku.capacity if vmss.sku else 0) or 0
                 total += capacity
-                tags = vmss.tags or {}
-                pool_name = tags.get("aks-managed-poolName") or tags.get("poolName")
-                if not pool_name and vmss.name:
-                    # AKS names scale sets "aks-<poolName>-<hash>-vmss"; pool names are
-                    # alphanumeric with no hyphens.
-                    segments = vmss.name.split("-")
-                    if len(segments) >= 2:
-                        pool_name = segments[1]
+                pool_name = scale_set_pool_name(vmss)
                 if pool_name:
                     pool_counts[pool_name] = pool_counts.get(pool_name, 0) + capacity
             return total, pool_counts

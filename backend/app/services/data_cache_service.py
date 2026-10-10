@@ -143,6 +143,10 @@ class CacheKeys:
         return f"{CacheKeys.PREFIX}:namespaces:{_hash_params(cluster_id)}"
 
     @staticmethod
+    def node_pool_metrics(scale_set_id: str, range_key: str) -> str:
+        return f"{CacheKeys.PREFIX}:nodepoolmetrics:{_hash_params(scale_set_id.lower(), range_key)}"
+
+    @staticmethod
     def vm_sizes(subscription_id: str, location: str) -> str:
         return f"{CacheKeys.PREFIX}:vmsizes:{_hash_params(subscription_id, location.lower())}"
 

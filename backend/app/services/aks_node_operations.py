@@ -33,21 +33,21 @@ def _quantity(value: Any) -> Decimal:
         return Decimal(0)
 
 
-def _millicores(value: Any) -> int:
+def to_millicores(value: Any) -> int:
     return int(_quantity(value) * 1000)
 
 
-def _bytes(value: Any) -> int:
+def to_bytes(value: Any) -> int:
     return int(_quantity(value))
 
 
 def _resource_block(resources: dict[str, Any] | None) -> dict[str, Any]:
     resources = resources or {}
     return {
-        "cpu_m": _millicores(resources.get("cpu")),
-        "memory_bytes": _bytes(resources.get("memory")),
+        "cpu_m": to_millicores(resources.get("cpu")),
+        "memory_bytes": to_bytes(resources.get("memory")),
         "pods": int(_quantity(resources.get("pods"))),
-        "ephemeral_storage_bytes": _bytes(resources.get("ephemeral-storage")),
+        "ephemeral_storage_bytes": to_bytes(resources.get("ephemeral-storage")),
     }
 
 
@@ -65,10 +65,10 @@ def pod_requests(pod: Any) -> dict[str, int]:
         return max(app, max((convert(_container_resources(c, kind).get(resource)) for c in init), default=0))
 
     return {
-        "cpu_request_m": effective("requests", "cpu", _millicores),
-        "cpu_limit_m": effective("limits", "cpu", _millicores),
-        "memory_request_bytes": effective("requests", "memory", _bytes),
-        "memory_limit_bytes": effective("limits", "memory", _bytes),
+        "cpu_request_m": effective("requests", "cpu", to_millicores),
+        "cpu_limit_m": effective("limits", "cpu", to_millicores),
+        "memory_request_bytes": effective("requests", "memory", to_bytes),
+        "memory_limit_bytes": effective("limits", "memory", to_bytes),
     }
 
 
@@ -165,7 +165,7 @@ class AKSNodeOperationsMixin:
             logger.info("node_metrics_unavailable", node=name, error=str(e)[:200])
             return None
         usage = metrics.get("usage") or {}
-        cpu_m, memory = _millicores(usage.get("cpu")), _bytes(usage.get("memory"))
+        cpu_m, memory = to_millicores(usage.get("cpu")), to_bytes(usage.get("memory"))
         return {
             "cpu_m": cpu_m,
             "memory_bytes": memory,

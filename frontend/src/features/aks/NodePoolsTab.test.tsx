@@ -20,10 +20,35 @@ vi.mock("../../services/aksApi", async (importOriginal) => ({
   useNodePoolPower: vi.fn(),
   useNodeDetail: vi.fn(() => ({ data: undefined, isLoading: true, isError: false })),
   useUpdateNodePoolLabelsTaints: vi.fn(),
+  useNodePoolMetrics: vi.fn(() => ({
+    data: {
+      nodepool_name: "userpool",
+      scale_set: "aks-userpool-1-vmss",
+      range: "24h",
+      interval: "PT15M",
+      series: [
+        { t: "2026-10-10T22:00:00Z", cpu_avg: 12.1, cpu_max: 20.4, memory_avg: 36.0, memory_max: 37.5 },
+        { t: "2026-10-10T22:15:00Z", cpu_avg: 13.4, cpu_max: 25.4, memory_avg: 36.5, memory_max: 39.0 },
+      ],
+      cpu: { current: 13.4, average: 12.8, peak: 25.4 },
+      memory: { current: 36.5, average: 36.3, peak: 39.0 },
+      memory_error: null,
+    },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+  })),
 }));
 
 import * as aksApi from "../../services/aksApi";
-import { formatCpu, formatMemory, nodeImageVersion, NodePoolsTab, poolIssues } from "./NodePoolsTab";
+
+// recharts' ResponsiveContainer needs ResizeObserver, which jsdom lacks.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+import { formatCpu, formatMemory, nodeImageVersion, NodePoolsTab, poolIssues, weightedUse } from "./NodePoolsTab";
 
 const CLUSTER = { id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks-01", name: "aks-01" } as any;
 
@@ -74,7 +99,10 @@ function pool(overrides: Partial<aksApi.NodePoolDetails> = {}): aksApi.NodePoolD
     pod_capacity: 60,
     ready_nodes: 2,
     cordoned_nodes: 0,
-    nodes: [node("aks-userpool-1"), node("aks-userpool-2")],
+    nodes: [node("aks-userpool-1", { cpu_usage_pct: 22.5, cpu_request_pct: 61.0 }), node("aks-userpool-2", { cpu_usage_pct: 48.0, cpu_request_pct: 70.0 })],
+    cpu_request_pct: 65.5,
+    memory_request_pct: 40.0,
+    utilisation: { cpu_pct: 13.5, memory_pct: 36.4, at: "2026-10-10T22:49:00+00:00", source: "azure-monitor" },
     ...overrides,
   };
 }
@@ -119,7 +147,7 @@ describe("NodePoolsTab", () => {
 
     const row = rows()[0];
     expect(within(row).getByText("Standard_D32s_v3")).toBeTruthy();
-    expect(within(row).getByText("/ 60")).toBeTruthy();
+    expect(within(row).getByTitle("40 pods of 60 capacity")).toBeTruthy();
     expect(within(row).getByText("Image 202602.13.0")).toBeTruthy();
     expect(within(row).getByTitle(/released 13 Feb 2026|released Feb 13, 2026/)).toBeTruthy();
     expect(within(row).getByText("Zones 1, 2, 3")).toBeTruthy();
@@ -133,7 +161,7 @@ describe("NodePoolsTab", () => {
     expect(screen.getByText("Node health unavailable")).toBeTruthy();
     expect(screen.getByText("Node health unknown")).toBeTruthy();
     expect(screen.queryByText("All pools healthy")).toBeNull();
-    expect(within(rows()[0]).getByTitle("The Kubernetes API did not respond in time.").textContent).toBe("—");
+    expect(within(rows()[0]).getByTitle("The Kubernetes API did not respond in time.").textContent).toBe("Pods—");
   });
 
   it("flags stale data even while a sync is marked running", () => {
@@ -324,6 +352,49 @@ describe("node pool labels and taints", () => {
     fireEvent.click(screen.getByRole("button", { name: "aks-userpool-1" }));
 
     expect(aksApi.useNodeDetail).toHaveBeenLastCalledWith(CLUSTER.id, "aks-userpool-1");
+  });
+});
+
+describe("node pool utilisation", () => {
+  it("shows CPU and memory in use for each pool", () => {
+    setup([pool()]);
+
+    const cpu = within(rows()[0]).getByTitle(/CPU in use 13.5% \(Azure Monitor, 5-minute average\) · 65.5% requested by pods/);
+    expect(cpu.textContent).toBe("CPU14%");
+    expect(within(rows()[0]).getByTitle(/Memory in use 36.4%/).textContent).toBe("Mem36%");
+  });
+
+  it("weights cluster utilisation by pool capacity, not by pool count", () => {
+    const big = pool({ name: "big", utilisation: { cpu_pct: 10, memory_pct: 20, at: null, source: "azure-monitor" }, nodes: [node("b1", { allocatable_cpu_m: 30000, allocatable_memory_bytes: 120 })] });
+    const small = pool({ name: "small", utilisation: { cpu_pct: 90, memory_pct: 80, at: null, source: "azure-monitor" }, nodes: [node("s1", { allocatable_cpu_m: 2000, allocatable_memory_bytes: 8 })] });
+    const stopped = pool({ name: "off", power_state: "Stopped", utilisation: { cpu_pct: 99, memory_pct: 99, at: null, source: "azure-monitor" } });
+
+    expect(weightedUse([big, small, stopped], "cpu")).toBe(15);
+    expect(weightedUse([big, small], "memory")).toBe(23.8);
+    expect(weightedUse([pool({ utilisation: null })], "cpu")).toBeNull();
+  });
+
+  it("opens the pool's utilisation and sorts its nodes by CPU use", () => {
+    setup([pool()]);
+    fireEvent.click(screen.getByRole("button", { name: "userpool" }));
+
+    expect(screen.getByText("CPU & Memory Utilisation")).toBeTruthy();
+    expect(within(screen.getByLabelText("CPU summary")).getByText("25.4%")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show nodes by CPU use" }));
+
+    const nodeRows = screen.getAllByRole("row").filter((r) => within(r).queryByText(/aks-userpool-/));
+    expect(within(nodeRows[0]).getByText("aks-userpool-2")).toBeTruthy(); // 48% used sorts first
+    expect(within(nodeRows[0]).getByText("48% used")).toBeTruthy();
+  });
+
+  it("switches the history range", () => {
+    setup([pool()]);
+    fireEvent.click(screen.getByRole("button", { name: "userpool" }));
+    fireEvent.click(screen.getByRole("button", { name: "7d" }));
+
+    expect(aksApi.useNodePoolMetrics).toHaveBeenLastCalledWith(CLUSTER.id, "userpool", "7d");
+    fireEvent.click(screen.getByRole("button", { name: "Show table" }));
+    expect(screen.getByText("25.4%")).toBeTruthy();
   });
 });
 

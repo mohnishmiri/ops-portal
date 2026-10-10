@@ -308,6 +308,25 @@ export interface NodeDetail {
   node_image_version?: string | null;
   created_at?: string | null;
   labels: Record<string, string>;
+  /** Pod requests and live usage (metrics-server); usage is null when metrics-server isn't installed. */
+  allocatable_cpu_m?: number;
+  allocatable_memory_bytes?: number;
+  cpu_request_m?: number;
+  memory_request_bytes?: number;
+  cpu_request_pct?: number | null;
+  memory_request_pct?: number | null;
+  cpu_usage_m?: number | null;
+  memory_usage_bytes?: number | null;
+  cpu_usage_pct?: number | null;
+  memory_usage_pct?: number | null;
+}
+
+/** Current CPU / memory used of a pool's scale set (Azure Monitor, latest 5-minute average). */
+export interface NodePoolUtilisation {
+  cpu_pct: number | null;
+  memory_pct: number | null;
+  at: string | null;
+  source: string;
 }
 
 export interface NodePoolDetails {
@@ -341,7 +360,39 @@ export interface NodePoolDetails {
   pod_capacity?: number | null;
   ready_nodes?: number | null;
   cordoned_nodes?: number | null;
+  /** Share of the pool's allocatable CPU / memory that pods have requested. */
+  cpu_request_pct?: number | null;
+  memory_request_pct?: number | null;
+  utilisation?: NodePoolUtilisation | null;
   nodes?: NodeDetail[];
+}
+
+export type NodePoolMetricsRange = "1h" | "6h" | "24h" | "7d" | "30d";
+
+export interface NodePoolMetricPoint {
+  t: string;
+  cpu_avg?: number | null;
+  cpu_max?: number | null;
+  memory_avg?: number | null;
+  memory_max?: number | null;
+}
+
+export interface NodePoolMetricSummary {
+  current: number;
+  average: number;
+  peak: number;
+}
+
+/** GET /aks/nodepools/metrics — the scale set's Azure Monitor history. */
+export interface NodePoolMetrics {
+  nodepool_name: string;
+  scale_set: string;
+  range: NodePoolMetricsRange;
+  interval: string;
+  series: NodePoolMetricPoint[];
+  cpu: NodePoolMetricSummary | null;
+  memory: NodePoolMetricSummary | null;
+  memory_error: string | null;
 }
 
 export interface NodePoolVmSize {
@@ -2309,6 +2360,25 @@ export function useNodePoolPower() {
       return data as { success: boolean; node_count?: number };
     },
     onSuccess: (_data, vars) => invalidateNodePools(queryClient, vars.clusterId),
+  });
+}
+
+export function useNodePoolMetrics(clusterId: string, nodepoolName: string, range: NodePoolMetricsRange, enabled = true) {
+  return useQuery({
+    queryKey: ["aks-nodepool-metrics", clusterId, nodepoolName, range],
+    queryFn: async () => {
+      const { data } = await apiClient.get(`${API_PREFIX}/nodepools/metrics`, {
+        params: { cluster_id: clusterId, nodepool_name: nodepoolName, range },
+        timeout: 60000,
+      });
+      return data as NodePoolMetrics;
+    },
+    enabled: !!clusterId && !!nodepoolName && enabled,
+    placeholderData: (prev) => prev,
+    staleTime: 60_000,
+    refetchInterval: safeInterval(120_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
   });
 }
 

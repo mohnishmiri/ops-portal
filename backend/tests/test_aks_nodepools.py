@@ -113,7 +113,7 @@ class FakeCore:
         return SimpleNamespace(data=json.dumps({"items": items}).encode())
 
 
-def service_with(core=None, k8s_error: Exception | None = None) -> AKSOperationsService:
+def service_with(core=None, k8s_error: Exception | None = None, node_metrics=None) -> AKSOperationsService:
     svc = AKSOperationsService.__new__(AKSOperationsService)
     svc.db = None
 
@@ -122,7 +122,11 @@ def service_with(core=None, k8s_error: Exception | None = None) -> AKSOperations
             raise k8s_error
         return None, core, None
 
+    async def _metrics(_core_v1):
+        return node_metrics or {}
+
     svc._get_k8s_clients = _clients
+    svc._node_metrics = _metrics
     return svc
 
 
@@ -233,13 +237,26 @@ async def _noop(*_args, **_kwargs):
 
 async def test_live_read_keeps_azure_data_when_kubernetes_fails(azure):
     svc = service_with(k8s_error=TimeoutError())
-    svc._actual_node_counts_from_vmss = lambda sub, rg: (9, {"auto": 7})
+
+    async def _scale_sets(*_args):
+        return {"auto": {"id": "/vmss/aks-auto-1-vmss", "capacity": 7}}
+
+    async def _utilisation(_sub, scale_sets):
+        return {
+            "auto": {"cpu_pct": 41.0, "memory_pct": 63.5, "at": "2026-10-11T00:00:00+00:00", "source": "azure-monitor"}
+        }
+
+    svc._pool_scale_sets = _scale_sets
+    svc._pool_utilisation = _utilisation
 
     pools = {p["name"]: p for p in await svc._fetch_node_pools_live(CLUSTER_ID)}
 
     assert pools["auto"]["count"] == 7
     assert pools["manual"]["count"] == 3
     assert all(p["node_details_available"] is False for p in pools.values())
+    # Azure Monitor utilisation doesn't depend on the Kubernetes API.
+    assert pools["auto"]["utilisation"]["cpu_pct"] == 41.0
+    assert pools["manual"]["utilisation"] is None
 
 
 # ── Scale / autoscaling validation ────────────────────────────────────
@@ -1105,3 +1122,153 @@ async def test_missing_node_is_404(app, db_session):
 
     assert resp.status_code == 404
     assert "aks-np-9" in resp.json()["detail"]
+
+
+# ── Utilisation ───────────────────────────────────────────────────────
+
+
+def _pod_json(node, cpu, memory, init_cpu=None):
+    spec = {"nodeName": node, "containers": [{"resources": {"requests": {"cpu": cpu, "memory": memory}}}]}
+    if init_cpu:
+        spec["initContainers"] = [{"resources": {"requests": {"cpu": init_cpu}}}]
+    return {"spec": spec}
+
+
+def test_pod_requests_follow_the_scheduler():
+    assert np_ops.json_pod_requests(_pod_json("n1", "250m", "256Mi")) == (250, 256 * 2**20)
+    assert np_ops.json_pod_requests(_pod_json("n1", "250m", "1Gi", init_cpu="2"))[0] == 2000
+    assert np_ops.json_pod_requests({"spec": {"containers": [{}]}}) == (0, 0)
+
+
+async def test_nodes_carry_requests_and_live_usage():
+    class Core(FakeCore):
+        def list_pod_for_all_namespaces(self, **kwargs):
+            items = [_pod_json("n1", "500m", "1Gi"), _pod_json("n1", "250m", "512Mi"), _pod_json("n2", "100m", "128Mi")]
+            return SimpleNamespace(data=json.dumps({"items": items}).encode())
+
+    core = Core([make_node("n1"), make_node("n2")], {})
+    svc = service_with(core, node_metrics={"n1": {"cpu": "15790m", "memory": "61728Ki"}})
+
+    nodes, _error = await svc._node_pool_k8s_snapshot(CLUSTER_ID)
+    n1 = next(n for n in nodes if n["name"] == "n1")
+    pool = np_ops.build_node_pool(make_pool(), vmss_count=2, nodes=nodes, k8s_error=None)
+
+    assert (n1["pod_count"], n1["cpu_request_m"], n1["memory_request_bytes"]) == (2, 750, 1536 * 2**20)
+    assert n1["cpu_usage_pct"] == 50.0  # 15.79 of 31.58 allocatable cores
+    assert n1["memory_usage_pct"] == 50.0
+    assert next(n for n in nodes if n["name"] == "n2")["cpu_usage_pct"] is None  # no metrics for n2
+    assert pool["cpu_request_pct"] == round(850 * 100 / (2 * 31580), 1)
+
+
+def _point(minute, average, maximum=None, minimum=None):
+    return SimpleNamespace(
+        time_stamp=datetime(2026, 10, 11, 0, minute, tzinfo=UTC), average=average, maximum=maximum, minimum=minimum
+    )
+
+
+def _metric(name, points):
+    return SimpleNamespace(name=SimpleNamespace(value=name), timeseries=[SimpleNamespace(data=points)])
+
+
+def test_memory_used_is_the_complement_of_available():
+    points = {
+        np_ops.CPU_METRIC: [_point(0, 12.0, 20.0), _point(5, 14.0, 31.5), _point(10, None)],
+        np_ops.MEMORY_METRIC: [_point(0, 64.0, minimum=60.0), _point(5, 62.0, minimum=55.0)],
+    }
+
+    series = np_ops.utilisation_series(points)
+
+    assert series[1] == {
+        "t": "2026-10-11T00:05:00+00:00",
+        "cpu_avg": 14.0,
+        "cpu_max": 31.5,
+        "memory_avg": 38.0,
+        "memory_max": 45.0,
+    }
+    assert np_ops.summarize_series(series, "cpu") == {"current": 14.0, "average": 13.0, "peak": 31.5}
+    assert np_ops.summarize_series(series, "memory") == {"current": 38.0, "average": 37.0, "peak": 45.0}
+    assert np_ops.summarize_series([], "cpu") is None
+
+
+class FakeMonitor:
+    def __init__(self, memory=True):
+        self.memory = memory
+        self.calls: list[dict] = []
+        self.metrics = SimpleNamespace(list=self._list)
+
+    def _list(self, resource_id, **kwargs):
+        self.calls.append({"resource": resource_id, **kwargs})
+        if np_ops.MEMORY_METRIC in kwargs["metricnames"] and not self.memory:
+            raise ValueError("Failed to find metric configuration for provider")
+        values = [_metric(np_ops.CPU_METRIC, [_point(0, 22.0, 40.0), _point(5, 24.0, 44.0)])]
+        if np_ops.MEMORY_METRIC in kwargs["metricnames"]:
+            values.append(_metric(np_ops.MEMORY_METRIC, [_point(0, 70.0, minimum=65.0), _point(5, 69.0, minimum=66.0)]))
+        return SimpleNamespace(value=values)
+
+
+async def test_pool_utilisation_reads_the_latest_azure_monitor_values(monkeypatch):
+    monitor = FakeMonitor()
+    monkeypatch.setattr(np_ops, "MonitorManagementClient", lambda credential, subscription: monitor)
+    svc = service_with()
+    svc.credential = None
+
+    result = await svc._pool_utilisation(
+        "s1", {"auto": {"id": "/vmss/a", "capacity": 3}, "empty": {"id": "/vmss/b", "capacity": 0}}
+    )
+
+    assert result == {
+        "auto": {"cpu_pct": 24.0, "memory_pct": 31.0, "at": "2026-10-11T00:05:00+00:00", "source": "azure-monitor"}
+    }
+    assert [c["resource"] for c in monitor.calls] == ["/vmss/a"]  # an empty pool has nothing to measure
+
+
+async def test_utilisation_history_falls_back_to_cpu_when_memory_is_missing(azure, monkeypatch):
+    monitor = FakeMonitor(memory=False)
+    monkeypatch.setattr(np_ops, "MonitorManagementClient", lambda credential, subscription: monitor)
+
+    async def _get_or_fetch(key, ttl, fetch_fn):
+        return await fetch_fn(), "live"
+
+    monkeypatch.setattr(np_ops.data_cache, "get_or_fetch", _get_or_fetch)
+    svc = service_with()
+
+    async def _scale_sets(*_args):
+        return {
+            "auto": {
+                "id": "/subscriptions/s1/resourceGroups/MC_rg/providers/Microsoft.Compute/virtualMachineScaleSets/aks-auto-1-vmss",
+                "capacity": 5,
+            }
+        }
+
+    svc._pool_scale_sets = _scale_sets
+    result = await svc.get_node_pool_metrics(CLUSTER_ID, "auto", "6h")
+
+    assert result["scale_set"] == "aks-auto-1-vmss"
+    assert result["interval"] == "PT5M"
+    assert result["cpu"] == {"current": 24.0, "average": 23.0, "peak": 44.0}
+    assert result["memory"] is None
+    assert "doesn't publish memory" in result["memory_error"]
+    with pytest.raises(LookupError):
+        await svc.get_node_pool_metrics(CLUSTER_ID, "missing", "1h")
+
+
+class FakeMetricsService:
+    async def get_node_pool_metrics(self, cluster_id, nodepool_name, range_key):
+        if nodepool_name == "gone":
+            raise LookupError("No scale set was found for node pool gone.")
+        return {"nodepool_name": nodepool_name, "range": range_key, "series": [], "cpu": None, "memory": None}
+
+
+async def test_read_user_can_view_pool_utilisation(app, db_session):
+    async with client(app, db_session, make_user(UserRole.READ), FakeMetricsService()) as ac:
+        ok = await ac.get(
+            "/api/v1/aks/nodepools/metrics", params={"cluster_id": CLUSTER_ID, "nodepool_name": "auto", "range": "7d"}
+        )
+        gone = await ac.get("/api/v1/aks/nodepools/metrics", params={"cluster_id": CLUSTER_ID, "nodepool_name": "gone"})
+        bad = await ac.get(
+            "/api/v1/aks/nodepools/metrics", params={"cluster_id": CLUSTER_ID, "nodepool_name": "auto", "range": "2y"}
+        )
+
+    assert ok.status_code == 200 and ok.json()["range"] == "7d"
+    assert gone.status_code == 404
+    assert bad.status_code == 422

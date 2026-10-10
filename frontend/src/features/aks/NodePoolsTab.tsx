@@ -38,6 +38,7 @@ import { DetailGrid, GridFilterSelect, type GridColumn } from "./DetailGrid";
 import { apiErrorDetail, DetailIcons, formatAge, iconProps, KeyValueGrid, ReadyBadge, Truncate } from "./detailShared";
 import { CreateNodePoolDialog, type KV, PairsEditor, type TaintRow, taintStrings, validateLabelsAndTaints } from "./CreateNodePoolDialog";
 import { NodeDetailModal } from "./NodeDetailModal";
+import { NodePoolUtilisation } from "./NodePoolUtilisation";
 import { ModalShell } from "./K8sResourceModals";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
@@ -98,6 +99,21 @@ function formatDuration(ms: number): string {
 }
 
 const hasNodeDetails = (p: NodePoolDetails) => p.node_details_available !== false;
+
+/** Cluster-wide CPU or memory in use: pools weighted by their allocatable capacity (node count when unknown). */
+export function weightedUse(pools: NodePoolDetails[], metric: "cpu" | "memory"): number | null {
+  let total = 0;
+  let weight = 0;
+  for (const p of pools) {
+    const pct = metric === "cpu" ? p.utilisation?.cpu_pct : p.utilisation?.memory_pct;
+    if (pct == null || p.power_state === "Stopped") continue;
+    const capacity = (p.nodes ?? []).reduce((n, node) => n + ((metric === "cpu" ? node.allocatable_cpu_m : node.allocatable_memory_bytes) ?? 0), 0);
+    const w = capacity || p.count;
+    total += pct * w;
+    weight += w;
+  }
+  return weight ? Math.round((total / weight) * 10) / 10 : null;
+}
 const isSystem = (p: NodePoolDetails) => p.mode === "System";
 const atAutoscaleMax = (p: NodePoolDetails) => p.enable_auto_scaling && !!p.max_count && p.count >= p.max_count;
 const isStopped = (p: NodePoolDetails) => p.power_state === "Stopped";
@@ -190,22 +206,40 @@ function NodesCell({ pool }: { pool: NodePoolDetails }) {
   );
 }
 
-function PodsCell({ pool }: { pool: NodePoolDetails }) {
-  if (!hasNodeDetails(pool) || pool.total_pods == null) {
-    return (
-      <span className="text-xs text-slate-400" title={pool.node_details_error ?? "Pod counts are unavailable"}>
-        —
-      </span>
-    );
-  }
-  const capacity = pool.pod_capacity ?? 0;
+const utilTone = (pct: number | null | undefined) => (pct == null ? "slate" : pct >= 90 ? "red" : pct >= 75 ? "amber" : "green");
+
+function Meter({ label, pct, value, title }: { label: string; pct: number | null; value: string; title: string }) {
   return (
-    <div className="min-w-[6.5rem]">
-      <div className="whitespace-nowrap text-sm font-semibold text-slate-800">
-        {pool.total_pods.toLocaleString()}
-        {capacity > 0 && <span className="ml-1 text-xs font-normal text-slate-500">/ {capacity.toLocaleString()}</span>}
+    <div title={title} className="grid grid-cols-[2.25rem_minmax(3.5rem,1fr)_auto] items-center gap-2">
+      <span className="text-[11px] text-slate-500">{label}</span>
+      <div className="h-1.5 rounded-full bg-slate-100" aria-hidden>
+        {pct != null && <div className={`h-1.5 rounded-full ${usageColor(pct)}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />}
       </div>
-      {capacity > 0 && <UsageBar pct={(pool.total_pods / capacity) * 100} />}
+      <span className="text-right text-[11px] font-semibold tabular-nums text-slate-700">{value}</span>
+    </div>
+  );
+}
+
+/** CPU and memory in use (Azure Monitor, scale set) and pods against capacity (Kubernetes). */
+function UtilisationCell({ pool }: { pool: NodePoolDetails }) {
+  const u = pool.utilisation;
+  const none = isStopped(pool) ? "Stopped: no utilisation." : "No recent Azure Monitor data: the pool has no running nodes, or metrics are delayed.";
+  const pods = hasNodeDetails(pool) ? pool.total_pods : null;
+  const capacity = pool.pod_capacity ?? 0;
+  const metric = (used: number | null | undefined, requested: number | null | undefined, name: string) =>
+    used != null
+      ? `${name} in use ${used}% (Azure Monitor, 5-minute average)${requested != null ? ` · ${requested}% requested by pods` : ""}`
+      : `${none}${requested != null ? ` ${requested}% of ${name.toLowerCase()} is requested by pods.` : ""}`;
+  return (
+    <div className="min-w-[9.5rem] space-y-1">
+      <Meter label="CPU" pct={u?.cpu_pct ?? null} value={u?.cpu_pct != null ? `${Math.round(u.cpu_pct)}%` : "—"} title={metric(u?.cpu_pct, pool.cpu_request_pct, "CPU")} />
+      <Meter label="Mem" pct={u?.memory_pct ?? null} value={u?.memory_pct != null ? `${Math.round(u.memory_pct)}%` : "—"} title={metric(u?.memory_pct, pool.memory_request_pct, "Memory")} />
+      <Meter
+        label="Pods"
+        pct={pods != null && capacity ? (pods / capacity) * 100 : null}
+        value={pods != null ? pods.toLocaleString() : "—"}
+        title={pods != null ? `${pods.toLocaleString()} pods of ${capacity.toLocaleString()} capacity` : pool.node_details_error ?? "Pod counts are unavailable"}
+      />
     </div>
   );
 }
@@ -291,6 +325,8 @@ export const NodePoolsTab: React.FC<{
       autoscaling: pools.filter((p) => p.enable_auto_scaling).length,
       atMax: pools.filter(atAutoscaleMax).length,
       attention: pools.filter((p) => poolIssues(p).length > 0).length,
+      cpuInUse: weightedUse(pools, "cpu"),
+      memoryInUse: weightedUse(pools, "memory"),
     };
   }, [pools]);
   const k8sError = pools.find((p) => !hasNodeDetails(p))?.node_details_error;
@@ -312,7 +348,7 @@ export const NodePoolsTab: React.FC<{
       case "vm_size": return p.vm_size.toLowerCase();
       case "count": return p.count;
       case "autoscaling": return p.enable_auto_scaling ? p.max_count ?? 0 : -1;
-      case "pods": return p.total_pods ?? -1;
+      case "utilisation": return p.utilisation?.cpu_pct ?? -1;
       case "version": return `${p.kubernetes_version ?? ""} ${p.node_image_version ?? ""}`;
       case "zones": return p.availability_zones.join(",");
       case "state": return poolIssues(p).length ? 0 : 1;
@@ -470,7 +506,14 @@ export const NodePoolsTab: React.FC<{
         <MetricCard
           title="Nodes"
           value={kpis.nodes}
-          subtitle={kpis.nodeDetails ? `${kpis.pods.toLocaleString()} pods · ${kpis.notReady ? `${kpis.notReady} not ready` : "all ready"}` : "Node health unavailable"}
+          subtitle={
+            <>
+              {kpis.nodeDetails ? `${kpis.pods.toLocaleString()} pods · ${kpis.notReady ? `${kpis.notReady} not ready` : "all ready"}` : "Node health unavailable"}
+              {(kpis.cpuInUse != null || kpis.memoryInUse != null) && (
+                <span className="block">CPU {kpis.cpuInUse ?? "—"}% · memory {kpis.memoryInUse ?? "—"}% in use</span>
+              )}
+            </>
+          }
           icon={MetricCardIcons.server()}
           tone={!kpis.nodeDetails ? "slate" : kpis.notReady ? "amber" : "green"}
           onClick={() => applyTile("with-nodes")}
@@ -519,7 +562,7 @@ export const NodePoolsTab: React.FC<{
                 <th className={gridStyles.headerCell}>{header("Name", "name")}</th>
                 <th className={gridStyles.headerCell}>{header("VM Size", "vm_size")}</th>
                 <th className={gridStyles.headerCell}>{header("Nodes", "count")}</th>
-                <th className={gridStyles.headerCell}>{header("Pods", "pods")}</th>
+                <th className={gridStyles.headerCell}>{header("Utilisation", "utilisation")}</th>
                 <th className={gridStyles.headerCell}>{header("Version", "version")}</th>
                 <th className={gridStyles.headerCell}>{header("State", "state")}</th>
                 <th className={`${gridStyles.headerCellCenter} ${stickyHead}`}>Actions</th>
@@ -562,7 +605,7 @@ export const NodePoolsTab: React.FC<{
                       </div>
                     </td>
                     <td className={gridStyles.cell}><NodesCell pool={pool} /></td>
-                    <td className={gridStyles.cell}><PodsCell pool={pool} /></td>
+                    <td className={gridStyles.cell}><UtilisationCell pool={pool} /></td>
                     <td className={gridStyles.cell}><VersionCell pool={pool} /></td>
                     <td className={gridStyles.cell}>
                       <div title={issues.join("\n") || undefined}><PoolState pool={pool} /></div>
@@ -680,11 +723,28 @@ function parseTaint(taint: string): { key: string; value: string; effect: string
   return { key, value, effect };
 }
 
-function NodesGrid({ pool, filter, onFilterChange, onOpenNode }: {
+function NodeMeter({ used, requested, capacity }: { used: number | null | undefined; requested: number | null | undefined; capacity: string }) {
+  const pct = used ?? requested ?? null;
+  return (
+    <div className="min-w-[7.5rem]" title={used == null ? "metrics-server isn't reporting this node; showing pod requests." : undefined}>
+      <div className="whitespace-nowrap text-xs font-semibold text-slate-800">
+        {used != null ? `${used}% used` : requested != null ? `${requested}% requested` : "—"}
+      </div>
+      {pct != null && <UsageBar pct={pct} />}
+      <div className="mt-0.5 whitespace-nowrap text-[11px] text-slate-500">
+        {used != null && requested != null ? `${requested}% requested · ` : ""}
+        {capacity}
+      </div>
+    </div>
+  );
+}
+
+function NodesGrid({ pool, filter, onFilterChange, onOpenNode, sortKey = "name" }: {
   pool: NodePoolDetails;
   filter: NodeFilter;
   onFilterChange: (f: NodeFilter) => void;
   onOpenNode: (name: string) => void;
+  sortKey?: string;
 }) {
   const nodes = pool.nodes ?? [];
   const matches = (n: NodeDetail, f: NodeFilter) =>
@@ -733,8 +793,18 @@ function NodesGrid({ pool, filter, onFilterChange, onOpenNode }: {
         );
       },
     },
-    { key: "cpu", header: "Allocatable CPU", sortValue: (n) => cpuCores(n.allocatable_cpu) || 0, render: (n) => <span className="whitespace-nowrap text-xs text-slate-700">{formatCpu(n.allocatable_cpu)}</span> },
-    { key: "memory", header: "Allocatable Memory", sortValue: (n) => memoryBytes(n.allocatable_memory) || 0, render: (n) => <span className="whitespace-nowrap text-xs text-slate-700">{formatMemory(n.allocatable_memory)}</span> },
+    {
+      key: "cpu",
+      header: "CPU",
+      sortValue: (n) => n.cpu_usage_pct ?? n.cpu_request_pct ?? 0,
+      render: (n) => <NodeMeter used={n.cpu_usage_pct} requested={n.cpu_request_pct} capacity={`of ${formatCpu(n.allocatable_cpu)}`} />,
+    },
+    {
+      key: "memory",
+      header: "Memory",
+      sortValue: (n) => n.memory_usage_pct ?? n.memory_request_pct ?? 0,
+      render: (n) => <NodeMeter used={n.memory_usage_pct} requested={n.memory_request_pct} capacity={`of ${formatMemory(n.allocatable_memory)}`} />,
+    },
     { key: "kubelet", header: "Kubelet", sortValue: (n) => n.kubelet_version ?? "", render: (n) => <span className="whitespace-nowrap font-mono text-xs text-slate-600">{n.kubelet_version ?? "—"}</span> },
     { key: "age", header: "Age", sortValue: (n) => n.created_at ?? "", render: (n) => <span className="whitespace-nowrap text-xs text-slate-600">{formatAge(n.created_at)}</span> },
   ];
@@ -760,7 +830,8 @@ function NodesGrid({ pool, filter, onFilterChange, onOpenNode }: {
       searchText={(n) => `${n.name} ${n.zone ?? ""} ${n.kubelet_version ?? ""}`}
       searchPlaceholder="Search node, zone, version…"
       emptyText={filter === "all" ? "No nodes are registered for this pool." : "No nodes match this filter."}
-      initialSort={{ key: "name", direction: "asc" }}
+      key={sortKey}
+      initialSort={{ key: sortKey, direction: sortKey === "name" ? "asc" : "desc" }}
       defaultPageSize={25}
     />
   );
@@ -796,8 +867,10 @@ export function NodePoolDetailModal({
   const [section, setSection] = useState<DetailSection>("overview");
   const [nodeName, setNodeName] = useState<string | null>(null);
   const [nodeFilter, setNodeFilter] = useState<NodeFilter>("all");
-  const showNodes = (filter: NodeFilter) => {
+  const [nodeSort, setNodeSort] = useState("name");
+  const showNodes = (filter: NodeFilter, sort = "name") => {
     setNodeFilter(filter);
+    setNodeSort(sort);
     setSection("nodes");
   };
   const details = !!pool && hasNodeDetails(pool);
@@ -868,25 +941,26 @@ export function NodePoolDetailModal({
                 actionLabel="Show pods per node"
               />
               <MetricCard
-                title="Autoscaling"
-                value={pool.enable_auto_scaling ? `${pool.min_count}–${pool.max_count}` : "Manual"}
-                subtitle={atAutoscaleMax(pool) ? "At maximum: can't add nodes" : `${pool.count} nodes now`}
+                title="CPU"
+                value={pool.utilisation?.cpu_pct != null ? `${pool.utilisation.cpu_pct}%` : "—"}
+                subtitle={pool.cpu_request_pct != null ? `In use now · ${pool.cpu_request_pct}% requested by pods` : isStopped(pool) ? "Pool is stopped" : "In use now (Azure Monitor)"}
                 icon={MetricCardIcons.activity()}
-                tone={atAutoscaleMax(pool) ? "red" : "purple"}
-                onClick={() => showNodes("all")}
-                actionLabel="Show the nodes the autoscaler manages"
+                tone={utilTone(pool.utilisation?.cpu_pct)}
+                onClick={() => showNodes("all", "cpu")}
+                actionLabel="Show nodes by CPU use"
               />
               <MetricCard
-                title="Kubernetes"
-                value={pool.kubernetes_version || "—"}
-                subtitle={image.released ? `Node image ${image.released.toLocaleDateString(undefined, { month: "short", year: "numeric" })}` : "Node image unknown"}
-                icon={MetricCardIcons.cloud()}
-                tone="indigo"
-                valueClassName="text-xl"
-                onClick={() => showNodes("all")}
-                actionLabel="Show kubelet versions per node"
+                title="Memory"
+                value={pool.utilisation?.memory_pct != null ? `${pool.utilisation.memory_pct}%` : "—"}
+                subtitle={pool.memory_request_pct != null ? `In use now · ${pool.memory_request_pct}% requested by pods` : isStopped(pool) ? "Pool is stopped" : "In use now (Azure Monitor)"}
+                icon={MetricCardIcons.database()}
+                tone={utilTone(pool.utilisation?.memory_pct)}
+                onClick={() => showNodes("all", "memory")}
+                actionLabel="Show nodes by memory use"
               />
             </KpiRow>
+
+            <NodePoolUtilisation clusterId={clusterId} nodepoolName={pool.name} formatDate={formatDate} stopped={isStopped(pool)} />
 
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
               <DetailCard title="Configuration">
@@ -896,6 +970,10 @@ export function NodePoolDetailModal({
                     { label: "Mode", value: pool.mode },
                     { label: "OS", value: [pool.os_type, pool.os_sku].filter(Boolean).join(" · ") },
                     { label: "OS Disk", value: [pool.os_disk_size_gb ? `${pool.os_disk_size_gb} GB` : null, pool.os_disk_type].filter(Boolean).join(" · ") },
+                    {
+                      label: "Autoscaling",
+                      value: pool.enable_auto_scaling ? `${pool.min_count}–${pool.max_count} nodes${atAutoscaleMax(pool) ? " (at maximum)" : ""}` : "Off (manual)",
+                    },
                     { label: "Max Pods per Node", value: pool.max_pods },
                     { label: "Availability Zones", value: pool.availability_zones.length ? pool.availability_zones.join(", ") : "None" },
                     { label: "Priority", value: pool.scale_set_priority },
@@ -922,7 +1000,7 @@ export function NodePoolDetailModal({
 
         {pool && section === "nodes" &&
           (details ? (
-            <NodesGrid pool={pool} filter={nodeFilter} onFilterChange={setNodeFilter} onOpenNode={setNodeName} />
+            <NodesGrid pool={pool} filter={nodeFilter} onFilterChange={setNodeFilter} onOpenNode={setNodeName} sortKey={nodeSort} />
           ) : (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               Node details are unavailable: {pool.node_details_error ?? "the Kubernetes API couldn't be read at the last sync."}

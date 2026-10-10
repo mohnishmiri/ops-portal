@@ -14,16 +14,20 @@ import asyncio
 import json
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
 from azure.mgmt.containerservice.models import PowerState
+from azure.mgmt.monitor import MonitorManagementClient
+from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 from sqlalchemy import delete, func, select
 
 from app.models.database import AzureResourceInventory
+from app.services.aks_node_operations import to_bytes, to_millicores
 from app.services.data_cache_service import TTL, CacheKeys, data_cache
 
 logger = structlog.get_logger(__name__)
@@ -37,6 +41,19 @@ ACTIVE_POD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
 K8S_SNAPSHOT_TIMEOUT_SECONDS = 90
 MAX_NODES_PER_POOL = 1000
 PRESSURE_CONDITIONS = ("MemoryPressure", "DiskPressure", "PIDPressure")
+# Azure Monitor platform metrics of the pool's scale set (averaged across its VMs).
+CPU_METRIC = "Percentage CPU"
+MEMORY_METRIC = "Available Memory Percentage"
+UTILISATION_LOOKBACK = timedelta(minutes=20)
+UTILISATION_TIMEOUT_SECONDS = 20
+# range → (lookback, grain) for the utilisation history chart.
+METRIC_RANGES: dict[str, tuple[timedelta, str]] = {
+    "1h": (timedelta(hours=1), "PT1M"),
+    "6h": (timedelta(hours=6), "PT5M"),
+    "24h": (timedelta(hours=24), "PT15M"),
+    "7d": (timedelta(days=7), "PT1H"),
+    "30d": (timedelta(days=30), "PT6H"),
+}
 
 
 TAINT_EFFECTS = ("NoSchedule", "PreferNoSchedule", "NoExecute")
@@ -84,13 +101,41 @@ def _int(value: Any) -> int:
         return 0
 
 
-def serialize_pool_node(node: Any, pod_count: int) -> dict[str, Any]:
-    """One Kubernetes node with its readiness and running-pod count."""
+def _pct(part: float | None, whole: float) -> float | None:
+    return round(part * 100 / whole, 1) if part is not None and whole else None
+
+
+def json_pod_requests(pod: dict[str, Any]) -> tuple[int, int]:
+    """(CPU millicores, memory bytes) a pod requests, as the scheduler counts: max(containers, largest init)."""
+    spec = pod.get("spec") or {}
+
+    def request(container: dict[str, Any], resource: str) -> Any:
+        return ((container.get("resources") or {}).get("requests") or {}).get(resource)
+
+    containers, init = spec.get("containers") or [], spec.get("initContainers") or []
+    cpu = max(
+        sum(to_millicores(request(c, "cpu")) for c in containers),
+        max((to_millicores(request(c, "cpu")) for c in init), default=0),
+    )
+    memory = max(
+        sum(to_bytes(request(c, "memory")) for c in containers),
+        max((to_bytes(request(c, "memory")) for c in init), default=0),
+    )
+    return cpu, memory
+
+
+def serialize_pool_node(
+    node: Any, pod_count: int, requests: tuple[int, int] = (0, 0), usage: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """One Kubernetes node with its readiness, running pods, pod requests, and live usage (metrics-server)."""
     meta, spec, status = node.metadata, node.spec, node.status
     labels = dict(meta.labels or {})
     conditions = {c.type: c.status for c in (status.conditions or [])} if status else {}
     allocatable = (status.allocatable or {}) if status else {}
     info = status.node_info if status else None
+    alloc_cpu, alloc_memory = to_millicores(allocatable.get("cpu")), to_bytes(allocatable.get("memory"))
+    cpu_used = to_millicores(usage.get("cpu")) if usage else None
+    memory_used = to_bytes(usage.get("memory")) if usage else None
     return {
         "name": meta.name,
         "pool": labels.get("kubernetes.azure.com/agentpool") or labels.get("agentpool"),
@@ -101,6 +146,16 @@ def serialize_pool_node(node: Any, pod_count: int) -> dict[str, Any]:
         "allocatable_pods": _int(allocatable.get("pods")),
         "allocatable_cpu": allocatable.get("cpu"),
         "allocatable_memory": allocatable.get("memory"),
+        "allocatable_cpu_m": alloc_cpu,
+        "allocatable_memory_bytes": alloc_memory,
+        "cpu_request_m": requests[0],
+        "memory_request_bytes": requests[1],
+        "cpu_request_pct": _pct(requests[0], alloc_cpu),
+        "memory_request_pct": _pct(requests[1], alloc_memory),
+        "cpu_usage_m": cpu_used,
+        "memory_usage_bytes": memory_used,
+        "cpu_usage_pct": _pct(cpu_used, alloc_cpu),
+        "memory_usage_pct": _pct(memory_used, alloc_memory),
         "zone": labels.get("topology.kubernetes.io/zone"),
         "kubelet_version": info.kubelet_version if info else None,
         "node_image_version": labels.get("kubernetes.azure.com/node-image-version"),
@@ -128,11 +183,18 @@ def build_node_pool(
     vmss_count: int | None,
     nodes: list[dict[str, Any]] | None,
     k8s_error: str | None,
+    utilisation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Grid/detail record for one agent pool. ``nodes`` is None when Kubernetes was unavailable."""
+    """Grid/detail record for one agent pool.
+
+    ``nodes`` is None when Kubernetes was unavailable; ``utilisation`` is the
+    scale set's current CPU / memory from Azure Monitor.
+    """
     available = nodes is not None
     pool_nodes = sorted((n for n in nodes or [] if n.get("pool") == pool.name), key=lambda n: n["name"])
     upgrade = pool.upgrade_settings
+    alloc_cpu = sum(n.get("allocatable_cpu_m") or 0 for n in pool_nodes)
+    alloc_memory = sum(n.get("allocatable_memory_bytes") or 0 for n in pool_nodes)
     return {
         "name": pool.name,
         "vm_size": pool.vm_size,
@@ -165,8 +227,56 @@ def build_node_pool(
         "pod_capacity": sum(n["allocatable_pods"] for n in pool_nodes) if available else None,
         "ready_nodes": sum(1 for n in pool_nodes if n["ready"]) if available else None,
         "cordoned_nodes": sum(1 for n in pool_nodes if n["unschedulable"]) if available else None,
+        # Share of the pool's allocatable CPU / memory that pods have reserved.
+        "cpu_request_pct": _pct(sum(n.get("cpu_request_m") or 0 for n in pool_nodes), alloc_cpu) if available else None,
+        "memory_request_pct": _pct(sum(n.get("memory_request_bytes") or 0 for n in pool_nodes), alloc_memory)
+        if available
+        else None,
+        "utilisation": utilisation,
         "nodes": pool_nodes,
     }
+
+
+def scale_set_pool_name(vmss: Any) -> str | None:
+    """The AKS pool a node resource group scale set belongs to."""
+    tags = vmss.tags or {}
+    name = tags.get("aks-managed-poolName") or tags.get("poolName")
+    if not name and vmss.name:
+        # AKS names scale sets "aks-<poolName>-<hash>-vmss"; pool names have no hyphens.
+        segments = vmss.name.split("-")
+        name = segments[1] if len(segments) >= 2 else None
+    return name
+
+
+def _metric_points(response: Any) -> dict[str, list[Any]]:
+    return {m.name.value: (m.timeseries[0].data if m.timeseries else []) for m in response.value}
+
+
+def _timespan(lookback: timedelta) -> str:
+    end = datetime.now(UTC)
+    return f"{end - lookback:%Y-%m-%dT%H:%M:%SZ}/{end:%Y-%m-%dT%H:%M:%SZ}"
+
+
+def utilisation_series(points: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """Merged CPU / memory-used points; memory used = 100 - available (peak = 100 - lowest available)."""
+    rows: dict[str, dict[str, Any]] = {}
+    for p in points.get(CPU_METRIC, []):
+        row = rows.setdefault(p.time_stamp.isoformat(), {"t": p.time_stamp.isoformat()})
+        row["cpu_avg"] = round(p.average, 1) if p.average is not None else None
+        row["cpu_max"] = round(p.maximum, 1) if getattr(p, "maximum", None) is not None else None
+    for p in points.get(MEMORY_METRIC, []):
+        row = rows.setdefault(p.time_stamp.isoformat(), {"t": p.time_stamp.isoformat()})
+        row["memory_avg"] = round(100 - p.average, 1) if p.average is not None else None
+        row["memory_max"] = round(100 - p.minimum, 1) if getattr(p, "minimum", None) is not None else None
+    return [rows[k] for k in sorted(rows)]
+
+
+def summarize_series(series: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
+    averages = [r[f"{key}_avg"] for r in series if r.get(f"{key}_avg") is not None]
+    if not averages:
+        return None
+    peaks = [r[f"{key}_max"] for r in series if r.get(f"{key}_max") is not None] or averages
+    return {"current": averages[-1], "average": round(sum(averages) / len(averages), 1), "peak": max(peaks)}
 
 
 def _power(resource: Any) -> str:
@@ -343,15 +453,25 @@ class AKSNodePoolOperationsMixin:
         subscription_id, resource_group, cluster_name = cluster_parts(cluster_id)
         aks_client = ContainerServiceClient(self.credential, subscription_id)  # type: ignore[attr-defined]
         try:
-            pools, vmss_counts, (nodes, k8s_error) = await asyncio.gather(
+            pools, scale_sets, (nodes, k8s_error) = await asyncio.gather(
                 asyncio.to_thread(lambda: list(aks_client.agent_pools.list(resource_group, cluster_name))),
-                self._node_pool_vmss_counts(aks_client, subscription_id, resource_group, cluster_name),
+                self._pool_scale_sets(aks_client, subscription_id, resource_group, cluster_name),
                 self._node_pool_k8s_snapshot(cluster_id),
             )
         except Exception as e:
             logger.error("node_pools_list_failed", cluster_id=cluster_id, error=str(e))
             raise
-        records = [build_node_pool(p, vmss_counts.get(p.name), nodes, k8s_error) for p in pools]
+        utilisation = await self._pool_utilisation(subscription_id, scale_sets)
+        records = [
+            build_node_pool(
+                p,
+                scale_sets[p.name]["capacity"] if p.name in scale_sets else None,
+                nodes,
+                k8s_error,
+                utilisation.get(p.name),
+            )
+            for p in pools
+        ]
         logger.info(
             "node_pools_listed",
             cluster=cluster_name,
@@ -360,22 +480,107 @@ class AKSNodePoolOperationsMixin:
         )
         return records
 
-    async def _node_pool_vmss_counts(
+    async def _pool_scale_sets(
         self, aks_client: Any, subscription_id: str, resource_group: str, cluster_name: str
-    ) -> dict[str, int]:
+    ) -> dict[str, dict[str, Any]]:
+        """pool name → {"id", "capacity"} for the cluster's scale sets; empty when they can't be read."""
         try:
             cluster = await asyncio.to_thread(aks_client.managed_clusters.get, resource_group, cluster_name)
+            if not cluster.node_resource_group:
+                return {}
+            compute = ComputeManagementClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+            scale_sets = await asyncio.to_thread(
+                lambda: list(compute.virtual_machine_scale_sets.list(cluster.node_resource_group))
+            )
         except Exception as e:
-            logger.warning("node_pools_cluster_lookup_failed", cluster=cluster_name, error=str(e))
+            logger.warning("node_pool_scale_sets_unavailable", cluster=cluster_name, error=str(e)[:200])
             return {}
-        if not cluster.node_resource_group:
+        result: dict[str, dict[str, Any]] = {}
+        for vmss in scale_sets:
+            name = scale_set_pool_name(vmss)
+            if name:
+                entry = result.setdefault(name, {"id": vmss.id, "capacity": 0})
+                entry["capacity"] += (vmss.sku.capacity if vmss.sku else 0) or 0
+        return result
+
+    def _read_vmss_metrics(
+        self, subscription_id: str, vmss_id: str, lookback: timedelta, grain: str, aggregation: str
+    ) -> tuple[dict[str, list[Any]], str | None]:
+        """Blocking Azure Monitor read; falls back to CPU alone when the memory metric isn't published."""
+        client = MonitorManagementClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+        kwargs = {"timespan": _timespan(lookback), "interval": grain, "aggregation": aggregation}
+        try:
+            return _metric_points(
+                client.metrics.list(vmss_id, metricnames=f"{CPU_METRIC},{MEMORY_METRIC}", **kwargs)
+            ), None
+        except Exception as e:
+            logger.info("vmss_memory_metric_unavailable", vmss=vmss_id.rsplit("/", 1)[-1], error=str(e)[:200])
+            points = _metric_points(client.metrics.list(vmss_id, metricnames=CPU_METRIC, **kwargs))
+            return points, "Azure Monitor doesn't publish memory for this scale set."
+
+    async def _pool_utilisation(
+        self, subscription_id: str, scale_sets: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """pool → current CPU / memory-used % (latest 5-minute average from Azure Monitor)."""
+
+        async def _one(pool: str, vmss_id: str) -> tuple[str, dict[str, Any] | None]:
+            try:
+                points, _memory_error = await asyncio.to_thread(
+                    self._read_vmss_metrics, subscription_id, vmss_id, UTILISATION_LOOKBACK, "PT5M", "Average"
+                )
+            except Exception as e:
+                logger.warning("node_pool_utilisation_failed", pool=pool, error=str(e)[:200])
+                return pool, None
+            series = utilisation_series(points)
+            cpu = next((r["cpu_avg"] for r in reversed(series) if r.get("cpu_avg") is not None), None)
+            memory = next((r["memory_avg"] for r in reversed(series) if r.get("memory_avg") is not None), None)
+            at = next((r["t"] for r in reversed(series) if r.get("cpu_avg") is not None), None)
+            if cpu is None and memory is None:
+                return pool, None
+            return pool, {"cpu_pct": cpu, "memory_pct": memory, "at": at, "source": "azure-monitor"}
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*(_one(pool, s["id"]) for pool, s in scale_sets.items() if s.get("capacity"))),
+                timeout=UTILISATION_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("node_pool_utilisation_timeout", pools=len(scale_sets))
             return {}
-        _total, counts = await asyncio.to_thread(
-            self._actual_node_counts_from_vmss,  # type: ignore[attr-defined]
-            subscription_id,
-            cluster.node_resource_group,
+        return {pool: value for pool, value in results if value}
+
+    async def get_node_pool_metrics(
+        self, cluster_id: str, nodepool_name: str, range_key: str = "24h"
+    ) -> dict[str, Any]:
+        """CPU and memory-used history of a pool's scale set from Azure Monitor."""
+        lookback, grain = METRIC_RANGES[range_key]
+        subscription_id, resource_group, cluster_name = cluster_parts(cluster_id)
+        aks_client = ContainerServiceClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+        scale_sets = await self._pool_scale_sets(aks_client, subscription_id, resource_group, cluster_name)
+        if nodepool_name not in scale_sets:
+            raise LookupError(f"No scale set was found for node pool {nodepool_name}.")
+        vmss_id = scale_sets[nodepool_name]["id"]
+
+        async def _fetch() -> dict[str, Any]:
+            points, memory_error = await asyncio.to_thread(
+                self._read_vmss_metrics, subscription_id, vmss_id, lookback, grain, "Average,Maximum,Minimum"
+            )
+            series = utilisation_series(points)
+            return {
+                "nodepool_name": nodepool_name,
+                "scale_set": vmss_id.rsplit("/", 1)[-1],
+                "range": range_key,
+                "interval": grain,
+                "series": series,
+                "cpu": summarize_series(series, "cpu"),
+                "memory": summarize_series(series, "memory"),
+                "memory_error": memory_error,
+            }
+
+        result, _tier = await data_cache.get_or_fetch(
+            key=CacheKeys.node_pool_metrics(vmss_id, range_key), ttl=60, fetch_fn=_fetch
         )
-        return counts  # type: ignore[no-any-return]
+        return result  # type: ignore[no-any-return]
 
     async def _node_pool_k8s_snapshot(self, cluster_id: str) -> tuple[list[dict[str, Any]] | None, str | None]:
         """(nodes, None), or (None, reason) when the Kubernetes API couldn't be read in time."""
@@ -389,21 +594,52 @@ class AKSNodePoolOperationsMixin:
             return None, reason
         return nodes, None
 
+    async def _node_metrics(self, core_v1: Any) -> dict[str, dict[str, Any]]:
+        """node → live CPU / memory usage from metrics-server; empty when it isn't installed."""
+        try:
+            custom = k8s_client.CustomObjectsApi(core_v1.api_client)
+            body = await asyncio.to_thread(
+                custom.list_cluster_custom_object, "metrics.k8s.io", "v1beta1", "nodes", _request_timeout=(5, 20)
+            )
+        except Exception as e:
+            logger.info("node_metrics_unavailable", error=str(e)[:200])
+            return {}
+        return {(m.get("metadata") or {}).get("name"): m.get("usage") or {} for m in body.get("items") or []}
+
     async def _read_pool_nodes(self, cluster_id: str) -> list[dict[str, Any]]:
         _, core_v1, _ = await self._get_k8s_clients(cluster_id)  # type: ignore[attr-defined]
-        node_list, pod_response = await asyncio.gather(
+        node_list, pod_response, usage = await asyncio.gather(
             asyncio.to_thread(core_v1.list_node, _request_timeout=(5, 30)),
-            # Raw JSON: deserializing thousands of V1Pod objects only to read nodeName is slow.
+            # Raw JSON: deserializing thousands of V1Pod objects only to read a few fields is slow.
             asyncio.to_thread(
                 core_v1.list_pod_for_all_namespaces,
                 field_selector=ACTIVE_POD_SELECTOR,
                 _request_timeout=(5, 60),
                 _preload_content=False,
             ),
+            self._node_metrics(core_v1),
         )
         pods = json.loads(pod_response.data).get("items") or []
-        per_node = Counter((p.get("spec") or {}).get("nodeName") for p in pods)
-        return [serialize_pool_node(n, per_node.get(n.metadata.name, 0)) for n in node_list.items]
+        per_node: Counter[str] = Counter()
+        requests: dict[str, list[int]] = {}
+        for pod in pods:
+            node = (pod.get("spec") or {}).get("nodeName")
+            if not node:
+                continue
+            per_node[node] += 1
+            cpu, memory = json_pod_requests(pod)
+            totals = requests.setdefault(node, [0, 0])
+            totals[0] += cpu
+            totals[1] += memory
+        return [
+            serialize_pool_node(
+                n,
+                per_node.get(n.metadata.name, 0),
+                tuple(requests.get(n.metadata.name, (0, 0))),  # type: ignore[arg-type]
+                usage.get(n.metadata.name),
+            )
+            for n in node_list.items
+        ]
 
     # ── Mutations ──────────────────────────────────────────────────────
 
