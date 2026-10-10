@@ -129,6 +129,11 @@ async def create_tables() -> None:
                     """
                 )
             )
+            # Who resolved an alert ("system" for automatic resolution), Oct 2026.
+            for alert_table in ("vm_threshold_alerts", "custom_expiry_alerts", "pg_flex_server_alerts"):
+                await conn.execute(
+                    text(f"ALTER TABLE IF EXISTS {alert_table} ADD COLUMN IF NOT EXISTS resolved_by VARCHAR(255)")
+                )
             await conn.execute(
                 text(
                     """

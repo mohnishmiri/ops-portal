@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from app.models.database import AlertScheduleConfig
+from app.models.database import AlertScheduleConfig, CertificateAutomationClaim
 from app.services import scheduler_service
 
 
@@ -30,6 +30,7 @@ async def session_factory(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'alert_schedules.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: AlertScheduleConfig.__table__.create(c))
+        await conn.run_sync(lambda c: CertificateAutomationClaim.__table__.create(c))
     yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await engine.dispose()
 
@@ -220,9 +221,15 @@ class _DigestDb:
 
     async def execute(self, _statement):
         self.queries += 1
-        # Active VM alerts, then active expiry alerts.
+        # Open VM alerts, then PG, then expiry.
         if self.queries == 1:
-            return _Rows([SimpleNamespace(vm_name="vm-1", metric_type="cpu", current_value=97.0, severity="critical")])
+            return _Rows(
+                [
+                    SimpleNamespace(
+                        vm_name="vm-1", metric_type="cpu", current_value=97.0, severity="critical", status="active"
+                    )
+                ]
+            )
         return _Rows([])
 
 
@@ -234,7 +241,7 @@ async def test_digest_sends_one_copy_per_inbox(monkeypatch):
         def __init__(self, _db):
             pass
 
-        async def send_alert_digest(self, *, recipient_emails, vm_alerts, expiry_alerts):
+        async def send_alert_digest(self, *, recipient_emails, vm_alerts, expiry_alerts, pg_alerts):
             sent.append(recipient_emails)
 
     db = _DigestDb()

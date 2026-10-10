@@ -6,20 +6,23 @@ Full management interface for infrastructure alerts:
 - Custom Expiry Alerts (MechID, Certificate, AAF, Database, ITServices Domain)
 """
 
+import re
 import traceback
 from datetime import datetime
 
 import structlog
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_role
+from app.core.access_scope import assert_resource_access
 from app.core.authz import require_capability
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
-from app.services.infra_alert_service import InfraAlertService
+from app.models.database import AuditLog
+from app.services.infra_alert_service import EXPIRY_ALERT_TYPES, InfraAlertService
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -31,8 +34,64 @@ async def _get_service(db: AsyncSession = Depends(get_db)) -> InfraAlertService:
 
 # ── Request/Response Models ────────────────────────────────────────────
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-class CreateVMThresholdConfigRequest(BaseModel):
+
+def _clean_emails(value: list[str] | None) -> list[str] | None:
+    """Trim, validate and de-duplicate (case-insensitively) a recipient list."""
+    if value is None:
+        return None
+    seen: dict[str, str] = {}
+    for raw in value:
+        email = (raw or "").strip()
+        if not email:
+            continue
+        if not _EMAIL_RE.match(email):
+            raise ValueError(f"'{email}' is not a valid email address")
+        seen.setdefault(email.lower(), email)
+    return list(seen.values())
+
+
+class _Recipients(BaseModel):
+    @field_validator("notification_emails", "digest_recipients", mode="before", check_fields=False)
+    @classmethod
+    def _validate_emails(cls, value):
+        return _clean_emails(value)
+
+
+def _check_pairs(model: BaseModel, pairs: list[tuple[str, str, str]]) -> None:
+    for label, warning_field, critical_field in pairs:
+        warning, critical = getattr(model, warning_field), getattr(model, critical_field)
+        if warning is not None and critical is not None and warning >= critical:
+            raise ValueError(f"{label}: warning ({warning:g}) must be lower than critical ({critical:g})")
+
+
+def _update_payload(request: BaseModel) -> dict:
+    """Fields the client sent; an explicit ``snooze_until: null`` clears the snooze."""
+    updates = request.model_dump(exclude_none=True)
+    if "snooze_until" in request.model_fields_set and getattr(request, "snooze_until", None) is None:
+        updates["clear_snooze"] = True
+    return updates
+
+
+_VM_PAIRS = [
+    ("CPU", "cpu_warning_threshold", "cpu_critical_threshold"),
+    ("Memory", "memory_warning_threshold", "memory_critical_threshold"),
+    ("Disk", "disk_warning_threshold", "disk_critical_threshold"),
+]
+_PG_PAIRS = [
+    ("CPU", "cpu_warning_threshold", "cpu_critical_threshold"),
+    ("Memory", "memory_warning_threshold", "memory_critical_threshold"),
+    ("Storage", "storage_warning_threshold", "storage_critical_threshold"),
+]
+_STORAGE_PAIRS = [
+    ("Capacity", "capacity_warning_gb", "capacity_critical_gb"),
+    ("Transactions", "transactions_warning", "transactions_critical"),
+    ("Egress", "egress_warning_gb", "egress_critical_gb"),
+]
+
+
+class CreateVMThresholdConfigRequest(_Recipients):
     """Request to create a VM threshold alert configuration."""
 
     subscription_id: str = Field(..., description="Azure subscription ID")
@@ -46,9 +105,15 @@ class CreateVMThresholdConfigRequest(BaseModel):
     disk_warning_threshold: float = Field(default=80.0, ge=0, le=100)
     disk_critical_threshold: float = Field(default=95.0, ge=0, le=100)
     notification_emails: list[str] = Field(default=[])
+    is_enabled: bool = True
+
+    @model_validator(mode="after")
+    def _thresholds_in_order(self):
+        _check_pairs(self, _VM_PAIRS)
+        return self
 
 
-class UpdateVMThresholdConfigRequest(BaseModel):
+class UpdateVMThresholdConfigRequest(_Recipients):
     """Request to update a VM threshold alert configuration."""
 
     cpu_warning_threshold: float | None = Field(default=None, ge=0, le=100)
@@ -61,16 +126,23 @@ class UpdateVMThresholdConfigRequest(BaseModel):
     notification_emails: list[str] | None = None
     snooze_until: datetime | None = None
 
+    @model_validator(mode="after")
+    def _thresholds_in_order(self):
+        _check_pairs(self, _VM_PAIRS)
+        return self
 
-class CreateExpiryConfigRequest(BaseModel):
+
+class CreateExpiryConfigRequest(_Recipients):
     """Request to create a custom expiry alert configuration."""
 
     alert_type: str = Field(
         ...,
         description="Type: mech_id, certificate, aaf_account, database_account, itservices_domain",
     )
-    resource_name: str = Field(..., description="Name of the resource to monitor")
-    resource_identifier: str = Field(..., description="Unique identifier for the resource")
+    resource_name: str = Field(..., min_length=1, max_length=255, description="Name of the resource to monitor")
+    resource_identifier: str = Field(
+        ..., min_length=1, max_length=500, description="Unique identifier for the resource"
+    )
     expiry_date: datetime = Field(..., description="Expiry date of the resource")
     description: str | None = Field(default=None)
     environment: str | None = Field(
@@ -78,21 +150,43 @@ class CreateExpiryConfigRequest(BaseModel):
         pattern="^(prod|non_prod)$",
         description="Environment classification: prod or non_prod",
     )
-    warning_days_before: int = Field(default=30, ge=1)
-    critical_days_before: int = Field(default=7, ge=1)
+    warning_days_before: int = Field(default=30, ge=1, le=730)
+    critical_days_before: int = Field(default=7, ge=1, le=730)
     notification_emails: list[str] = Field(default=[])
     metadata: dict | None = Field(default=None)
+    is_enabled: bool = True
+
+    @field_validator("alert_type")
+    @classmethod
+    def _known_type(cls, value: str) -> str:
+        if value not in EXPIRY_ALERT_TYPES:
+            raise ValueError(f"alert_type must be one of {list(EXPIRY_ALERT_TYPES)}")
+        return value
+
+    @field_validator("resource_name", "resource_identifier")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _days_in_order(self):
+        if self.critical_days_before >= self.warning_days_before:
+            raise ValueError("critical days must be fewer than warning days (e.g. warn at 30, critical at 7)")
+        return self
 
 
-class UpdateExpiryConfigRequest(BaseModel):
+class UpdateExpiryConfigRequest(_Recipients):
     """Request to update a custom expiry alert configuration."""
 
-    resource_name: str | None = None
+    resource_name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     environment: str | None = Field(default=None, pattern="^(prod|non_prod)$")
     expiry_date: datetime | None = None
-    warning_days_before: int | None = Field(default=None, ge=1)
-    critical_days_before: int | None = Field(default=None, ge=1)
+    warning_days_before: int | None = Field(default=None, ge=1, le=730)
+    critical_days_before: int | None = Field(default=None, ge=1, le=730)
     is_enabled: bool | None = None
     notification_emails: list[str] | None = None
     snooze_until: datetime | None = None
@@ -108,13 +202,13 @@ class AcknowledgeAlertRequest(BaseModel):
 class ResolveAlertRequest(BaseModel):
     """Request to resolve an alert."""
 
-    resolution_notes: str | None = Field(default=None, description="Notes about the resolution")
+    resolution_notes: str | None = Field(default=None, max_length=2000, description="Notes about the resolution")
 
 
 # ── Storage Alert Request/Response Models ──────────────────────────────
 
 
-class CreateStorageAlertConfigRequest(BaseModel):
+class CreateStorageAlertConfigRequest(_Recipients):
     """Request to create a storage alert configuration."""
 
     subscription_id: str = Field(..., description="Azure subscription ID")
@@ -128,9 +222,15 @@ class CreateStorageAlertConfigRequest(BaseModel):
     egress_warning_gb: float = Field(default=50.0, ge=0)
     egress_critical_gb: float = Field(default=200.0, ge=0)
     notification_emails: list[str] = Field(default=[])
+    is_enabled: bool = True
+
+    @model_validator(mode="after")
+    def _thresholds_in_order(self):
+        _check_pairs(self, _STORAGE_PAIRS)
+        return self
 
 
-class UpdateStorageAlertConfigRequest(BaseModel):
+class UpdateStorageAlertConfigRequest(_Recipients):
     """Request to update a storage alert configuration."""
 
     capacity_warning_gb: float | None = Field(default=None, ge=0)
@@ -143,11 +243,16 @@ class UpdateStorageAlertConfigRequest(BaseModel):
     notification_emails: list[str] | None = None
     snooze_until: datetime | None = None
 
+    @model_validator(mode="after")
+    def _thresholds_in_order(self):
+        _check_pairs(self, _STORAGE_PAIRS)
+        return self
+
 
 # ── PG Flex Server Alert Request/Response Models ───────────────────────
 
 
-class CreatePGFlexConfigRequest(BaseModel):
+class CreatePGFlexConfigRequest(_Recipients):
     """Request to create a PG Flexible Server alert configuration."""
 
     subscription_id: str = Field(..., description="Azure subscription ID")
@@ -161,9 +266,15 @@ class CreatePGFlexConfigRequest(BaseModel):
     storage_warning_threshold: float = Field(default=80.0, ge=0, le=100)
     storage_critical_threshold: float = Field(default=95.0, ge=0, le=100)
     notification_emails: list[str] = Field(default=[])
+    is_enabled: bool = True
+
+    @model_validator(mode="after")
+    def _thresholds_in_order(self):
+        _check_pairs(self, _PG_PAIRS)
+        return self
 
 
-class UpdatePGFlexConfigRequest(BaseModel):
+class UpdatePGFlexConfigRequest(_Recipients):
     """Request to update a PG Flexible Server alert configuration."""
 
     cpu_warning_threshold: float | None = Field(default=None, ge=0, le=100)
@@ -176,8 +287,13 @@ class UpdatePGFlexConfigRequest(BaseModel):
     notification_emails: list[str] | None = None
     snooze_until: datetime | None = None
 
+    @model_validator(mode="after")
+    def _thresholds_in_order(self):
+        _check_pairs(self, _PG_PAIRS)
+        return self
 
-class CreateAlertScheduleConfigRequest(BaseModel):
+
+class CreateAlertScheduleConfigRequest(_Recipients):
     """Request to create a persisted infra alert schedule configuration."""
 
     name: str = Field(..., min_length=1, max_length=255)
@@ -186,8 +302,9 @@ class CreateAlertScheduleConfigRequest(BaseModel):
     interval_minutes: int = Field(default=15, ge=1, le=10080)
     cron_expression: str | None = Field(default=None, max_length=100)
     check_vm_thresholds: bool = True
-    check_storage_thresholds: bool = True
-    check_disk_thresholds: bool = True
+    # Storage and disk checks are not evaluated yet (see execute_alert_schedule_job).
+    check_storage_thresholds: bool = False
+    check_disk_thresholds: bool = False
     check_expiry_alerts: bool = True
     check_pg_thresholds: bool = True
     send_daily_digest: bool = True
@@ -196,7 +313,7 @@ class CreateAlertScheduleConfigRequest(BaseModel):
     is_enabled: bool = True
 
 
-class UpdateAlertScheduleConfigRequest(BaseModel):
+class UpdateAlertScheduleConfigRequest(_Recipients):
     """Request to update a persisted infra alert schedule configuration."""
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -384,6 +501,7 @@ async def create_vm_threshold_config(
         disk_warning=request.disk_warning_threshold,
         disk_critical=request.disk_critical_threshold,
         notification_emails=request.notification_emails,
+        is_enabled=request.is_enabled,
     )
 
 
@@ -399,8 +517,7 @@ async def update_vm_threshold_config(
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Update a VM threshold alert configuration."""
-    updates = request.model_dump(exclude_none=True)
-    return await service.update_vm_threshold_config(config_id, **updates)
+    return await service.update_vm_threshold_config(config_id, **_update_payload(request))
 
 
 @router.delete(
@@ -510,6 +627,7 @@ async def get_vm_metrics(
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Get current VM metrics."""
+    assert_resource_access(subscription_id, "read", context=f"vm metrics {vm_name}")
     return await service.get_vm_metrics(subscription_id, resource_group, vm_name)
 
 
@@ -564,6 +682,7 @@ async def create_expiry_config(
         notification_emails=request.notification_emails,
         metadata=request.metadata,
         environment=request.environment,
+        is_enabled=request.is_enabled,
     )
 
 
@@ -579,8 +698,7 @@ async def update_expiry_config(
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Update a custom expiry alert configuration."""
-    updates = request.model_dump(exclude_none=True)
-    return await service.update_expiry_config(config_id, **updates)
+    return await service.update_expiry_config(config_id, **_update_payload(request))
 
 
 @router.delete(
@@ -674,7 +792,7 @@ async def check_expiry_alerts(
     user: UserContext = Depends(require_role(UserRole.WRITE)),
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
-    """Check all expiry configs and generate alerts if needed."""
+    """Bring every expiry alert in line with its config (create, escalate, auto-resolve)."""
     return await service.check_and_generate_expiry_alerts()
 
 
@@ -727,6 +845,7 @@ async def create_storage_alert_config(
         egress_warning_gb=request.egress_warning_gb,
         egress_critical_gb=request.egress_critical_gb,
         notification_emails=request.notification_emails,
+        is_enabled=request.is_enabled,
     )
 
 
@@ -742,8 +861,7 @@ async def update_storage_alert_config(
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Update a storage alert configuration."""
-    updates = request.model_dump(exclude_none=True)
-    return await service.update_storage_alert_config(config_id, **updates)
+    return await service.update_storage_alert_config(config_id, **_update_payload(request))
 
 
 @router.delete(
@@ -809,6 +927,7 @@ async def create_pg_flex_config(
         storage_warning_threshold=request.storage_warning_threshold,
         storage_critical_threshold=request.storage_critical_threshold,
         notification_emails=request.notification_emails,
+        is_enabled=request.is_enabled,
     )
 
 
@@ -824,8 +943,7 @@ async def update_pg_flex_config(
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Update a PG Flexible Server alert configuration."""
-    updates = request.model_dump(exclude_none=True)
-    return await service.update_pg_flex_config(config_id, **updates)
+    return await service.update_pg_flex_config(config_id, **_update_payload(request))
 
 
 @router.delete(
@@ -918,6 +1036,7 @@ async def get_pg_metrics(
     service: InfraAlertService = Depends(_get_service),
 ) -> dict:
     """Get current PG Flexible Server metrics."""
+    assert_resource_access(subscription_id, "read", context=f"pg metrics {server_name}")
     return await service.get_pg_metrics(subscription_id, resource_group, server_name)
 
 
@@ -1581,6 +1700,19 @@ async def trigger_pg_check(
 
 # ── Notification History ───────────────────────────────────────────────
 
+INFRA_NOTIFICATION_TYPES_BY_KIND: dict[str, list[str]] = {
+    "vm": ["vm_threshold"],
+    "pg": ["pg_flex_server"],
+    "expiry": ["custom_expiry", *EXPIRY_ALERT_TYPES],
+}
+# This page lists infra alert mail only — certificate, checksum and access
+# notifications live on their own pages.
+INFRA_NOTIFICATION_TYPES = [
+    *(t for types in INFRA_NOTIFICATION_TYPES_BY_KIND.values() for t in types),
+    "storage",
+    "digest",
+]
+
 
 @router.get(
     "/notifications/history",
@@ -1592,11 +1724,16 @@ async def get_notification_history(
     alert_type: str | None = Query(default=None, description="Filter by alert type"),
     alert_id: int | None = Query(default=None, description="Filter by alert ID"),
     status: str | None = Query(default=None, description="Filter by delivery status"),
+    alert_kind: str | None = Query(
+        default=None,
+        pattern="^(vm|pg|expiry)$",
+        description="With alert_id: every notification about that VM, PG or expiry alert",
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     user: UserContext = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    """Get notification history."""
+    """Get notification history (infra alert notifications only unless a type is given)."""
     if db is None:
         return JSONResponse(status_code=200, content=[])
     try:
@@ -1606,13 +1743,22 @@ async def get_notification_history(
         if effective_alert_type == "expiry":
             effective_alert_type = "custom_expiry"
 
+        alert_types = None
+        if alert_kind:
+            # An alert's emails are recorded under more than one type: expiry
+            # status changes use the account type (mech_id, ...).
+            alert_types = INFRA_NOTIFICATION_TYPES_BY_KIND[alert_kind]
+        elif not effective_alert_type:
+            alert_types = INFRA_NOTIFICATION_TYPES
+
         email_service = EmailNotificationService(db)
         return await email_service.get_notification_history(
             alert_type=effective_alert_type,
             alert_id=alert_id,
             status=status,
             limit=limit,
-            exclude_alert_types=(None if effective_alert_type else ["checksum_report", "checksum_verification"]),
+            exclude_alert_types=None,
+            alert_types=alert_types,
         )
     except OSError as e:
         logger.warning("get_notification_history_connection_error", error=str(e))
@@ -1684,7 +1830,7 @@ async def send_test_notification(
         raise HTTPException(status_code=500, detail=f"Failed to send test notification: {str(e)}")
 
 
-# ── VM Power Management ───────────────────────────────────────────────
+# ── VM / PG Power Management ──────────────────────────────────────────
 
 
 class VMActionRequest(BaseModel):
@@ -1692,6 +1838,94 @@ class VMActionRequest(BaseModel):
 
     resource_group: str = Field(..., description="Resource group containing the VM")
     vm_name: str = Field(..., description="Name of the virtual machine")
+    subscription_id: str | None = Field(
+        default=None,
+        description="Subscription of the VM. Looked up in the synced inventory when omitted.",
+    )
+
+
+class PGServerActionRequest(BaseModel):
+    """Request body for PG server power actions."""
+
+    resource_group: str = Field(..., description="Resource group containing the PG server")
+    server_name: str = Field(..., description="Name of the PostgreSQL Flexible Server")
+    subscription_id: str | None = Field(
+        default=None,
+        description="Subscription of the server. Looked up in the synced inventory when omitted.",
+    )
+
+
+_POWER_LABELS = {"start": "start", "stop": "stop", "restart": "restart"}
+
+
+async def _run_power_action(
+    *,
+    db: AsyncSession,
+    http_request: Request,
+    user: UserContext,
+    kind: str,
+    action: str,
+    resource_group: str,
+    name: str,
+    subscription_id: str | None,
+) -> JSONResponse:
+    """Run a VM / PG power action against the resource's own subscription, audited.
+
+    Every action used to go to the first configured subscription, so VMs and
+    servers in any other subscription could not be started or stopped (and a
+    same-named resource there could be hit instead).
+    """
+    from app.services.azure_resource_service import AzureResourceService
+
+    svc = AzureResourceService(db_session=db)
+    resource_type = "virtual_machine" if kind == "vm" else "pg_flex_server"
+    label = "VM" if kind == "vm" else "PG server"
+    try:
+        subscription = subscription_id or await svc.resolve_inventory_subscription(resource_type, resource_group, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    assert_resource_access(subscription, "write", context=f"{resource_type} {action} {name}")
+
+    async def _audit(status: str, details: dict) -> None:
+        if db is None:
+            return
+        db.add(
+            AuditLog(
+                user_id=user.user_id,
+                user_email=user.email,
+                action=f"{resource_type}_{action}",
+                resource_type=resource_type,
+                resource_id=name,
+                details={
+                    "page": "InfraAlertPage",
+                    "feature": "resource_power",
+                    "subscription_id": subscription,
+                    "resource_group": resource_group,
+                    "resource_name": name,
+                    **details,
+                },
+                ip_address=http_request.client.host if http_request.client else None,
+                status=status,
+            )
+        )
+        try:
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            logger.warning("power_action_audit_failed", resource=name, error=str(exc)[:200])
+
+    method = getattr(svc, f"{action}_{'vm' if kind == 'vm' else 'pg_server'}")
+    try:
+        result = await method(resource_group, name, subscription_id=subscription)
+    except Exception as e:
+        logger.error(f"{action}_{kind}_failed", resource=name, error=str(e), tb=traceback.format_exc())
+        await _audit("failure", {"error": str(e)[:500]})
+        raise HTTPException(status_code=500, detail=f"Failed to {_POWER_LABELS[action]} {label} '{name}': {str(e)}")
+
+    # Refresh the inventory row so the grid shows the new state without a full resync.
+    refreshed = await svc.refresh_inventory_power_state(resource_type, subscription, resource_group, name)
+    await _audit("success", {"new_state": refreshed})
+    return JSONResponse(content={**result, "subscription_id": subscription, "power_state": refreshed})
 
 
 @router.post(
@@ -1700,25 +1934,22 @@ class VMActionRequest(BaseModel):
     description="Start a virtual machine",
 )
 async def start_vm_endpoint(
+    http_request: Request,
     request: VMActionRequest = Body(...),
     user: UserContext = Depends(require_capability("infra_vm_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Start a VM."""
-    try:
-        from app.services.azure_resource_service import AzureResourceService
-
-        svc = AzureResourceService(db_session=db)
-        result = await svc.start_vm(request.resource_group, request.vm_name)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            "start_vm_endpoint_failed",
-            vm=request.vm_name,
-            error=str(e),
-            tb=traceback.format_exc(),
-        )
-        raise HTTPException(status_code=500, detail=f"Failed to start VM '{request.vm_name}': {str(e)}")
+    return await _run_power_action(
+        db=db,
+        http_request=http_request,
+        user=user,
+        kind="vm",
+        action="start",
+        resource_group=request.resource_group,
+        name=request.vm_name,
+        subscription_id=request.subscription_id,
+    )
 
 
 @router.post(
@@ -1727,25 +1958,22 @@ async def start_vm_endpoint(
     description="Stop and deallocate a virtual machine",
 )
 async def stop_vm_endpoint(
+    http_request: Request,
     request: VMActionRequest = Body(...),
     user: UserContext = Depends(require_capability("infra_vm_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Stop (deallocate) a VM."""
-    try:
-        from app.services.azure_resource_service import AzureResourceService
-
-        svc = AzureResourceService(db_session=db)
-        result = await svc.stop_vm(request.resource_group, request.vm_name)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            "stop_vm_endpoint_failed",
-            vm=request.vm_name,
-            error=str(e),
-            tb=traceback.format_exc(),
-        )
-        raise HTTPException(status_code=500, detail=f"Failed to stop VM '{request.vm_name}': {str(e)}")
+    return await _run_power_action(
+        db=db,
+        http_request=http_request,
+        user=user,
+        kind="vm",
+        action="stop",
+        resource_group=request.resource_group,
+        name=request.vm_name,
+        subscription_id=request.subscription_id,
+    )
 
 
 @router.post(
@@ -1754,38 +1982,22 @@ async def stop_vm_endpoint(
     description="Restart a virtual machine",
 )
 async def restart_vm_endpoint(
+    http_request: Request,
     request: VMActionRequest = Body(...),
     user: UserContext = Depends(require_capability("infra_vm_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Restart a VM."""
-    try:
-        from app.services.azure_resource_service import AzureResourceService
-
-        svc = AzureResourceService(db_session=db)
-        result = await svc.restart_vm(request.resource_group, request.vm_name)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            "restart_vm_endpoint_failed",
-            vm=request.vm_name,
-            error=str(e),
-            tb=traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to restart VM '{request.vm_name}': {str(e)}",
-        )
-
-
-# ── PG Flexible Server Power Management ───────────────────────────────
-
-
-class PGServerActionRequest(BaseModel):
-    """Request body for PG server power actions."""
-
-    resource_group: str = Field(..., description="Resource group containing the PG server")
-    server_name: str = Field(..., description="Name of the PostgreSQL Flexible Server")
+    return await _run_power_action(
+        db=db,
+        http_request=http_request,
+        user=user,
+        kind="vm",
+        action="restart",
+        resource_group=request.resource_group,
+        name=request.vm_name,
+        subscription_id=request.subscription_id,
+    )
 
 
 @router.post(
@@ -1794,28 +2006,22 @@ class PGServerActionRequest(BaseModel):
     description="Start a PostgreSQL Flexible Server",
 )
 async def start_pg_server_endpoint(
+    http_request: Request,
     request: PGServerActionRequest = Body(...),
     user: UserContext = Depends(require_capability("infra_pg_server_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Start a PG Flexible Server."""
-    try:
-        from app.services.azure_resource_service import AzureResourceService
-
-        svc = AzureResourceService(db_session=db)
-        result = await svc.start_pg_server(request.resource_group, request.server_name)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            "start_pg_server_endpoint_failed",
-            server=request.server_name,
-            error=str(e),
-            tb=traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to start PG server '{request.server_name}': {str(e)}",
-        )
+    return await _run_power_action(
+        db=db,
+        http_request=http_request,
+        user=user,
+        kind="pg",
+        action="start",
+        resource_group=request.resource_group,
+        name=request.server_name,
+        subscription_id=request.subscription_id,
+    )
 
 
 @router.post(
@@ -1824,28 +2030,22 @@ async def start_pg_server_endpoint(
     description="Stop a PostgreSQL Flexible Server",
 )
 async def stop_pg_server_endpoint(
+    http_request: Request,
     request: PGServerActionRequest = Body(...),
     user: UserContext = Depends(require_capability("infra_pg_server_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Stop a PG Flexible Server."""
-    try:
-        from app.services.azure_resource_service import AzureResourceService
-
-        svc = AzureResourceService(db_session=db)
-        result = await svc.stop_pg_server(request.resource_group, request.server_name)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            "stop_pg_server_endpoint_failed",
-            server=request.server_name,
-            error=str(e),
-            tb=traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to stop PG server '{request.server_name}': {str(e)}",
-        )
+    return await _run_power_action(
+        db=db,
+        http_request=http_request,
+        user=user,
+        kind="pg",
+        action="stop",
+        resource_group=request.resource_group,
+        name=request.server_name,
+        subscription_id=request.subscription_id,
+    )
 
 
 @router.post(
@@ -1854,25 +2054,19 @@ async def stop_pg_server_endpoint(
     description="Restart a PostgreSQL Flexible Server",
 )
 async def restart_pg_server_endpoint(
+    http_request: Request,
     request: PGServerActionRequest = Body(...),
     user: UserContext = Depends(require_capability("infra_pg_server_power")),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Restart a PG Flexible Server."""
-    try:
-        from app.services.azure_resource_service import AzureResourceService
-
-        svc = AzureResourceService(db_session=db)
-        result = await svc.restart_pg_server(request.resource_group, request.server_name)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            "restart_pg_server_endpoint_failed",
-            server=request.server_name,
-            error=str(e),
-            tb=traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to restart PG server '{request.server_name}': {str(e)}",
-        )
+    return await _run_power_action(
+        db=db,
+        http_request=http_request,
+        user=user,
+        kind="pg",
+        action="restart",
+        resource_group=request.resource_group,
+        name=request.server_name,
+        subscription_id=request.subscription_id,
+    )

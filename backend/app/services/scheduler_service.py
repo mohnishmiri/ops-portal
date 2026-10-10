@@ -9,6 +9,8 @@ Uses APScheduler for:
 """
 
 import asyncio
+import os
+import socket
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,16 +19,16 @@ import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cron import cron_trigger_from_crontab
 from app.core.database import get_db_session
 from app.models.database import (
     AlertScheduleConfig,
+    CertificateAutomationClaim,
     ChecksumScheduleConfig,
-    CustomExpiryAlert,
     CustomExpiryAlertConfig,
-    VMThresholdAlert,
     VMThresholdAlertConfig,
 )
 from app.services.azure_resource_service import AzureResourceService
@@ -42,6 +44,8 @@ logger = structlog.get_logger(__name__)
 # Global scheduler instance
 _scheduler: AsyncIOScheduler | None = None
 ALERT_SCHEDULE_JOB_PREFIX = "alert_schedule_config:"
+# Rows in cert_automation_claims (the shared once-a-day claim table).
+DIGEST_CLAIM_TYPE = "infra_alert_digest"
 LEGACY_ALERT_JOB_IDS = {"vm_threshold_check", "expiry_alert_check", "daily_digest"}
 
 
@@ -259,6 +263,43 @@ async def _claim_alert_schedule(db: AsyncSession, config: AlertScheduleConfig, n
     return True
 
 
+def _digest_due(config: AlertScheduleConfig, now: datetime) -> bool:
+    """A cron schedule sends its digest when it fires; an interval schedule at
+    its first run on or after ``digest_time_utc`` each day."""
+    if config.schedule_type == "cron" and config.cron_expression:
+        return True
+    try:
+        hour, minute = (int(part) for part in (config.digest_time_utc or "08:00").split(":"))
+    except ValueError:
+        hour, minute = 8, 0
+    return (now.hour, now.minute) >= (hour, minute)
+
+
+async def _claim_daily_digest(db: AsyncSession, config: AlertScheduleConfig, now: datetime) -> bool:
+    """At most one digest per schedule per UTC day, whichever worker gets there first.
+
+    "Include daily digest" on a 15-minute schedule used to email every 15 minutes.
+    """
+    if not _digest_due(config, now):
+        return False
+    db.add(
+        CertificateAutomationClaim(
+            claim_type=DIGEST_CLAIM_TYPE,
+            subject_id=config.id,
+            claim_date=now.strftime("%Y-%m-%d"),
+            claimed_by=f"{socket.gethostname()}:{os.getpid()}",
+        )
+    )
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # The rollback expired the schedule row, and the caller still reads it.
+        await db.refresh(config)
+        return False
+    return True
+
+
 async def ensure_default_alert_schedule_configs() -> dict[str, Any]:
     """Seed default alert schedules for empty environments."""
     async for db in get_db_session():
@@ -345,89 +386,16 @@ async def sync_alert_schedule_jobs() -> dict[str, Any]:
 # ── Scheduled Jobs ───────────────────────────────────────────────────────
 
 
-async def check_vm_thresholds_job() -> None:
-    """Check VM thresholds and generate alerts."""
+async def check_vm_thresholds_job() -> dict[str, Any]:
+    """Check VM thresholds and update alerts (see InfraAlertService for the lifecycle)."""
     logger.info("vm_threshold_check_started")
-
     try:
         async for db in get_db_session():
-            alert_service = InfraAlertService(db)
-            email_service = EmailNotificationService(db)
-
-            # Get all enabled VM threshold configs
-            configs = await alert_service.list_vm_threshold_configs(is_enabled=True)
-
-            alerts_generated = 0
-
-            for config in configs:
-                try:
-                    # Skip snoozed configs
-                    if config.get("snooze_until"):
-                        snooze_until = datetime.fromisoformat(config["snooze_until"])
-                        if snooze_until > datetime.utcnow():
-                            continue
-
-                    # Get current VM metrics
-                    metrics = await alert_service.get_vm_metrics(
-                        subscription_id=config["subscription_id"],
-                        resource_group=config["resource_group"],
-                        vm_name=config["vm_name"],
-                    )
-
-                    if not metrics:
-                        continue
-
-                    # Check CPU threshold
-                    cpu_value = metrics.get("cpu_percent", 0)
-                    await _check_and_create_alert(
-                        db=db,
-                        config=config,
-                        metric_type="cpu",
-                        current_value=cpu_value,
-                        warning_threshold=config["cpu_warning_threshold"],
-                        critical_threshold=config["cpu_critical_threshold"],
-                        email_service=email_service,
-                    )
-
-                    # Check Memory threshold
-                    memory_value = metrics.get("memory_percent", 0)
-                    await _check_and_create_alert(
-                        db=db,
-                        config=config,
-                        metric_type="memory",
-                        current_value=memory_value,
-                        warning_threshold=config["memory_warning_threshold"],
-                        critical_threshold=config["memory_critical_threshold"],
-                        email_service=email_service,
-                    )
-
-                    # Check Disk threshold
-                    disk_value = metrics.get("disk_percent", 0)
-                    await _check_and_create_alert(
-                        db=db,
-                        config=config,
-                        metric_type="disk",
-                        current_value=disk_value,
-                        warning_threshold=config["disk_warning_threshold"],
-                        critical_threshold=config["disk_critical_threshold"],
-                        email_service=email_service,
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        "vm_threshold_check_error",
-                        vm=config.get("vm_name"),
-                        error=str(e),
-                    )
-
-            logger.info(
-                "vm_threshold_check_completed",
-                configs=len(configs),
-                alerts=alerts_generated,
-            )
-
+            return await InfraAlertService(db).check_and_generate_vm_alerts()
     except Exception as e:
         logger.error("vm_threshold_job_failed", error=str(e))
+        return {"error": str(e)[:300]}
+    return {"error": "database unavailable"}
 
 
 async def sync_leadership_dashboard_job() -> None:
@@ -447,176 +415,16 @@ async def sync_leadership_dashboard_job() -> None:
         logger.error("leadership_dashboard_sync_failed", error=str(exc)[:300])
 
 
-async def _check_and_create_alert(
-    db: AsyncSession,
-    config: dict,
-    metric_type: str,
-    current_value: float,
-    warning_threshold: float,
-    critical_threshold: float,
-    email_service: EmailNotificationService,
-) -> VMThresholdAlert | None:
-    """Check if alert needs to be created and send notification."""
-    if current_value < warning_threshold:
-        return None
-
-    severity = "critical" if current_value >= critical_threshold else "warning"
-    threshold_value = critical_threshold if severity == "critical" else warning_threshold
-
-    # Check for existing active alert
-    existing = await db.execute(
-        select(VMThresholdAlert).where(
-            VMThresholdAlert.config_id == config["id"],
-            VMThresholdAlert.metric_type == metric_type,
-            VMThresholdAlert.status == "active",
-        )
-    )
-    existing_alert = existing.scalar_one_or_none()
-
-    if existing_alert:
-        # Update existing alert
-        existing_alert.current_value = current_value
-        existing_alert.severity = severity
-        existing_alert.threshold_value = threshold_value
-        existing_alert.updated_at = datetime.utcnow()
-        await db.commit()
-        return existing_alert
-
-    # Create new alert
-    alert = VMThresholdAlert(
-        config_id=config["id"],
-        vm_id=config["vm_id"],
-        vm_name=config["vm_name"],
-        metric_type=metric_type,
-        current_value=current_value,
-        threshold_value=threshold_value,
-        severity=severity,
-        status="active",
-    )
-    db.add(alert)
-    await db.commit()
-    await db.refresh(alert)
-
-    # Send email notification
-    notification_emails = config.get("notification_emails", [])
-    if notification_emails:
-        await email_service.send_vm_threshold_alert(
-            recipient_emails=notification_emails,
-            vm_name=config["vm_name"],
-            resource_group=config["resource_group"],
-            subscription_id=config["subscription_id"],
-            metric_type=metric_type,
-            current_value=current_value,
-            threshold_value=threshold_value,
-            severity=severity,
-            alert_id=alert.id,
-        )
-
-    logger.info(
-        "vm_threshold_alert_created",
-        vm=config["vm_name"],
-        metric=metric_type,
-        value=current_value,
-        severity=severity,
-    )
-
-    return alert
-
-
-async def check_expiry_alerts_job() -> None:
-    """Check for upcoming expirations and generate alerts."""
+async def check_expiry_alerts_job() -> dict[str, Any]:
+    """Bring expiry alerts in line with their configs' expiry dates."""
     logger.info("expiry_alert_check_started")
-
     try:
         async for db in get_db_session():
-            email_service = EmailNotificationService(db)
-
-            # Get all enabled expiry configs
-            result = await db.execute(
-                select(CustomExpiryAlertConfig).where(CustomExpiryAlertConfig.is_enabled.is_(True))
-            )
-            configs = result.scalars().all()
-
-            alerts_generated = 0
-            now = datetime.utcnow()
-
-            for config in configs:
-                try:
-                    # Skip snoozed configs
-                    if config.snooze_until and config.snooze_until > now:
-                        continue
-
-                    days_until_expiry = (config.expiry_date - now).days
-
-                    # Determine severity
-                    if days_until_expiry <= config.critical_days_before:
-                        severity = "critical"
-                    elif days_until_expiry <= config.warning_days_before:
-                        severity = "warning"
-                    else:
-                        continue  # No alert needed
-
-                    # Check for existing active alert
-                    existing = await db.execute(
-                        select(CustomExpiryAlert).where(
-                            CustomExpiryAlert.config_id == config.id,
-                            CustomExpiryAlert.status == "active",
-                        )
-                    )
-                    existing_alert = existing.scalar_one_or_none()
-
-                    if existing_alert:
-                        # Update existing alert
-                        existing_alert.days_until_expiry = days_until_expiry
-                        existing_alert.severity = severity
-                        existing_alert.updated_at = now
-                        await db.commit()
-                    else:
-                        # Create new alert
-                        alert = CustomExpiryAlert(
-                            config_id=config.id,
-                            alert_type=config.alert_type,
-                            resource_name=config.resource_name,
-                            expiry_date=config.expiry_date,
-                            days_until_expiry=days_until_expiry,
-                            severity=severity,
-                            status="active",
-                        )
-                        db.add(alert)
-                        await db.commit()
-                        await db.refresh(alert)
-                        alerts_generated += 1
-
-                        # Send email notification
-                        notification_emails = config.notification_emails or []
-                        if notification_emails:
-                            await email_service.send_expiry_alert(
-                                recipient_emails=notification_emails,
-                                resource_name=config.resource_name,
-                                resource_identifier=config.resource_identifier,
-                                alert_type=config.alert_type,
-                                expiry_date=config.expiry_date,
-                                days_until_expiry=days_until_expiry,
-                                severity=severity,
-                                description=config.description,
-                                alert_id=alert.id,
-                            )
-
-                except Exception as e:
-                    logger.error(
-                        "expiry_check_error",
-                        resource=config.resource_name,
-                        error=str(e),
-                    )
-
-            logger.info(
-                "expiry_alert_check_completed",
-                configs=len(configs),
-                alerts=alerts_generated,
-            )
-
+            return await InfraAlertService(db).reconcile_expiry_alerts()
     except Exception as e:
         logger.error("expiry_alert_job_failed", error=str(e))
+        return {"error": str(e)[:300]}
+    return {"error": "database unavailable"}
 
 
 async def check_pg_thresholds_job() -> None:
@@ -657,8 +465,10 @@ async def execute_alert_schedule_job(schedule_config_id: int) -> None:
 
             # Each check emails on what it finds, and copies running side by side
             # each see "no alert yet" — so they would all create one and all send.
+            # Read the name first: a lost claim rolls back, which expires the row.
+            schedule_name = config.name
             if not await _claim_alert_schedule(db, config, datetime.utcnow()):
-                logger.info("alert_schedule_job_skipped", schedule=config.name, reason="run_by_another_worker")
+                logger.info("alert_schedule_job_skipped", schedule=schedule_name, reason="run_by_another_worker")
                 break
             await db.refresh(config)
 
@@ -669,7 +479,7 @@ async def execute_alert_schedule_job(schedule_config_id: int) -> None:
                 await check_expiry_alerts_job()
             if config.check_pg_thresholds:
                 await check_pg_thresholds_job()
-            if config.send_daily_digest:
+            if config.send_daily_digest and await _claim_daily_digest(db, config, datetime.utcnow()):
                 await send_daily_digest_job(digest_recipients=list(config.digest_recipients or []))
             if config.check_storage_thresholds:
                 unsupported_checks.append("storage")
@@ -696,7 +506,7 @@ async def execute_alert_schedule_job(schedule_config_id: int) -> None:
 
 
 async def send_daily_digest_job(digest_recipients: list[str] | None = None) -> None:
-    """Send the digest of all active alerts.
+    """Send the digest of every open alert.
 
     A schedule passes its own recipients. Pooling every digest schedule's list
     instead meant each schedule mailed everyone, once per schedule.
@@ -706,17 +516,10 @@ async def send_daily_digest_job(digest_recipients: list[str] | None = None) -> N
     try:
         async for db in get_db_session():
             email_service = EmailNotificationService(db)
+            digest = await InfraAlertService(db).collect_digest()
 
-            # Get active VM threshold alerts
-            vm_result = await db.execute(select(VMThresholdAlert).where(VMThresholdAlert.status == "active"))
-            vm_alerts = vm_result.scalars().all()
-
-            # Get active expiry alerts
-            expiry_result = await db.execute(select(CustomExpiryAlert).where(CustomExpiryAlert.status == "active"))
-            expiry_alerts = expiry_result.scalars().all()
-
-            if not vm_alerts and not expiry_alerts:
-                logger.info("daily_digest_skipped", reason="no_active_alerts")
+            if not any(digest.values()):
+                logger.info("daily_digest_skipped", reason="no_open_alerts")
                 return
 
             recipients: list[str] = []
@@ -754,37 +557,18 @@ async def send_daily_digest_job(digest_recipients: list[str] | None = None) -> N
                 logger.info("daily_digest_skipped", reason="no_recipients")
                 return
 
-            # Send digest
-            vm_alert_data = [
-                {
-                    "vm_name": a.vm_name,
-                    "metric_type": a.metric_type,
-                    "current_value": a.current_value,
-                    "severity": a.severity,
-                }
-                for a in vm_alerts
-            ]
-
-            expiry_alert_data = [
-                {
-                    "resource_name": a.resource_name,
-                    "alert_type": a.alert_type,
-                    "days_until_expiry": a.days_until_expiry,
-                    "severity": a.severity,
-                }
-                for a in expiry_alerts
-            ]
-
             await email_service.send_alert_digest(
                 recipient_emails=unique_recipients,
-                vm_alerts=vm_alert_data,
-                expiry_alerts=expiry_alert_data,
+                vm_alerts=digest["vm_alerts"],
+                expiry_alerts=digest["expiry_alerts"],
+                pg_alerts=digest["pg_alerts"],
             )
 
             logger.info(
                 "daily_digest_sent",
-                vm_alerts=len(vm_alerts),
-                expiry_alerts=len(expiry_alerts),
+                vm_alerts=len(digest["vm_alerts"]),
+                pg_alerts=len(digest["pg_alerts"]),
+                expiry_alerts=len(digest["expiry_alerts"]),
                 recipients=len(unique_recipients),
             )
 
@@ -1114,14 +898,14 @@ def _compute_next_run_time(schedule: ChecksumScheduleConfig, now: datetime) -> d
 
 async def trigger_vm_threshold_check() -> dict[str, Any]:
     """Manually trigger VM threshold check."""
-    await check_vm_thresholds_job()
-    return {"status": "completed", "job": "vm_threshold_check"}
+    result = await check_vm_thresholds_job()
+    return {"status": "failed" if "error" in result else "completed", "job": "vm_threshold_check", "result": result}
 
 
 async def trigger_expiry_check() -> dict[str, Any]:
     """Manually trigger expiry alert check."""
-    await check_expiry_alerts_job()
-    return {"status": "completed", "job": "expiry_alert_check"}
+    result = await check_expiry_alerts_job()
+    return {"status": "failed" if "error" in result else "completed", "job": "expiry_alert_check", "result": result}
 
 
 async def trigger_daily_digest() -> dict[str, Any]:

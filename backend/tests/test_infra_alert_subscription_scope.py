@@ -324,9 +324,15 @@ async def test_create_tables_backfills_certificate_private_key_column(monkeypatc
 
 
 @pytest.mark.anyio
-async def test_create_expiry_config_persists_environment():
+async def test_create_expiry_config_persists_environment(monkeypatch):
     fake_db = _SeedableDbSession()
     service = InfraAlertService(fake_db)
+
+    async def _no_reconcile(config_ids=None, **_kwargs):
+        return {"created": 0}
+
+    # Creation reconciles the new config's alert straight away; that has its own tests.
+    monkeypatch.setattr(service, "reconcile_expiry_alerts", _no_reconcile)
 
     result = await service.create_expiry_config(
         alert_type="database_account",
@@ -356,8 +362,10 @@ async def test_list_expiry_configs_returns_environment():
         critical_days_before=7,
         is_enabled=True,
         notification_emails=[],
+        snooze_until=None,
         extra_data={},
         created_at=datetime.datetime(2026, 1, 1),
+        updated_at=None,
         created_by="tester@example.com",
     )
     fake_db = _CapturingDbSession(rows=[row])
@@ -401,6 +409,7 @@ async def test_infra_alert_history_maps_notification_type_to_backend_filter(
         alert_type=None,
         alert_id=None,
         status="sent",
+        alert_kind=None,
         limit=25,
         user=None,
         db=_CapturingDbSession(),
@@ -410,6 +419,56 @@ async def test_infra_alert_history_maps_notification_type_to_backend_filter(
     assert captured["alert_type"] == "custom_expiry"
     assert captured["status"] == "sent"
     assert captured["exclude_alert_types"] is None
+    assert captured["alert_types"] is None
+
+
+@pytest.mark.anyio
+async def test_infra_alert_history_lists_only_infra_notifications(monkeypatch):
+    captured = {}
+
+    async def _fake_history(self, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "app.services.email_notification_service.EmailNotificationService.get_notification_history",
+        _fake_history,
+    )
+
+    await infra_alerts.get_notification_history(
+        notification_type=None,
+        alert_type=None,
+        alert_id=None,
+        status=None,
+        alert_kind=None,
+        limit=100,
+        user=None,
+        db=_CapturingDbSession(),
+    )
+    # Certificate, checksum and access mail belong to other pages.
+    assert "certificate_expiry" not in captured["alert_types"]
+    assert {"vm_threshold", "pg_flex_server", "custom_expiry", "mech_id", "digest"} <= set(captured["alert_types"])
+
+    await infra_alerts.get_notification_history(
+        notification_type=None,
+        alert_type=None,
+        alert_id=12,
+        status=None,
+        alert_kind="expiry",
+        limit=100,
+        user=None,
+        db=_CapturingDbSession(),
+    )
+    # One expiry alert's mail is recorded under "custom_expiry" and under its account type.
+    assert captured["alert_id"] == 12
+    assert set(captured["alert_types"]) == {
+        "custom_expiry",
+        "mech_id",
+        "certificate",
+        "aaf_account",
+        "database_account",
+        "itservices_domain",
+    }
 
 
 @pytest.mark.anyio

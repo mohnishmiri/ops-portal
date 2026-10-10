@@ -10,7 +10,8 @@
  * - Scheduler management and notification history
  */
 
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import { useSubscriptionScope } from "../contexts/SubscriptionContext";
@@ -20,28 +21,11 @@ import { MetricCard } from "../components/MetricCard";
 import {
   AlertScheduleConfig,
   CreateAlertScheduleConfigRequest,
-  CreateExpiryConfigRequest,
-  CreatePGFlexConfigRequest,
-  CreateStorageAlertConfigRequest,
-  CreateVMThresholdConfigRequest,
-  EnvClassification,
-  ExpiryAlert,
-  ExpiryAlertType,
-  ExpiryConfig,
-  PGFlexServerAlert,
-  PGFlexServerConfig,
-  StorageAlertConfig,
   UpdateAlertScheduleConfigRequest,
-  UpdateExpiryConfigRequest,
-  UpdatePGFlexConfigRequest,
-  UpdateStorageAlertConfigRequest,
-  UpdateVMThresholdConfigRequest,
-  VMThresholdAlert,
-  VMThresholdConfig,
+  apiErrorMessage,
   formatRelativeTime,
   getAlertTypeLabel,
   getEnvLabel,
-  getNotificationStatusColor,
   getNotificationTypeLabel,
   useAcknowledgeExpiryAlert,
   useAcknowledgePGFlexAlert,
@@ -55,10 +39,6 @@ import {
   useCheckExpiryAlerts,
   useCheckPGAlerts,
   useCreateAlertScheduleConfig,
-  useCreateExpiryConfig,
-  useCreatePGFlexConfig,
-  useCreateStorageAlertConfig,
-  useCreateVMThresholdConfig,
   useDeleteVMThresholdConfig,
   useDeleteAlertScheduleConfig,
   useDeleteExpiryConfig,
@@ -90,10 +70,6 @@ import {
   useTriggerResourceSync,
   useTriggerVMCheck,
   useUpdateAlertScheduleConfig,
-  useUpdateExpiryConfig,
-  useUpdatePGFlexConfig,
-  useUpdateStorageAlertConfig,
-  useUpdateVMThresholdConfig,
   useVMThresholdAlerts,
   useVMThresholdConfigs,
 } from "../services/infraAlertApi";
@@ -113,6 +89,25 @@ import {
 } from "recharts";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { useAdminSubscriptions } from "../services/costApi";
+import { ConfigEditor, type ConfigEditorTarget } from "../features/infraAlerts/ConfigEditors";
+import {
+  InfraAlertDetailHost,
+  type InfraDetailTarget,
+  type PowerAction,
+  type PowerKind,
+  type PowerTarget,
+} from "../features/infraAlerts/DetailViews";
+import {
+  AlertStatusBadge as StatusBadge,
+  clickableRow,
+  ConfigStateBadge,
+  daysLeftText,
+  daysLeftTone,
+  describeSchedule,
+  ExpiryHealthBadge,
+  expiryHealth,
+  SeverityBadge,
+} from "../features/infraAlerts/shared";
 
 // ── SVG Icons ─────────────────────────────────────────────────────────
 
@@ -208,6 +203,7 @@ const Icons = {
 // ── Tab Types ─────────────────────────────────────────────────────────
 
 type TabKey = "dashboard" | "vm-thresholds" | "pg-thresholds" | "expiry-alerts" | "resources" | "configs" | "scheduler";
+const TAB_KEYS: TabKey[] = ["dashboard", "vm-thresholds", "pg-thresholds", "expiry-alerts", "resources", "configs", "scheduler"];
 
 const defaultAlertScheduleFormData: CreateAlertScheduleConfigRequest = {
   name: "",
@@ -216,8 +212,9 @@ const defaultAlertScheduleFormData: CreateAlertScheduleConfigRequest = {
   interval_minutes: 15,
   cron_expression: "",
   check_vm_thresholds: true,
-  check_storage_thresholds: true,
-  check_disk_thresholds: true,
+  // Not evaluated by the scheduler yet — offered disabled in the editor.
+  check_storage_thresholds: false,
+  check_disk_thresholds: false,
   check_expiry_alerts: true,
   check_pg_thresholds: true,
   send_daily_digest: false,
@@ -236,7 +233,13 @@ const COLORS = {
   resolved: "#10b981",
 };
 
-const PIE_COLORS = [COLORS.active, COLORS.acknowledged, COLORS.resolved];
+// Keyed by slice name: zero-value slices are filtered out, so colouring by
+// index painted "Acknowledged" red whenever nothing was active.
+const PIE_COLORS: Record<string, string> = {
+  Active: COLORS.active,
+  Acknowledged: COLORS.acknowledged,
+  Resolved: COLORS.resolved,
+};
 
 const CHART_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#06b6d4", "#ec4899", "#14b8a6", "#f97316", "#6366f1"];
 
@@ -306,9 +309,15 @@ const GridActionButton: React.FC<{
 }> = ({ title, tone, onClick, disabled = false, children }) => (
   <button
     type="button"
-    onClick={onClick}
+    // Grid rows open their detail view on click; an action must not do that too.
+    onClick={(event) => {
+      event.stopPropagation();
+      onClick();
+    }}
+    onKeyDown={(event) => event.stopPropagation()}
     disabled={disabled}
     title={title}
+    aria-label={title}
     className={`rounded-lg p-2 transition disabled:opacity-40 ${actionButtonTones[tone]}`}
   >
     {children}
@@ -345,29 +354,6 @@ const ActionTileButton: React.FC<{
     <span className="text-center leading-tight">{title}</span>
   </button>
 );
-
-const SeverityBadge: React.FC<{ severity: string }> = ({ severity }) => {
-  const bgColor = severity === "critical" ? "bg-red-100 text-red-700" : "bg-yellow-100 text-yellow-700";
-  return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${bgColor}`}>
-      {severity}
-    </span>
-  );
-};
-
-const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const colors: Record<string, string> = {
-    active: "bg-red-100 text-red-700",
-    acknowledged: "bg-blue-100 text-blue-700",
-    resolved: "bg-green-100 text-green-700",
-    snoozed: "bg-gray-100 text-gray-700",
-  };
-  return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${colors[status] || "bg-gray-100"}`}>
-      {status}
-    </span>
-  );
-};
 
 // ── Pagination & Search Helpers ───────────────────────────────────────
 
@@ -445,6 +431,20 @@ function parseEmailList(value: string): string[] {
     .split(/[\n,;]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+/** "Expiry check: 1 raised, 2 resolved" from a check endpoint's summary. */
+function checkSummary(label: string, result: Record<string, unknown> | undefined): string {
+  const data = ((result?.result as Record<string, unknown>) ?? result ?? {}) as Record<string, unknown>;
+  const parts = [
+    ["created", "raised"],
+    ["escalated", "escalated"],
+    ["resolved", "resolved"],
+  ]
+    .map(([key, word]) => (Number(data[key]) ? `${data[key]} ${word}` : null))
+    .filter(Boolean);
+  const errors = Array.isArray(data.errors) ? data.errors.length : 0;
+  return `${label} check finished: ${parts.length ? parts.join(", ") : "no changes"}${errors ? ` · ${errors} resource(s) could not be read` : ""}`;
 }
 
 function totalFromStatusMap(counts: Record<string, number> | undefined): number {
@@ -564,6 +564,64 @@ const TablePagination: React.FC<{
   );
 };
 
+// Module level, not inside the page: a component declared during render is a
+// new type every render, so React would remount it and the search box would
+// lose focus on each keystroke.
+const ConfigSection: React.FC<{
+  title: string;
+  count: number;
+  description: React.ReactNode;
+  search: string;
+  onSearch: (value: string) => void;
+  searchPlaceholder: string;
+  addLabel: string;
+  canAdd: boolean;
+  onAdd: () => void;
+  children: React.ReactNode;
+}> = ({ title, count, description, search, onSearch, searchPlaceholder, addLabel, canAdd, onAdd, children }) => (
+  <div>
+    <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h3 className="flex items-center gap-2 text-lg font-semibold text-gray-800">
+          {title}
+          <span className={gridStyles.countBadge}>{count}</span>
+        </h3>
+        <p className="text-sm text-gray-500">{description}</p>
+      </div>
+      <div className="flex items-center gap-3">
+        <SearchBar value={search} onChange={onSearch} placeholder={searchPlaceholder} />
+        {canAdd && (
+          <button onClick={onAdd} className={buttonStyles.primary}>
+            {Icons.plus()} {addLabel}
+          </button>
+        )}
+      </div>
+    </div>
+    <div className={gridStyles.shell}>{children}</div>
+  </div>
+);
+
+const RowActions: React.FC<{ canWrite: boolean; onEdit: () => void; onDelete: () => void; name: string }> = ({ canWrite, onEdit, onDelete, name }) =>
+  canWrite ? (
+    <div className="flex items-center justify-center gap-1">
+      <GridActionButton onClick={onEdit} title={`Edit ${name}`} tone="blue">
+        {Icons.edit()}
+      </GridActionButton>
+      <GridActionButton onClick={onDelete} title={`Delete ${name}`} tone="red">
+        {Icons.trash()}
+      </GridActionButton>
+    </div>
+  ) : (
+    <span className="text-xs text-gray-400">View</span>
+  );
+
+const OpenAlertsCell: React.FC<{ count: number }> = ({ count }) =>
+  count ? (
+    <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700 ring-1 ring-red-200">{count} open</span>
+  ) : (
+    <span className="text-xs text-gray-400">None</span>
+  );
+
 // ── Main Component ────────────────────────────────────────────────────
 
 const InfraAlertPage: React.FC = () => {
@@ -571,91 +629,43 @@ const InfraAlertPage: React.FC = () => {
   // Deleting a disk is a capability (cost_resource_cleanup, default-granted to write) like VM power.
   const { hasCapability } = usePermissions();
   const canCleanupResources = canWrite && hasCapability("COST_RESOURCE_CLEANUP");
+  // Gate exactly like the API: the power routes check these capabilities.
+  const canPowerVM = canWrite && hasCapability("INFRA_VM_POWER");
+  const canPowerPG = canWrite && hasCapability("INFRA_PG_SERVER_POWER");
   const { timezone, formatDate } = usePortalTimezone();
   const { availableSubscriptions, effectiveSubscriptionIds } = useSubscriptionScope();
   const scopedSubscriptions = useMemo(
     () => availableSubscriptions.filter((s) => effectiveSubscriptionIds.includes(s.subscription_id)),
     [availableSubscriptions, effectiveSubscriptionIds],
   );
-  const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTabState] = useState<TabKey>(() => {
+    const requested = searchParams.get("tab");
+    return requested && TAB_KEYS.includes(requested as TabKey) ? (requested as TabKey) : "dashboard";
+  });
+  const setActiveTab = useCallback((tab: TabKey) => {
+    setActiveTabState(tab);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("tab", tab);
+      next.delete("alert");
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
   const [subscriptionFilter, setSubscriptionFilter] = useState<string>("");
-  const [showAddVMConfig, setShowAddVMConfig] = useState(false);
-  const [showAddExpiryConfig, setShowAddExpiryConfig] = useState(false);
-  const [editingVMConfig, setEditingVMConfig] = useState<VMThresholdConfig | null>(null);
-  const [editingExpiryConfig, setEditingExpiryConfig] = useState<ExpiryConfig | null>(null);
-  const [showAddStorageConfig, setShowAddStorageConfig] = useState(false);
-  const [editingStorageConfig, setEditingStorageConfig] = useState<StorageAlertConfig | null>(null);
-  const [showAddPGConfig, setShowAddPGConfig] = useState(false);
-  const [editingPGConfig, setEditingPGConfig] = useState<PGFlexServerConfig | null>(null);
+  const [editor, setEditor] = useState<ConfigEditorTarget | null>(null);
+  const [detail, setDetail] = useState<InfraDetailTarget | null>(null);
   const [showAlertScheduleEditor, setShowAlertScheduleEditor] = useState(false);
   const [editingAlertSchedule, setEditingAlertSchedule] = useState<AlertScheduleConfig | null>(null);
   const [pgAlertStatusFilter, setPgAlertStatusFilter] = useState<string>("");
-  const [alertStatusFilter, setAlertStatusFilter] = useState<string>("");
+  // Separate filters: one shared value used to filter the VM and expiry tabs together.
+  const [vmAlertStatusFilter, setVmAlertStatusFilter] = useState<string>("");
+  const [expiryAlertStatusFilter, setExpiryAlertStatusFilter] = useState<string>("");
   const [testEmail, setTestEmail] = useState<string>("");
   const [alertScheduleFormData, setAlertScheduleFormData] = useState<CreateAlertScheduleConfigRequest>(
     defaultAlertScheduleFormData,
   );
   const [alertScheduleRecipientsInput, setAlertScheduleRecipientsInput] = useState("");
-
-  // Form state for VM Config
-  const [vmFormData, setVmFormData] = useState<CreateVMThresholdConfigRequest>({
-    subscription_id: "",
-    resource_group: "",
-    vm_name: "",
-    vm_id: "",
-    cpu_warning_threshold: 80,
-    cpu_critical_threshold: 90,
-    memory_warning_threshold: 80,
-    memory_critical_threshold: 90,
-    disk_warning_threshold: 80,
-    disk_critical_threshold: 90,
-    notification_emails: [],
-  });
-
-  // Form state for Expiry Config
-  const [expiryFormData, setExpiryFormData] = useState<CreateExpiryConfigRequest>({
-    alert_type: "certificate",
-    resource_name: "",
-    resource_identifier: "",
-    expiry_date: "",
-    description: "",
-    environment: "non_prod",
-    warning_days_before: 30,
-    critical_days_before: 7,
-    notification_emails: [],
-  });
-
-  // Form state for Storage Alert Config
-  const [storageFormData, setStorageFormData] = useState<CreateStorageAlertConfigRequest>({
-    subscription_id: "",
-    resource_group: "",
-    account_name: "",
-    account_id: "",
-    capacity_warning_gb: 100,
-    capacity_critical_gb: 500,
-    transactions_warning: 100000,
-    transactions_critical: 500000,
-    egress_warning_gb: 50,
-    egress_critical_gb: 200,
-    notification_emails: [],
-  });
-
-  // Form state for PG Flex Server Config
-  const [pgFormData, setPgFormData] = useState<CreatePGFlexConfigRequest>({
-    subscription_id: "",
-    resource_group: "",
-    server_name: "",
-    server_id: "",
-    cpu_warning_threshold: 70,
-    cpu_critical_threshold: 90,
-    memory_warning_threshold: 75,
-    memory_critical_threshold: 90,
-    storage_warning_threshold: 80,
-    storage_critical_threshold: 95,
-    notification_emails: [],
-  });
-
-  const [emailInput, setEmailInput] = useState("");
 
   // Table search + pagination state (single object for all 9 tables)
   const [tblState, setTblState] = useState<Record<string, { search: string; page: number }>>({});
@@ -678,13 +688,17 @@ const InfraAlertPage: React.FC = () => {
 
   // Queries
   const { data: summary, isLoading: summaryLoading } = useAlertSummary();
-  const { data: vmAlerts = [], isLoading: vmAlertsLoading } = useVMThresholdAlerts(alertStatusFilter || undefined);
-  const { data: expiryAlerts = [], isLoading: expiryAlertsLoading } = useExpiryAlerts(undefined, alertStatusFilter || undefined);
+  const { data: vmAlerts = [] } = useVMThresholdAlerts(vmAlertStatusFilter || undefined);
+  const { data: expiryAlerts = [] } = useExpiryAlerts(undefined, expiryAlertStatusFilter || undefined);
+  // Unfiltered copies (same cache as the detail views) for the dashboard.
+  const { data: allVmAlerts = [] } = useVMThresholdAlerts();
+  const { data: allExpiryAlerts = [] } = useExpiryAlerts();
   const { data: vmConfigs = [] } = useVMThresholdConfigs();
   const { data: expiryConfigs = [] } = useExpiryConfigs();
   const { data: storageConfigs = [] } = useStorageAlertConfigs();
   const { data: pgConfigs = [] } = usePGFlexConfigs();
-  const { data: pgAlerts = [], isLoading: pgAlertsLoading } = usePGFlexAlerts(pgAlertStatusFilter || undefined);
+  const { data: pgAlerts = [] } = usePGFlexAlerts(pgAlertStatusFilter || undefined);
+  const { data: allPgAlerts = [] } = usePGFlexAlerts();
   const { data: vmResponse } = useAzureVMs();
   const { data: adminSubscriptions } = useAdminSubscriptions();
   const { data: storageResponse } = useAzureStorageAccounts();
@@ -755,19 +769,11 @@ const InfraAlertPage: React.FC = () => {
   const deleteVMConfig = useDeleteVMThresholdConfig();
   const deleteExpiryConfig = useDeleteExpiryConfig();
   const checkExpiry = useCheckExpiryAlerts();
-  const createVMConfig = useCreateVMThresholdConfig();
-  const updateVMConfig = useUpdateVMThresholdConfig();
-  const createExpiryConfigMutation = useCreateExpiryConfig();
-  const updateExpiryConfigMutation = useUpdateExpiryConfig();
   const triggerVMCheck = useTriggerVMCheck();
   const triggerExpiryCheck = useTriggerExpiryCheck();
   const triggerResourceSync = useTriggerResourceSync();
   const syncResources = useSyncResources();
-  const createStorageConfigMut = useCreateStorageAlertConfig();
-  const updateStorageConfigMut = useUpdateStorageAlertConfig();
   const deleteStorageConfigMut = useDeleteStorageAlertConfig();
-  const createPGConfigMut = useCreatePGFlexConfig();
-  const updatePGConfigMut = useUpdatePGFlexConfig();
   const deletePGConfigMut = useDeletePGFlexConfig();
   const acknowledgePGAlert = useAcknowledgePGFlexAlert();
   const resolvePGAlert = useResolvePGFlexAlert();
@@ -785,8 +791,7 @@ const InfraAlertPage: React.FC = () => {
   const startPGServerMut = useStartPGServer();
   const stopPGServerMut = useStopPGServer();
   const restartPGServerMut = useRestartPGServer();
-  const [vmActionTarget, setVMActionTarget] = useState<string | null>(null);
-  const [pgActionTarget, setPGActionTarget] = useState<string | null>(null);
+  const [powerPendingKey, setPowerPendingKey] = useState<string | null>(null);
   const [diskActionTarget, setDiskActionTarget] = useState<string | null>(null);
   const deleteDiskMut = useDeleteUnattachedDisk();
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -799,6 +804,108 @@ const InfraAlertPage: React.FC = () => {
   // Toast notification (consistent with AKS Operations page)
   const [toast, setToast] = useState<ToastState | null>(null);
   const showToast = useCallback((message: string, type: ToastState["type"] = "success") => setToast({ message, type }), []);
+  const toastError = useCallback((error: unknown, fallback: string) => showToast(apiErrorMessage(error, fallback), "error"), [showToast]);
+
+  // Email links land on ?alert=vm-12 / pg-3 / expiry-7 (older mails: ?alert=12, a VM alert).
+  useEffect(() => {
+    const requested = searchParams.get("alert");
+    if (!requested) return;
+    const match = requested.match(/^(?:(vm|pg|expiry)-)?(\d+)$/);
+    if (match) {
+      const kind = (match[1] || "vm") as "vm" | "pg" | "expiry";
+      setDetail({ kind: `${kind}-alert` as "vm-alert", id: Number(match[2]) });
+      setActiveTabState(kind === "expiry" ? "expiry-alerts" : kind === "pg" ? "pg-thresholds" : "vm-thresholds");
+    }
+    // Only on arrival; closing the detail clears the parameter.
+  }, []);
+
+  const closeDetail = useCallback(() => {
+    setDetail(null);
+    if (searchParams.get("alert")) {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("alert");
+        return next;
+      }, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
+  const deleteConfigMutations = {
+    vm: deleteVMConfig,
+    pg: deletePGConfigMut,
+    storage: deleteStorageConfigMut,
+    expiry: deleteExpiryConfig,
+  };
+  const requestDeleteConfig = (kind: "vm" | "pg" | "storage" | "expiry", id: number, name: string) => {
+    const label = { vm: "VM threshold", pg: "PG server", storage: "storage", expiry: "expiry" }[kind];
+    setConfirmDialog({
+      title: `Delete ${label} configuration?`,
+      message:
+        kind === "storage"
+          ? `Stop tracking thresholds for "${name}". This cannot be undone.`
+          : `Stop monitoring "${name}" and delete its alert history. Open alerts disappear and no further emails are sent. This cannot be undone.`,
+      confirmLabel: "Delete",
+      onConfirm: () =>
+        deleteConfigMutations[kind].mutate(id, {
+          onSuccess: () => {
+            showToast(`Configuration for ${name} deleted`);
+            setDetail(null);
+          },
+          onError: (e: unknown) => toastError(e, "Failed to delete the configuration"),
+        }),
+    });
+  };
+  const requestDeleteSchedule = (schedule: AlertScheduleConfig) =>
+    setConfirmDialog({
+      title: "Delete alert schedule?",
+      message: `"${schedule.name}" stops running immediately on every worker. Checks it ran will no longer happen unless another schedule covers them.`,
+      confirmLabel: "Delete",
+      onConfirm: () =>
+        deleteAlertScheduleMut.mutate(schedule.id, {
+          onSuccess: () => {
+            showToast(`Schedule "${schedule.name}" deleted`);
+            setDetail(null);
+          },
+          onError: (e: unknown) => toastError(e, "Failed to delete schedule"),
+        }),
+    });
+
+  const powerMutations = {
+    vm: { start: startVMMut, stop: stopVMMut, restart: restartVMMut },
+    pg: { start: startPGServerMut, stop: stopPGServerMut, restart: restartPGServerMut },
+  };
+  const runPower = (kind: PowerKind, action: PowerAction, resource: PowerTarget) => {
+    const key = `${kind}:${resource.subscription_id}:${resource.name}`;
+    const label = kind === "vm" ? "VM" : "PG server";
+    const verb = { start: "started", stop: kind === "vm" ? "stopped (deallocated)" : "stopped", restart: "restarted" }[action];
+    const execute = () => {
+      setPowerPendingKey(key);
+      const body =
+        kind === "vm"
+          ? { resource_group: resource.resource_group, vm_name: resource.name, subscription_id: resource.subscription_id }
+          : { resource_group: resource.resource_group, server_name: resource.name, subscription_id: resource.subscription_id };
+      (powerMutations[kind][action].mutate as (b: typeof body, o: object) => void)(body, {
+        onSuccess: (result: { power_state?: string | null }) =>
+          showToast(`${label} '${resource.name}' ${verb}${result?.power_state ? ` — now ${result.power_state}` : ""}`),
+        onError: (e: unknown) => toastError(e, `Failed to ${action} ${label} '${resource.name}'`),
+        onSettled: () => setPowerPendingKey(null),
+      });
+    };
+    if (action === "start") {
+      execute();
+      return;
+    }
+    const subscription = subNameMap.get(resource.subscription_id || "") || resource.subscription_id || "its subscription";
+    setConfirmDialog({
+      title: `${action === "stop" ? "Stop" : "Restart"} ${resource.name}?`,
+      message:
+        action === "stop"
+          ? `${label} "${resource.name}" in ${resource.resource_group} (${subscription}) will be ${kind === "vm" ? "deallocated — everything running on it stops" : "stopped — every connection is dropped"}. This can take a few minutes.`
+          : `${label} "${resource.name}" in ${resource.resource_group} (${subscription}) will restart. Running workloads are interrupted.`,
+      confirmLabel: action === "stop" ? "Stop" : "Restart",
+      onConfirm: execute,
+    });
+  };
 
   // Tab navigation
   const tabs = [
@@ -838,40 +945,60 @@ const InfraAlertPage: React.FC = () => {
   }, [activeExpiryAlerts, activePgAlerts, activeVmAlerts, expiryStatusTotals.acknowledged, expiryStatusTotals.resolved, pgStatusTotals.acknowledged, pgStatusTotals.resolved, vmStatusTotals.acknowledged, vmStatusTotals.resolved]);
 
   const recentActiveAlerts = useMemo(() => {
-    const vmItems = vmAlerts
+    const vmItems = allVmAlerts
       .filter((alert) => alert.status === "active")
       .map((alert) => ({
         id: `vm-${alert.id}`,
+        target: { kind: "vm-alert", id: alert.id, snapshot: alert } as InfraDetailTarget,
+        kindLabel: "VM",
         title: alert.vm_name,
-        detail: `${alert.metric_type.toUpperCase()}: ${alert.current_value}%`,
+        detail: `${alert.metric_type.toUpperCase()} at ${alert.current_value.toFixed(1)}%`,
+        detailTone: "text-slate-500",
         severity: alert.severity,
         createdAt: alert.created_at,
       }));
 
-    const expiryItems = expiryAlerts
+    const expiryItems = allExpiryAlerts
       .filter((alert) => alert.status === "active")
       .map((alert) => ({
         id: `expiry-${alert.id}`,
+        target: { kind: "expiry-alert", id: alert.id, snapshot: alert } as InfraDetailTarget,
+        kindLabel: getAlertTypeLabel(alert.alert_type).replace(" Expiry", ""),
         title: alert.resource_name,
-        detail: `Expires: ${formatDateOnly(alert.expiry_date)}`,
+        // "Expires: 6/28/2026" read as upcoming for something that lapsed months ago.
+        detail: `${daysLeftText(alert.days_until_expiry)} · ${formatDateOnly(alert.expiry_date)}`,
+        detailTone: daysLeftTone(alert.days_until_expiry),
         severity: alert.severity,
         createdAt: alert.created_at,
       }));
 
-    const pgItems = pgAlerts
+    const pgItems = allPgAlerts
       .filter((alert) => alert.status === "active")
       .map((alert) => ({
         id: `pg-${alert.id}`,
+        target: { kind: "pg-alert", id: alert.id, snapshot: alert } as InfraDetailTarget,
+        kindLabel: "PG",
         title: alert.server_name,
-        detail: `${alert.metric_type.toUpperCase()}: ${alert.current_value}%`,
+        detail: `${alert.metric_type.toUpperCase()} at ${alert.current_value.toFixed(1)}%`,
+        detailTone: "text-slate-500",
         severity: alert.severity,
         createdAt: alert.created_at,
       }));
 
+    const rank = (severity: string) => (severity === "critical" ? 0 : 1);
     return [...vmItems, ...expiryItems, ...pgItems]
-      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
-      .slice(0, 5);
-  }, [expiryAlerts, pgAlerts, vmAlerts]);
+      .sort((left, right) => rank(left.severity) - rank(right.severity) || right.createdAt.localeCompare(left.createdAt))
+      .slice(0, 8);
+  }, [allExpiryAlerts, allPgAlerts, allVmAlerts]);
+
+  const configCounts = useMemo(() => {
+    const all = [...vmConfigs, ...expiryConfigs, ...pgConfigs, ...storageConfigs];
+    return { total: all.length, enabled: all.filter((c) => c.is_enabled).length };
+  }, [vmConfigs, expiryConfigs, pgConfigs, storageConfigs]);
+
+  const openAlertsTotal =
+    summary?.total_open_alerts ??
+    activeVmAlerts + activeExpiryAlerts + activePgAlerts + (vmStatusTotals.acknowledged || 0) + (expiryStatusTotals.acknowledged || 0) + (pgStatusTotals.acknowledged || 0);
 
   const resetAlertScheduleEditor = useCallback(() => {
     setShowAlertScheduleEditor(false);
@@ -911,48 +1038,59 @@ const InfraAlertPage: React.FC = () => {
 
   // ── Dashboard Tab ───────────────────────────────────────────────────
 
+  const openAlertsTab = (tab: TabKey, status: string) => {
+    if (tab === "vm-thresholds") setVmAlertStatusFilter(status);
+    if (tab === "expiry-alerts") setExpiryAlertStatusFilter(status);
+    if (tab === "pg-thresholds") setPgAlertStatusFilter(status);
+    setActiveTab(tab);
+  };
+
   const renderDashboard = () => (
     <div className="space-y-6">
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard
-          title="Total Active Alerts"
-          value={summary?.total_active_alerts || 0}
-          subtitle={`${totalVmAlerts + totalExpiryAlerts + totalPgAlerts} total alerts tracked`}
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-5">
+        <MetricCard
+          title="Active Alerts"
+          value={summary?.total_active_alerts ?? 0}
+          subtitle={`${openAlertsTotal} open incl. acknowledged · ${totalVmAlerts + totalExpiryAlerts + totalPgAlerts} tracked`}
           icon={Icons.alert("text-red-600")}
-          color="red"
+          tone="red"
         />
-        <StatCard
+        <MetricCard
           title="Active VM Alerts"
           value={activeVmAlerts}
-          subtitle={`${totalVmAlerts} total across CPU, memory, and disk`}
+          subtitle={`${vmStatusTotals.acknowledged || 0} acknowledged · ${totalVmAlerts} total`}
           icon={Icons.server("text-blue-600")}
-          color="blue"
+          tone="blue"
+          onClick={() => openAlertsTab("vm-thresholds", "active")}
+          actionLabel="Show active VM alerts"
         />
-        <StatCard
-          title="Active Expiry Alerts"
-          value={activeExpiryAlerts}
-          subtitle={`${totalExpiryAlerts} total across expiry rules`}
-          icon={Icons.clock("text-orange-600")}
-          color="orange"
-        />
-        <StatCard
-          title="Configs Monitored"
-          value={vmConfigs.length + expiryConfigs.length + pgConfigs.length}
-          subtitle="Active configurations"
-          icon={Icons.settings("text-gray-600")}
-          color="gray"
-        />
-      </div>
-
-      {/* PG Flex Server Alert Card (extra row) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard
+        <MetricCard
           title="Active PG Alerts"
           value={activePgAlerts}
-          subtitle={`${totalPgAlerts} total across PG metrics`}
+          subtitle={`${pgStatusTotals.acknowledged || 0} acknowledged · ${totalPgAlerts} total`}
           icon={Icons.database("text-purple-600")}
-          color="purple"
+          tone="purple"
+          onClick={() => openAlertsTab("pg-thresholds", "active")}
+          actionLabel="Show active PG alerts"
+        />
+        <MetricCard
+          title="Active Expiry Alerts"
+          value={activeExpiryAlerts}
+          subtitle={`${expiryStatusTotals.acknowledged || 0} acknowledged · ${totalExpiryAlerts} total`}
+          icon={Icons.clock("text-orange-600")}
+          tone="orange"
+          onClick={() => openAlertsTab("expiry-alerts", "active")}
+          actionLabel="Show active expiry alerts"
+        />
+        <MetricCard
+          title="Configs Monitored"
+          value={configCounts.enabled}
+          subtitle={`${configCounts.enabled} enabled of ${configCounts.total} configurations`}
+          icon={Icons.settings("text-gray-600")}
+          tone="slate"
+          onClick={() => setActiveTab("configs")}
+          actionLabel="Open configuration"
         />
       </div>
 
@@ -960,9 +1098,10 @@ const InfraAlertPage: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Status Distribution */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-          <h3 className="text-lg font-semibold text-gray-800 mb-4">Alert Status Distribution</h3>
+          <h3 className="text-lg font-semibold text-gray-800">Alert Status Distribution</h3>
+          <p className="mb-2 text-xs text-gray-500">VM, PG and expiry alerts together</p>
           {statusPieData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
+            <ResponsiveContainer width="100%" height={260}>
               <PieChart>
                 <Pie
                   data={statusPieData}
@@ -973,15 +1112,16 @@ const InfraAlertPage: React.FC = () => {
                   dataKey="value"
                   label={({ name, value }) => `${name}: ${value}`}
                 >
-                  {statusPieData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                  {statusPieData.map((entry) => (
+                    <Cell key={entry.name} fill={PIE_COLORS[entry.name]} />
                   ))}
                 </Pie>
                 <Tooltip />
+                <Legend verticalAlign="bottom" height={24} />
               </PieChart>
             </ResponsiveContainer>
           ) : (
-            <div className="flex items-center justify-center h-[250px] text-gray-400">
+            <div className="flex items-center justify-center h-[260px] text-gray-400">
               No alert data available
             </div>
           )}
@@ -989,20 +1129,26 @@ const InfraAlertPage: React.FC = () => {
 
         {/* Recent Alerts */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-          <h3 className="text-lg font-semibold text-gray-800 mb-4">Recent Active Alerts</h3>
-          <div className="space-y-3 max-h-[250px] overflow-y-auto">
+          <h3 className="text-lg font-semibold text-gray-800">Active Alerts</h3>
+          <p className="mb-3 text-xs text-gray-500">Critical first, newest first · click for details</p>
+          <div className="space-y-2 max-h-[260px] overflow-y-auto">
             {recentActiveAlerts.map((alert) => (
-                <div
-                  key={alert.id}
-                  className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-                >
-                  <div>
-                    <p className="font-medium text-gray-800">{alert.title}</p>
-                    <p className="text-sm text-gray-500">{alert.detail}</p>
-                  </div>
-                  <SeverityBadge severity={alert.severity} />
+              <button
+                key={alert.id}
+                type="button"
+                onClick={() => setDetail(alert.target)}
+                className="flex w-full items-center justify-between gap-3 rounded-lg border border-transparent bg-gray-50 p-3 text-left transition hover:border-att-200 hover:bg-att-50/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-att-300"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-gray-800">
+                    <span className="mr-2 rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500 ring-1 ring-gray-200">{alert.kindLabel}</span>
+                    {alert.title}
+                  </p>
+                  <p className={`text-sm ${alert.detailTone}`}>{alert.detail}</p>
                 </div>
-              ))}
+                <SeverityBadge severity={alert.severity} />
+              </button>
+            ))}
             {recentActiveAlerts.length === 0 && (
               <p className="text-center text-gray-400 py-8">No active alerts</p>
             )}
@@ -1051,8 +1197,8 @@ const InfraAlertPage: React.FC = () => {
             ))}
           </select>
           <select
-            value={alertStatusFilter}
-            onChange={(e) => setAlertStatusFilter(e.target.value)}
+            value={vmAlertStatusFilter}
+            onChange={(e) => setVmAlertStatusFilter(e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
           >
             <option value="">All Statuses</option>
@@ -1087,8 +1233,10 @@ const InfraAlertPage: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {pagedVMAlerts.map((alert) => (
-              <tr key={alert.id} className={gridStyles.row}>
+            {pagedVMAlerts.map((alert) => {
+              const open = clickableRow(() => setDetail({ kind: "vm-alert", id: alert.id, snapshot: alert }), `Open VM alert on ${alert.vm_name}`);
+              return (
+              <tr key={alert.id} {...open} className={`${gridStyles.row} ${open.className}`}>
                 <td className={gridStyles.strongCell}>{alert.vm_name}</td>
                 <td className={gridStyles.cell}>{alert.metric_type.toUpperCase()}</td>
                 <td className={gridStyles.cell}>{alert.current_value.toFixed(1)}%</td>
@@ -1104,21 +1252,21 @@ const InfraAlertPage: React.FC = () => {
                       <GridActionButton
                         onClick={() => acknowledgeVMAlert.mutate(alert.id, {
                           onSuccess: () => showToast("VM alert acknowledged"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to acknowledge VM alert", "error"),
+                          onError: (e: unknown) => toastError(e, "Failed to acknowledge VM alert"),
                         })}
                         title="Acknowledge"
                         tone="blue"
                       >
-                        {Icons.check()}
+                        {Icons.eye()}
                       </GridActionButton>
                     )}
                     {canWrite && alert.status !== "resolved" && (
                       <GridActionButton
                         onClick={() => resolveVMAlert.mutate({ alertId: alert.id }, {
                           onSuccess: () => showToast("VM alert resolved"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to resolve VM alert", "error"),
+                          onError: (e: unknown) => toastError(e, "Failed to resolve VM alert"),
                         })}
-                        title="Resolve"
+                        title="Resolve (open the alert to add notes)"
                         tone="green"
                       >
                         {Icons.check()}
@@ -1127,7 +1275,8 @@ const InfraAlertPage: React.FC = () => {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         {totalVMAlerts === 0 && (
@@ -1199,8 +1348,8 @@ const InfraAlertPage: React.FC = () => {
           {canWrite && (
           <button
             onClick={() => checkPGAlerts.mutate(undefined, {
-              onSuccess: () => showToast("PG alert check completed"),
-              onError: (e: any) => showToast(e?.response?.data?.detail || "PG alert check failed", "error"),
+              onSuccess: (result: Record<string, unknown>) => showToast(checkSummary("PG", result)),
+              onError: (e: unknown) => toastError(e, "PG alert check failed"),
             })}
             disabled={checkPGAlerts.isPending}
             className={buttonStyles.purpleSoft}
@@ -1230,8 +1379,10 @@ const InfraAlertPage: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {pagedPGAlerts.map((alert) => (
-              <tr key={alert.id} className={gridStyles.row}>
+            {pagedPGAlerts.map((alert) => {
+              const open = clickableRow(() => setDetail({ kind: "pg-alert", id: alert.id, snapshot: alert }), `Open PG alert on ${alert.server_name}`);
+              return (
+              <tr key={alert.id} {...open} className={`${gridStyles.row} ${open.className}`}>
                 <td className={gridStyles.strongCell}>{alert.server_name}</td>
                 <td className={gridStyles.cell}>{alert.metric_type.toUpperCase()}</td>
                 <td className={gridStyles.cell}>{alert.current_value.toFixed(1)}%</td>
@@ -1247,21 +1398,21 @@ const InfraAlertPage: React.FC = () => {
                       <GridActionButton
                         onClick={() => acknowledgePGAlert.mutate(alert.id, {
                           onSuccess: () => showToast("PG alert acknowledged"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to acknowledge PG alert", "error"),
+                          onError: (e: unknown) => toastError(e, "Failed to acknowledge PG alert"),
                         })}
                         title="Acknowledge"
                         tone="blue"
                       >
-                        {Icons.check()}
+                        {Icons.eye()}
                       </GridActionButton>
                     )}
                     {canWrite && alert.status !== "resolved" && (
                       <GridActionButton
                         onClick={() => resolvePGAlert.mutate({ alertId: alert.id }, {
                           onSuccess: () => showToast("PG alert resolved"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to resolve PG alert", "error"),
+                          onError: (e: unknown) => toastError(e, "Failed to resolve PG alert"),
                         })}
-                        title="Resolve"
+                        title="Resolve (open the alert to add notes)"
                         tone="green"
                       >
                         {Icons.check()}
@@ -1270,7 +1421,8 @@ const InfraAlertPage: React.FC = () => {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         {totalPGAlerts === 0 && (
@@ -1312,8 +1464,8 @@ const InfraAlertPage: React.FC = () => {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <select
-            value={alertStatusFilter}
-            onChange={(e) => setAlertStatusFilter(e.target.value)}
+            value={expiryAlertStatusFilter}
+            onChange={(e) => setExpiryAlertStatusFilter(e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
           >
             <option value="">All Statuses</option>
@@ -1330,8 +1482,8 @@ const InfraAlertPage: React.FC = () => {
         {canWrite && (
         <button
           onClick={() => checkExpiry.mutate(undefined, {
-            onSuccess: () => showToast("Expiry alert check completed"),
-            onError: (e: any) => showToast(e?.response?.data?.detail || "Expiry alert check failed", "error"),
+            onSuccess: (result: Record<string, unknown>) => showToast(checkSummary("Expiry", result)),
+            onError: (e: unknown) => toastError(e, "Expiry alert check failed"),
           })}
           disabled={checkExpiry.isPending}
           className={buttonStyles.blueSoft}
@@ -1357,8 +1509,10 @@ const InfraAlertPage: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {pagedExpAlerts.map((alert) => (
-              <tr key={alert.id} className={gridStyles.row}>
+            {pagedExpAlerts.map((alert) => {
+              const open = clickableRow(() => setDetail({ kind: "expiry-alert", id: alert.id, snapshot: alert }), `Open expiry alert for ${alert.resource_name}`);
+              return (
+              <tr key={alert.id} {...open} className={`${gridStyles.row} ${open.className}`}>
                 <td className={gridStyles.strongCell}>
                   {getAlertTypeLabel(alert.alert_type)}
                 </td>
@@ -1367,9 +1521,8 @@ const InfraAlertPage: React.FC = () => {
                   {formatDateOnly(alert.expiry_date)}
                 </td>
                 <td className={gridStyles.cell}>
-                  <span className={alert.days_until_expiry <= 0 ? "text-red-600 font-bold" : "text-gray-900"}>
-                    {alert.days_until_expiry <= 0 ? "EXPIRED" : `${alert.days_until_expiry} days`}
-                  </span>
+                  {/* "EXPIRED" used to show for anything due today or tomorrow too. */}
+                  <span className={daysLeftTone(alert.days_until_expiry)}>{daysLeftText(alert.days_until_expiry)}</span>
                 </td>
                 <td className={gridStyles.cell}><SeverityBadge severity={alert.severity} /></td>
                 <td className={gridStyles.cell}><StatusBadge status={alert.status} /></td>
@@ -1379,21 +1532,21 @@ const InfraAlertPage: React.FC = () => {
                       <GridActionButton
                         onClick={() => acknowledgeExpiryAlert.mutate(alert.id, {
                           onSuccess: () => showToast("Expiry alert acknowledged"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to acknowledge expiry alert", "error"),
+                          onError: (e: unknown) => toastError(e, "Failed to acknowledge expiry alert"),
                         })}
                         title="Acknowledge"
                         tone="blue"
                       >
-                        {Icons.check()}
+                        {Icons.eye()}
                       </GridActionButton>
                     )}
                     {canWrite && alert.status !== "resolved" && (
                       <GridActionButton
                         onClick={() => resolveExpiryAlert.mutate({ alertId: alert.id }, {
-                          onSuccess: () => showToast("Expiry alert resolved"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to resolve expiry alert", "error"),
+                          onSuccess: () => showToast("Expiry alert resolved — it stays resolved for this expiry date unless it gets worse"),
+                          onError: (e: unknown) => toastError(e, "Failed to resolve expiry alert"),
                         })}
-                        title="Resolve"
+                        title="Resolve (open the alert to add notes)"
                         tone="green"
                       >
                         {Icons.check()}
@@ -1402,7 +1555,8 @@ const InfraAlertPage: React.FC = () => {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         {totalExpAlerts === 0 && (
@@ -1420,16 +1574,27 @@ const InfraAlertPage: React.FC = () => {
 
   // ── Configuration Tab ───────────────────────────────────────────────
 
+  const openAlertsByConfig = (alerts: { config_id: number; status: string }[]) => {
+    const counts = new Map<number, number>();
+    alerts.forEach((a) => {
+      if (a.status !== "resolved") counts.set(a.config_id, (counts.get(a.config_id) || 0) + 1);
+    });
+    return counts;
+  };
+
   const renderConfigs = () => {
+    const vmOpen = openAlertsByConfig(allVmAlerts);
+    const pgOpen = openAlertsByConfig(allPgAlerts);
+    const expiryOpen = openAlertsByConfig(allExpiryAlerts);
     const vmConfigSort = tblSort("vmConfigs", "vm_name", "asc");
-    const expiryConfigSort = tblSort("expiryConfigs", "resource_name", "asc");
+    const expiryConfigSort = tblSort("expiryConfigs", "days_until_expiry", "asc");
     const storageConfigSort = tblSort("storageConfigs", "account_name", "asc");
     const pgConfigSort = tblSort("pgConfigs", "server_name", "asc");
     const { items: pagedVMConfigs, total: totalVMConfigs, page: vmCfgPage } = filterAndPaginate(
       filteredVMConfigs,
       tbl("vmConfigs").search,
       tbl("vmConfigs").page,
-      (c) => [c.vm_name, c.resource_group],
+      (c) => [c.vm_name, c.resource_group, ...(c.notification_emails || [])],
       vmConfigSort,
       {
         vm_name: (c) => c.vm_name,
@@ -1437,6 +1602,7 @@ const InfraAlertPage: React.FC = () => {
         cpu_warning_threshold: (c) => c.cpu_warning_threshold,
         memory_warning_threshold: (c) => c.memory_warning_threshold,
         disk_warning_threshold: (c) => c.disk_warning_threshold,
+        open: (c) => vmOpen.get(c.id) || 0,
         is_enabled: (c) => c.is_enabled,
       },
     );
@@ -1444,15 +1610,16 @@ const InfraAlertPage: React.FC = () => {
       expiryConfigs,
       tbl("expiryConfigs").search,
       tbl("expiryConfigs").page,
-      (c) => [getAlertTypeLabel(c.alert_type), c.resource_name, getEnvLabel(c.environment)],
+      (c) => [getAlertTypeLabel(c.alert_type), c.resource_name, c.resource_identifier, getEnvLabel(c.environment), c.description],
       expiryConfigSort,
       {
         alert_type: (c) => getAlertTypeLabel(c.alert_type),
         resource_name: (c) => c.resource_name,
         environment: (c) => getEnvLabel(c.environment),
         expiry_date: (c) => c.expiry_date,
+        days_until_expiry: (c) => c.days_until_expiry ?? Number.MAX_SAFE_INTEGER,
         warning_days_before: (c) => c.warning_days_before,
-        critical_days_before: (c) => c.critical_days_before,
+        open: (c) => expiryOpen.get(c.id) || 0,
         is_enabled: (c) => c.is_enabled,
       },
     );
@@ -1471,11 +1638,39 @@ const InfraAlertPage: React.FC = () => {
         is_enabled: (c) => c.is_enabled,
       },
     );
+    const { items: pagedPGConfigs, total: totalPGConfigs, page: pgCfgPage } = filterAndPaginate(
+      filteredPGConfigs,
+      tbl("pgConfigs").search,
+      tbl("pgConfigs").page,
+      (c) => [c.server_name, c.resource_group],
+      pgConfigSort,
+      {
+        server_name: (c) => c.server_name,
+        resource_group: (c) => c.resource_group,
+        cpu_warning_threshold: (c) => c.cpu_warning_threshold,
+        memory_warning_threshold: (c) => c.memory_warning_threshold,
+        storage_warning_threshold: (c) => c.storage_warning_threshold,
+        open: (c) => pgOpen.get(c.id) || 0,
+        is_enabled: (c) => c.is_enabled,
+      },
+    );
+    const header = (table: string, sort: SortState<string>, key: string, label: string, dir: "asc" | "desc" = "asc") => (
+      <th className={gridStyles.headerCell}>
+        <SortableHeader label={label} active={sort.key === key} direction={sort.direction} onClick={() => setTblSort(table, key, dir)} />
+      </th>
+    );
+    const pair = (w: number, c: number, unit = "%") => (
+      <span className="whitespace-nowrap">
+        <span className="text-amber-700">{w}{unit}</span>
+        <span className="text-gray-400"> / </span>
+        <span className="text-red-700">{c}{unit}</span>
+      </span>
+    );
 
     return (
     <div className="space-y-8">
       {/* Subscription Filter */}
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <select
           value={subscriptionFilter}
           onChange={(e) => setSubscriptionFilter(e.target.value)}
@@ -1488,156 +1683,45 @@ const InfraAlertPage: React.FC = () => {
             </option>
           ))}
         </select>
+        <p className="text-sm text-gray-500">Click any row for its details, live metrics and alert history.</p>
       </div>
 
-      {/* VM Threshold Configs */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-800">VM Threshold Configurations</h3>
-          <div className="flex items-center gap-3">
-            <SearchBar
-              value={tbl("vmConfigs").search}
-              onChange={(v) => setTblSearch("vmConfigs", v)}
-              placeholder="Search VM configs..."
-            />
-            {canWrite && (
-              <button
-                onClick={() => setShowAddVMConfig(true)}
-                className={buttonStyles.primary}
-              >
-                {Icons.plus()} Add VM Config
-              </button>
-            )}
-          </div>
-        </div>
-        <div className={gridStyles.shell}>
-          <table className={gridStyles.table}>
-            <thead className={gridStyles.head}>
-              <tr>
-                <th className={gridStyles.headerCell}><SortableHeader label="VM Name" active={vmConfigSort.key === "vm_name"} direction={vmConfigSort.direction} onClick={() => setTblSort("vmConfigs", "vm_name", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Resource Group" active={vmConfigSort.key === "resource_group"} direction={vmConfigSort.direction} onClick={() => setTblSort("vmConfigs", "resource_group", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="CPU (Warn/Crit)" active={vmConfigSort.key === "cpu_warning_threshold"} direction={vmConfigSort.direction} onClick={() => setTblSort("vmConfigs", "cpu_warning_threshold", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Memory (Warn/Crit)" active={vmConfigSort.key === "memory_warning_threshold"} direction={vmConfigSort.direction} onClick={() => setTblSort("vmConfigs", "memory_warning_threshold", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Disk (Warn/Crit)" active={vmConfigSort.key === "disk_warning_threshold"} direction={vmConfigSort.direction} onClick={() => setTblSort("vmConfigs", "disk_warning_threshold", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Status" active={vmConfigSort.key === "is_enabled"} direction={vmConfigSort.direction} onClick={() => setTblSort("vmConfigs", "is_enabled", "asc")} /></th>
-                <th className={gridStyles.headerCellCenter}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedVMConfigs.map((config) => (
-                <tr key={config.id} className={gridStyles.row}>
-                  <td className={gridStyles.strongCell}>{config.vm_name}</td>
-                  <td className={gridStyles.cell}>{config.resource_group}</td>
+      <ConfigSection
+        title="Expiry Tracking"
+        count={expiryConfigs.length}
+        description="MechIDs, domain accounts, AAF and database accounts, certificates — warned before they expire."
+        search={tbl("expiryConfigs").search}
+        onSearch={(v) => setTblSearch("expiryConfigs", v)}
+        canAdd={canWrite}
+        searchPlaceholder="Search name, identifier…"
+        addLabel="Track Expiry"
+        onAdd={() => setEditor({ kind: "expiry", config: null })}
+      >
+        <table className={gridStyles.table}>
+          <thead className={gridStyles.head}>
+            <tr>
+              {header("expiryConfigs", expiryConfigSort, "alert_type", "Type")}
+              {header("expiryConfigs", expiryConfigSort, "resource_name", "Resource")}
+              {header("expiryConfigs", expiryConfigSort, "environment", "Env")}
+              {header("expiryConfigs", expiryConfigSort, "expiry_date", "Expiry Date")}
+              {header("expiryConfigs", expiryConfigSort, "days_until_expiry", "Days Left")}
+              {header("expiryConfigs", expiryConfigSort, "warning_days_before", "Warn / Crit", "desc")}
+              {header("expiryConfigs", expiryConfigSort, "open", "Alerts", "desc")}
+              {header("expiryConfigs", expiryConfigSort, "is_enabled", "Status")}
+              <th className={gridStyles.headerCellCenter}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pagedExpConfigs.map((config) => {
+              const open = clickableRow(() => setDetail({ kind: "expiry-config", id: config.id }), `Open ${config.resource_name}`);
+              const health = expiryHealth(config.days_until_expiry, config.warning_days_before, config.critical_days_before);
+              return (
+                <tr key={config.id} {...open} className={`${gridStyles.row} ${open.className}`}>
+                  <td className={gridStyles.strongCell}>{getAlertTypeLabel(config.alert_type)}</td>
                   <td className={gridStyles.cell}>
-                    {config.cpu_warning_threshold}% / {config.cpu_critical_threshold}%
+                    <div className="font-medium text-gray-800">{config.resource_name}</div>
+                    {config.resource_identifier !== config.resource_name && <div className="font-mono text-xs text-gray-500">{config.resource_identifier}</div>}
                   </td>
-                  <td className={gridStyles.cell}>
-                    {config.memory_warning_threshold}% / {config.memory_critical_threshold}%
-                  </td>
-                  <td className={gridStyles.cell}>
-                    {config.disk_warning_threshold}% / {config.disk_critical_threshold}%
-                  </td>
-                  <td className={gridStyles.cell}>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${config.is_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-700"}`}>
-                      {config.is_enabled ? "Enabled" : "Disabled"}
-                    </span>
-                  </td>
-                  <td className={gridStyles.centerCell}>
-                    <div className="flex items-center justify-center gap-1">
-                      {canWrite && (
-                      <GridActionButton
-                        onClick={() => {
-                          setEditingVMConfig(config);
-                          setVmFormData({
-                            subscription_id: config.subscription_id,
-                            resource_group: config.resource_group,
-                            vm_name: config.vm_name,
-                            vm_id: config.vm_id,
-                            cpu_warning_threshold: config.cpu_warning_threshold,
-                            cpu_critical_threshold: config.cpu_critical_threshold,
-                            memory_warning_threshold: config.memory_warning_threshold,
-                            memory_critical_threshold: config.memory_critical_threshold,
-                            disk_warning_threshold: config.disk_warning_threshold,
-                            disk_critical_threshold: config.disk_critical_threshold,
-                            notification_emails: config.notification_emails || [],
-                          });
-                        }}
-                        title="Edit"
-                        tone="blue"
-                      >
-                        {Icons.edit()}
-                      </GridActionButton>
-                      )}
-                      {canWrite && (
-                      <GridActionButton
-                        onClick={() => deleteVMConfig.mutate(config.id, {
-                          onSuccess: () => showToast("VM config deleted"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to delete VM config", "error"),
-                        })}
-                        title="Delete"
-                        tone="red"
-                      >
-                        {Icons.trash()}
-                      </GridActionButton>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {totalVMConfigs === 0 && (
-            <div className="text-center py-12 text-gray-400">No VM threshold configurations</div>
-          )}
-          <TablePagination
-            currentPage={vmCfgPage}
-            totalItems={totalVMConfigs}
-            onPageChange={(p) => setTblPage("vmConfigs", p)}
-          />
-        </div>
-      </div>
-
-      {/* Expiry Configs */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-800">Expiry Alert Configurations</h3>
-          <div className="flex items-center gap-3">
-            <SearchBar
-              value={tbl("expiryConfigs").search}
-              onChange={(v) => setTblSearch("expiryConfigs", v)}
-              placeholder="Search expiry configs..."
-            />
-            {canWrite && (
-              <button
-                onClick={() => setShowAddExpiryConfig(true)}
-                className={buttonStyles.primary}
-              >
-                {Icons.plus()} Add Expiry Config
-              </button>
-            )}
-          </div>
-        </div>
-        <div className={gridStyles.shell}>
-          <table className={gridStyles.table}>
-            <thead className={gridStyles.head}>
-              <tr>
-                <th className={gridStyles.headerCell}><SortableHeader label="Type" active={expiryConfigSort.key === "alert_type"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "alert_type", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Resource" active={expiryConfigSort.key === "resource_name"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "resource_name", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="ENV" active={expiryConfigSort.key === "environment"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "environment", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Expiry Date" active={expiryConfigSort.key === "expiry_date"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "expiry_date", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Warning (days)" active={expiryConfigSort.key === "warning_days_before"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "warning_days_before", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Critical (days)" active={expiryConfigSort.key === "critical_days_before"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "critical_days_before", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Status" active={expiryConfigSort.key === "is_enabled"} direction={expiryConfigSort.direction} onClick={() => setTblSort("expiryConfigs", "is_enabled", "asc")} /></th>
-                <th className={gridStyles.headerCellCenter}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedExpConfigs.map((config) => (
-                <tr key={config.id} className={gridStyles.row}>
-                  <td className={gridStyles.strongCell}>
-                    {getAlertTypeLabel(config.alert_type)}
-                  </td>
-                  <td className={gridStyles.cell}>{config.resource_name}</td>
                   <td className={gridStyles.cell}>
                     {config.environment ? (
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${config.environment === "prod" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
@@ -1647,285 +1731,184 @@ const InfraAlertPage: React.FC = () => {
                       <span className="text-gray-400">—</span>
                     )}
                   </td>
+                  <td className={gridStyles.cell}>{formatDateOnly(config.expiry_date)}</td>
                   <td className={gridStyles.cell}>
-                    {formatDateOnly(config.expiry_date)}
+                    <div className={daysLeftTone(config.days_until_expiry, config.warning_days_before, config.critical_days_before)}>{daysLeftText(config.days_until_expiry)}</div>
+                    {config.is_enabled && health !== "ok" && <ExpiryHealthBadge health={health} />}
                   </td>
-                  <td className={gridStyles.cell}>{config.warning_days_before}</td>
-                  <td className={gridStyles.cell}>{config.critical_days_before}</td>
                   <td className={gridStyles.cell}>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${config.is_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-700"}`}>
-                      {config.is_enabled ? "Enabled" : "Disabled"}
+                    <span className="whitespace-nowrap">
+                      <span className="text-amber-700">{config.warning_days_before}d</span>
+                      <span className="text-gray-400"> / </span>
+                      <span className="text-red-700">{config.critical_days_before}d</span>
                     </span>
                   </td>
+                  <td className={gridStyles.cell}><OpenAlertsCell count={expiryOpen.get(config.id) || 0} /></td>
+                  <td className={gridStyles.cell}><ConfigStateBadge enabled={config.is_enabled} snoozeUntil={config.snooze_until} /></td>
                   <td className={gridStyles.centerCell}>
-                    <div className="flex items-center justify-center gap-1">
-                      {canWrite && (
-                      <GridActionButton
-                        onClick={() => {
-                          setEditingExpiryConfig(config);
-                          setExpiryFormData({
-                            alert_type: config.alert_type,
-                            resource_name: config.resource_name,
-                            resource_identifier: config.resource_identifier,
-                            expiry_date: toDateInputValue(config.expiry_date),
-                            description: config.description || '',
-                            environment: config.environment || "non_prod",
-                            warning_days_before: config.warning_days_before,
-                            critical_days_before: config.critical_days_before,
-                            notification_emails: config.notification_emails || [],
-                          });
-                        }}
-                        title="Edit"
-                        tone="blue"
-                      >
-                        {Icons.edit()}
-                      </GridActionButton>
-                      )}
-                      {canWrite && (
-                      <GridActionButton
-                        onClick={() => deleteExpiryConfig.mutate(config.id, {
-                          onSuccess: () => showToast("Expiry config deleted"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to delete expiry config", "error"),
-                        })}
-                        title="Delete"
-                        tone="red"
-                      >
-                        {Icons.trash()}
-                      </GridActionButton>
-                      )}
-                    </div>
+                    <RowActions
+                      canWrite={canWrite}
+                      name={config.resource_name}
+                      onEdit={() => setEditor({ kind: "expiry", config })}
+                      onDelete={() => requestDeleteConfig("expiry", config.id, config.resource_name)}
+                    />
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          {totalExpConfigs === 0 && (
-            <div className="text-center py-12 text-gray-400">No expiry alert configurations</div>
-          )}
-          <TablePagination
-            currentPage={expCfgPage}
-            totalItems={totalExpConfigs}
-            onPageChange={(p) => setTblPage("expiryConfigs", p)}
-          />
-        </div>
-      </div>
-
-      {/* Storage Alert Configs */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-800">Storage Alert Configurations</h3>
-          <div className="flex items-center gap-3">
-            <SearchBar value={tbl("storageConfigs").search} onChange={(v) => setTblSearch("storageConfigs", v)} placeholder="Search storage configs..." />
-            {canWrite && (
-              <button
-                onClick={() => setShowAddStorageConfig(true)}
-                className={buttonStyles.primary}
-              >
-                {Icons.plus()} Add Storage Config
-              </button>
-            )}
+              );
+            })}
+          </tbody>
+        </table>
+        {totalExpConfigs === 0 && (
+          <div className="py-12 text-center text-gray-400">
+            {expiryConfigs.length ? "No expiry configurations match your search" : "Nothing tracked yet — add a MechID, domain account or certificate to get warned before it expires."}
           </div>
-        </div>
-        <div className={gridStyles.shell}>
-          <table className={gridStyles.table}>
-            <thead className={gridStyles.head}>
-              <tr>
-                <th className={gridStyles.headerCell}><SortableHeader label="Account Name" active={storageConfigSort.key === "account_name"} direction={storageConfigSort.direction} onClick={() => setTblSort("storageConfigs", "account_name", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Resource Group" active={storageConfigSort.key === "resource_group"} direction={storageConfigSort.direction} onClick={() => setTblSort("storageConfigs", "resource_group", "asc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Capacity (Warn/Crit) GB" active={storageConfigSort.key === "capacity_warning_gb"} direction={storageConfigSort.direction} onClick={() => setTblSort("storageConfigs", "capacity_warning_gb", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Transactions (Warn/Crit)" active={storageConfigSort.key === "transactions_warning"} direction={storageConfigSort.direction} onClick={() => setTblSort("storageConfigs", "transactions_warning", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Egress (Warn/Crit) GB" active={storageConfigSort.key === "egress_warning_gb"} direction={storageConfigSort.direction} onClick={() => setTblSort("storageConfigs", "egress_warning_gb", "desc")} /></th>
-                <th className={gridStyles.headerCell}><SortableHeader label="Status" active={storageConfigSort.key === "is_enabled"} direction={storageConfigSort.direction} onClick={() => setTblSort("storageConfigs", "is_enabled", "asc")} /></th>
-                <th className={gridStyles.headerCellCenter}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedStorageConfigs.map((config) => (
-                <tr key={config.id} className={gridStyles.row}>
+        )}
+        <TablePagination currentPage={expCfgPage} totalItems={totalExpConfigs} onPageChange={(p) => setTblPage("expiryConfigs", p)} />
+      </ConfigSection>
+
+      <ConfigSection
+        title="VM Thresholds"
+        count={filteredVMConfigs.length}
+        description="CPU, memory and disk I/O limits read from Azure Monitor on every scheduled check."
+        search={tbl("vmConfigs").search}
+        onSearch={(v) => setTblSearch("vmConfigs", v)}
+        canAdd={canWrite}
+        searchPlaceholder="Search VM, resource group…"
+        addLabel="Monitor VM"
+        onAdd={() => setEditor({ kind: "vm", config: null })}
+      >
+        <table className={gridStyles.table}>
+          <thead className={gridStyles.head}>
+            <tr>
+              {header("vmConfigs", vmConfigSort, "vm_name", "VM Name")}
+              {header("vmConfigs", vmConfigSort, "resource_group", "Resource Group")}
+              {header("vmConfigs", vmConfigSort, "cpu_warning_threshold", "CPU (Warn/Crit)", "desc")}
+              {header("vmConfigs", vmConfigSort, "memory_warning_threshold", "Memory (Warn/Crit)", "desc")}
+              {header("vmConfigs", vmConfigSort, "disk_warning_threshold", "Disk I/O (Warn/Crit)", "desc")}
+              {header("vmConfigs", vmConfigSort, "open", "Alerts", "desc")}
+              {header("vmConfigs", vmConfigSort, "is_enabled", "Status")}
+              <th className={gridStyles.headerCellCenter}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pagedVMConfigs.map((config) => {
+              const open = clickableRow(() => setDetail({ kind: "vm-config", id: config.id }), `Open ${config.vm_name}`);
+              return (
+                <tr key={config.id} {...open} className={`${gridStyles.row} ${open.className}`}>
+                  <td className={gridStyles.strongCell}>{config.vm_name}</td>
+                  <td className={gridStyles.cell}>{config.resource_group}</td>
+                  <td className={gridStyles.cell}>{pair(config.cpu_warning_threshold, config.cpu_critical_threshold)}</td>
+                  <td className={gridStyles.cell}>{pair(config.memory_warning_threshold, config.memory_critical_threshold)}</td>
+                  <td className={gridStyles.cell}>{pair(config.disk_warning_threshold, config.disk_critical_threshold)}</td>
+                  <td className={gridStyles.cell}><OpenAlertsCell count={vmOpen.get(config.id) || 0} /></td>
+                  <td className={gridStyles.cell}><ConfigStateBadge enabled={config.is_enabled} snoozeUntil={config.snooze_until} /></td>
+                  <td className={gridStyles.centerCell}>
+                    <RowActions canWrite={canWrite} name={config.vm_name} onEdit={() => setEditor({ kind: "vm", config })} onDelete={() => requestDeleteConfig("vm", config.id, config.vm_name)} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {totalVMConfigs === 0 && <div className="py-12 text-center text-gray-400">No VM threshold configurations</div>}
+        <TablePagination currentPage={vmCfgPage} totalItems={totalVMConfigs} onPageChange={(p) => setTblPage("vmConfigs", p)} />
+      </ConfigSection>
+
+      <ConfigSection
+        title="PostgreSQL Flexible Server Thresholds"
+        count={filteredPGConfigs.length}
+        description="CPU, memory and storage limits for PG Flexible Servers."
+        search={tbl("pgConfigs").search}
+        onSearch={(v) => setTblSearch("pgConfigs", v)}
+        canAdd={canWrite}
+        searchPlaceholder="Search server, resource group…"
+        addLabel="Monitor PG Server"
+        onAdd={() => setEditor({ kind: "pg", config: null })}
+      >
+        <table className={gridStyles.table}>
+          <thead className={gridStyles.head}>
+            <tr>
+              {header("pgConfigs", pgConfigSort, "server_name", "Server Name")}
+              {header("pgConfigs", pgConfigSort, "resource_group", "Resource Group")}
+              {header("pgConfigs", pgConfigSort, "cpu_warning_threshold", "CPU (Warn/Crit)", "desc")}
+              {header("pgConfigs", pgConfigSort, "memory_warning_threshold", "Memory (Warn/Crit)", "desc")}
+              {header("pgConfigs", pgConfigSort, "storage_warning_threshold", "Storage (Warn/Crit)", "desc")}
+              {header("pgConfigs", pgConfigSort, "open", "Alerts", "desc")}
+              {header("pgConfigs", pgConfigSort, "is_enabled", "Status")}
+              <th className={gridStyles.headerCellCenter}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pagedPGConfigs.map((config) => {
+              const open = clickableRow(() => setDetail({ kind: "pg-config", id: config.id }), `Open ${config.server_name}`);
+              return (
+                <tr key={config.id} {...open} className={`${gridStyles.row} ${open.className}`}>
+                  <td className={gridStyles.strongCell}>{config.server_name}</td>
+                  <td className={gridStyles.cell}>{config.resource_group}</td>
+                  <td className={gridStyles.cell}>{pair(config.cpu_warning_threshold, config.cpu_critical_threshold)}</td>
+                  <td className={gridStyles.cell}>{pair(config.memory_warning_threshold, config.memory_critical_threshold)}</td>
+                  <td className={gridStyles.cell}>{pair(config.storage_warning_threshold, config.storage_critical_threshold)}</td>
+                  <td className={gridStyles.cell}><OpenAlertsCell count={pgOpen.get(config.id) || 0} /></td>
+                  <td className={gridStyles.cell}><ConfigStateBadge enabled={config.is_enabled} snoozeUntil={config.snooze_until} /></td>
+                  <td className={gridStyles.centerCell}>
+                    <RowActions canWrite={canWrite} name={config.server_name} onEdit={() => setEditor({ kind: "pg", config })} onDelete={() => requestDeleteConfig("pg", config.id, config.server_name)} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {totalPGConfigs === 0 && <div className="py-12 text-center text-gray-400">No PostgreSQL Flexible Server configurations</div>}
+        <TablePagination currentPage={pgCfgPage} totalItems={totalPGConfigs} onPageChange={(p) => setTblPage("pgConfigs", p)} />
+      </ConfigSection>
+
+      <ConfigSection
+        title="Storage Account Thresholds"
+        count={filteredStorageConfigs.length}
+        description={<span>Capacity, transaction and egress limits. <span className="font-medium text-amber-700">Saved but not evaluated by the schedules yet.</span></span>}
+        search={tbl("storageConfigs").search}
+        onSearch={(v) => setTblSearch("storageConfigs", v)}
+        canAdd={canWrite}
+        searchPlaceholder="Search storage configs…"
+        addLabel="Add Storage Config"
+        onAdd={() => setEditor({ kind: "storage", config: null })}
+      >
+        <table className={gridStyles.table}>
+          <thead className={gridStyles.head}>
+            <tr>
+              {header("storageConfigs", storageConfigSort, "account_name", "Account Name")}
+              {header("storageConfigs", storageConfigSort, "resource_group", "Resource Group")}
+              {header("storageConfigs", storageConfigSort, "capacity_warning_gb", "Capacity (Warn/Crit)", "desc")}
+              {header("storageConfigs", storageConfigSort, "transactions_warning", "Transactions (Warn/Crit)", "desc")}
+              {header("storageConfigs", storageConfigSort, "egress_warning_gb", "Egress (Warn/Crit)", "desc")}
+              {header("storageConfigs", storageConfigSort, "is_enabled", "Status")}
+              <th className={gridStyles.headerCellCenter}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pagedStorageConfigs.map((config) => {
+              const open = clickableRow(() => setDetail({ kind: "storage-config", id: config.id }), `Open ${config.account_name}`);
+              return (
+                <tr key={config.id} {...open} className={`${gridStyles.row} ${open.className}`}>
                   <td className={gridStyles.strongCell}>{config.account_name}</td>
                   <td className={gridStyles.cell}>{config.resource_group}</td>
-                  <td className={gridStyles.cell}>
-                    {config.capacity_warning_gb} / {config.capacity_critical_gb}
-                  </td>
+                  <td className={gridStyles.cell}>{pair(config.capacity_warning_gb, config.capacity_critical_gb, " GB")}</td>
                   <td className={gridStyles.cell}>
                     {config.transactions_warning?.toLocaleString()} / {config.transactions_critical?.toLocaleString()}
                   </td>
-                  <td className={gridStyles.cell}>
-                    {config.egress_warning_gb} / {config.egress_critical_gb}
-                  </td>
-                  <td className={gridStyles.cell}>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${config.is_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-700"}`}>
-                      {config.is_enabled ? "Enabled" : "Disabled"}
-                    </span>
-                  </td>
+                  <td className={gridStyles.cell}>{pair(config.egress_warning_gb, config.egress_critical_gb, " GB")}</td>
+                  <td className={gridStyles.cell}><ConfigStateBadge enabled={config.is_enabled} snoozeUntil={config.snooze_until} /></td>
                   <td className={gridStyles.centerCell}>
-                    <div className="flex items-center justify-center gap-1">
-                      {canWrite && (
-                      <GridActionButton
-                        onClick={() => {
-                          setEditingStorageConfig(config);
-                          setStorageFormData({
-                            subscription_id: config.subscription_id,
-                            resource_group: config.resource_group,
-                            account_name: config.account_name,
-                            account_id: config.account_id || "",
-                            capacity_warning_gb: config.capacity_warning_gb,
-                            capacity_critical_gb: config.capacity_critical_gb,
-                            transactions_warning: config.transactions_warning,
-                            transactions_critical: config.transactions_critical,
-                            egress_warning_gb: config.egress_warning_gb,
-                            egress_critical_gb: config.egress_critical_gb,
-                            notification_emails: config.notification_emails || [],
-                          });
-                          setShowAddStorageConfig(true);
-                        }}
-                        title="Edit"
-                        tone="blue"
-                      >
-                        {Icons.edit()}
-                      </GridActionButton>
-                      )}
-                      {canWrite && (
-                      <GridActionButton
-                        onClick={() => deleteStorageConfigMut.mutate(config.id, {
-                          onSuccess: () => showToast("Storage config deleted"),
-                          onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to delete storage config", "error"),
-                        })}
-                        title="Delete"
-                        tone="red"
-                      >
-                        {Icons.trash()}
-                      </GridActionButton>
-                      )}
-                    </div>
+                    <RowActions canWrite={canWrite} name={config.account_name} onEdit={() => setEditor({ kind: "storage", config })} onDelete={() => requestDeleteConfig("storage", config.id, config.account_name)} />
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          {totalStorageConfigs === 0 && (
-            <div className="text-center py-12 text-gray-400">No storage alert configurations</div>
-          )}
-          <TablePagination
-            currentPage={storageCfgPage}
-            totalItems={totalStorageConfigs}
-            onPageChange={(p) => setTblPage("storageConfigs", p)}
-          />
-        </div>
-      </div>
-
-      {/* PG Flex Server Alert Configs */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-800">PostgreSQL Flexible Server Configurations</h3>
-          <div className="flex items-center gap-3">
-            <SearchBar value={tbl("pgConfigs").search} onChange={(v) => setTblSearch("pgConfigs", v)} placeholder="Search PG configs..." />
-            {canWrite && (
-              <button
-                onClick={() => setShowAddPGConfig(true)}
-                className={buttonStyles.purpleSoft}
-              >
-                {Icons.plus()} Add PG Config
-              </button>
-            )}
-          </div>
-        </div>
-        <div className={gridStyles.shell}>
-          {(() => {
-            const { items: pagedPGConfigs, total: totalPGConfigs, page: pgCfgPage } = filterAndPaginate(
-              filteredPGConfigs, tbl("pgConfigs").search, tbl("pgConfigs").page,
-              (c) => [c.server_name, c.resource_group],
-              pgConfigSort,
-              {
-                server_name: (c) => c.server_name,
-                resource_group: (c) => c.resource_group,
-                cpu_warning_threshold: (c) => c.cpu_warning_threshold,
-                memory_warning_threshold: (c) => c.memory_warning_threshold,
-                storage_warning_threshold: (c) => c.storage_warning_threshold,
-                is_enabled: (c) => c.is_enabled,
-              },
-            );
-            return (
-              <>
-                <table className={gridStyles.table}>
-                  <thead className={gridStyles.head}>
-                    <tr>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Server Name" active={pgConfigSort.key === "server_name"} direction={pgConfigSort.direction} onClick={() => setTblSort("pgConfigs", "server_name", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Resource Group" active={pgConfigSort.key === "resource_group"} direction={pgConfigSort.direction} onClick={() => setTblSort("pgConfigs", "resource_group", "asc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="CPU (Warn/Crit) %" active={pgConfigSort.key === "cpu_warning_threshold"} direction={pgConfigSort.direction} onClick={() => setTblSort("pgConfigs", "cpu_warning_threshold", "desc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Memory (Warn/Crit) %" active={pgConfigSort.key === "memory_warning_threshold"} direction={pgConfigSort.direction} onClick={() => setTblSort("pgConfigs", "memory_warning_threshold", "desc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Storage (Warn/Crit) %" active={pgConfigSort.key === "storage_warning_threshold"} direction={pgConfigSort.direction} onClick={() => setTblSort("pgConfigs", "storage_warning_threshold", "desc")} /></th>
-                      <th className={gridStyles.headerCell}><SortableHeader label="Status" active={pgConfigSort.key === "is_enabled"} direction={pgConfigSort.direction} onClick={() => setTblSort("pgConfigs", "is_enabled", "asc")} /></th>
-                      <th className={gridStyles.headerCellCenter}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedPGConfigs.map((config) => (
-                      <tr key={config.id} className={gridStyles.row}>
-                        <td className={gridStyles.strongCell}>{config.server_name}</td>
-                        <td className={gridStyles.cell}>{config.resource_group}</td>
-                        <td className={gridStyles.cell}>{config.cpu_warning_threshold} / {config.cpu_critical_threshold}</td>
-                        <td className={gridStyles.cell}>{config.memory_warning_threshold} / {config.memory_critical_threshold}</td>
-                        <td className={gridStyles.cell}>{config.storage_warning_threshold} / {config.storage_critical_threshold}</td>
-                        <td className={gridStyles.cell}>
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${config.is_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-700"}`}>
-                            {config.is_enabled ? "Enabled" : "Disabled"}
-                          </span>
-                        </td>
-                        <td className={gridStyles.centerCell}>
-                          <div className="flex items-center justify-center gap-1">
-                            {canWrite && (
-                            <GridActionButton
-                              onClick={() => {
-                                setEditingPGConfig(config);
-                                setPgFormData({
-                                  subscription_id: config.subscription_id,
-                                  resource_group: config.resource_group,
-                                  server_name: config.server_name,
-                                  server_id: config.server_id || "",
-                                  cpu_warning_threshold: config.cpu_warning_threshold,
-                                  cpu_critical_threshold: config.cpu_critical_threshold,
-                                  memory_warning_threshold: config.memory_warning_threshold,
-                                  memory_critical_threshold: config.memory_critical_threshold,
-                                  storage_warning_threshold: config.storage_warning_threshold,
-                                  storage_critical_threshold: config.storage_critical_threshold,
-                                  notification_emails: config.notification_emails || [],
-                                });
-                                setShowAddPGConfig(true);
-                              }}
-                              title="Edit"
-                              tone="blue"
-                            >
-                              {Icons.edit()}
-                            </GridActionButton>
-                            )}
-                            {canWrite && (
-                            <GridActionButton
-                              onClick={() => deletePGConfigMut.mutate(config.id, {
-                                onSuccess: () => showToast("PG config deleted"),
-                                onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to delete PG config", "error"),
-                              })}
-                              title="Delete"
-                              tone="red"
-                            >
-                              {Icons.trash()}
-                            </GridActionButton>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {totalPGConfigs === 0 && (
-                  <div className="text-center py-12 text-gray-400">No PostgreSQL Flexible Server configurations</div>
-                )}
-                <TablePagination currentPage={pgCfgPage} totalItems={totalPGConfigs} onPageChange={(p) => setTblPage("pgConfigs", p)} />
-              </>
-            );
-          })()}
-        </div>
-      </div>
+              );
+            })}
+          </tbody>
+        </table>
+        {totalStorageConfigs === 0 && <div className="py-12 text-center text-gray-400">No storage alert configurations</div>}
+        <TablePagination currentPage={storageCfgPage} totalItems={totalStorageConfigs} onPageChange={(p) => setTblPage("storageConfigs", p)} />
+      </ConfigSection>
     </div>
   );
   };
@@ -1974,866 +1957,42 @@ const InfraAlertPage: React.FC = () => {
       {activeTab === "configs" && renderConfigs()}
       {activeTab === "scheduler" && renderScheduler()}
 
-      {/* Add/Edit VM Config Modal */}
-      {(showAddVMConfig || editingVMConfig) && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold mb-4">
-              {editingVMConfig ? "Edit VM Threshold Configuration" : "Add VM Threshold Configuration"}
-            </h3>
-            <form onSubmit={(e) => {
-              e.preventDefault();
-              if (editingVMConfig) {
-                updateVMConfig.mutate({
-                  configId: editingVMConfig.id,
-                  data: {
-                    cpu_warning_threshold: vmFormData.cpu_warning_threshold,
-                    cpu_critical_threshold: vmFormData.cpu_critical_threshold,
-                    memory_warning_threshold: vmFormData.memory_warning_threshold,
-                    memory_critical_threshold: vmFormData.memory_critical_threshold,
-                    disk_warning_threshold: vmFormData.disk_warning_threshold,
-                    disk_critical_threshold: vmFormData.disk_critical_threshold,
-                    notification_emails: vmFormData.notification_emails,
-                  },
-                }, {
-                  onSuccess: () => {
-                    setEditingVMConfig(null);
-                    resetVMForm();
-                  },
-                });
-              } else {
-                createVMConfig.mutate(vmFormData, {
-                  onSuccess: () => {
-                    setShowAddVMConfig(false);
-                    resetVMForm();
-                  },
-                });
-              }
-            }}>
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Subscription *</label>
-                  <select
-                    value={vmFormData.subscription_id}
-                    onChange={(e) => setVmFormData({ ...vmFormData, subscription_id: e.target.value, resource_group: "", vm_name: "", vm_id: "" })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white"
-                    required
-                    disabled={!!editingVMConfig}
-                  >
-                    <option value="">-- Select Subscription --</option>
-                    {[...new Set(azureVMs.map((vm) => vm.subscription_id || vm.id?.split("/")[2]).filter(Boolean))].map((sub) => (
-                      <option key={sub} value={sub!}>{subNameMap.get(sub!) || sub}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Resource Group *</label>
-                  <select
-                    value={vmFormData.resource_group}
-                    onChange={(e) => setVmFormData({ ...vmFormData, resource_group: e.target.value, vm_name: "", vm_id: "" })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white"
-                    required
-                    disabled={!!editingVMConfig || !vmFormData.subscription_id}
-                  >
-                    <option value="">-- Select Resource Group --</option>
-                    {[...new Set(
-                      azureVMs
-                        .filter((vm) => !vmFormData.subscription_id || (vm.subscription_id || vm.id?.split("/")[2]) === vmFormData.subscription_id)
-                        .map((vm) => vm.resource_group)
-                        .filter(Boolean)
-                    )].map((rg) => (
-                      <option key={rg} value={rg!}>{rg}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">VM Name *</label>
-                  <select
-                    value={vmFormData.vm_name}
-                    onChange={(e) => {
-                      const selectedVM = azureVMs.find(
-                        (vm) =>
-                          vm.name === e.target.value &&
-                          vm.resource_group === vmFormData.resource_group
-                      );
-                      setVmFormData({
-                        ...vmFormData,
-                        vm_name: e.target.value,
-                        vm_id: selectedVM?.id || "",
-                      });
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white"
-                    required
-                    disabled={!!editingVMConfig || !vmFormData.resource_group}
-                  >
-                    <option value="">-- Select VM --</option>
-                    {azureVMs
-                      .filter(
-                        (vm) =>
-                          (!vmFormData.subscription_id || (vm.subscription_id || vm.id?.split("/")[2]) === vmFormData.subscription_id) &&
-                          (!vmFormData.resource_group || vm.resource_group === vmFormData.resource_group)
-                      )
-                      .map((vm) => (
-                        <option key={vm.id} value={vm.name}>{vm.name}</option>
-                      ))}
-                  </select>
-                </div>
-              </div>
-              
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Threshold Settings (%)</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">CPU Warning</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={vmFormData.cpu_warning_threshold}
-                      onChange={(e) => setVmFormData({ ...vmFormData, cpu_warning_threshold: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">CPU Critical</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={vmFormData.cpu_critical_threshold}
-                      onChange={(e) => setVmFormData({ ...vmFormData, cpu_critical_threshold: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Memory Warning</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={vmFormData.memory_warning_threshold}
-                      onChange={(e) => setVmFormData({ ...vmFormData, memory_warning_threshold: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Memory Critical</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={vmFormData.memory_critical_threshold}
-                      onChange={(e) => setVmFormData({ ...vmFormData, memory_critical_threshold: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Disk Warning</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={vmFormData.disk_warning_threshold}
-                      onChange={(e) => setVmFormData({ ...vmFormData, disk_warning_threshold: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Disk Critical</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={vmFormData.disk_critical_threshold}
-                      onChange={(e) => setVmFormData({ ...vmFormData, disk_critical_threshold: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Notification Emails</label>
-                <div className="flex gap-2 mb-2">
-                  <input
-                    type="email"
-                    value={emailInput}
-                    onChange={(e) => setEmailInput(e.target.value)}
-                    placeholder="Enter email and press Add"
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (emailInput && !vmFormData.notification_emails?.includes(emailInput)) {
-                        setVmFormData({
-                          ...vmFormData,
-                          notification_emails: [...(vmFormData.notification_emails || []), emailInput],
-                        });
-                        setEmailInput("");
-                      }
-                    }}
-                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
-                  >
-                    Add
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {vmFormData.notification_emails?.map((email, idx) => (
-                    <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm flex items-center gap-1">
-                      {email}
-                      <button
-                        type="button"
-                        onClick={() => setVmFormData({
-                          ...vmFormData,
-                          notification_emails: vmFormData.notification_emails?.filter((_, i) => i !== idx),
-                        })}
-                        className="text-blue-500 hover:text-blue-700"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddVMConfig(false);
-                    setEditingVMConfig(null);
-                    resetVMForm();
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={createVMConfig.isPending || updateVMConfig.isPending}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {createVMConfig.isPending || updateVMConfig.isPending ? "Saving..." : "Save Configuration"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {editor && (
+        <ConfigEditor
+          key={`${editor.kind}-${editor.config?.id ?? "new"}`}
+          target={editor}
+          subscriptionNames={subNameMap}
+          formatDate={formatDate}
+          onClose={() => setEditor(null)}
+          onSaved={(message) => {
+            setEditor(null);
+            showToast(message);
+          }}
+        />
       )}
 
-      {/* Add/Edit Expiry Config Modal */}
-      {(showAddExpiryConfig || editingExpiryConfig) && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold mb-4">
-              {editingExpiryConfig ? "Edit Expiry Alert Configuration" : "Add Expiry Alert Configuration"}
-            </h3>
-            <form onSubmit={(e) => {
-              e.preventDefault();
-              if (editingExpiryConfig) {
-                updateExpiryConfigMutation.mutate({
-                  configId: editingExpiryConfig.id,
-                  data: {
-                    resource_name: expiryFormData.resource_name,
-                    description: expiryFormData.description,
-                    environment: expiryFormData.environment,
-                    expiry_date: expiryFormData.expiry_date,
-                    warning_days_before: expiryFormData.warning_days_before,
-                    critical_days_before: expiryFormData.critical_days_before,
-                    notification_emails: expiryFormData.notification_emails,
-                  },
-                }, {
-                  onSuccess: () => {
-                    setEditingExpiryConfig(null);
-                    resetExpiryForm();
-                  },
-                });
-              } else {
-                createExpiryConfigMutation.mutate(expiryFormData, {
-                  onSuccess: () => {
-                    setShowAddExpiryConfig(false);
-                    resetExpiryForm();
-                  },
-                });
-              }
-            }}>
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Alert Type *</label>
-                  <select
-                    value={expiryFormData.alert_type}
-                    onChange={(e) => setExpiryFormData({ ...expiryFormData, alert_type: e.target.value as ExpiryAlertType })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    disabled={!!editingExpiryConfig}
-                  >
-                    <option value="certificate">Certificate Expiry</option>
-                    <option value="mech_id">MechID Expiry</option>
-                    <option value="aaf_account">AAF Account Expiry</option>
-                    <option value="database_account">Database Account Expiry</option>
-                    <option value="itservices_domain">ITServices Domain Expiry</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Environment *</label>
-                  <select
-                    value={expiryFormData.environment || "non_prod"}
-                    onChange={(e) => setExpiryFormData({ ...expiryFormData, environment: e.target.value as EnvClassification })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="non_prod">NPROD</option>
-                    <option value="prod">PROD</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Resource Name *</label>
-                  <input
-                    type="text"
-                    value={expiryFormData.resource_name}
-                    onChange={(e) => setExpiryFormData({ ...expiryFormData, resource_name: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    placeholder="e.g., api-server-cert"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Resource Identifier *</label>
-                  <input
-                    type="text"
-                    value={expiryFormData.resource_identifier}
-                    onChange={(e) => setExpiryFormData({ ...expiryFormData, resource_identifier: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    placeholder="Unique identifier or path"
-                    required
-                    disabled={!!editingExpiryConfig}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Expiry Date *</label>
-                  <input
-                    type="date"
-                    value={expiryFormData.expiry_date}
-                    onChange={(e) => setExpiryFormData({ ...expiryFormData, expiry_date: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                  <input
-                    type="text"
-                    value={expiryFormData.description || ""}
-                    onChange={(e) => setExpiryFormData({ ...expiryFormData, description: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    placeholder="Optional description"
-                  />
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Alert Thresholds (Days Before Expiry)</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Warning Days</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="365"
-                      value={expiryFormData.warning_days_before}
-                      onChange={(e) => setExpiryFormData({ ...expiryFormData, warning_days_before: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Critical Days</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="365"
-                      value={expiryFormData.critical_days_before}
-                      onChange={(e) => setExpiryFormData({ ...expiryFormData, critical_days_before: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Notification Emails</label>
-                <div className="flex gap-2 mb-2">
-                  <input
-                    type="email"
-                    value={emailInput}
-                    onChange={(e) => setEmailInput(e.target.value)}
-                    placeholder="Enter email and press Add"
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (emailInput && !expiryFormData.notification_emails?.includes(emailInput)) {
-                        setExpiryFormData({
-                          ...expiryFormData,
-                          notification_emails: [...(expiryFormData.notification_emails || []), emailInput],
-                        });
-                        setEmailInput("");
-                      }
-                    }}
-                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
-                  >
-                    Add
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {expiryFormData.notification_emails?.map((email, idx) => (
-                    <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm flex items-center gap-1">
-                      {email}
-                      <button
-                        type="button"
-                        onClick={() => setExpiryFormData({
-                          ...expiryFormData,
-                          notification_emails: expiryFormData.notification_emails?.filter((_, i) => i !== idx),
-                        })}
-                        className="text-blue-500 hover:text-blue-700"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddExpiryConfig(false);
-                    setEditingExpiryConfig(null);
-                    resetExpiryForm();
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={createExpiryConfigMutation.isPending || updateExpiryConfigMutation.isPending}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {createExpiryConfigMutation.isPending || updateExpiryConfigMutation.isPending ? "Saving..." : "Save Configuration"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Storage Config Modal */}
-      {showAddStorageConfig && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
-              {editingStorageConfig ? "Edit Storage Alert Config" : "Add Storage Alert Config"}
-            </h3>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (editingStorageConfig) {
-                  updateStorageConfigMut.mutate(
-                    { configId: editingStorageConfig.id, data: storageFormData as any },
-                    {
-                      onSuccess: () => {
-                        showToast("Storage config updated successfully");
-                        setShowAddStorageConfig(false);
-                        setEditingStorageConfig(null);
-                        resetStorageForm();
-                      },
-                      onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to update storage config", "error"),
-                    }
-                  );
-                } else {
-                  createStorageConfigMut.mutate(storageFormData, {
-                    onSuccess: () => {
-                      showToast("Storage config created successfully");
-                      setShowAddStorageConfig(false);
-                      resetStorageForm();
-                    },
-                    onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to create storage config", "error"),
-                  });
-                }
-              }}
-            >
-              <div className="space-y-4 mb-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Storage Account *</label>
-                  <select
-                    value={storageFormData.account_name}
-                    onChange={(e) => {
-                      const selected = storageAccounts.find((sa) => sa.name === e.target.value);
-                      if (selected) {
-                        setStorageFormData({
-                          ...storageFormData,
-                          account_name: selected.name,
-                          account_id: selected.id || "",
-                          resource_group: selected.resource_group || "",
-                          subscription_id: selected.subscription_id || "",
-                        });
-                      }
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    required
-                    disabled={!!editingStorageConfig}
-                  >
-                    <option value="">Select a Storage Account</option>
-                    {storageAccounts.map((sa) => (
-                      <option key={sa.id || sa.name} value={sa.name}>
-                        {sa.name} ({sa.resource_group})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Capacity Thresholds (GB)</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Warning</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={storageFormData.capacity_warning_gb}
-                      onChange={(e) => setStorageFormData({ ...storageFormData, capacity_warning_gb: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Critical</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={storageFormData.capacity_critical_gb}
-                      onChange={(e) => setStorageFormData({ ...storageFormData, capacity_critical_gb: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Transaction Thresholds</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Warning</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={storageFormData.transactions_warning}
-                      onChange={(e) => setStorageFormData({ ...storageFormData, transactions_warning: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Critical</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={storageFormData.transactions_critical}
-                      onChange={(e) => setStorageFormData({ ...storageFormData, transactions_critical: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Egress Thresholds (GB)</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Warning</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={storageFormData.egress_warning_gb}
-                      onChange={(e) => setStorageFormData({ ...storageFormData, egress_warning_gb: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Critical</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={storageFormData.egress_critical_gb}
-                      onChange={(e) => setStorageFormData({ ...storageFormData, egress_critical_gb: Number(e.target.value) })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-200 pt-4 mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Notification Emails</label>
-                <div className="flex gap-2 mb-2">
-                  <input
-                    type="email"
-                    value={emailInput}
-                    onChange={(e) => setEmailInput(e.target.value)}
-                    placeholder="Enter email and press Add"
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (emailInput && !storageFormData.notification_emails?.includes(emailInput)) {
-                        setStorageFormData({
-                          ...storageFormData,
-                          notification_emails: [...(storageFormData.notification_emails || []), emailInput],
-                        });
-                        setEmailInput("");
-                      }
-                    }}
-                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
-                  >
-                    Add
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {storageFormData.notification_emails?.map((email, idx) => (
-                    <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm flex items-center gap-1">
-                      {email}
-                      <button
-                        type="button"
-                        onClick={() => setStorageFormData({
-                          ...storageFormData,
-                          notification_emails: storageFormData.notification_emails?.filter((_, i) => i !== idx),
-                        })}
-                        className="text-blue-500 hover:text-blue-700"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddStorageConfig(false);
-                    setEditingStorageConfig(null);
-                    resetStorageForm();
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={createStorageConfigMut.isPending || updateStorageConfigMut.isPending}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {createStorageConfigMut.isPending || updateStorageConfigMut.isPending ? "Saving..." : "Save Configuration"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* PG Flex Server Config Modal */}
-      {showAddPGConfig && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
-              {editingPGConfig ? "Edit PG Flex Server Config" : "Add PG Flex Server Config"}
-            </h3>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (editingPGConfig) {
-                  updatePGConfigMut.mutate(
-                    { configId: editingPGConfig.id, data: pgFormData as any },
-                    {
-                      onSuccess: () => {
-                        showToast("PG config updated successfully");
-                        setShowAddPGConfig(false);
-                        setEditingPGConfig(null);
-                        resetPGForm();
-                      },
-                      onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to update PG config", "error"),
-                    },
-                  );
-                } else {
-                  createPGConfigMut.mutate(pgFormData as any, {
-                    onSuccess: () => {
-                      showToast("PG config created successfully");
-                      setShowAddPGConfig(false);
-                      resetPGForm();
-                    },
-                    onError: (e: any) => showToast(e?.response?.data?.detail || "Failed to create PG config", "error"),
-                  });
-                }
-              }}
-              className="space-y-4"
-            >
-              {/* PG Server Selector */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Server</label>
-                <select
-                  value={pgFormData.server_id}
-                  onChange={(e) => {
-                    const server = pgServers.find((s) => s.id === e.target.value);
-                    if (server) {
-                      setPgFormData((prev) => ({
-                        ...prev,
-                        server_id: server.id || "",
-                        server_name: server.name || "",
-                        subscription_id: server.subscription_id || "",
-                        resource_group: server.resource_group || "",
-                      }));
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                  required
-                >
-                  <option value="">Select a PG Flex Server</option>
-                  {pgServers.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name} ({s.resource_group})</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* CPU Thresholds */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">CPU Warning %</label>
-                  <input type="number" min={0} max={100} value={pgFormData.cpu_warning_threshold}
-                    onChange={(e) => setPgFormData((p) => ({ ...p, cpu_warning_threshold: +e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg" required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">CPU Critical %</label>
-                  <input type="number" min={0} max={100} value={pgFormData.cpu_critical_threshold}
-                    onChange={(e) => setPgFormData((p) => ({ ...p, cpu_critical_threshold: +e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg" required />
-                </div>
-              </div>
-
-              {/* Memory Thresholds */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Memory Warning %</label>
-                  <input type="number" min={0} max={100} value={pgFormData.memory_warning_threshold}
-                    onChange={(e) => setPgFormData((p) => ({ ...p, memory_warning_threshold: +e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg" required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Memory Critical %</label>
-                  <input type="number" min={0} max={100} value={pgFormData.memory_critical_threshold}
-                    onChange={(e) => setPgFormData((p) => ({ ...p, memory_critical_threshold: +e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg" required />
-                </div>
-              </div>
-
-              {/* Storage Thresholds */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Storage Warning %</label>
-                  <input type="number" min={0} max={100} value={pgFormData.storage_warning_threshold}
-                    onChange={(e) => setPgFormData((p) => ({ ...p, storage_warning_threshold: +e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg" required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Storage Critical %</label>
-                  <input type="number" min={0} max={100} value={pgFormData.storage_critical_threshold}
-                    onChange={(e) => setPgFormData((p) => ({ ...p, storage_critical_threshold: +e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg" required />
-                </div>
-              </div>
-
-              {/* Notification Emails */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notification Emails</label>
-                <div className="flex gap-2">
-                  <input
-                    type="email"
-                    value={emailInput}
-                    onChange={(e) => setEmailInput(e.target.value)}
-                    placeholder="Add email..."
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        if (emailInput.trim()) {
-                          setPgFormData((p) => ({
-                            ...p,
-                            notification_emails: [...(p.notification_emails || []), emailInput.trim()],
-                          }));
-                          setEmailInput("");
-                        }
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (emailInput.trim()) {
-                        setPgFormData((p) => ({
-                          ...p,
-                          notification_emails: [...(p.notification_emails || []), emailInput.trim()],
-                        }));
-                        setEmailInput("");
-                      }
-                    }}
-                    className="px-3 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
-                  >
-                    Add
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {(pgFormData.notification_emails || []).map((email, idx) => (
-                    <span key={idx} className="flex items-center gap-1 px-2 py-1 bg-purple-50 text-purple-700 rounded-full text-sm">
-                      {email}
-                      <button
-                        type="button"
-                        onClick={() => setPgFormData((p) => ({
-                          ...p,
-                          notification_emails: (p.notification_emails || []).filter((_, i) => i !== idx),
-                        }))}
-                        className="text-purple-500 hover:text-purple-700"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddPGConfig(false);
-                    setEditingPGConfig(null);
-                    resetPGForm();
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={createPGConfigMut.isPending || updatePGConfigMut.isPending}
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
-                >
-                  {createPGConfigMut.isPending || updatePGConfigMut.isPending ? "Saving..." : "Save Configuration"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {detail && (
+        <InfraAlertDetailHost
+          target={detail}
+          onOpen={setDetail}
+          onClose={closeDetail}
+          onEditConfig={setEditor}
+          onEditSchedule={(schedule) => {
+            setDetail(null);
+            setActiveTab("scheduler");
+            openEditAlertScheduleEditor(schedule);
+          }}
+          onDeleteConfig={requestDeleteConfig}
+          onDeleteSchedule={requestDeleteSchedule}
+          onPower={runPower}
+          powerPendingKey={powerPendingKey}
+          onToast={showToast}
+          canWrite={canWrite}
+          canPowerVM={canPowerVM}
+          canPowerPG={canPowerPG}
+          subscriptionNames={subNameMap}
+          formatDate={formatDate}
+        />
       )}
 
       {confirmDialog && (
@@ -2880,73 +2039,6 @@ const InfraAlertPage: React.FC = () => {
       )}
     </div>
   );
-
-  // Form reset helpers
-  function resetVMForm() {
-    setVmFormData({
-      subscription_id: "",
-      resource_group: "",
-      vm_name: "",
-      vm_id: "",
-      cpu_warning_threshold: 80,
-      cpu_critical_threshold: 90,
-      memory_warning_threshold: 80,
-      memory_critical_threshold: 90,
-      disk_warning_threshold: 80,
-      disk_critical_threshold: 90,
-      notification_emails: [],
-    });
-    setEmailInput("");
-  }
-
-  function resetExpiryForm() {
-    setExpiryFormData({
-      alert_type: "certificate",
-      resource_name: "",
-      resource_identifier: "",
-      expiry_date: "",
-      description: "",
-      environment: "non_prod",
-      warning_days_before: 30,
-      critical_days_before: 7,
-      notification_emails: [],
-    });
-    setEmailInput("");
-  }
-
-  function resetStorageForm() {
-    setStorageFormData({
-      subscription_id: "",
-      resource_group: "",
-      account_name: "",
-      account_id: "",
-      capacity_warning_gb: 100,
-      capacity_critical_gb: 500,
-      transactions_warning: 100000,
-      transactions_critical: 500000,
-      egress_warning_gb: 50,
-      egress_critical_gb: 200,
-      notification_emails: [],
-    });
-    setEmailInput("");
-  }
-
-  function resetPGForm() {
-    setPgFormData({
-      subscription_id: "",
-      resource_group: "",
-      server_name: "",
-      server_id: "",
-      cpu_warning_threshold: 70,
-      cpu_critical_threshold: 90,
-      memory_warning_threshold: 75,
-      memory_critical_threshold: 90,
-      storage_warning_threshold: 80,
-      storage_critical_threshold: 95,
-      notification_emails: [],
-    });
-    setEmailInput("");
-  }
 
   // ── Resources Tab ───────────────────────────────────────────────────
 
@@ -3099,9 +2191,17 @@ const InfraAlertPage: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {pagedVMs.map((vm) => (
-                <tr key={vm.id} className={gridStyles.row}>
-                  <td className={gridStyles.strongCell}>{vm.name}</td>
+              {pagedVMs.map((vm) => {
+                const open = clickableRow(() => setDetail({ kind: "vm", id: vm.id }), `Open ${vm.name}`);
+                const target = { name: vm.name, resource_group: vm.resource_group || "", subscription_id: vm.subscription_id };
+                const busy = powerPendingKey === `vm:${vm.subscription_id}:${vm.name}`;
+                const configured = vmConfigs.some((c) => c.vm_id.toLowerCase() === vm.id.toLowerCase());
+                return (
+                <tr key={vm.id} {...open} className={`${gridStyles.row} ${open.className}`}>
+                  <td className={gridStyles.strongCell}>
+                    {vm.name}
+                    {configured && <span className="ml-2 rounded bg-att-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-att-700 ring-1 ring-att-200">Monitored</span>}
+                  </td>
                   <td className={gridStyles.cell}>{vm.resource_group}</td>
                   <td className={gridStyles.cell}>{vm.location}</td>
                   <td className={gridStyles.cell}>{vm.vm_size}</td>
@@ -3117,70 +2217,28 @@ const InfraAlertPage: React.FC = () => {
                   </td>
                   <td className={gridStyles.centerCell}>
                     <div className="flex justify-center gap-1">
-                      {canWrite && vm.power_state !== "running" && (
-                        <GridActionButton
-                          onClick={() => {
-                            setVMActionTarget(vm.name);
-                            startVMMut.mutate(
-                              { resource_group: vm.resource_group, vm_name: vm.name },
-                              {
-                                onSuccess: () => { showToast(`VM '${vm.name}' started successfully`); syncResources.mutate("vms"); },
-                                onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to start VM '${vm.name}'`, "error"),
-                                onSettled: () => setVMActionTarget(null),
-                              },
-                            );
-                          }}
-                          disabled={vmActionTarget === vm.name}
-                          title="Start VM"
-                          tone="green"
-                        >
-                          {vmActionTarget === vm.name && startVMMut.isPending ? Icons.refresh("animate-spin") : Icons.play()}
+                      {busy && Icons.refresh("animate-spin text-att-600")}
+                      {canPowerVM && !busy && vm.power_state !== "running" && (
+                        <GridActionButton onClick={() => runPower("vm", "start", target)} title="Start VM" tone="green">
+                          {Icons.play()}
                         </GridActionButton>
                       )}
-                      {canWrite && vm.power_state === "running" && (
+                      {canPowerVM && !busy && vm.power_state === "running" && (
                         <>
-                          <GridActionButton
-                            onClick={() => {
-                              setVMActionTarget(vm.name);
-                              stopVMMut.mutate(
-                                { resource_group: vm.resource_group, vm_name: vm.name },
-                                {
-                                  onSuccess: () => { showToast(`VM '${vm.name}' stopped (deallocated) successfully`); syncResources.mutate("vms"); },
-                                  onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to stop VM '${vm.name}'`, "error"),
-                                  onSettled: () => setVMActionTarget(null),
-                                },
-                              );
-                            }}
-                            disabled={vmActionTarget === vm.name}
-                            title="Stop (Deallocate) VM"
-                            tone="red"
-                          >
-                            {vmActionTarget === vm.name && stopVMMut.isPending ? Icons.refresh("animate-spin") : Icons.stop()}
+                          <GridActionButton onClick={() => runPower("vm", "stop", target)} title="Stop (deallocate) VM" tone="red">
+                            {Icons.stop()}
                           </GridActionButton>
-                          <GridActionButton
-                            onClick={() => {
-                              setVMActionTarget(vm.name);
-                              restartVMMut.mutate(
-                                { resource_group: vm.resource_group, vm_name: vm.name },
-                                {
-                                  onSuccess: () => { showToast(`VM '${vm.name}' restarted successfully`); syncResources.mutate("vms"); },
-                                  onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to restart VM '${vm.name}'`, "error"),
-                                  onSettled: () => setVMActionTarget(null),
-                                },
-                              );
-                            }}
-                            disabled={vmActionTarget === vm.name}
-                            title="Restart VM"
-                            tone="orange"
-                          >
-                            {vmActionTarget === vm.name && restartVMMut.isPending ? Icons.refresh("animate-spin") : Icons.restart()}
+                          <GridActionButton onClick={() => runPower("vm", "restart", target)} title="Restart VM" tone="orange">
+                            {Icons.restart()}
                           </GridActionButton>
                         </>
                       )}
+                      {!canPowerVM && <span className="text-xs text-gray-400">View</span>}
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           {totalVMs === 0 && (
@@ -3224,8 +2282,12 @@ const InfraAlertPage: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {pagedPGServers.map((server) => (
-                      <tr key={server.id} className={gridStyles.row}>
+                    {pagedPGServers.map((server) => {
+                      const open = clickableRow(() => setDetail({ kind: "pg-server", id: server.id }), `Open ${server.name}`);
+                      const target = { name: server.name, resource_group: server.resource_group, subscription_id: server.subscription_id };
+                      const busy = powerPendingKey === `pg:${server.subscription_id}:${server.name}`;
+                      return (
+                      <tr key={server.id} {...open} className={`${gridStyles.row} ${open.className}`}>
                         <td className={gridStyles.strongCell}>{server.name}</td>
                         <td className={gridStyles.cell}>{server.resource_group}</td>
                         <td className={gridStyles.cell}>{server.location}</td>
@@ -3240,70 +2302,28 @@ const InfraAlertPage: React.FC = () => {
                         <td className={gridStyles.cell}>{server.sku_name || "—"}</td>
                         <td className={gridStyles.centerCell}>
                           <div className="flex justify-center gap-1">
-                            {canWrite && server.state === "Stopped" && (
-                              <GridActionButton
-                                onClick={() => {
-                                  setPGActionTarget(server.name);
-                                  startPGServerMut.mutate(
-                                    { resource_group: server.resource_group, server_name: server.name },
-                                    {
-                                      onSuccess: () => { showToast(`PG Server '${server.name}' started successfully`); syncResources.mutate("pg-servers"); },
-                                      onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to start PG Server '${server.name}'`, "error"),
-                                      onSettled: () => setPGActionTarget(null),
-                                    },
-                                  );
-                                }}
-                                disabled={pgActionTarget === server.name}
-                                title="Start PG Server"
-                                tone="green"
-                              >
-                                {pgActionTarget === server.name && startPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.play()}
+                            {busy && Icons.refresh("animate-spin text-att-600")}
+                            {canPowerPG && !busy && server.state === "Stopped" && (
+                              <GridActionButton onClick={() => runPower("pg", "start", target)} title="Start PG Server" tone="green">
+                                {Icons.play()}
                               </GridActionButton>
                             )}
-                            {canWrite && server.state === "Ready" && (
+                            {canPowerPG && !busy && server.state === "Ready" && (
                               <>
-                                <GridActionButton
-                                  onClick={() => {
-                                    setPGActionTarget(server.name);
-                                    stopPGServerMut.mutate(
-                                      { resource_group: server.resource_group, server_name: server.name },
-                                      {
-                                        onSuccess: () => { showToast(`PG Server '${server.name}' stopped successfully`); syncResources.mutate("pg-servers"); },
-                                        onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to stop PG Server '${server.name}'`, "error"),
-                                        onSettled: () => setPGActionTarget(null),
-                                      },
-                                    );
-                                  }}
-                                  disabled={pgActionTarget === server.name}
-                                  title="Stop PG Server"
-                                  tone="red"
-                                >
-                                  {pgActionTarget === server.name && stopPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.stop()}
+                                <GridActionButton onClick={() => runPower("pg", "stop", target)} title="Stop PG Server" tone="red">
+                                  {Icons.stop()}
                                 </GridActionButton>
-                                <GridActionButton
-                                  onClick={() => {
-                                    setPGActionTarget(server.name);
-                                    restartPGServerMut.mutate(
-                                      { resource_group: server.resource_group, server_name: server.name },
-                                      {
-                                        onSuccess: () => { showToast(`PG Server '${server.name}' restarted successfully`); syncResources.mutate("pg-servers"); },
-                                        onError: (e: any) => showToast(e?.response?.data?.detail || `Failed to restart PG Server '${server.name}'`, "error"),
-                                        onSettled: () => setPGActionTarget(null),
-                                      },
-                                    );
-                                  }}
-                                  disabled={pgActionTarget === server.name}
-                                  title="Restart PG Server"
-                                  tone="orange"
-                                >
-                                  {pgActionTarget === server.name && restartPGServerMut.isPending ? Icons.refresh("animate-spin") : Icons.restart()}
+                                <GridActionButton onClick={() => runPower("pg", "restart", target)} title="Restart PG Server" tone="orange">
+                                  {Icons.restart()}
                                 </GridActionButton>
                               </>
                             )}
+                            {!canPowerPG && <span className="text-xs text-gray-400">View</span>}
                           </div>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
                 {totalPGServers === 0 && (
@@ -3335,7 +2355,7 @@ const InfraAlertPage: React.FC = () => {
             </thead>
             <tbody>
               {pagedSA.map((sa) => (
-                <tr key={sa.id} className={gridStyles.row}>
+                <tr key={sa.id} {...clickableRow(() => setDetail({ kind: "storage-account", id: sa.id }), `Open ${sa.name}`)} className={`${gridStyles.row} cursor-pointer focus:outline-none focus-visible:bg-att-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-att-300`}>
                   <td className={gridStyles.strongCell}>{sa.name}</td>
                   <td className={gridStyles.cell}>{sa.resource_group}</td>
                   <td className={gridStyles.cell}>{sa.location}</td>
@@ -3388,7 +2408,7 @@ const InfraAlertPage: React.FC = () => {
                     // Color: <50% green, 50-80% blue, >80% red-orange
                     const barColor = pct > 80 ? "#ef4444" : pct > 50 ? "#3b82f6" : "#22c55e";
                     return (
-                      <tr key={disk.id} className={gridStyles.row}>
+                      <tr key={disk.id} {...clickableRow(() => setDetail({ kind: "disk", id: disk.id }), `Open ${disk.name}`)} className={`${gridStyles.row} cursor-pointer focus:outline-none focus-visible:bg-att-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-att-300`}>
                         <td className={gridStyles.strongCell} title={disk.name}>{disk.name && disk.name.length > 30 ? disk.name.slice(0, 30) + "..." : disk.name}</td>
                         <td className={gridStyles.cell} title={disk.resource_group}>{disk.resource_group && disk.resource_group.length > 35 ? disk.resource_group.slice(0, 35) + "..." : disk.resource_group}</td>
                         <td className={gridStyles.cell}>{disk.location}</td>
@@ -3607,8 +2627,7 @@ const InfraAlertPage: React.FC = () => {
             showToast(`Schedule \"${payload.name}\" updated`);
             resetAlertScheduleEditor();
           },
-          onError: (error: any) =>
-            showToast(error?.response?.data?.detail || "Failed to update schedule", "error"),
+          onError: (error: unknown) => toastError(error, "Failed to update schedule"),
         },
       );
       return;
@@ -3619,8 +2638,7 @@ const InfraAlertPage: React.FC = () => {
         showToast(`Schedule \"${payload.name}\" created`);
         resetAlertScheduleEditor();
       },
-      onError: (error: any) =>
-        showToast(error?.response?.data?.detail || "Failed to create schedule", "error"),
+      onError: (error: unknown) => toastError(error, "Failed to create schedule"),
     });
   }
 
@@ -3772,26 +2790,50 @@ const InfraAlertPage: React.FC = () => {
                           cron_expression: event.target.value,
                         }))
                       }
-                      className={`${gridStyles.toolbarInput} w-full`}
-                      placeholder="0 */2 * * *"
+                      className={`${gridStyles.toolbarInput} w-full font-mono`}
+                      placeholder="0 8 * * *"
                     />
+                    <span className="flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+                      <span>Standard 5-field cron, UTC.</span>
+                      {[
+                        ["Daily 08:00", "0 8 * * *"],
+                        ["Weekdays 08:00", "0 8 * * 1-5"],
+                        ["Every 2 hours", "0 */2 * * *"],
+                        ["Hourly", "0 * * * *"],
+                      ].map(([label, expression]) => (
+                        <button
+                          key={expression}
+                          type="button"
+                          onClick={() => setAlertScheduleFormData((prev) => ({ ...prev, cron_expression: expression }))}
+                          className="rounded-full border border-att-200 bg-white px-2 py-0.5 font-medium text-gray-600 hover:bg-att-50"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </span>
                   </label>
                 )}
 
-                <label className="space-y-2 text-sm text-gray-700">
-                  <span className="font-medium text-gray-800">Digest Time (UTC)</span>
-                  <input
-                    type="time"
-                    value={alertScheduleFormData.digest_time_utc}
-                    onChange={(event) =>
-                      setAlertScheduleFormData((prev) => ({ ...prev, digest_time_utc: event.target.value }))
-                    }
-                    className={`${gridStyles.toolbarInput} w-full`}
-                  />
-                </label>
+                {alertScheduleFormData.schedule_type === "interval" && alertScheduleFormData.send_daily_digest && (
+                  <label className="space-y-2 text-sm text-gray-700">
+                    <span className="font-medium text-gray-800">Digest Time (UTC)</span>
+                    <input
+                      type="time"
+                      value={alertScheduleFormData.digest_time_utc}
+                      onChange={(event) =>
+                        setAlertScheduleFormData((prev) => ({ ...prev, digest_time_utc: event.target.value }))
+                      }
+                      className={`${gridStyles.toolbarInput} w-full`}
+                    />
+                    <span className="block text-xs text-gray-500">Sent once a day, on the first run at or after this time.</span>
+                  </label>
+                )}
 
                 <label className="space-y-2 text-sm text-gray-700 md:col-span-2 xl:col-span-4">
-                  <span className="font-medium text-gray-800">Digest Recipients</span>
+                  <span className="font-medium text-gray-800">
+                    Digest Recipients{" "}
+                    <span className="font-normal text-gray-500">— empty sends the digest to every alert configuration's recipients</span>
+                  </span>
                   <textarea
                     value={alertScheduleRecipientsInput}
                     onChange={(event) => setAlertScheduleRecipientsInput(event.target.value)}
@@ -3803,31 +2845,40 @@ const InfraAlertPage: React.FC = () => {
 
               <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {[
-                  { key: "check_vm_thresholds", label: "Run VM threshold checks" },
-                  { key: "check_pg_thresholds", label: "Run PG threshold checks" },
-                  { key: "check_expiry_alerts", label: "Run expiry checks" },
-                  { key: "check_storage_thresholds", label: "Run storage checks" },
-                  { key: "check_disk_thresholds", label: "Run disk checks" },
-                  { key: "send_daily_digest", label: "Include daily digest" },
-                ].map((item) => (
-                  <label
-                    key={item.key}
-                    className="flex items-center gap-3 rounded-xl border border-att-100 bg-white px-4 py-3 text-sm text-gray-700"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={Boolean(alertScheduleFormData[item.key as keyof CreateAlertScheduleConfigRequest])}
-                      onChange={(event) =>
-                        setAlertScheduleFormData((prev) => ({
-                          ...prev,
-                          [item.key]: event.target.checked,
-                        }))
-                      }
-                      className="h-4 w-4 rounded border-att-300 text-att-600 focus:ring-att-500"
-                    />
-                    <span>{item.label}</span>
-                  </label>
-                ))}
+                  { key: "check_vm_thresholds", label: "Run VM threshold checks", hint: "CPU, memory and disk I/O from Azure Monitor" },
+                  { key: "check_pg_thresholds", label: "Run PG threshold checks", hint: "CPU, memory and storage" },
+                  { key: "check_expiry_alerts", label: "Run expiry checks", hint: "Raise, escalate and auto-resolve expiry alerts" },
+                  { key: "send_daily_digest", label: "Send daily digest", hint: "At most once per day per schedule" },
+                  { key: "check_storage_thresholds", label: "Run storage checks", hint: "Not evaluated yet", unsupported: true },
+                  { key: "check_disk_thresholds", label: "Run disk checks", hint: "Not evaluated yet", unsupported: true },
+                ].map((item) => {
+                  const checked = Boolean(alertScheduleFormData[item.key as keyof CreateAlertScheduleConfigRequest]);
+                  // A check that is already on stays editable so it can be switched off.
+                  const locked = item.unsupported && !checked;
+                  return (
+                    <label
+                      key={item.key}
+                      className={`flex items-start gap-3 rounded-xl border border-att-100 bg-white px-4 py-3 text-sm text-gray-700 ${locked ? "opacity-60" : "cursor-pointer"}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={locked}
+                        onChange={(event) =>
+                          setAlertScheduleFormData((prev) => ({
+                            ...prev,
+                            [item.key]: event.target.checked,
+                          }))
+                        }
+                        className="mt-0.5 h-4 w-4 rounded border-att-300 text-att-600 focus:ring-att-500"
+                      />
+                      <span>
+                        <span className="block font-medium text-gray-800">{item.label}</span>
+                        <span className={`block text-xs ${item.unsupported ? "text-amber-700" : "text-gray-500"}`}>{item.hint}</span>
+                      </span>
+                    </label>
+                  );
+                })}
               </div>
 
               <div className="mt-5 flex items-center justify-end gap-3">
@@ -3909,13 +2960,14 @@ const InfraAlertPage: React.FC = () => {
                     schedule.check_vm_thresholds ? "VM" : null,
                     schedule.check_pg_thresholds ? "PG" : null,
                     schedule.check_expiry_alerts ? "Expiry" : null,
-                    schedule.check_storage_thresholds ? "Storage" : null,
-                    schedule.check_disk_thresholds ? "Disk" : null,
+                    schedule.check_storage_thresholds ? "Storage (not evaluated)" : null,
+                    schedule.check_disk_thresholds ? "Disk (not evaluated)" : null,
                     schedule.send_daily_digest ? "Digest" : null,
                   ].filter(Boolean);
 
+                  const open = clickableRow(() => setDetail({ kind: "schedule", id: schedule.id }), `Open schedule ${schedule.name}`);
                   return (
-                    <tr key={schedule.id} className={gridStyles.row}>
+                    <tr key={schedule.id} {...open} className={`${gridStyles.row} ${open.className}`}>
                       <td className={gridStyles.strongCell}>
                         <div>
                           <div>{schedule.name}</div>
@@ -3925,9 +2977,8 @@ const InfraAlertPage: React.FC = () => {
                         </div>
                       </td>
                       <td className={gridStyles.cell}>
-                        {schedule.schedule_type === "interval"
-                          ? `Every ${schedule.interval_minutes} min`
-                          : schedule.cron_expression || "Cron"}
+                        <div>{describeSchedule(schedule.schedule_type, schedule.interval_minutes, schedule.cron_expression)}</div>
+                        {schedule.schedule_type === "cron" && <div className="font-mono text-xs text-gray-400">{schedule.cron_expression}</div>}
                       </td>
                       <td className={gridStyles.cell}>{enabledChecks.join(", ") || "No checks selected"}</td>
                       <td className={gridStyles.cell}>
@@ -3940,11 +2991,10 @@ const InfraAlertPage: React.FC = () => {
                         </span>
                       </td>
                       <td className={gridStyles.cell}>
-                        {schedule.next_run_at
-                          ? formatDate(schedule.next_run_at)
-                          : schedule.send_daily_digest
-                            ? `Digest at ${schedule.digest_time_utc} UTC`
-                            : "Not scheduled"}
+                        <div>{schedule.next_run_at ? formatDate(schedule.next_run_at) : schedule.is_enabled ? "Scheduling…" : "Paused"}</div>
+                        <div className="text-xs text-gray-400">
+                          {schedule.last_run_at ? `Last run ${formatRelativeTime(schedule.last_run_at)}` : "Not run yet"}
+                        </div>
                       </td>
                       <td className={gridStyles.centerCell}>
                         <div className="flex items-center justify-center gap-1">
@@ -3959,13 +3009,7 @@ const InfraAlertPage: React.FC = () => {
                           )}
                           {canWrite && (
                           <GridActionButton
-                            onClick={() =>
-                              deleteAlertScheduleMut.mutate(schedule.id, {
-                                onSuccess: () => showToast(`Schedule \"${schedule.name}\" deleted`),
-                                onError: (error: any) =>
-                                  showToast(error?.response?.data?.detail || "Failed to delete schedule", "error"),
-                              })
-                            }
+                            onClick={() => requestDeleteSchedule(schedule)}
                             disabled={deleteAlertScheduleMut.isPending}
                             title="Delete Schedule"
                             tone="red"
@@ -4040,8 +3084,8 @@ const InfraAlertPage: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
             <ActionTileButton
               onClick={() => triggerVMCheck.mutate(undefined, {
-                onSuccess: () => showToast("VM check completed"),
-                onError: (e: any) => showToast(e?.response?.data?.detail || "VM check failed", "error"),
+                onSuccess: (result) => showToast(checkSummary("VM", result as unknown as Record<string, unknown>)),
+                onError: (e: unknown) => toastError(e, "VM check failed"),
               })}
               disabled={triggerVMCheck.isPending}
               tone="blue"
@@ -4050,8 +3094,8 @@ const InfraAlertPage: React.FC = () => {
             />
             <ActionTileButton
               onClick={() => triggerPGCheck.mutate(undefined, {
-                onSuccess: () => showToast("PG check completed"),
-                onError: (e: any) => showToast(e?.response?.data?.detail || "PG check failed", "error"),
+                onSuccess: (result) => showToast(checkSummary("PG", result as unknown as Record<string, unknown>)),
+                onError: (e: unknown) => toastError(e, "PG check failed"),
               })}
               disabled={triggerPGCheck.isPending}
               tone="purple"
@@ -4060,8 +3104,8 @@ const InfraAlertPage: React.FC = () => {
             />
             <ActionTileButton
               onClick={() => triggerExpiryCheck.mutate(undefined, {
-                onSuccess: () => showToast("Expiry check completed"),
-                onError: (e: any) => showToast(e?.response?.data?.detail || "Expiry check failed", "error"),
+                onSuccess: (result) => showToast(checkSummary("Expiry", result as unknown as Record<string, unknown>)),
+                onError: (e: unknown) => toastError(e, "Expiry check failed"),
               })}
               disabled={triggerExpiryCheck.isPending}
               tone="orange"
@@ -4128,7 +3172,10 @@ const InfraAlertPage: React.FC = () => {
         {/* Notification History */}
         <div className={gridStyles.shell}>
           <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-800">Notification History</h3>
+            <div>
+              <h3 className="text-lg font-semibold text-gray-800">Notification History</h3>
+              <p className="text-sm text-gray-500">Infra alert emails only — the 100 most recent. Click a row for delivery details.</p>
+            </div>
             <SearchBar value={tbl("notifHistory").search} onChange={(v) => setTblSearch("notifHistory", v)} placeholder="Search notifications..." />
           </div>
           {(() => {
@@ -4158,7 +3205,11 @@ const InfraAlertPage: React.FC = () => {
                   </thead>
                   <tbody>
                     {pagedNotifs.map((notification) => (
-                      <tr key={notification.id} className={gridStyles.row}>
+                      <tr
+                        key={notification.id}
+                        {...clickableRow(() => setDetail({ kind: "notification", id: notification.id, snapshot: notification }), `Open notification to ${notification.recipient_email}`)}
+                        className={`${gridStyles.row} cursor-pointer focus:outline-none focus-visible:bg-att-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-att-300`}
+                      >
                         <td className={gridStyles.strongCell}>
                           {getNotificationTypeLabel(notification.notification_type)}
                         </td>
@@ -4173,7 +3224,7 @@ const InfraAlertPage: React.FC = () => {
                             {notification.status}
                           </span>
                         </td>
-                        <td className={gridStyles.cell}>
+                        <td className={gridStyles.cell} title={notification.sent_at ? formatDate(notification.sent_at) : undefined}>
                           {notification.sent_at ? formatRelativeTime(notification.sent_at) : "Pending"}
                         </td>
                       </tr>

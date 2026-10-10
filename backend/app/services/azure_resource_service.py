@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -303,141 +303,177 @@ class AzureResourceService:
             logger.error("get_vm_details_failed", vm=vm_name, error=str(e))
             return None
 
-    # ── VM Power Management ──────────────────────────────────────────────
+    # ── VM / PG Power Management ─────────────────────────────────────────
 
-    async def start_vm(self, resource_group: str, vm_name: str) -> dict[str, Any]:
+    def _pg_client_for_subscription(self, subscription_id: str):
+        if not _pg_flex_available:
+            raise RuntimeError("azure-mgmt-rdbms package not installed. Run: uv add azure-mgmt-rdbms")
+        return PostgreSQLFlexibleManagementClient(credential=self._get_credential(), subscription_id=subscription_id)
+
+    async def resolve_inventory_subscription(self, resource_type: str, resource_group: str, name: str) -> str:
+        """Subscription of a synced VM / PG server, for callers that only know its name.
+
+        Raises ``ValueError`` when the inventory has no match or several.
+        """
+        if self.db is None:
+            raise ValueError("Database unavailable — pass subscription_id explicitly.")
+        scoped = await self._resolve_scoped_subscription_ids()
+        rows = (
+            (
+                await self.db.execute(
+                    select(AzureResourceInventory.subscription_id).where(
+                        AzureResourceInventory.resource_type == resource_type,
+                        func.lower(AzureResourceInventory.name) == name.lower(),
+                        func.lower(AzureResourceInventory.resource_group) == resource_group.lower(),
+                        AzureResourceInventory.subscription_id.in_(scoped),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        found = sorted(set(rows))
+        if not found:
+            raise ValueError(
+                f"'{name}' in resource group '{resource_group}' is not in the synced inventory — "
+                "sync resources and retry."
+            )
+        if len(found) > 1:
+            raise ValueError(f"'{name}' exists in {len(found)} subscriptions — choose the subscription explicitly.")
+        return found[0]
+
+    async def _power_action(
+        self, kind: str, action: str, operation, resource_group: str, name: str, subscription_id: str
+    ) -> dict[str, Any]:
+        """Run a long-running Azure power operation to completion off the event loop."""
+        self._ensure_azure_available()
+        await asyncio.to_thread(lambda: operation().wait())
+        logger.info(
+            f"{kind}_{action}_completed", resource=name, resource_group=resource_group, subscription_id=subscription_id
+        )
+        name_key = "vm_name" if kind == "vm" else "server_name"
+        return {"status": "success", "action": action, name_key: name, "resource_group": resource_group}
+
+    async def start_vm(self, resource_group: str, vm_name: str, *, subscription_id: str) -> dict[str, Any]:
         """Start a virtual machine."""
-        try:
-            self._ensure_azure_available()
-            compute = self._get_compute_client()
+        compute = self._get_compute_client_for_subscription(subscription_id)
+        return await self._power_action(
+            "vm",
+            "start",
+            lambda: compute.virtual_machines.begin_start(resource_group, vm_name),
+            resource_group,
+            vm_name,
+            subscription_id,
+        )
 
-            def _start() -> None:
-                poller = compute.virtual_machines.begin_start(resource_group, vm_name)
-                poller.wait()
+    async def stop_vm(self, resource_group: str, vm_name: str, *, subscription_id: str) -> dict[str, Any]:
+        """Stop (deallocate) a virtual machine so compute is no longer billed."""
+        compute = self._get_compute_client_for_subscription(subscription_id)
+        return await self._power_action(
+            "vm",
+            "deallocate",
+            lambda: compute.virtual_machines.begin_deallocate(resource_group, vm_name),
+            resource_group,
+            vm_name,
+            subscription_id,
+        )
 
-            await asyncio.to_thread(_start)
-            logger.info("vm_started", vm=vm_name, resource_group=resource_group)
-            return {
-                "status": "success",
-                "action": "start",
-                "vm_name": vm_name,
-                "resource_group": resource_group,
-            }
-        except Exception as e:
-            logger.error("start_vm_failed", vm=vm_name, error=str(e))
-            raise
-
-    async def stop_vm(self, resource_group: str, vm_name: str) -> dict[str, Any]:
-        """Stop (deallocate) a virtual machine."""
-        try:
-            self._ensure_azure_available()
-            compute = self._get_compute_client()
-
-            def _deallocate() -> None:
-                poller = compute.virtual_machines.begin_deallocate(resource_group, vm_name)
-                poller.wait()
-
-            await asyncio.to_thread(_deallocate)
-            logger.info("vm_stopped", vm=vm_name, resource_group=resource_group)
-            return {
-                "status": "success",
-                "action": "deallocate",
-                "vm_name": vm_name,
-                "resource_group": resource_group,
-            }
-        except Exception as e:
-            logger.error("stop_vm_failed", vm=vm_name, error=str(e))
-            raise
-
-    async def restart_vm(self, resource_group: str, vm_name: str) -> dict[str, Any]:
+    async def restart_vm(self, resource_group: str, vm_name: str, *, subscription_id: str) -> dict[str, Any]:
         """Restart a virtual machine."""
-        try:
-            self._ensure_azure_available()
-            compute = self._get_compute_client()
+        compute = self._get_compute_client_for_subscription(subscription_id)
+        return await self._power_action(
+            "vm",
+            "restart",
+            lambda: compute.virtual_machines.begin_restart(resource_group, vm_name),
+            resource_group,
+            vm_name,
+            subscription_id,
+        )
 
-            def _restart() -> None:
-                poller = compute.virtual_machines.begin_restart(resource_group, vm_name)
-                poller.wait()
-
-            await asyncio.to_thread(_restart)
-            logger.info("vm_restarted", vm=vm_name, resource_group=resource_group)
-            return {
-                "status": "success",
-                "action": "restart",
-                "vm_name": vm_name,
-                "resource_group": resource_group,
-            }
-        except Exception as e:
-            logger.error("restart_vm_failed", vm=vm_name, error=str(e))
-            raise
-
-    # ── PG Flex Server Power Management ──────────────────────────────────
-
-    async def start_pg_server(self, resource_group: str, server_name: str) -> dict[str, Any]:
+    async def start_pg_server(self, resource_group: str, server_name: str, *, subscription_id: str) -> dict[str, Any]:
         """Start a PostgreSQL Flexible Server."""
-        try:
-            self._ensure_azure_available()
-            pg_client = self._get_pg_client()
+        pg_client = self._pg_client_for_subscription(subscription_id)
+        return await self._power_action(
+            "pg",
+            "start",
+            lambda: pg_client.servers.begin_start(resource_group, server_name),
+            resource_group,
+            server_name,
+            subscription_id,
+        )
 
-            def _start() -> None:
-                poller = pg_client.servers.begin_start(resource_group, server_name)
-                poller.wait()
-
-            await asyncio.to_thread(_start)
-            logger.info("pg_server_started", server=server_name, resource_group=resource_group)
-            return {
-                "status": "success",
-                "action": "start",
-                "server_name": server_name,
-                "resource_group": resource_group,
-            }
-        except Exception as e:
-            logger.error("start_pg_server_failed", server=server_name, error=str(e))
-            raise
-
-    async def stop_pg_server(self, resource_group: str, server_name: str) -> dict[str, Any]:
+    async def stop_pg_server(self, resource_group: str, server_name: str, *, subscription_id: str) -> dict[str, Any]:
         """Stop a PostgreSQL Flexible Server."""
-        try:
-            self._ensure_azure_available()
-            pg_client = self._get_pg_client()
+        pg_client = self._pg_client_for_subscription(subscription_id)
+        return await self._power_action(
+            "pg",
+            "stop",
+            lambda: pg_client.servers.begin_stop(resource_group, server_name),
+            resource_group,
+            server_name,
+            subscription_id,
+        )
 
-            def _stop() -> None:
-                poller = pg_client.servers.begin_stop(resource_group, server_name)
-                poller.wait()
-
-            await asyncio.to_thread(_stop)
-            logger.info("pg_server_stopped", server=server_name, resource_group=resource_group)
-            return {
-                "status": "success",
-                "action": "stop",
-                "server_name": server_name,
-                "resource_group": resource_group,
-            }
-        except Exception as e:
-            logger.error("stop_pg_server_failed", server=server_name, error=str(e))
-            raise
-
-    async def restart_pg_server(self, resource_group: str, server_name: str) -> dict[str, Any]:
+    async def restart_pg_server(self, resource_group: str, server_name: str, *, subscription_id: str) -> dict[str, Any]:
         """Restart a PostgreSQL Flexible Server."""
+        pg_client = self._pg_client_for_subscription(subscription_id)
+        return await self._power_action(
+            "pg",
+            "restart",
+            lambda: pg_client.servers.begin_restart(resource_group, server_name, None),
+            resource_group,
+            server_name,
+            subscription_id,
+        )
+
+    async def refresh_inventory_power_state(
+        self, resource_type: str, subscription_id: str, resource_group: str, name: str
+    ) -> str | None:
+        """Re-read one VM / PG server's state from Azure into its inventory row.
+
+        The grid used to trigger a full resync of every resource type after each
+        power action. Returns the new state, or ``None`` if it could not be read.
+        """
         try:
-            self._ensure_azure_available()
-            pg_client = self._get_pg_client()
-
-            def _restart() -> None:
-                poller = pg_client.servers.begin_restart(resource_group, server_name, None)
-                poller.wait()
-
-            await asyncio.to_thread(_restart)
-            logger.info("pg_server_restarted", server=server_name, resource_group=resource_group)
-            return {
-                "status": "success",
-                "action": "restart",
-                "server_name": server_name,
-                "resource_group": resource_group,
-            }
-        except Exception as e:
-            logger.error("restart_pg_server_failed", server=server_name, error=str(e))
-            raise
+            if resource_type == "virtual_machine":
+                detail = await self.get_vm_details(resource_group, name, subscription_id=subscription_id)
+                state = (detail or {}).get("power_state")
+                field = "power_state"
+            else:
+                pg_client = self._pg_client_for_subscription(subscription_id)
+                server = await asyncio.to_thread(pg_client.servers.get, resource_group, name)
+                state = str(server.state) if server.state else None
+                field = "state"
+            if state is None or self.db is None:
+                return state
+            rows = (
+                (
+                    await self.db.execute(
+                        select(AzureResourceInventory).where(
+                            AzureResourceInventory.resource_type == resource_type,
+                            AzureResourceInventory.subscription_id == subscription_id,
+                            func.lower(AzureResourceInventory.name) == name.lower(),
+                            func.lower(AzureResourceInventory.resource_group) == resource_group.lower(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                details = dict(row.resource_details or {})
+                details[field] = state
+                if resource_type == "pg_flex_server":
+                    details["provisioning_state"] = state
+                row.resource_details = details
+                row.last_sync = datetime.utcnow()
+            await self.db.commit()
+            return state
+        except Exception as exc:
+            if self.db is not None:
+                await self.db.rollback()
+            logger.warning("inventory_power_state_refresh_failed", resource=name, error=str(exc)[:200])
+            return None
 
     # ── Storage Accounts ─────────────────────────────────────────────────
 

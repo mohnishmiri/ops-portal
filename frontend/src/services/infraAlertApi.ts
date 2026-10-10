@@ -8,6 +8,7 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import apiClient from "./apiClient";
+import { parseApiDate } from "../utils/dateFormat";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -32,7 +33,20 @@ export interface VMThresholdConfig {
   notification_emails: string[];
   snooze_until: string | null;
   created_at: string;
+  updated_at?: string | null;
   created_by: string;
+}
+
+/** Fields every alert row carries (VM, PG and expiry alike). */
+export interface AlertLifecycleFields {
+  created_at: string;
+  updated_at?: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+  /** "system" when the check resolved it automatically. */
+  resolved_by?: string | null;
+  resolution_notes?: string | null;
 }
 
 export interface VMThresholdAlert {
@@ -46,9 +60,12 @@ export interface VMThresholdAlert {
   severity: AlertSeverity;
   status: AlertStatus;
   created_at: string;
+  updated_at?: string | null;
   acknowledged_by: string | null;
   acknowledged_at: string | null;
   resolved_at: string | null;
+  resolved_by?: string | null;
+  resolution_notes?: string | null;
 }
 
 export interface ExpiryConfig {
@@ -59,12 +76,16 @@ export interface ExpiryConfig {
   description: string | null;
   environment: EnvClassification | null;
   expiry_date: string;
+  /** Calendar days left as of today (UTC); negative once expired. */
+  days_until_expiry?: number;
   warning_days_before: number;
   critical_days_before: number;
   is_enabled: boolean;
   notification_emails: string[];
+  snooze_until?: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
+  updated_at?: string | null;
   created_by: string;
 }
 
@@ -78,9 +99,12 @@ export interface ExpiryAlert {
   severity: AlertSeverity;
   status: AlertStatus;
   created_at: string;
+  updated_at?: string | null;
   acknowledged_by: string | null;
   acknowledged_at: string | null;
   resolved_at: string | null;
+  resolved_by?: string | null;
+  resolution_notes?: string | null;
 }
 
 export interface StorageAlertConfig {
@@ -99,6 +123,7 @@ export interface StorageAlertConfig {
   notification_emails: string[];
   snooze_until: string | null;
   created_at: string;
+  updated_at?: string | null;
   created_by: string;
 }
 
@@ -111,14 +136,16 @@ export interface PGFlexServer {
   sku_tier: string | null;
   version: string | null;
   state: string;
-  fqdn: string | null;
+  fully_qualified_domain_name?: string | null;
   storage_size_gb: number | null;
   backup_retention_days: number | null;
   geo_redundant_backup: string | null;
-  ha_mode: string | null;
-  ha_state: string | null;
+  high_availability_mode?: string | null;
+  high_availability_state?: string | null;
   admin_login: string | null;
+  tags?: Record<string, string>;
   subscription_id: string;
+  _last_sync?: string;
 }
 
 export interface PGFlexServerConfig {
@@ -137,6 +164,7 @@ export interface PGFlexServerConfig {
   notification_emails: string[];
   snooze_until: string | null;
   created_at: string;
+  updated_at?: string | null;
   created_by: string;
 }
 
@@ -151,9 +179,11 @@ export interface PGFlexServerAlert {
   severity: AlertSeverity;
   status: AlertStatus;
   created_at: string;
+  updated_at?: string | null;
   acknowledged_by: string | null;
   acknowledged_at: string | null;
   resolved_at: string | null;
+  resolved_by?: string | null;
   resolution_notes: string | null;
 }
 
@@ -161,6 +191,7 @@ export interface PGMetrics {
   cpu: number | null;
   memory: number | null;
   storage: number | null;
+  collected_at?: string | null;
   error?: string;
 }
 
@@ -170,20 +201,28 @@ export interface AlertSummary {
     by_severity: Record<string, number>;
     total?: number;
     active?: number;
+    acknowledged?: number;
+    open?: number;
   };
   expiry_alerts: {
     by_type: Record<string, number>;
     by_status: Record<string, number>;
     total?: number;
     active?: number;
+    acknowledged?: number;
+    open?: number;
   };
   pg_flex_alerts?: {
     by_status: Record<string, number>;
     by_severity: Record<string, number>;
     total?: number;
     active?: number;
+    acknowledged?: number;
+    open?: number;
   };
   total_active_alerts: number;
+  /** Active + acknowledged. */
+  total_open_alerts?: number;
   last_updated: string;
 }
 
@@ -253,6 +292,10 @@ export interface VMInfo {
   power_state: string;
   subscription_id?: string;
   os_type?: string;
+  os_disk_name?: string | null;
+  os_disk_size_gb?: number | null;
+  data_disks?: { name: string; size_gb: number | null; lun: number }[];
+  tags?: Record<string, string>;
   provisioning_state?: string;
   _last_sync?: string;
 }
@@ -266,9 +309,14 @@ export interface ResourceListResponse<T> {
 }
 
 export interface VMMetrics {
+  /** Percentage CPU. */
   cpu: number | null;
+  /** Memory used % (100 - Available Memory Percentage). */
   memory: number | null;
+  /** Busiest OS/data disk IOPS or bandwidth consumed %. */
   disk: number | null;
+  collected_at?: string | null;
+  metrics?: Record<string, number | null>;
   error?: string;
 }
 
@@ -286,6 +334,7 @@ export interface CreateVMThresholdConfigRequest {
   disk_warning_threshold?: number;
   disk_critical_threshold?: number;
   notification_emails?: string[];
+  is_enabled?: boolean;
 }
 
 export interface UpdateVMThresholdConfigRequest {
@@ -297,7 +346,8 @@ export interface UpdateVMThresholdConfigRequest {
   disk_critical_threshold?: number;
   is_enabled?: boolean;
   notification_emails?: string[];
-  snooze_until?: string;
+  /** ISO time to mute until; null clears an existing snooze. */
+  snooze_until?: string | null;
 }
 
 export interface CreateExpiryConfigRequest {
@@ -311,6 +361,7 @@ export interface CreateExpiryConfigRequest {
   critical_days_before?: number;
   notification_emails?: string[];
   metadata?: Record<string, unknown>;
+  is_enabled?: boolean;
 }
 
 export interface UpdateExpiryConfigRequest {
@@ -322,7 +373,7 @@ export interface UpdateExpiryConfigRequest {
   critical_days_before?: number;
   is_enabled?: boolean;
   notification_emails?: string[];
-  snooze_until?: string;
+  snooze_until?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -338,6 +389,7 @@ export interface CreateStorageAlertConfigRequest {
   egress_warning_gb?: number;
   egress_critical_gb?: number;
   notification_emails?: string[];
+  is_enabled?: boolean;
 }
 
 export interface UpdateStorageAlertConfigRequest {
@@ -349,7 +401,8 @@ export interface UpdateStorageAlertConfigRequest {
   egress_critical_gb?: number;
   is_enabled?: boolean;
   notification_emails?: string[];
-  snooze_until?: string;
+  /** ISO time to mute until; null clears an existing snooze. */
+  snooze_until?: string | null;
 }
 
 export interface CreatePGFlexConfigRequest {
@@ -364,6 +417,7 @@ export interface CreatePGFlexConfigRequest {
   storage_warning_threshold?: number;
   storage_critical_threshold?: number;
   notification_emails?: string[];
+  is_enabled?: boolean;
 }
 
 export interface UpdatePGFlexConfigRequest {
@@ -375,7 +429,8 @@ export interface UpdatePGFlexConfigRequest {
   storage_critical_threshold?: number;
   is_enabled?: boolean;
   notification_emails?: string[];
-  snooze_until?: string;
+  /** ISO time to mute until; null clears an existing snooze. */
+  snooze_until?: string | null;
 }
 
 // ── API Functions ─────────────────────────────────────────────────────
@@ -1036,6 +1091,23 @@ export const getAlertTypeLabel = (type: ExpiryAlertType): string => {
   return labels[type] || type;
 };
 
+/** Readable message from an API error, including FastAPI's 422 validation lists. */
+export const apiErrorMessage = (error: unknown, fallback: string): string => {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail
+      .map((item) => {
+        const entry = item as { msg?: string; loc?: (string | number)[] };
+        const field = entry.loc?.filter((part) => part !== "body").join(".");
+        const msg = (entry.msg || "").replace(/^Value error, /, "");
+        return field ? `${field}: ${msg}` : msg;
+      })
+      .join("; ");
+  }
+  return fallback;
+};
+
 export const getEnvLabel = (env?: EnvClassification | null): string => {
   if (env === "prod") return "PROD";
   if (env === "non_prod") return "NPROD";
@@ -1154,7 +1226,18 @@ export interface TriggerResult {
 
 // ── Notification Types ────────────────────────────────────────────────
 
-export type NotificationType = "vm_threshold" | "expiry" | "storage" | "digest" | "test";
+export type NotificationType =
+  | "vm_threshold"
+  | "pg_flex_server"
+  | "custom_expiry"
+  | ExpiryAlertType
+  | "expiry"
+  | "storage"
+  | "digest"
+  | "test";
+
+/** Which alert family a notification history query is about. */
+export type AlertKind = "vm" | "pg" | "expiry";
 export type NotificationStatus = "pending" | "sent" | "failed";
 
 export interface NotificationHistory {
@@ -1296,6 +1379,8 @@ export const stopScheduler = async (): Promise<SchedulerStatus> => {
 export interface VMActionRequest {
   resource_group: string;
   vm_name: string;
+  /** The VM's own subscription — without it the action can hit the wrong one. */
+  subscription_id?: string;
 }
 
 export interface ResourceActionResult {
@@ -1304,6 +1389,9 @@ export interface ResourceActionResult {
   vm_name?: string;
   server_name?: string;
   resource_group: string;
+  subscription_id?: string;
+  /** State read back from Azure after the action. */
+  power_state?: string | null;
 }
 
 export const startVM = async (req: VMActionRequest): Promise<ResourceActionResult> => {
@@ -1326,6 +1414,7 @@ export const restartVM = async (req: VMActionRequest): Promise<ResourceActionRes
 export interface PGServerActionRequest {
   resource_group: string;
   server_name: string;
+  subscription_id?: string;
 }
 
 export const startPGServer = async (req: PGServerActionRequest): Promise<ResourceActionResult> => {
@@ -1354,6 +1443,13 @@ export const fetchNotificationHistory = async (
   if (notificationType) params.set("notification_type", notificationType);
   if (status) params.set("status", status);
   params.set("limit", String(limit));
+  const response = await apiClient.get(`${API_BASE}/notifications/history?${params}`);
+  return response.data;
+};
+
+/** Every email sent about one alert (creation, escalation, acknowledge, resolve). */
+export const fetchAlertNotifications = async (kind: AlertKind, alertId: number): Promise<NotificationHistory[]> => {
+  const params = new URLSearchParams({ alert_kind: kind, alert_id: String(alertId), limit: "200" });
   const response = await apiClient.get(`${API_BASE}/notifications/history?${params}`);
   return response.data;
 };
@@ -1593,6 +1689,13 @@ export const useNotificationHistory = (
     refetchInterval: SUMMARY_REFRESH_INTERVAL,
   });
 
+export const useAlertNotifications = (kind: AlertKind, alertId: number | null) =>
+  useQuery({
+    queryKey: [...notificationKeys.all, "alert", kind, alertId] as const,
+    queryFn: () => fetchAlertNotifications(kind, alertId as number),
+    enabled: alertId != null,
+  });
+
 export const useSendTestNotification = () => {
   const queryClient = useQueryClient();
   return useMutation({
@@ -1705,14 +1808,21 @@ export const getResourceTypeIcon = (type: string): string => {
 };
 
 export const getNotificationTypeLabel = (type: NotificationType): string => {
-  const labels: Record<NotificationType, string> = {
-    vm_threshold: "VM Threshold Alert",
+  const labels: Partial<Record<NotificationType, string>> = {
+    vm_threshold: "VM Alert",
+    pg_flex_server: "PG Server Alert",
+    custom_expiry: "Expiry Alert",
     expiry: "Expiry Alert",
+    mech_id: "MechID Alert Update",
+    certificate: "Certificate Alert Update",
+    aaf_account: "AAF Account Alert Update",
+    database_account: "Database Account Alert Update",
+    itservices_domain: "ITServices Domain Alert Update",
     storage: "Storage Alert",
     digest: "Daily Digest",
     test: "Test Notification",
   };
-  return labels[type] || type;
+  return labels[type] || String(type).replace(/_/g, " ");
 };
 
 export const getNotificationStatusColor = (status: NotificationStatus): string => {
@@ -1729,9 +1839,11 @@ export const formatDateTime = (dateString: string): string => {
 };
 
 export const formatRelativeTime = (dateString: string): string => {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
+  // The API sends naive UTC timestamps; new Date() read them as local time,
+  // so every row looked hours newer (or "Just now") east of UTC.
+  const date = parseApiDate(dateString);
+  if (!date) return dateString;
+  const diffMs = Date.now() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
   const diffHours = Math.floor(diffMins / 60);
   const diffDays = Math.floor(diffHours / 24);

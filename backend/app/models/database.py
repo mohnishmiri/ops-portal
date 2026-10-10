@@ -796,6 +796,7 @@ class VMThresholdAlert(Base):
     acknowledged_at = Column(DateTime, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
     resolution_notes = Column(Text, nullable=True)
+    resolved_by = Column(String(255), nullable=True)  # "system" when resolved automatically
 
     config = relationship("VMThresholdAlertConfig", backref="alerts")
 
@@ -871,6 +872,7 @@ class CustomExpiryAlert(Base):
     acknowledged_at = Column(DateTime, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
     resolution_notes = Column(Text, nullable=True)
+    resolved_by = Column(String(255), nullable=True)  # "system" when resolved automatically
 
     config = relationship("CustomExpiryAlertConfig", backref="alerts")
 
@@ -1098,6 +1100,7 @@ class PGFlexServerAlert(Base):
     acknowledged_at = Column(DateTime, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
     resolution_notes = Column(Text, nullable=True)
+    resolved_by = Column(String(255), nullable=True)  # "system" when resolved automatically
 
     config = relationship("PGFlexServerAlertConfig", backref="alerts")
 

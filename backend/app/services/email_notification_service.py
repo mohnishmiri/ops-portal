@@ -56,7 +56,7 @@ VM_THRESHOLD_ALERT_TEMPLATE = """
 <body>
     <div class="container">
         <div class="header">
-            <h1>⚠️ VM Threshold Alert: {severity}</h1>
+            <h1>⚠️ {resource_kind} Threshold Alert: {severity}</h1>
         </div>
         <div class="content">
             <div class="alert-box">
@@ -115,7 +115,7 @@ EXPIRY_ALERT_TEMPLATE = """
         <div class="content">
             <div class="alert-box">
                 <div class="resource">{resource_name}</div>
-                <div class="expiry">{days_until_expiry} days until expiry</div>
+                <div class="expiry">{expiry_headline}</div>
                 <div style="color: #6b7280; font-size: 14px;">Expires: {expiry_date}</div>
             </div>
 
@@ -362,6 +362,15 @@ CERT_RENEWAL_REPORT_TEMPLATE = (
 )
 
 
+def _expiry_phrase(days: int) -> str:
+    """'in 12 days', 'today', or 'expired 3 days ago' for digest rows."""
+    if days < 0:
+        return f"expired {abs(days)} day{'s' if abs(days) != 1 else ''} ago"
+    if days == 0:
+        return "today"
+    return f"in {days} day{'s' if days != 1 else ''}"
+
+
 class EmailNotificationService:
     """
     Production-ready email notification service.
@@ -396,13 +405,17 @@ class EmailNotificationService:
         threshold_value: float,
         severity: str,
         alert_id: int,
+        resource_kind: str = "VM",
+        notification_type: str = "vm_threshold",
+        link_prefix: str = "vm",
     ) -> dict[str, Any]:
-        """Send VM threshold alert notification."""
+        """Send a VM (or PG Flexible Server) threshold alert notification."""
         colors = self._get_severity_colors(severity)
 
-        subject = f"[{severity.upper()}] VM Alert: {vm_name} - {metric_type.upper()} at {current_value}%"
+        subject = f"[{severity.upper()}] {resource_kind} Alert: {vm_name} - {metric_type.upper()} at {current_value}%"
 
         html_body = VM_THRESHOLD_ALERT_TEMPLATE.format(
+            resource_kind=resource_kind,
             vm_name=vm_name,
             resource_group=resource_group,
             subscription_id=subscription_id,
@@ -414,7 +427,7 @@ class EmailNotificationService:
             header_color=colors["header"],
             border_color=colors["border"],
             metric_color=colors["metric"],
-            portal_url=f"{self.portal_base_url}/infra-alerts?alert={alert_id}",
+            portal_url=f"{self.portal_base_url}/infra-alerts?alert={link_prefix}-{alert_id}",
             settings_url=f"{self.portal_base_url}/infra-alerts?tab=configs",
         )
 
@@ -422,7 +435,7 @@ class EmailNotificationService:
             recipient_emails=recipient_emails,
             subject=subject,
             html_body=html_body,
-            alert_type="vm_threshold",
+            alert_type=notification_type,
             alert_id=alert_id,
         )
 
@@ -457,8 +470,10 @@ class EmailNotificationService:
         }
         alert_type_label = alert_type_labels.get(alert_type, alert_type)
 
-        if days_until_expiry <= 0:
+        if days_until_expiry < 0:
             subject = f"[EXPIRED] {alert_type_label}: {resource_name} has expired!"
+        elif days_until_expiry == 0:
+            subject = f"[{severity.upper()}] {alert_type_label}: {resource_name} expires today"
         else:
             subject = f"[{severity.upper()}] {alert_type_label}: {resource_name} expires in {days_until_expiry} days"
 
@@ -467,14 +482,20 @@ class EmailNotificationService:
             resource_identifier=resource_identifier,
             alert_type_label=alert_type_label,
             expiry_date=expiry_date.strftime("%Y-%m-%d"),
-            days_until_expiry=days_until_expiry if days_until_expiry > 0 else "EXPIRED",
+            expiry_headline=(
+                f"Expired {abs(days_until_expiry)} day{'s' if abs(days_until_expiry) != 1 else ''} ago"
+                if days_until_expiry < 0
+                else "Expires today"
+                if days_until_expiry == 0
+                else f"{days_until_expiry} day{'s' if days_until_expiry != 1 else ''} until expiry"
+            ),
             severity=severity.upper(),
             description=description or "N/A",
             alert_time=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
             header_color=colors["header"],
             border_color=colors["border"],
             expiry_color=colors["metric"],
-            action_url=f"{self.portal_base_url}/infra-alerts?alert={alert_id}",
+            action_url=f"{self.portal_base_url}/infra-alerts?alert=expiry-{alert_id}",
         )
 
         results = await self._send_email_batch(
@@ -547,9 +568,11 @@ class EmailNotificationService:
         recipient_emails: list[str],
         vm_alerts: list[dict],
         expiry_alerts: list[dict],
+        pg_alerts: list[dict] | None = None,
     ) -> dict[str, Any]:
-        """Send daily digest of all active alerts."""
-        total_alerts = len(vm_alerts) + len(expiry_alerts)
+        """Send the daily digest of every open (active or acknowledged) alert."""
+        pg_alerts = pg_alerts or []
+        total_alerts = len(vm_alerts) + len(expiry_alerts) + len(pg_alerts)
 
         if total_alerts == 0:
             return {"status": "skipped", "reason": "no_active_alerts"}
@@ -557,15 +580,24 @@ class EmailNotificationService:
         vm_rows = "\n".join(
             [
                 f"<tr><td>{a['vm_name']}</td><td>{a['metric_type'].upper()}</td>"
-                f"<td>{a['current_value']}%</td><td>{a['severity']}</td></tr>"
+                f"<td>{a['current_value']}%</td><td>{a['severity']}</td><td>{a.get('status', 'active')}</td></tr>"
                 for a in vm_alerts[:10]
+            ]
+        )
+
+        pg_rows = "\n".join(
+            [
+                f"<tr><td>{a['server_name']}</td><td>{a['metric_type'].upper()}</td>"
+                f"<td>{a['current_value']}%</td><td>{a['severity']}</td><td>{a.get('status', 'active')}</td></tr>"
+                for a in pg_alerts[:10]
             ]
         )
 
         expiry_rows = "\n".join(
             [
                 f"<tr><td>{a['resource_name']}</td><td>{a['alert_type']}</td>"
-                f"<td>{a['days_until_expiry']} days</td><td>{a['severity']}</td></tr>"
+                f"<td>{_expiry_phrase(a['days_until_expiry'])}</td><td>{a['severity']}</td>"
+                f"<td>{a.get('status', 'active')}</td></tr>"
                 for a in expiry_alerts[:10]
             ]
         )
@@ -592,11 +624,13 @@ class EmailNotificationService:
                     <p style="margin: 8px 0 0; opacity: 0.9;">{datetime.utcnow().strftime("%Y-%m-%d")}</p>
                 </div>
                 <div class="content">
-                    <p>You have <strong>{total_alerts}</strong> active infrastructure alerts requiring attention.</p>
+                    <p>You have <strong>{total_alerts}</strong> open infrastructure alerts requiring attention.</p>
 
-                    {"<div class='section-title'>🖥️ VM Threshold Alerts (" + str(len(vm_alerts)) + ")</div><table><tr><th>VM</th><th>Metric</th><th>Value</th><th>Severity</th></tr>" + vm_rows + "</table>" if vm_alerts else ""}
+                    {"<div class='section-title'>🖥️ VM Threshold Alerts (" + str(len(vm_alerts)) + ")</div><table><tr><th>VM</th><th>Metric</th><th>Value</th><th>Severity</th><th>Status</th></tr>" + vm_rows + "</table>" if vm_alerts else ""}
 
-                    {"<div class='section-title'>📅 Expiry Alerts (" + str(len(expiry_alerts)) + ")</div><table><tr><th>Resource</th><th>Type</th><th>Expires In</th><th>Severity</th></tr>" + expiry_rows + "</table>" if expiry_alerts else ""}
+                    {"<div class='section-title'>🐘 PostgreSQL Flexible Server Alerts (" + str(len(pg_alerts)) + ")</div><table><tr><th>Server</th><th>Metric</th><th>Value</th><th>Severity</th><th>Status</th></tr>" + pg_rows + "</table>" if pg_alerts else ""}
+
+                    {"<div class='section-title'>📅 Expiry Alerts (" + str(len(expiry_alerts)) + ")</div><table><tr><th>Resource</th><th>Type</th><th>Expires</th><th>Severity</th><th>Status</th></tr>" + expiry_rows + "</table>" if expiry_alerts else ""}
 
                           <a href="{self.portal_base_url}/infra-alerts"
                                   style="display: inline-block; background: #3b82f6; color: white; padding: 12px 24px;
@@ -609,7 +643,7 @@ class EmailNotificationService:
         </html>
         """
 
-        subject = f"[Digest] {total_alerts} Active Infrastructure Alerts - {datetime.utcnow().strftime('%Y-%m-%d')}"
+        subject = f"[Digest] {total_alerts} Open Infrastructure Alerts - {datetime.utcnow().strftime('%Y-%m-%d')}"
 
         results = await self._send_email_batch(
             recipient_emails=recipient_emails,
@@ -1402,17 +1436,25 @@ For questions or to acknowledge findings, visit the Compliance Dashboard.
         status: str | None = None,
         limit: int = 100,
         exclude_alert_types: list[str] | None = None,
+        alert_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Get notification history."""
+        """Get notification history.
+
+        ``alert_types`` restricts to any of several types (one alert family is
+        recorded under more than one, e.g. expiry status changes use the
+        account type).
+        """
         if self.db is None:
             return []
 
-        if exclude_alert_types is None and alert_type is None:
+        if exclude_alert_types is None and alert_type is None and alert_types is None:
             exclude_alert_types = ["checksum_report", "checksum_verification"]
 
         query = select(AlertNotificationHistory)
         if alert_type:
             query = query.where(AlertNotificationHistory.alert_type == alert_type)
+        if alert_types:
+            query = query.where(AlertNotificationHistory.alert_type.in_(alert_types))
         if alert_id:
             query = query.where(AlertNotificationHistory.alert_id == alert_id)
         if status:
