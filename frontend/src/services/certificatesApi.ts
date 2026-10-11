@@ -812,6 +812,7 @@ export const useSetEnabledCollections = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["certificates", "enabled-collections"] });
       qc.invalidateQueries({ queryKey: ["certificates", "collections"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 };

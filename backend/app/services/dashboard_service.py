@@ -539,7 +539,10 @@ class DashboardService:
 
         from app.models.database import AdminConfig as _AdminCfg
         from app.models.database import AdminSubscription as _AdminSub
-        from app.services.admin_service import AdminService
+        from app.services.admin_service import ENVIRONMENT_OPTIONS, AdminService
+        from app.services.amortized_cost_sync_service import AmortizedCostSyncService
+
+        cost_env = AmortizedCostSyncService.resolve_env_label
 
         # Probe Azure alongside the DB reads below rather than after them.
         azure_probe = asyncio.create_task(AdminService(db).check_azure_api())
@@ -573,6 +576,8 @@ class DashboardService:
                             "enabled": row.enabled,
                             "monitored": row.monitored,
                             "environment": row.environment,
+                            # Prod / Non-Prod bucket this sub's spend lands in (Environment, else name).
+                            "cost_env": cost_env(row.environment, row.subscription_name),
                             "notes": row.notes,
                             "created_at": (row.created_at.isoformat() if row.created_at else None),
                             "updated_at": (row.updated_at.isoformat() if row.updated_at else None),
@@ -595,6 +600,7 @@ class DashboardService:
                     "enabled": True,
                     "monitored": True,
                     "environment": None,
+                    "cost_env": cost_env(None, sid),
                     "notes": None,
                     "created_at": None,
                     "updated_at": None,
@@ -649,5 +655,9 @@ class DashboardService:
                 "api": "healthy" if azure_ok else "unreachable",
             },
             "cors_origins": cors_origins,
+            "environment_options": [
+                {"value": value, "label": label, "cost_env": cost_env(value, None)}
+                for value, label in ENVIRONMENT_OPTIONS
+            ],
             "generated_at": datetime.utcnow().isoformat(),
         }

@@ -5,23 +5,46 @@
  *  - Enable / disable / monitor toggle per subscription
  *  - Add new subscription manually
  *  - Discover subscriptions from Azure ARM
+ *  - Edit name / environment / notes, and remove subscriptions
  *  - Admin config management
+ *  - Activity grid of every change made here (audit_logs)
  */
 
 import React, { useState, useCallback, useEffect, useMemo } from "react";
 import {
   useAdminDashboard,
   useAdminConfigs,
+  useAdminActivity,
   useAddSubscription,
   useToggleSubscription,
+  useUpdateSubscription,
+  useDeleteSubscription,
   useDiscoverSubscriptions,
   useSyncSubscriptions,
   useUpsertAdminConfig,
   useReleaseOperationalCache,
   SubscriptionInfo,
   AdminConfigEntry,
+  AdminActivityEntry,
+  EnvironmentOption,
 } from "../services/costApi";
 import { apiErrorMessage } from "../services/infraAlertApi";
+import { SortableHeader, gridStyles } from "../components/gridStyles";
+import {
+  AccessIcons,
+  ActionIconButton,
+  ConfirmDialog,
+  GridHeader,
+  GridMessageRow,
+  GridPagerBar,
+  Modal,
+  fieldLabel,
+  inputClass,
+  primaryButton,
+  secondaryButton,
+  textMatches,
+  useGridRows,
+} from "../features/access/accessShared";
 import {
   useAllCollections,
   useEnabledCollections,
@@ -97,7 +120,13 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/** "Development — Non-Prod spend": what each Environment choice does to cost reporting. */
+const environmentOptionLabel = (option: EnvironmentOption) => `${option.label} — ${option.cost_env} spend`;
+
+const AddSubscriptionForm: React.FC<{ onClose: () => void; environmentOptions: EnvironmentOption[] }> = ({
+  onClose,
+  environmentOptions,
+}) => {
   const [subId, setSubId] = useState("");
   const [subName, setSubName] = useState("");
   const [env, setEnv] = useState("");
@@ -160,12 +189,12 @@ const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => 
               onChange={(e) => setEnv(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             >
-              <option value="">— select —</option>
-              <option value="production">Production</option>
-              <option value="non-production">Non-Production</option>
-              <option value="development">Development</option>
-              <option value="staging">Staging</option>
-              <option value="dr">DR</option>
+              <option value="">Not set — classified from the name</option>
+              {environmentOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {environmentOptionLabel(option)}
+                </option>
+              ))}
             </select>
           </div>
           <div>
@@ -218,16 +247,106 @@ const SCOPE_FILTER_LABEL: Record<ScopeFilter, string> = {
   out: "Not in scope",
 };
 
+type SubscriptionSortKey = "name" | "environment" | "state";
+
+const subscriptionLabel = (sub: SubscriptionInfo) => sub.subscription_name || sub.name || sub.subscription_id;
+
+const subscriptionMatches = (sub: SubscriptionInfo, query: string) =>
+  textMatches(query, sub.subscription_name, sub.name, sub.subscription_id, sub.environment, sub.cost_env);
+
+const subscriptionAccessor = (sub: SubscriptionInfo, key: SubscriptionSortKey): string => {
+  if (key === "environment") return sub.environment ?? "";
+  if (key === "state") return sub.state ?? "";
+  return subscriptionLabel(sub).toLowerCase();
+};
+
+const EditSubscriptionModal: React.FC<{
+  sub: SubscriptionInfo;
+  environmentOptions: EnvironmentOption[];
+  onClose: () => void;
+}> = ({ sub, environmentOptions, onClose }) => {
+  const updateMutation = useUpdateSubscription();
+  const [name, setName] = useState(subscriptionLabel(sub));
+  const [environment, setEnvironment] = useState(sub.environment ?? "");
+  const [notes, setNotes] = useState(sub.notes ?? "");
+  // A free-text value saved before the dropdown existed stays selectable.
+  const customEnvironment =
+    sub.environment && !environmentOptions.some((option) => option.value === sub.environment) ? sub.environment : null;
+
+  const handleSave = () => {
+    updateMutation.mutate(
+      { subscription_id: sub.subscription_id, subscription_name: name.trim(), environment, notes },
+      { onSuccess: onClose },
+    );
+  };
+
+  return (
+    <Modal
+      title="Edit subscription"
+      subtitle={<span className="font-mono">{sub.subscription_id}</span>}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" onClick={onClose} className={secondaryButton} disabled={updateMutation.isPending}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            className={primaryButton}
+            disabled={updateMutation.isPending || !name.trim()}
+          >
+            {updateMutation.isPending ? "Saving…" : "Save"}
+          </button>
+        </>
+      }
+    >
+      <div>
+        <label className={fieldLabel} htmlFor="edit-sub-name">Display name</label>
+        <input id="edit-sub-name" value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
+      </div>
+      <div>
+        <label className={fieldLabel} htmlFor="edit-sub-env">Environment</label>
+        <select id="edit-sub-env" value={environment} onChange={(e) => setEnvironment(e.target.value)} className={inputClass}>
+          <option value="">Not set — classified from the name</option>
+          {environmentOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {environmentOptionLabel(option)}
+            </option>
+          ))}
+          {customEnvironment && (
+            <option value={customEnvironment}>
+              {customEnvironment} (current) — {sub.cost_env} spend
+            </option>
+          )}
+        </select>
+        <p className="mt-1 text-xs text-gray-500">
+          Decides whether this subscription&apos;s spend is reported as Prod or Non-Prod on the cost dashboards. It does
+          not change who can see it — access tiers are set in Access Management.
+        </p>
+      </div>
+      <div>
+        <label className={fieldLabel} htmlFor="edit-sub-notes">Notes</label>
+        <textarea id="edit-sub-notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} className={inputClass} />
+      </div>
+      <InlineError error={updateMutation.error} fallback="Failed to save the subscription." />
+    </Modal>
+  );
+};
+
 const SubscriptionTable: React.FC<{
   subs: SubscriptionInfo[];
+  environmentOptions: EnvironmentOption[];
   onShowAdd: () => void;
   scopeFilter: ScopeFilter;
   onScopeFilterChange: (filter: ScopeFilter) => void;
-}> = ({ subs, onShowAdd, scopeFilter, onScopeFilterChange }) => {
+}> = ({ subs, environmentOptions, onShowAdd, scopeFilter, onScopeFilterChange }) => {
   const toggleMutation = useToggleSubscription();
   const discoverMutation = useDiscoverSubscriptions();
   const syncMutation = useSyncSubscriptions();
-  const [search, setSearch] = useState("");
+  const deleteMutation = useDeleteSubscription();
+  const [editTarget, setEditTarget] = useState<SubscriptionInfo | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SubscriptionInfo | null>(null);
 
   const handleToggle = useCallback(
     (sub: SubscriptionInfo, field: "enabled" | "monitored") => {
@@ -240,102 +359,74 @@ const SubscriptionTable: React.FC<{
     [toggleMutation],
   );
 
+  const handleDelete = () => {
+    if (!deleteTarget) return;
+    deleteMutation.mutate(deleteTarget.subscription_id, { onSuccess: () => setDeleteTarget(null) });
+  };
+
   const inScopeCount = subs.filter(isInScope).length;
-  const visibleSubs = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return subs.filter((sub) => {
-      if (scopeFilter === "in" && !isInScope(sub)) return false;
-      if (scopeFilter === "out" && isInScope(sub)) return false;
-      if (!term) return true;
-      return [sub.subscription_name, sub.name, sub.subscription_id, sub.environment]
-        .some((value) => value?.toLowerCase().includes(term));
-    });
-  }, [subs, search, scopeFilter]);
+  const scoped = useMemo(
+    () =>
+      subs.filter((sub) => scopeFilter === "all" || (scopeFilter === "in") === isInScope(sub)),
+    [subs, scopeFilter],
+  );
+  const grid = useGridRows<SubscriptionInfo, SubscriptionSortKey>(scoped, {
+    matches: subscriptionMatches,
+    accessor: subscriptionAccessor,
+    initialSort: { key: "name", direction: "asc" },
+  });
+  const header = (label: string, key: SubscriptionSortKey, center = false) => (
+    <th className={center ? gridStyles.headerCellCenter : gridStyles.headerCell}>
+      <SortableHeader
+        label={label}
+        active={grid.sort.key === key}
+        direction={grid.sort.direction}
+        onClick={() => grid.toggleSort(key)}
+        align={center ? "center" : "left"}
+      />
+    </th>
+  );
+
+  const banners = [
+    discoverMutation.isSuccess && (
+      <div key="discover" className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+        Discovered {(discoverMutation.data as any)?.discovered ?? 0} subscriptions
+        ({(discoverMutation.data as any)?.new_count ?? 0} new, added disabled for review).
+      </div>
+    ),
+    syncMutation.isSuccess && (
+      <div key="sync" className="p-3 bg-att-50 border border-att-100 rounded-lg text-sm text-att-700">
+        Synced {(syncMutation.data as any)?.updated_count ?? 0} of{" "}
+        {(syncMutation.data as any)?.discovered ?? 0} subscriptions.
+      </div>
+    ),
+    discoverMutation.isError && (
+      <div key="discover-error" role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+        Discover failed: {apiErrorMessage(discoverMutation.error, "Azure did not respond.")}
+      </div>
+    ),
+    syncMutation.isError && (
+      <div key="sync-error" role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+        Sync failed: {apiErrorMessage(syncMutation.error, "Azure did not respond.")}
+      </div>
+    ),
+    toggleMutation.isError && (
+      <div key="toggle-error" role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+        Could not update the subscription: {apiErrorMessage(toggleMutation.error, "request failed.")}
+      </div>
+    ),
+  ].filter(Boolean);
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 gap-3">
-        <div>
-          <h3 className="text-lg font-semibold text-gray-800">
-            Managed Subscriptions
-          </h3>
-          <p className="text-sm text-gray-500">
-            {inScopeCount} in scope (enabled &amp; monitored) of {subs.length} total
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => discoverMutation.mutate()}
-            disabled={discoverMutation.isPending}
-            title="Add subscriptions the service principal can see but the portal doesn't know yet (added disabled)"
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg text-sm font-semibold hover:bg-purple-100 disabled:opacity-50"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            {discoverMutation.isPending ? "Discovering…" : "Discover from Azure"}
-          </button>
-          <button
-            onClick={() => syncMutation.mutate()}
-            disabled={syncMutation.isPending}
-            title="Refresh name and state of existing subscriptions from Azure"
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm font-semibold hover:bg-indigo-100 disabled:opacity-50"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            {syncMutation.isPending ? "Syncing…" : "Sync"}
-          </button>
-          <button
-            onClick={onShowAdd}
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-            </svg>
-            Add
-          </button>
-        </div>
-      </div>
-
-      {discoverMutation.isSuccess && (
-        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
-          Discovered {(discoverMutation.data as any)?.discovered ?? 0} subscriptions
-          ({(discoverMutation.data as any)?.new_count ?? 0} new, added disabled for review).
-        </div>
-      )}
-      {syncMutation.isSuccess && (
-        <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-sm text-indigo-800">
-          Synced {(syncMutation.data as any)?.updated_count ?? 0} of{" "}
-          {(syncMutation.data as any)?.discovered ?? 0} subscriptions.
-        </div>
-      )}
-      {discoverMutation.isError && (
-        <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-          Discover failed: {apiErrorMessage(discoverMutation.error, "Azure did not respond.")}
-        </div>
-      )}
-      {syncMutation.isError && (
-        <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-          Sync failed: {apiErrorMessage(syncMutation.error, "Azure did not respond.")}
-        </div>
-      )}
-      {toggleMutation.isError && (
-        <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-          Could not update the subscription: {apiErrorMessage(toggleMutation.error, "request failed.")}
-        </div>
-      )}
-
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search name, ID or environment…"
-          aria-label="Search subscriptions"
-          className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-        />
-        <div className="inline-flex rounded-lg border border-gray-200 p-0.5" role="group" aria-label="Scope filter">
+    <div className={gridStyles.shell}>
+      <GridHeader
+        title="Managed Subscriptions"
+        subtitle={`${inScopeCount} in scope (enabled & monitored) of ${subs.length} total`}
+        search={grid.search}
+        onSearch={grid.setSearch}
+        placeholder="Search name, ID or environment…"
+      >
+        <div className="inline-flex rounded-lg border border-att-200 bg-white p-0.5" role="group" aria-label="Scope filter">
           {(Object.keys(SCOPE_FILTER_LABEL) as ScopeFilter[]).map((key) => (
             <button
               key={key}
@@ -343,89 +434,158 @@ const SubscriptionTable: React.FC<{
               onClick={() => onScopeFilterChange(key)}
               aria-pressed={scopeFilter === key}
               className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
-                scopeFilter === key ? "bg-blue-600 text-white" : "text-gray-600 hover:bg-gray-100"
+                scopeFilter === key ? "bg-att-400 text-white" : "text-gray-600 hover:bg-att-50"
               }`}
             >
               {SCOPE_FILTER_LABEL[key]}
             </button>
           ))}
         </div>
-      </div>
+        <button
+          type="button"
+          onClick={() => discoverMutation.mutate()}
+          disabled={discoverMutation.isPending}
+          title="Add subscriptions the service principal can see but the portal doesn't know yet (added disabled)"
+          className={secondaryButton}
+        >
+          {discoverMutation.isPending ? "Discovering…" : "Discover from Azure"}
+        </button>
+        <button
+          type="button"
+          onClick={() => syncMutation.mutate()}
+          disabled={syncMutation.isPending}
+          title="Refresh name and state of existing subscriptions from Azure"
+          className={secondaryButton}
+        >
+          {syncMutation.isPending ? "Syncing…" : "Sync"}
+        </button>
+        <button type="button" onClick={onShowAdd} className={primaryButton}>
+          {AccessIcons.plus()}
+          Add
+        </button>
+      </GridHeader>
+
+      {banners.length > 0 && <div className="space-y-2 border-b border-att-100 px-4 py-3">{banners}</div>}
 
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-200">
-              <th className="text-left py-2 px-3 font-semibold text-gray-600">Name</th>
-              <th className="text-left py-2 px-3 font-semibold text-gray-600">Subscription ID</th>
-              <th className="text-center py-2 px-3 font-semibold text-gray-600">Environment</th>
-              <th className="text-center py-2 px-3 font-semibold text-gray-600">State</th>
-              <th className="text-center py-2 px-3 font-semibold text-gray-600">Enabled</th>
-              <th className="text-center py-2 px-3 font-semibold text-gray-600">Monitored</th>
+        <table className={gridStyles.table}>
+          <thead className={gridStyles.head}>
+            <tr>
+              {header("Name", "name")}
+              <th className={gridStyles.headerCell}>Subscription ID</th>
+              {header("Environment", "environment")}
+              {header("State", "state", true)}
+              <th className={gridStyles.headerCellCenter}>Enabled</th>
+              <th className={gridStyles.headerCellCenter}>Monitored</th>
+              <th className={gridStyles.headerCellCenter}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {visibleSubs.map((sub) => (
-              <tr
-                key={sub.subscription_id}
-                className={`border-b border-gray-50 hover:bg-gray-50 ${
-                  !isInScope(sub) ? "opacity-60" : ""
-                }`}
-              >
-                <td className="py-3 px-3 font-medium text-gray-900">
-                  {sub.subscription_name || sub.name}
-                </td>
-                <td className="py-3 px-3 font-mono text-gray-600 text-xs">
-                  {sub.subscription_id}
-                </td>
-                <td className="py-3 px-3 text-center">
-                  {sub.environment ? (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">
-                      {sub.environment}
-                    </span>
-                  ) : (
-                    <span className="text-gray-400 text-xs">—</span>
-                  )}
-                </td>
-                <td className="py-3 px-3 text-center">
-                  <StatusBadge status={sub.state} />
-                </td>
-                <td className="py-3 px-3 text-center">
-                  <Toggle
-                    checked={sub.enabled}
-                    onChange={() => handleToggle(sub, "enabled")}
-                    disabled={toggleMutation.isPending}
-                    label={`Toggle enabled for ${sub.subscription_name || sub.name}`}
-                  />
-                </td>
-                <td className="py-3 px-3 text-center">
-                  <Toggle
-                    checked={sub.monitored}
-                    onChange={() => handleToggle(sub, "monitored")}
-                    disabled={toggleMutation.isPending}
-                    label={`Toggle monitored for ${sub.subscription_name || sub.name}`}
-                  />
-                </td>
-              </tr>
-            ))}
-            {subs.length === 0 && (
-              <tr>
-                <td colSpan={6} className="py-8 text-center text-gray-400">
-                  No subscriptions configured. Click <strong>Add</strong> or{" "}
-                  <strong>Discover from Azure</strong> to get started.
-                </td>
-              </tr>
-            )}
-            {subs.length > 0 && visibleSubs.length === 0 && (
-              <tr>
-                <td colSpan={6} className="py-8 text-center text-gray-400">
-                  No subscriptions match the current search or filter.
-                </td>
-              </tr>
+            {subs.length === 0 ? (
+              <GridMessageRow colSpan={7}>
+                No subscriptions configured. Click <strong>Add</strong> or <strong>Discover from Azure</strong> to get started.
+              </GridMessageRow>
+            ) : grid.pageRows.length === 0 ? (
+              <GridMessageRow colSpan={7}>No subscriptions match the current search or filter.</GridMessageRow>
+            ) : (
+              grid.pageRows.map((sub) => (
+                <tr key={sub.subscription_id} className={`${gridStyles.row} ${!isInScope(sub) ? "opacity-60" : ""}`}>
+                  <td className={gridStyles.strongCell}>{subscriptionLabel(sub)}</td>
+                  <td className={gridStyles.monoCell}>{sub.subscription_id}</td>
+                  <td className={gridStyles.cell}>
+                    {sub.environment ? (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">
+                        {sub.environment}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400 text-xs">Not set</span>
+                    )}
+                    {sub.cost_env && (
+                      <p
+                        className="mt-0.5 text-[11px] text-gray-500"
+                        title="Bucket this subscription's spend is reported in on the cost dashboards"
+                      >
+                        {sub.cost_env} spend{!sub.environment ? " (from name)" : ""}
+                      </p>
+                    )}
+                  </td>
+                  <td className={gridStyles.centerCell}>
+                    <StatusBadge status={sub.state} />
+                  </td>
+                  <td className={gridStyles.centerCell}>
+                    <Toggle
+                      checked={sub.enabled}
+                      onChange={() => handleToggle(sub, "enabled")}
+                      disabled={toggleMutation.isPending}
+                      label={`Toggle enabled for ${subscriptionLabel(sub)}`}
+                    />
+                  </td>
+                  <td className={gridStyles.centerCell}>
+                    <Toggle
+                      checked={sub.monitored}
+                      onChange={() => handleToggle(sub, "monitored")}
+                      disabled={toggleMutation.isPending}
+                      label={`Toggle monitored for ${subscriptionLabel(sub)}`}
+                    />
+                  </td>
+                  <td className={gridStyles.centerCell}>
+                    <div className="inline-flex items-center gap-1">
+                      <ActionIconButton title={`Edit ${subscriptionLabel(sub)}`} tone="att" onClick={() => setEditTarget(sub)}>
+                        {AccessIcons.pen("h-[18px] w-[18px]")}
+                      </ActionIconButton>
+                      <ActionIconButton
+                        title={`Remove ${subscriptionLabel(sub)}`}
+                        tone="red"
+                        onClick={() => {
+                          deleteMutation.reset();
+                          setDeleteTarget(sub);
+                        }}
+                      >
+                        {AccessIcons.delete()}
+                      </ActionIconButton>
+                    </div>
+                  </td>
+                </tr>
+              ))
             )}
           </tbody>
         </table>
       </div>
+      <GridPagerBar
+        page={grid.page}
+        totalPages={grid.totalPages}
+        total={grid.total}
+        pageSize={grid.pageSize}
+        onPage={grid.setPage}
+        noun="subscriptions"
+      />
+
+      {editTarget && (
+        <EditSubscriptionModal sub={editTarget} environmentOptions={environmentOptions} onClose={() => setEditTarget(null)} />
+      )}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Remove subscription?"
+          message={
+            <>
+              <p>
+                Remove <strong>{subscriptionLabel(deleteTarget)}</strong>{" "}
+                <span className="font-mono text-xs">({deleteTarget.subscription_id})</span> from the portal? It stops being
+                synced and drops off every dashboard.
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                Its cost history and any subscription-level access grants are kept. <strong>Discover from Azure</strong>{" "}
+                adds it back as disabled while the service principal can still see it.
+              </p>
+            </>
+          }
+          confirmLabel="Remove"
+          busy={deleteMutation.isPending}
+          error={deleteMutation.isError ? apiErrorMessage(deleteMutation.error, "Failed to remove the subscription.") : null}
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
   );
 };
@@ -609,14 +769,132 @@ const CertificateCollectionsAdmin: React.FC = () => {
   );
 };
 
+// ── Admin Activity ───────────────────────────────────────────────────
+
+const ACTIVITY_LABELS: Record<string, string> = {
+  admin_config_update: "Setting changed",
+  admin_cache_release: "Cache released",
+  admin_subscription_add: "Subscription added",
+  admin_subscription_update: "Subscription edited",
+  admin_subscription_delete: "Subscription removed",
+  admin_subscription_toggle: "Scope changed",
+  admin_subscription_discover: "Discover",
+  admin_subscription_sync: "Sync",
+  cert_enabled_collections_config: "Certificate collections",
+};
+
+const activityLabel = (entry: AdminActivityEntry) => ACTIVITY_LABELS[entry.action] ?? entry.action;
+
+type ActivitySortKey = "timestamp" | "user" | "action";
+
+const activityMatches = (entry: AdminActivityEntry, query: string) =>
+  textMatches(query, entry.user_email, activityLabel(entry), entry.summary, entry.resource_id);
+
+const activityAccessor = (entry: AdminActivityEntry, key: ActivitySortKey): string => {
+  if (key === "user") return entry.user_email.toLowerCase();
+  if (key === "action") return activityLabel(entry);
+  return entry.timestamp ?? "";
+};
+
+const AdminActivity: React.FC = () => {
+  const { data, isLoading, error } = useAdminActivity();
+  const { formatDate } = usePortalTimezone();
+  const grid = useGridRows<AdminActivityEntry, ActivitySortKey>(data ?? [], {
+    matches: activityMatches,
+    accessor: activityAccessor,
+    initialSort: { key: "timestamp", direction: "desc" },
+  });
+  const header = (label: string, key: ActivitySortKey) => (
+    <th className={gridStyles.headerCell}>
+      <SortableHeader
+        label={label}
+        active={grid.sort.key === key}
+        direction={grid.sort.direction}
+        onClick={() => grid.toggleSort(key)}
+      />
+    </th>
+  );
+
+  return (
+    <div className={gridStyles.shell}>
+      <GridHeader
+        title="Admin Activity"
+        subtitle="Every change made on this page, from the audit log (latest 200)."
+        search={grid.search}
+        onSearch={grid.setSearch}
+        placeholder="Search user, action or details…"
+      />
+      <div className="overflow-x-auto">
+        <table className={gridStyles.table}>
+          <thead className={gridStyles.head}>
+            <tr>
+              {header("When", "timestamp")}
+              {header("User", "user")}
+              {header("Action", "action")}
+              <th className={gridStyles.headerCell}>Details</th>
+              <th className={gridStyles.headerCellCenter}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading ? (
+              <GridMessageRow colSpan={5}>Loading activity…</GridMessageRow>
+            ) : error ? (
+              <GridMessageRow colSpan={5} tone="error">
+                Could not load activity: {apiErrorMessage(error, "request failed.")}
+              </GridMessageRow>
+            ) : grid.pageRows.length === 0 ? (
+              <GridMessageRow colSpan={5}>
+                {data?.length ? "No activity matches the search." : "No changes recorded yet."}
+              </GridMessageRow>
+            ) : (
+              grid.pageRows.map((entry) => (
+                <tr key={entry.id} className={gridStyles.row}>
+                  <td className={`${gridStyles.cell} whitespace-nowrap`}>{formatDate(entry.timestamp)}</td>
+                  <td className={gridStyles.cell}>{entry.user_email}</td>
+                  <td className={`${gridStyles.strongCell} whitespace-nowrap`}>{activityLabel(entry)}</td>
+                  <td className={gridStyles.cell}>{entry.summary}</td>
+                  <td className={gridStyles.centerCell}>
+                    <span
+                      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                        entry.status === "success" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"
+                      }`}
+                    >
+                      {entry.status}
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      <GridPagerBar
+        page={grid.page}
+        totalPages={grid.totalPages}
+        total={grid.total}
+        pageSize={grid.pageSize}
+        onPage={grid.setPage}
+        noun="changes"
+      />
+    </div>
+  );
+};
+
 // ── Admin Utilities Link ─────────────────────────────────────────────
+
+const utilityLink =
+  "px-3 py-2 bg-att-50 text-att-700 border border-att-100 rounded-md text-sm font-medium hover:bg-att-100";
 
 const AdminUtilities: React.FC = () => (
   <div className="bg-white rounded-xl p-4 border">
     <h3 className="text-sm font-semibold mb-2">Admin Utilities</h3>
-    <div className="flex gap-3">
-      <Link to="/admin/permissions" className="px-3 py-2 bg-att-50 text-att-700 border border-att-100 rounded-md text-sm font-medium hover:bg-att-100">Manage Permissions</Link>
+    <div className="flex flex-wrap gap-3">
+      <Link to="/admin/permissions" className={utilityLink}>Manage Permissions</Link>
+      <Link to="/access/manage" className={utilityLink}>Access Management</Link>
     </div>
+    <p className="mt-2 text-xs text-gray-500">
+      Access Management places subscriptions into projects and Prod / Non-Prod tiers and handles access requests.
+    </p>
   </div>
 );
 
@@ -880,7 +1158,8 @@ const ConfigPanel: React.FC<{
             )}
             <InlineError error={rpmMutation.error} fallback="Failed to save the rate limit." />
             <p className="mt-2 text-xs text-gray-500">
-              Per client IP, counted separately by each API worker. Other workers apply a change within 30 seconds.
+              Per client IP across every API worker and replica (counts are shared every 5 seconds). A change applies
+              everywhere within 30 seconds.
             </p>
             <ConfigChangedBy entry={configByKey.get("rate_limit_rpm")} />
           </div>
@@ -1161,6 +1440,7 @@ const AdminDashboard: React.FC = () => {
     );
   }
 
+  const environmentOptions = data.environment_options ?? [];
   const inScopeCount = data.subscriptions.filter(isInScope).length;
   const outOfScopeCount = data.subscriptions.length - inScopeCount;
   const unhealthy = [
@@ -1243,11 +1523,14 @@ const AdminDashboard: React.FC = () => {
       </div>
 
       {/* Add Subscription Form */}
-      {showAddForm && <AddSubscriptionForm onClose={() => setShowAddForm(false)} />}
+      {showAddForm && (
+        <AddSubscriptionForm onClose={() => setShowAddForm(false)} environmentOptions={environmentOptions} />
+      )}
 
       {/* Subscription Table */}
       <SubscriptionTable
         subs={data.subscriptions}
+        environmentOptions={environmentOptions}
         onShowAdd={() => setShowAddForm(true)}
         scopeFilter={scopeFilter}
         onScopeFilterChange={setScopeFilter}
@@ -1255,6 +1538,9 @@ const AdminDashboard: React.FC = () => {
 
       {/* Certificate Collections Admin */}
       <CertificateCollectionsAdmin />
+
+      {/* Audit trail of changes made on this page */}
+      <AdminActivity />
     </div>
   );
 };

@@ -750,10 +750,18 @@ export interface SubscriptionInfo {
   enabled: boolean;
   monitored: boolean;
   environment?: string | null;
+  /** Prod / Non-Prod bucket this subscription's spend lands in (Environment, else name). */
+  cost_env?: "Prod" | "Non-Prod";
   notes?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   created_by?: string | null;
+}
+
+export interface EnvironmentOption {
+  value: string;
+  label: string;
+  cost_env: "Prod" | "Non-Prod";
 }
 
 export interface AdminDashboard {
@@ -772,7 +780,20 @@ export interface AdminDashboard {
     api: string;
   };
   cors_origins: string[];
+  environment_options?: EnvironmentOption[];
   generated_at: string;
+}
+
+/** One audit_logs row for a change made from the Admin page. */
+export interface AdminActivityEntry {
+  id: number;
+  timestamp: string | null;
+  user_email: string;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  summary: string;
+  status: string;
 }
 
 export interface AdminConfigEntry {
@@ -834,6 +855,7 @@ export function useAddSubscription() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "subscriptions"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -857,6 +879,7 @@ export function useToggleSubscription() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "subscriptions"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -881,6 +904,7 @@ export function useUpdateSubscription() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "subscriptions"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -897,6 +921,7 @@ export function useDeleteSubscription() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "subscriptions"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -911,6 +936,7 @@ export function useDiscoverSubscriptions() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "subscriptions"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -925,6 +951,7 @@ export function useSyncSubscriptions() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "subscriptions"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -958,6 +985,7 @@ export function useUpsertAdminConfig() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["admin", "config"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
@@ -976,7 +1004,20 @@ export function useReleaseOperationalCache() {
       qc.invalidateQueries({ queryKey: ["costs", "amortized-summary"] });
       qc.invalidateQueries({ queryKey: ["costs", "amortized-drilldown"] });
       qc.invalidateQueries({ queryKey: ["dashboard", "admin"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
+  });
+}
+
+export function useAdminActivity(limit = 200) {
+  return useQuery<AdminActivityEntry[]>({
+    queryKey: ["admin", "audit", limit],
+    queryFn: async () => {
+      const { data } = await apiClient.get("/admin/audit", { params: { limit } });
+      return data;
+    },
+    staleTime: 30 * 1000,
+    refetchInterval: GRID_POLL_INTERVAL,
   });
 }
 

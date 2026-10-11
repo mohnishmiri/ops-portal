@@ -19,7 +19,24 @@ import AdminDashboard from "./AdminDashboard";
 
 const SUB = (id: string, name: string, enabled: boolean, monitored: boolean) => ({
   subscription_id: id, subscription_name: name, name, state: "Enabled", enabled, monitored, environment: null,
+  cost_env: name.includes("NPRD") || name.includes("DEV") ? "Non-Prod" : "Prod",
 });
+
+const ENV_OPTIONS = [
+  { value: "production", label: "Production", cost_env: "Prod" },
+  { value: "development", label: "Development", cost_env: "Non-Prod" },
+];
+
+const ACTIVITY = Array.from({ length: 12 }, (_, i) => ({
+  id: i + 1,
+  timestamp: `2026-10-11T05:${String(10 + i).padStart(2, "0")}:00`,
+  user_email: i % 2 ? "pat@example.com" : "lee@example.com",
+  action: i === 11 ? "admin_cache_release" : "admin_config_update",
+  resource_type: i === 11 ? "admin_cache" : "admin_config",
+  resource_id: null,
+  summary: i === 11 ? "Released 4 cached key(s)" : `Changed cache_ttl_seconds from ${i} to ${i + 1}`,
+  status: "success",
+}));
 
 const DASHBOARD = {
   subscriptions: [
@@ -37,6 +54,7 @@ const DASHBOARD = {
   ollama_enabled: false,
   system_health: { database: "connected", cache: "connected", api: "unreachable" },
   cors_origins: ["http://localhost:5177"],
+  environment_options: ENV_OPTIONS,
   generated_at: "2026-10-11T05:26:25",
 };
 
@@ -71,6 +89,7 @@ beforeEach(() => {
     "/admin/portal-timezone": { timezone: "UTC" },
     "/certificates/collections": [{ id: 1, name: "AP-KF-ATTCC-31599" }, { id: 2, name: "AP-KF-OTHER-1" }],
     "/certificates/collections/enabled": { collection_ids: [], mode: "all" },
+    "/admin/audit": ACTIVITY,
   };
   (apiClient.get as any).mockImplementation(async (url: string) => {
     if (!(url in responses)) throw new Error(`unexpected GET ${url}`);
@@ -92,7 +111,7 @@ describe("AdminDashboard", () => {
     expect(screen.getByText("ACC-NPRD-31599-ATTCC")).toBeInTheDocument();
     expect(screen.getByText("ACC-DEV-31599-ATTCC")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Search subscriptions"), { target: { value: "dev" } });
+    fireEvent.change(screen.getByLabelText("Search Managed Subscriptions"), { target: { value: "dev" } });
     expect(screen.queryByText("ACC-NPRD-31599-ATTCC")).not.toBeInTheDocument();
     expect(screen.getByText("ACC-DEV-31599-ATTCC")).toBeInTheDocument();
   });
@@ -144,6 +163,73 @@ describe("AdminDashboard", () => {
 
     // Last change is attributed.
     expect(screen.getByText(/Changed by pat@example.com/)).toBeInTheDocument();
+  });
+
+  it("edits a subscription's environment and shows what it does to cost reporting", async () => {
+    (apiClient.put as any).mockResolvedValue({ data: { changes: {} } });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit ACC-PROD-31599-ATTCC" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit subscription" });
+    const env = within(dialog).getByLabelText("Environment");
+    expect(within(env).getByRole("option", { name: "Development — Non-Prod spend" })).toBeInTheDocument();
+
+    fireEvent.change(env, { target: { value: "development" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(apiClient.put).toHaveBeenCalledWith("/admin/subscriptions/00000000-0000-0000-0000-000000000001", {
+        subscription_name: "ACC-PROD-31599-ATTCC",
+        environment: "development",
+        notes: "",
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("asks before removing a subscription and keeps the dialog open on failure", async () => {
+    (apiClient.delete as any).mockRejectedValueOnce(axiosError(404, "Subscription not found"));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove ACC-DEV-31599-ATTCC" }));
+    const dialog = screen.getByRole("dialog", { name: "Remove subscription?" });
+    expect(apiClient.delete).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+    expect(await within(dialog).findByText("Subscription not found")).toBeInTheDocument();
+    expect(apiClient.delete).toHaveBeenCalledWith("/admin/subscriptions/00000000-0000-0000-0000-000000000003");
+  });
+
+  it("paginates the subscription grid ten rows at a time", async () => {
+    responses["/dashboards/admin"] = {
+      ...DASHBOARD,
+      subscriptions: Array.from({ length: 12 }, (_, i) =>
+        SUB(`00000000-0000-0000-0000-0000000000${String(i).padStart(2, "0")}`, `SUB-${String(i).padStart(2, "0")}`, true, true),
+      ),
+      subscription_count: 12,
+    };
+    renderPage();
+
+    expect(await screen.findByText("Showing 1–10 of 12 subscriptions")).toBeInTheDocument();
+    expect(screen.queryByText("SUB-11")).not.toBeInTheDocument();
+    const pager = screen.getByText("Showing 1–10 of 12 subscriptions").parentElement as HTMLElement;
+    fireEvent.click(within(pager).getByRole("button", { name: "Next" }));
+    expect(screen.getByText("SUB-11")).toBeInTheDocument();
+  });
+
+  it("lists admin activity newest first with search", async () => {
+    renderPage();
+
+    const grid = (await screen.findByText("Admin Activity")).closest("div.overflow-hidden") as HTMLElement;
+    await within(grid).findByText("Released 4 cached key(s)");
+    const firstRow = within(grid).getAllByRole("row")[1];
+    expect(within(firstRow).getByText("Released 4 cached key(s)")).toBeInTheDocument();
+    expect(within(firstRow).getByText("Cache released")).toBeInTheDocument();
+    expect(within(grid).getByText("Showing 1–10 of 12 changes")).toBeInTheDocument();
+
+    fireEvent.change(within(grid).getByLabelText("Search Admin Activity"), { target: { value: "from 3 to" } });
+    expect(within(grid).getByText("Changed cache_ttl_seconds from 3 to 4")).toBeInTheDocument();
+    expect(within(grid).getByText("Showing 1–1 of 1 changes")).toBeInTheDocument();
   });
 
   it("only enables certificate collection Save when the selection changed, and flags an empty selection", async () => {

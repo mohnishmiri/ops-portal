@@ -1366,6 +1366,23 @@ class UserSubscriptionPreference(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class RateLimitWindow(Base):
+    """Requests per client IP per minute, shared by every API worker.
+
+    Each worker adds its counts here in batches (see
+    ``app.middleware.rate_limit``), so ``rate_limit_rpm`` applies to the
+    deployment as a whole rather than separately in each process.
+    """
+
+    __tablename__ = "rate_limit_windows"
+
+    client_ip = Column(String(64), primary_key=True)
+    window_start = Column(DateTime, primary_key=True)  # naive UTC, minute-aligned
+    request_count = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("ix_rate_limit_windows_window_start", "window_start"),)
+
+
 class AdminConfig(Base):
     """Key-value admin configuration stored in DB so it can be
     managed through the Admin panel without redeploying."""

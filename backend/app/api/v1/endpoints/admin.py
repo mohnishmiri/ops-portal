@@ -1,9 +1,14 @@
-"""Admin API endpoints for subscription management and portal config."""
+"""Admin API endpoints for subscription management and portal config.
+
+Every change made here is also written to ``audit_logs`` (resource types
+``admin_subscription`` / ``admin_config`` / ``admin_cache``) and listed back
+by ``GET /admin/audit`` for the Admin page's activity grid.
+"""
 
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +34,19 @@ _GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 # 0 = keep page-cache keys until released; otherwise 1 minute to 7 days.
 _MAX_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+# The settings the Admin page manages. Anything else is rejected so a typo
+# (or a guessed key) can't write config rows nothing reads.
+_CONFIG_KEYS = frozenset(
+    {
+        CORS_CONFIG_KEY,
+        "rate_limit_rpm",
+        "cache_enabled",
+        "ollama_enabled",
+        "cache_ttl_seconds",
+        "portal_timezone",
+    }
+)
 
 
 class AddSubscriptionRequest(BaseModel):
@@ -57,9 +75,18 @@ class ToggleSubscriptionRequest(BaseModel):
 
 
 class UpdateSubscriptionRequest(BaseModel):
-    subscription_name: str | None = None
-    environment: str | None = None
+    """``None`` leaves a field unchanged; an empty string clears Environment or Notes."""
+
+    subscription_name: str | None = Field(default=None, max_length=255)
+    environment: str | None = Field(default=None, max_length=50)
     notes: str | None = None
+
+    @field_validator("subscription_name")
+    @classmethod
+    def _name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("cannot be blank")
+        return value
 
 
 class UpsertConfigRequest(BaseModel):
@@ -74,6 +101,14 @@ class UpsertConfigRequest(BaseModel):
 
 def _get_admin_service(db: AsyncSession = Depends(get_db)) -> AdminService:
     return AdminService(db)
+
+
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _actor(user: UserContext) -> str | None:
+    return user.email or user.display_name
 
 
 # ── Subscription endpoints ─────────────────────────────────────────────
@@ -98,6 +133,7 @@ async def list_subscriptions(
 )
 async def add_subscription(
     body: AddSubscriptionRequest,
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
@@ -111,12 +147,26 @@ async def add_subscription(
             monitored=body.monitored,
             environment=body.environment,
             notes=body.notes,
-            created_by=user.email or user.display_name,
+            created_by=_actor(user),
         )
-        invalidate_subscription_cache()
-        return result
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    invalidate_subscription_cache()
+    await service.record_audit(
+        user,
+        "admin_subscription_add",
+        resource_type="admin_subscription",
+        resource_id=result["subscription_id"],
+        summary=f"Added subscription {result['subscription_name']}",
+        details={
+            "feature": "managed_subscriptions",
+            "environment": result.get("environment"),
+            "enabled": result.get("enabled"),
+            "monitored": result.get("monitored"),
+        },
+        ip_address=_client_ip(request),
+    )
+    return result
 
 
 @router.put(
@@ -126,6 +176,7 @@ async def add_subscription(
 async def toggle_subscription(
     subscription_id: str,
     body: ToggleSubscriptionRequest,
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
@@ -135,12 +186,24 @@ async def toggle_subscription(
             subscription_id,
             enabled=body.enabled,
             monitored=body.monitored,
-            updated_by=user.email or user.display_name,
+            updated_by=_actor(user),
         )
-        invalidate_subscription_cache()
-        return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    invalidate_subscription_cache()
+    changed = {field: value for field, value in body.model_dump().items() if value is not None}
+    if changed:
+        await service.record_audit(
+            user,
+            "admin_subscription_toggle",
+            resource_type="admin_subscription",
+            resource_id=subscription_id,
+            summary=f"Set {', '.join(f'{field}={value}' for field, value in changed.items())} "
+            f"on {result.get('subscription_name') or subscription_id}",
+            details={"feature": "managed_subscriptions", **changed},
+            ip_address=_client_ip(request),
+        )
+    return result
 
 
 @router.put(
@@ -150,6 +213,7 @@ async def toggle_subscription(
 async def update_subscription(
     subscription_id: str,
     body: UpdateSubscriptionRequest,
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
@@ -160,12 +224,23 @@ async def update_subscription(
             subscription_name=body.subscription_name,
             environment=body.environment,
             notes=body.notes,
-            updated_by=user.email or user.display_name,
+            updated_by=_actor(user),
         )
-        invalidate_subscription_cache()
-        return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    invalidate_subscription_cache()
+    changes = result.get("changes") or {}
+    if changes:
+        await service.record_audit(
+            user,
+            "admin_subscription_update",
+            resource_type="admin_subscription",
+            resource_id=subscription_id,
+            summary=f"Edited {', '.join(changes)} on {result['subscription_name']}",
+            details={"feature": "managed_subscriptions", "changes": changes},
+            ip_address=_client_ip(request),
+        )
+    return result
 
 
 @router.delete(
@@ -174,16 +249,67 @@ async def update_subscription(
 )
 async def remove_subscription(
     subscription_id: str,
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Remove a subscription from DB."""
     try:
         result = await service.remove_subscription(subscription_id)
-        invalidate_subscription_cache()
-        return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    invalidate_subscription_cache()
+    await service.record_audit(
+        user,
+        "admin_subscription_delete",
+        resource_type="admin_subscription",
+        resource_id=subscription_id,
+        summary=f"Removed subscription {result.get('subscription_name') or subscription_id}",
+        details={"feature": "managed_subscriptions"},
+        ip_address=_client_ip(request),
+    )
+    return result
+
+
+async def _discover(request: Request, user: UserContext, service: AdminService, *, sync_only: bool) -> dict:
+    action = "admin_subscription_sync" if sync_only else "admin_subscription_discover"
+    try:
+        result = await service.discover_subscriptions(created_by=_actor(user), sync_only=sync_only)
+    except Exception as exc:
+        await service.record_audit(
+            user,
+            action,
+            resource_type="admin_subscription",
+            resource_id=None,
+            summary=f"{'Sync' if sync_only else 'Discover'} from Azure failed",
+            details={"feature": "managed_subscriptions", "error": str(exc)[:300]},
+            ip_address=_client_ip(request),
+            status="failed",
+        )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    invalidate_subscription_cache()
+    new_ids = [s["subscription_id"] for s in result.get("subscriptions", []) if s.get("is_new")]
+    summary = (
+        f"Synced {result['updated_count']} subscriptions from Azure"
+        if sync_only
+        else f"Discovered {result['discovered']} subscriptions from Azure ({result['new_count']} new)"
+    )
+    await service.record_audit(
+        user,
+        action,
+        resource_type="admin_subscription",
+        resource_id=None,
+        summary=summary,
+        details={
+            "feature": "managed_subscriptions",
+            "discovered": result["discovered"],
+            "new_count": result["new_count"],
+            "updated_count": result["updated_count"],
+            "new_subscription_ids": new_ids,
+        },
+        ip_address=_client_ip(request),
+    )
+    return result
 
 
 @router.post(
@@ -191,20 +317,13 @@ async def remove_subscription(
     summary="Discover subscriptions from Azure",
 )
 async def discover_subscriptions(
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Query Azure ARM for all subscriptions visible to the service principal
     and upsert them into the database.  New ones are added as disabled."""
-    try:
-        result = await service.discover_subscriptions(
-            created_by=user.email or user.display_name,
-            sync_only=False,
-        )
-        invalidate_subscription_cache()
-        return result
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return await _discover(request, user, service, sync_only=False)
 
 
 @router.post(
@@ -212,20 +331,13 @@ async def discover_subscriptions(
     summary="Sync existing subscriptions from Azure",
 )
 async def sync_subscriptions(
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
     """Re-sync existing subscriptions from Azure ARM.  Updates name and
     state for subscriptions already in the DB without adding new ones."""
-    try:
-        result = await service.discover_subscriptions(
-            created_by=user.email or user.display_name,
-            sync_only=True,
-        )
-        invalidate_subscription_cache()
-        return result
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return await _discover(request, user, service, sync_only=True)
 
 
 # ── System health ──────────────────────────────────────────────────────
@@ -241,6 +353,22 @@ async def system_health(
 ) -> dict:
     """Check health of all system components."""
     return await service.check_system_health()
+
+
+# ── Audit trail ────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/audit",
+    summary="Recent changes made from the Admin page",
+)
+async def list_admin_activity(
+    limit: int = Query(default=200, ge=1, le=1000),
+    user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
+    service: AdminService = Depends(_get_admin_service),
+) -> list[dict]:
+    """Subscription, configuration, cache, and certificate-collection changes, newest first."""
+    return await service.list_admin_activity(limit=limit)
 
 
 # ── Admin Config ───────────────────────────────────────────────────────
@@ -264,6 +392,7 @@ async def list_admin_config(
 )
 async def upsert_admin_config(
     body: UpsertConfigRequest,
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
     db: AsyncSession = Depends(get_db),
@@ -273,6 +402,12 @@ async def upsert_admin_config(
     value = body.config_value
     config_type = body.config_type
     description = body.description
+
+    if key not in _CONFIG_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown config key {key!r}. Allowed: {', '.join(sorted(_CONFIG_KEYS))}.",
+        )
 
     if key == CORS_CONFIG_KEY:
         try:
@@ -342,12 +477,13 @@ async def upsert_admin_config(
         if description is None:
             description = "Enable or disable Ollama LLM for Leadership Dashboard forecasts and AI advisor."
 
+    previous = await service.get_admin_config(key)
     result = await service.upsert_admin_config(
         key=key,
         value=value,
         config_type=config_type,
         description=description,
-        updated_by=user.email or user.display_name,
+        updated_by=_actor(user),
     )
 
     # Push rate-limit override into in-memory store so the middleware picks
@@ -365,6 +501,18 @@ async def upsert_admin_config(
 
         await refresh_cache_enabled_flag(db)
 
+    old_value = previous["config_value"] if previous else None
+    if old_value != value:
+        await service.record_audit(
+            user,
+            "admin_config_update",
+            resource_type="admin_config",
+            resource_id=key,
+            summary=f"Changed {key} from {old_value if old_value is not None else '(default)'} to {value}",
+            details={"feature": "portal_configuration", "old_value": old_value, "new_value": value},
+            ip_address=_client_ip(request),
+        )
+
     return result
 
 
@@ -373,11 +521,22 @@ async def upsert_admin_config(
     summary="Release cached page and cost data",
 )
 async def release_cached_data(
+    request: Request,
     user: UserContext = Depends(require_role(UserRole.SUPER_ADMIN)),
     service: AdminService = Depends(_get_admin_service),
 ) -> dict:
-    """Release Redis-backed page payload and cost query caches."""
-    return await service.release_cached_data()
+    """Release DB-backed page payload and cost query caches."""
+    result = await service.release_cached_data()
+    await service.record_audit(
+        user,
+        "admin_cache_release",
+        resource_type="admin_cache",
+        resource_id=None,
+        summary=f"Released {result['released_keys']} cached key(s)",
+        details={"feature": "cached_data_release", "patterns": result["patterns"]},
+        ip_address=_client_ip(request),
+    )
+    return result
 
 
 @router.get(

@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.azure_auth import get_azure_credential
 from app.core.config import settings
 from app.core.db_cache import cache_manager
-from app.models.database import AdminConfig, AdminSubscription
+from app.models.auth import UserContext
+from app.models.database import AdminConfig, AdminSubscription, AuditLog
 
 logger = structlog.get_logger(__name__)
 
@@ -23,6 +24,25 @@ logger = structlog.get_logger(__name__)
 # minute. (monotonic timestamp, reachable)
 _AZURE_PROBE_TTL_SECONDS = 60
 _azure_probe_result: tuple[float, bool] | None = None
+
+# audit_logs.resource_type values for changes made from the Admin page; the
+# certificate-collection picker on the same page already writes
+# "certificate_config".
+ADMIN_ACTIVITY_RESOURCE_TYPES = ("admin_config", "admin_subscription", "admin_cache", "certificate_config")
+
+# Environment values offered by the Admin page. Free text is still accepted;
+# AmortizedCostSyncService.normalize_environment maps any value to Prod / Non-Prod.
+ENVIRONMENT_OPTIONS = (
+    ("production", "Production"),
+    ("non-production", "Non-Production"),
+    ("development", "Development"),
+    ("staging", "Staging"),
+    ("dr", "DR"),
+)
+
+# Page caches whose payloads depend on which subscriptions are in scope or on
+# their Environment (the Prod / Non-Prod cost split).
+_SCOPE_DEPENDENT_CACHE_PATTERNS = ("pagecache:leadership%", "pagecache:amortized%", "pagecache:env%")
 
 
 class AdminService:
@@ -140,6 +160,7 @@ class AdminService:
         row.updated_by = updated_by
         await self._db.commit()
         await self._db.refresh(row)
+        await self.invalidate_scope_dependent_caches()
 
         logger.info(
             "subscription_toggled",
@@ -150,6 +171,7 @@ class AdminService:
         )
         return {
             "subscription_id": row.subscription_id,
+            "subscription_name": row.subscription_name,
             "enabled": row.enabled,
             "monitored": row.monitored,
         }
@@ -163,7 +185,12 @@ class AdminService:
         notes: str | None = None,
         updated_by: str | None = None,
     ) -> dict:
-        """Update metadata of a subscription."""
+        """Update metadata of a subscription.
+
+        ``None`` leaves a field unchanged; an empty string clears Environment
+        or Notes. The returned ``changes`` maps each changed field to
+        ``[old, new]`` for the audit trail.
+        """
         result = await self._db.execute(
             select(AdminSubscription).where(AdminSubscription.subscription_id == subscription_id)
         )
@@ -171,16 +198,29 @@ class AdminService:
         if not row:
             raise ValueError(f"Subscription {subscription_id} not found")
 
+        updates: dict[str, str | None] = {}
         if subscription_name is not None:
-            row.subscription_name = subscription_name
+            updates["subscription_name"] = subscription_name.strip()
         if environment is not None:
-            row.environment = environment
+            updates["environment"] = environment.strip() or None
         if notes is not None:
-            row.notes = notes
-        row.updated_at = datetime.utcnow()
-        row.updated_by = updated_by
-        await self._db.commit()
-        await self._db.refresh(row)
+            updates["notes"] = notes.strip() or None
+
+        changes: dict[str, list[str | None]] = {}
+        for field, value in updates.items():
+            current = getattr(row, field)
+            if current != value:
+                changes[field] = [current, value]
+                setattr(row, field, value)
+
+        if changes:
+            row.updated_at = datetime.utcnow()
+            row.updated_by = updated_by
+            await self._db.commit()
+            await self._db.refresh(row)
+            # Name and Environment decide the Prod / Non-Prod cost split.
+            if changes.keys() & {"subscription_name", "environment"}:
+                await self.invalidate_scope_dependent_caches()
 
         return {
             "subscription_id": row.subscription_id,
@@ -188,6 +228,7 @@ class AdminService:
             "environment": row.environment,
             "notes": row.notes,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "changes": changes,
         }
 
     async def remove_subscription(self, subscription_id: str) -> dict:
@@ -199,14 +240,16 @@ class AdminService:
         if not row:
             raise ValueError(f"Subscription {subscription_id} not found")
 
+        name = row.subscription_name
         await self._db.delete(row)
         await self._db.commit()
 
         from app.core.access_scope import invalidate_access_topology
 
         invalidate_access_topology()
+        await self.invalidate_scope_dependent_caches()
         logger.info("subscription_removed", subscription_id=subscription_id)
-        return {"subscription_id": subscription_id, "removed": True}
+        return {"subscription_id": subscription_id, "subscription_name": name, "removed": True}
 
     async def get_enabled_subscription_ids(self) -> list[str]:
         """Return a list of subscription IDs that are enabled AND monitored.
@@ -404,6 +447,72 @@ class AdminService:
             "description": row.description,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
+
+    # ── Audit trail ────────────────────────────────────────────────────
+
+    async def record_audit(
+        self,
+        user: UserContext,
+        action: str,
+        *,
+        resource_type: str,
+        resource_id: str | None,
+        summary: str,
+        details: dict | None = None,
+        ip_address: str | None = None,
+        status: str = "success",
+    ) -> None:
+        """Write an ``audit_logs`` row for an Admin page change.
+
+        Called after the change has committed; never raises, so a failed audit
+        write cannot turn a successful change into an error response.
+        """
+        try:
+            self._db.add(
+                AuditLog(
+                    user_id=user.user_id,
+                    user_email=user.email,
+                    action=action,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    details={"page": "AdminDashboard", "summary": summary, **(details or {})},
+                    ip_address=ip_address,
+                    status=status,
+                )
+            )
+            await self._db.commit()
+        except Exception as exc:
+            await self._db.rollback()
+            logger.warning("admin_audit_failed", action=action, error=str(exc)[:200])
+
+    async def list_admin_activity(self, limit: int = 200) -> list[dict]:
+        """Most recent changes made from the Admin page, newest first."""
+        result = await self._db.execute(
+            select(AuditLog)
+            .where(AuditLog.resource_type.in_(ADMIN_ACTIVITY_RESOURCE_TYPES))
+            .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "id": row.id,
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "user_email": row.user_email or row.user_id,
+                "action": row.action,
+                "resource_type": row.resource_type,
+                "resource_id": row.resource_id,
+                "summary": (row.details or {}).get("summary") or row.action,
+                "status": row.status,
+            }
+            for row in result.scalars().all()
+        ]
+
+    async def invalidate_scope_dependent_caches(self) -> int:
+        """Drop page caches built from the old subscription scope / environments."""
+        released = 0
+        for pattern in _SCOPE_DEPENDENT_CACHE_PATTERNS:
+            released += await cache_manager.invalidate(pattern)
+        return released
 
     # ── System Health ──────────────────────────────────────────────────
 

@@ -141,6 +141,7 @@ export function useUpdatePortalTimezone() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin", "portal-timezone"] });
       qc.invalidateQueries({ queryKey: ["admin", "config"] });
+      qc.invalidateQueries({ queryKey: ["admin", "audit"] });
     },
   });
 }
