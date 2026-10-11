@@ -39,6 +39,13 @@ interface ProtectedRouteProps {
   page?: string;
   /** Human-readable label shown in the AccessDenied message. */
   label?: string;
+  /**
+   * Whether the page needs a subscription grant to be of any use. True for
+   * every module page that reads Azure. Pages that touch no subscription
+   * (Tools → Credential Check) pass false, so a user with portal access but
+   * no grant yet is not sent to /access for access they do not need.
+   */
+  requiresSubscription?: boolean;
 }
 
 const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
@@ -46,6 +53,7 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   module,
   page,
   label,
+  requiresSubscription = true,
 }) => {
   const { isAdmin } = useAuth();
   const { isLoading, canViewModule, canViewPage } = usePermissions();
@@ -54,7 +62,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   // No grant yet → nothing to show on any module page. Checked after the
   // permission check below, so a page the user may never open still says
   // "Access Denied" rather than inviting a request that would not help.
-  const noSubscriptions = Boolean(module || page) && !isSuperAdmin && !hasSubscriptionAccess;
+  const noSubscriptions =
+    requiresSubscription && Boolean(module || page) && !isSuperAdmin && !hasSubscriptionAccess;
   const noSubscriptionsPanel = <NoSubscriptionAccess resourceName={label ?? page ?? module} />;
 
   // Admins always pass the module/page permission check

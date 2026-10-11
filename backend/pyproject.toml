@@ -47,6 +47,10 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
     "alembic>=1.13.0",
     "openpyxl>=3.1.0",
+    # Credential checks bind to Active Directory over LDAPS (Tools module).
+    # Imported defensively in credential_check_service, so a build without it
+    # still starts — the domain check reports itself unavailable instead.
+    "ldap3>=2.9.1",
 ]
 
 [project.optional-dependencies]

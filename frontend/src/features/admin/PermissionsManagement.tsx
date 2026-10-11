@@ -44,6 +44,7 @@ const RESOURCE_LABELS: Record<string, { label: string; description: string }> = 
   keyvault:          { label: "Key Vault",           description: "Secrets, keys & certificate lifecycle" },
   infra_alerts:      { label: "Infra Alerts",        description: "Infrastructure alerting & threshold monitoring" },
   admin:             { label: "Admin Panel",         description: "System administration — subscriptions, config & access control" },
+  tools:             { label: "Tools",               description: "Operational self-service tools" },
   // Pages
   leadership_dashboard: { label: "Leadership Dashboard", description: "Cost KPIs, advisor & executive summary" },
   amortized_costs:      { label: "Amortized Costs",      description: "Amortized cost breakdown & trend analysis" },
@@ -52,6 +53,7 @@ const RESOURCE_LABELS: Record<string, { label: string; description: string }> = 
   keyvault_main:        { label: "Key Vault Dashboard",   description: "Key Vault inventory & expiry tracking" },
   infra_alerts_main:    { label: "Infra Alerts Dashboard",description: "Infrastructure alert feed & thresholds" },
   admin_dashboard:      { label: "Admin Dashboard",       description: "Subscription management, system health & configuration" },
+  credential_check_main: { label: "Credential Check",     description: "Check whether a domain, AAF or JFrog credential still authenticates" },
   admin_permissions:    { label: "Access Management",     description: "Module/page-level RBAC and role/user permission management" },
 };
 

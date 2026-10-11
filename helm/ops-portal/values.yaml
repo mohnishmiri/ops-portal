@@ -95,6 +95,21 @@ backend:
     # Empty = https://login.microsoftonline.com/<AZURE_TENANT_ID>
     AZURE_AUTHORITY: ""
 
+    # ── Credential checks (Tools → Credential Check) ──
+    # Leave the LDAP URLs empty until the domain controllers and the egress
+    # to them are agreed with the directory owners: a failed check counts as
+    # a failed sign-in against the AD lockout policy. Empty = the domain
+    # check reports itself unconfigured rather than attempting a bind.
+    # The network policy below must also allow egress to 636 for LDAPS.
+    CRED_CHECK_LDAP_ITSERVICES: ""
+    CRED_CHECK_LDAP_TESTITSERVICES: ""
+    CRED_CHECK_JFROG_URL: "https://artifact.it.att.com"
+    CRED_CHECK_AAF_URL_PROD: "https://aaf-azure.it.att.com"
+    CRED_CHECK_AAF_URL_NONPROD: "https://aafist-azure.it.att.com"
+    CRED_CHECK_AAF_PATH: "/authn/basicAuth"
+    CRED_CHECK_TIMEOUT_SECONDS: "15"
+    CRED_CHECK_CA_BUNDLE: ""
+
   # akv2k8s sync: one AzureKeyVaultSecret per item, wired into the backend env.
   # When the vault doesn't hold a secret, or this project doesn't use the
   # feature, skip it instead of deleting the item. A skipped item gets no

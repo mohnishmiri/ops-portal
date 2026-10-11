@@ -302,6 +302,43 @@ class Settings(BaseSettings):
         """Escrow only runs when explicitly enabled *and* pointed at a vault."""
         return bool(self.CERT_KEY_ESCROW_ENABLED and self.cert_key_escrow_vault_uri)
 
+    # ── Credential checks (Tools module) ──────────────────────────────
+    # Endpoints the portal binds against to answer "does this password or
+    # token still work?".  Each is overridable because the paths below are
+    # the documented ones, not ones this portal has verified in your tenant.
+    CRED_CHECK_TIMEOUT_SECONDS: int = Field(
+        default=15,
+        description="Timeout in seconds for a single credential check",
+    )
+    CRED_CHECK_CA_BUNDLE: str = Field(
+        default="",
+        description="Optional PEM CA file trusted in addition to the default bundle (TLS-inspecting proxy)",
+    )
+    CRED_CHECK_LDAP_ITSERVICES: str = Field(
+        default="",
+        description="LDAPS URL of the ITSERVICES domain controller, e.g. ldaps://dc.itservices.example.com:636",
+    )
+    CRED_CHECK_LDAP_TESTITSERVICES: str = Field(
+        default="",
+        description="LDAPS URL of the TESTITSERVICES domain controller",
+    )
+    CRED_CHECK_JFROG_URL: str = Field(
+        default="https://artifact.it.att.com",
+        description="Base URL of the JFrog Artifactory instance",
+    )
+    CRED_CHECK_AAF_URL_PROD: str = Field(
+        default="https://aaf-azure.it.att.com",
+        description="Base URL of the production AAF instance",
+    )
+    CRED_CHECK_AAF_URL_NONPROD: str = Field(
+        default="https://aafist-azure.it.att.com",
+        description="Base URL of the non-production (IST) AAF instance",
+    )
+    CRED_CHECK_AAF_PATH: str = Field(
+        default="/authn/basicAuth",
+        description="AAF path that answers 200 for a valid basic-auth credential",
+    )
+
     # ── RBAC Roles ────────────────────────────────────────────────────
     # Super Admin manages every project. It is deliberately an Entra app role
     # only — nothing in the portal can grant it.

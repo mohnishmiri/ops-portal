@@ -42,6 +42,7 @@ import InfraAlertPage from "./pages/InfraAlertPage";
 import CertificatesPage from "./pages/CertificatesPage";
 import AmortizedCostDashboard from "./pages/AmortizedCostDashboard";
 import EnvironmentSchedulerPage from "./pages/EnvironmentSchedulerPage";
+import CredentialCheckPage from "./pages/CredentialCheckPage";
 import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
@@ -101,6 +102,7 @@ const ALL_NAV_ITEMS: NavItem[] = [
   { to: "/compliance", label: "Compliance",            module: "compliance",       page: "compliance_main" },
   { to: "/infra-alerts", label: "Infra Alerts",        module: "infra_alerts",     page: "infra_alerts_main" },
   { to: "/env-scheduler", label: "Env Scheduler",      module: "aks_operations",   page: "env_scheduler" },
+  { to: "/tools/credential-check", label: "Credential Check", module: "tools",      page: "credential_check_main" },
 ];
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -395,6 +397,19 @@ const MainContent: React.FC = () => (
           />
 
           {/* Project / app / subscription access */}
+          {/*
+            Tools pages read no Azure subscription, so they do not require a
+            subscription grant the way every module page above does.
+          */}
+          <Route
+            path="/tools/credential-check"
+            element={
+              <ProtectedRoute module="tools" page="credential_check_main" label="Credential Check" requiresSubscription={false}>
+                <CredentialCheckPage />
+              </ProtectedRoute>
+            }
+          />
+
           <Route path="/access" element={<MyAccessPage />} />
           <Route
             path="/access/manage"

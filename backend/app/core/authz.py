@@ -106,7 +106,11 @@ async def enforce_portal_access(
 #
 # Prefixes intentionally absent (and therefore not gated here): /auth,
 # /admin and /permissions (role-gated), /notifications, /sync-jobs and
-# /checksum-schedules (cross-module infrastructure).
+# /checksum-schedules (cross-module infrastructure), and /tools — the
+# credential checks are authorized per operation by the ``credential_check``
+# capability and touch no Azure subscription, so gating them here would also
+# impose the "no subscription grant" refusal in bind_subscription_scope on a
+# tool that has nothing to do with subscriptions.
 _API_MODULE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("/api/v1/aks", "aks_operations"),
     ("/api/v1/environment", "aks_operations"),

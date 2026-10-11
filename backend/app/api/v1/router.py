@@ -24,6 +24,7 @@ from app.api.v1.endpoints import (
     permissions,
     reports,
     sync_jobs,
+    tools,
 )
 from app.core.authz import enforce_module_access, enforce_portal_access
 from app.core.subscription_scope import bind_subscription_scope
@@ -78,6 +79,9 @@ api_router.include_router(infra_resource_admin.router, prefix="/infra-alerts", t
 
 # Module 5: Checksum Schedule Management
 api_router.include_router(checksum_schedules.router, prefix="/checksum-schedules", tags=["checksum-schedules"])
+
+# Operational self-service tools (credential checks)
+api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
 
 # Background sync job queue — non-blocking refresh + polling
 api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])
