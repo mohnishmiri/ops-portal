@@ -20,6 +20,36 @@ vi.mock("../../services/aksApi", async (importOriginal) => ({
   useNodePoolPower: vi.fn(),
   useNodeDetail: vi.fn(() => ({ data: undefined, isLoading: true, isError: false })),
   useUpdateNodePoolLabelsTaints: vi.fn(),
+  // Per-node split of the pool: nine nodes, so the quietest one folds into "Other".
+  useClusterMetrics: vi.fn(() => {
+    const t = (v: number) => [
+      { t: "2026-10-10T22:00:00Z", v },
+      { t: "2026-10-10T22:15:00Z", v: v + 1 },
+    ];
+    const names = Array.from({ length: 9 }, (_, i) => `aks-userpool-1234-vmss00000${i}`);
+    const lines = { top: names.slice(1).map((name, i) => ({ name, series: t(10 * (i + 2)) })), other: { count: 1, series: t(4) } };
+    return {
+      data: {
+        scope: "nodes",
+        range: "24h",
+        interval: "PT15M",
+        node: null,
+        nodepool: "userpool",
+        truncated: false,
+        nodes: names.map((name, i) => ({
+          name,
+          cpu: { current: 10 * (i + 1) + 1, average: 10 * (i + 1), peak: 10 * (i + 1) + 5 },
+          memory: { current: 30, average: 30, peak: 31 },
+          last_seen: "2026-10-10T22:15:00Z",
+          reporting: i !== 8,
+        })),
+        lines: { cpu: lines, memory: lines },
+      },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+    };
+  }),
   useNodePoolMetrics: vi.fn(() => ({
     data: {
       nodepool_name: "userpool",
@@ -395,6 +425,46 @@ describe("node pool utilisation", () => {
     expect(aksApi.useNodePoolMetrics).toHaveBeenLastCalledWith(CLUSTER.id, "userpool", "7d");
     fireEvent.click(screen.getByRole("button", { name: "Show table" }));
     expect(screen.getByText("25.4%")).toBeTruthy();
+  });
+});
+
+describe("node pool utilisation by node", () => {
+  it("reads per-node history only once asked", () => {
+    setup([pool()]);
+    fireEvent.click(screen.getByRole("button", { name: "userpool" }));
+    expect(aksApi.useClusterMetrics).toHaveBeenLastCalledWith(CLUSTER.id, "24h", { split: "node", nodepool: "userpool" }, false);
+
+    fireEvent.click(screen.getByRole("button", { name: "By node" }));
+    expect(aksApi.useClusterMetrics).toHaveBeenLastCalledWith(CLUSTER.id, "24h", { split: "node", nodepool: "userpool" }, true);
+  });
+
+  it("draws the busiest nodes as their own lines and folds the rest into one", () => {
+    setup([pool()]);
+    fireEvent.click(screen.getByRole("button", { name: "userpool" }));
+    fireEvent.click(screen.getByRole("button", { name: "By node" }));
+
+    expect(screen.getByText(/8 nodes reporting now, 9 in this range/)).toBeTruthy();
+    const legend = screen.getByLabelText("CPU by node legend");
+    expect(within(legend).getAllByRole("listitem")).toHaveLength(9);
+    expect(within(legend).getByText("vmss000001")).toBeTruthy(); // the common prefix is dropped
+    expect(within(legend).getByText("Other 1 node, average")).toBeTruthy();
+    expect(within(legend).getByText("(removed)")).toBeTruthy(); // vmss000008 stopped reporting
+    expect(within(legend).queryByText("vmss000000")).toBeNull();
+  });
+
+  it("lists every node and opens the ones still running", () => {
+    setup([pool()]);
+    fireEvent.click(screen.getByRole("button", { name: "userpool" }));
+    fireEvent.click(screen.getByRole("button", { name: "By node" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show table" }));
+
+    const rows = screen.getAllByRole("row").filter((r) => within(r).queryByText(/aks-userpool-1234-/));
+    expect(within(rows[0]).getByText("aks-userpool-1234-vmss000008")).toBeTruthy(); // busiest first
+    expect(within(rows[0]).getByText("Removed")).toBeTruthy();
+    expect(within(rows[0]).queryByRole("button")).toBeNull();
+
+    fireEvent.click(within(rows[1]).getByRole("button", { name: "aks-userpool-1234-vmss000007" }));
+    expect(aksApi.useNodeDetail).toHaveBeenLastCalledWith(CLUSTER.id, "aks-userpool-1234-vmss000007");
   });
 });
 

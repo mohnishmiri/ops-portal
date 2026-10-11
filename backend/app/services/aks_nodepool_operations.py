@@ -50,6 +50,10 @@ CLUSTER_MEMORY_METRIC = "node_memory_working_set_percentage"
 UTILISATION_LOOKBACK = timedelta(minutes=20)
 UTILISATION_TIMEOUT_SECONDS = 20
 # range → (lookback, grain) for the utilisation history chart.
+# Azure Monitor returns only 10 dimension values unless asked for more. AKS allows 100 pools
+# per cluster and 1000 nodes per pool; an autoscaling pool also reports nodes since removed.
+MAX_POOL_SERIES, MAX_NODE_SERIES = 100, 1000
+NODE_LINES = 8  # the busiest nodes drawn as their own line; the rest fold into one
 METRIC_RANGES: dict[str, tuple[timedelta, str]] = {
     "1h": (timedelta(hours=1), "PT1M"),
     "6h": (timedelta(hours=6), "PT5M"),
@@ -263,8 +267,11 @@ def latest_average(points: list[Any]) -> tuple[float | None, str | None]:
     return None, None
 
 
-def aks_metric_series(metrics: list[Any]) -> dict[str, list[dict[str, Any]]]:
+def aks_metric_series(metrics: list[Any], dimension: str | None = None) -> dict[str, list[dict[str, Any]]]:
     """AKS node metrics → rows per dimension value ("" when the response isn't split).
+
+    ``dimension`` names the one to key by when a series carries several (a
+    per-node split also reports each node's pool).
 
     CPU and memory working set are percentages already; Maximum is the busiest
     node within each interval.
@@ -273,7 +280,8 @@ def aks_metric_series(metrics: list[Any]) -> dict[str, list[dict[str, Any]]]:
     for metric in metrics:
         key = "cpu" if metric.name.value == CLUSTER_CPU_METRIC else "memory"
         for ts in metric.timeseries or []:
-            dim = ts.metadatavalues[0].value if getattr(ts, "metadatavalues", None) else ""
+            dims = getattr(ts, "metadatavalues", None) or []
+            dim = next((d.value for d in dims if not dimension or d.name.value == dimension), "")
             rows = out.setdefault(dim, {})
             for p in ts.data or []:
                 t = p.time_stamp.isoformat()
@@ -289,6 +297,53 @@ def summarize_series(series: list[dict[str, Any]], key: str) -> dict[str, Any] |
         return None
     peaks = [r[f"{key}_max"] for r in series if r.get(f"{key}_max") is not None] or averages
     return {"current": averages[-1], "average": round(sum(averages) / len(averages), 1), "peak": max(peaks)}
+
+
+def node_lines(by_node: dict[str, list[dict[str, Any]]], key: str, top: int = NODE_LINES) -> dict[str, Any]:
+    """The busiest nodes' lines for one metric (by average over the range); the rest averaged as one line."""
+    summaries = {n: summarize_series(s, key) for n, s in by_node.items()}
+    ranked = sorted((n for n in by_node if summaries[n]), key=lambda n: (-summaries[n]["average"], n))  # type: ignore[index]
+    shown, rest = ranked[:top], ranked[top:]
+
+    def points(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"t": r["t"], "v": r.get(f"{key}_avg")} for r in series]
+
+    other = None
+    if rest:
+        values: dict[str, list[float]] = {}
+        for n in rest:
+            for r in by_node[n]:
+                bucket = values.setdefault(r["t"], [])
+                if r.get(f"{key}_avg") is not None:
+                    bucket.append(r[f"{key}_avg"])
+        other = {
+            "count": len(rest),
+            "series": [{"t": t, "v": round(sum(v) / len(v), 1) if v else None} for t, v in sorted(values.items())],
+        }
+    # Listed by name so a node keeps its colour while the busiest set stays the same.
+    return {"top": [{"name": n, "series": points(by_node[n])} for n in sorted(shown)], "other": other}
+
+
+def node_summaries(by_node: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Every node that reported in the range; ``reporting`` is False for nodes gone before its end."""
+
+    def reported(r: dict[str, Any]) -> bool:
+        return r.get("cpu_avg") is not None or r.get("memory_avg") is not None
+
+    seen = {n: next((r["t"] for r in reversed(s) if reported(r)), None) for n, s in by_node.items()}
+    # The newest interval can still be filling in, so the last two with any data count as "now".
+    recent = set(sorted({r["t"] for s in by_node.values() for r in s if reported(r)})[-2:])
+    return [
+        {
+            "name": n,
+            "cpu": summarize_series(by_node[n], "cpu"),
+            "memory": summarize_series(by_node[n], "memory"),
+            "last_seen": seen[n],
+            "reporting": seen[n] in recent,
+        }
+        for n in sorted(by_node)
+        if seen[n]
+    ]
 
 
 def _power(resource: Any) -> str:
@@ -593,16 +648,32 @@ class AKSNodePoolOperationsMixin:
             logger.warning("cluster_utilisation_timeout", clusters=len(clusters))
 
     async def get_cluster_metrics(
-        self, cluster_id: str, range_key: str = "24h", node: str | None = None, split_by_pool: bool = False
+        self,
+        cluster_id: str,
+        range_key: str = "24h",
+        node: str | None = None,
+        split: str = "none",
+        nodepool: str | None = None,
     ) -> dict[str, Any]:
-        """CPU and memory working-set history from AKS platform metrics: the cluster, one node, or per node pool."""
+        """CPU and memory working-set history from AKS platform metrics.
+
+        The whole cluster, one ``node``, each node pool (``split="nodepool"``), or
+        each node of ``nodepool`` (``split="node"``).
+        """
         lookback, grain = METRIC_RANGES[range_key]
         subscription_id, _rg, _name = cluster_parts(cluster_id)
-        # node names are validated by the endpoint (Kubernetes name syntax), so they can't break the filter.
-        metric_filter = f"node eq '{node}'" if node else ("nodepool eq '*'" if split_by_pool else None)
+        # node and pool names are validated by the endpoint, so they can't break the filter.
+        metric_filter, top = None, None
+        if node:
+            metric_filter = f"node eq '{node}'"
+        elif split == "nodepool":
+            metric_filter, top = "nodepool eq '*'", MAX_POOL_SERIES
+        elif split == "node":
+            metric_filter, top = f"nodepool eq '{nodepool}' and node eq '*'", MAX_NODE_SERIES
 
         async def _fetch() -> dict[str, Any]:
             client = MonitorManagementClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+            extra = {"top": top, "orderby": "Average desc"} if top else {}
             response = await asyncio.to_thread(
                 client.metrics.list,
                 cluster_id,
@@ -611,10 +682,12 @@ class AKSNodePoolOperationsMixin:
                 metricnames=f"{CLUSTER_CPU_METRIC},{CLUSTER_MEMORY_METRIC}",
                 aggregation="Average,Maximum",
                 filter=metric_filter,
+                **extra,
             )
-            by_dim = aks_metric_series(response.value)
+            truncated = bool(top) and any(len(m.timeseries or []) >= top for m in response.value)  # type: ignore[operator]
+            by_dim = aks_metric_series(response.value, dimension="node" if split == "node" else None)
             base = {"range": range_key, "interval": grain, "node": node}
-            if split_by_pool:
+            if split == "nodepool":
                 pools = [
                     {
                         "name": name,
@@ -625,7 +698,17 @@ class AKSNodePoolOperationsMixin:
                     for name, series in sorted(by_dim.items())
                     if name and any(r.get("cpu_avg") is not None for r in series)
                 ]
-                return {**base, "scope": "nodepools", "pools": pools}
+                return {**base, "scope": "nodepools", "pools": pools, "truncated": truncated}
+            if split == "node":
+                by_node = {name: series for name, series in by_dim.items() if name}
+                return {
+                    **base,
+                    "scope": "nodes",
+                    "nodepool": nodepool,
+                    "nodes": node_summaries(by_node),
+                    "lines": {"cpu": node_lines(by_node, "cpu"), "memory": node_lines(by_node, "memory")},
+                    "truncated": truncated,
+                }
             series = next(iter(by_dim.values()), [])
             return {
                 **base,
@@ -635,10 +718,9 @@ class AKSNodePoolOperationsMixin:
                 "memory": summarize_series(series, "memory"),
             }
 
+        split_key = f"node:{nodepool}" if split == "node" else ("nodepool" if split == "nodepool" else "")
         result, _tier = await data_cache.get_or_fetch(
-            key=CacheKeys.cluster_metrics(cluster_id, range_key, node or "", "nodepool" if split_by_pool else ""),
-            ttl=60,
-            fetch_fn=_fetch,
+            key=CacheKeys.cluster_metrics(cluster_id, range_key, node or "", split_key), ttl=60, fetch_fn=_fetch
         )
         return result  # type: ignore[no-any-return]
 

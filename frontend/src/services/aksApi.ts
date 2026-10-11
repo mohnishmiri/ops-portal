@@ -2377,8 +2377,28 @@ export function useNodePoolPower() {
 }
 
 /** GET /aks/cluster-metrics — AKS platform metrics for the cluster, one node, or each node pool. */
+export interface MetricLinePoint {
+  t: string;
+  v: number | null;
+}
+
+/** One metric split per node: the busiest nodes' lines, and the rest averaged as one. */
+export interface NodeMetricLines {
+  top: { name: string; series: MetricLinePoint[] }[];
+  other: { count: number; series: MetricLinePoint[] } | null;
+}
+
+export interface NodeMetricSummary {
+  name: string;
+  cpu: NodePoolMetricSummary | null;
+  memory: NodePoolMetricSummary | null;
+  last_seen: string;
+  /** False for a node that stopped reporting before the range ended (e.g. scaled in). */
+  reporting: boolean;
+}
+
 export interface ClusterMetrics {
-  scope: "cluster" | "node" | "nodepools";
+  scope: "cluster" | "node" | "nodepools" | "nodes";
   range: NodePoolMetricsRange;
   interval: string;
   node: string | null;
@@ -2386,20 +2406,32 @@ export interface ClusterMetrics {
   cpu?: NodePoolMetricSummary | null;
   memory?: NodePoolMetricSummary | null;
   pools?: { name: string; series: NodePoolMetricPoint[]; cpu: NodePoolMetricSummary | null; memory: NodePoolMetricSummary | null }[];
+  /** Per-node split of one pool. */
+  nodepool?: string;
+  nodes?: NodeMetricSummary[];
+  lines?: { cpu: NodeMetricLines; memory: NodeMetricLines };
+  /** Azure Monitor returned as many series as it was asked for, so some may be missing. */
+  truncated?: boolean;
 }
 
 export function useClusterMetrics(
   clusterId: string,
   range: NodePoolMetricsRange,
-  opts: { node?: string; split?: "none" | "nodepool" } = {},
+  opts: { node?: string; split?: "none" | "nodepool" | "node"; nodepool?: string } = {},
   enabled = true
 ) {
   const split = opts.split ?? "none";
   return useQuery({
-    queryKey: ["aks-cluster-metrics", clusterId, range, opts.node ?? "", split],
+    queryKey: ["aks-cluster-metrics", clusterId, range, opts.node ?? "", split, opts.nodepool ?? ""],
     queryFn: async () => {
       const { data } = await apiClient.get(`${API_PREFIX}/cluster-metrics`, {
-        params: { cluster_id: clusterId, range, split, ...(opts.node ? { node: opts.node } : {}) },
+        params: {
+          cluster_id: clusterId,
+          range,
+          split,
+          ...(opts.node ? { node: opts.node } : {}),
+          ...(opts.nodepool ? { nodepool: opts.nodepool } : {}),
+        },
         timeout: 60000,
       });
       return data as ClusterMetrics;

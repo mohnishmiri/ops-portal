@@ -2122,20 +2122,28 @@ async def update_node_pool_labels_taints(
 
 
 # Not under /clusters/: GET /clusters/{cluster_id:path} would capture it.
-@router.get("/cluster-metrics", summary="CPU and memory utilisation history of a cluster, a node, or each node pool")
+@router.get(
+    "/cluster-metrics",
+    summary="CPU and memory utilisation history of a cluster, a node, each node pool, or each node of a pool",
+)
 async def get_cluster_metrics(
     cluster_id: str = Query(..., description="Full Azure resource ID of the AKS cluster"),
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),  # noqa: A002
     node: str | None = Query(default=None, max_length=253, pattern=r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"),
-    split: Literal["none", "nodepool"] = Query(default="none"),
+    split: Literal["none", "nodepool", "node"] = Query(
+        default="none", description="nodepool: one series per pool; node: one per node of `nodepool`"
+    ),
+    nodepool: str | None = Query(default=None, pattern=NODEPOOL_NAME_PATTERN),
     user: UserContext = Depends(get_current_user),
     service: AKSOperationsService = Depends(_get_service),
 ) -> dict:
     """AKS platform metrics node_cpu_usage_percentage and node_memory_working_set_percentage (Azure Monitor)."""
     if node and split != "none":
-        raise HTTPException(status_code=400, detail="Choose either a node or a per-node-pool split, not both.")
+        raise HTTPException(status_code=400, detail="Choose either a node or a split, not both.")
+    if (split == "node") != bool(nodepool):
+        raise HTTPException(status_code=400, detail="A per-node split needs a node pool, and only it takes one.")
     try:
-        return await service.get_cluster_metrics(cluster_id, range, node=node, split_by_pool=split == "nodepool")
+        return await service.get_cluster_metrics(cluster_id, range, node=node, split=split, nodepool=nodepool)
     except Exception as e:
         logger.error("cluster_metrics_failed", cluster_id=cluster_id, error=str(e)[:300])
         raise HTTPException(status_code=502, detail="Unable to read utilisation from Azure Monitor.") from e

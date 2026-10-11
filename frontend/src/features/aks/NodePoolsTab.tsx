@@ -960,7 +960,7 @@ export function NodePoolDetailModal({
               />
             </KpiRow>
 
-            <NodePoolUtilisation clusterId={clusterId} nodepoolName={pool.name} formatDate={formatDate} stopped={isStopped(pool)} />
+            <NodePoolUtilisation clusterId={clusterId} nodepoolName={pool.name} formatDate={formatDate} stopped={isStopped(pool)} onOpenNode={setNodeName} />
 
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
               <DetailCard title="Configuration">

@@ -203,6 +203,8 @@ class FakeHistoryMonitor:
 
     def _list(self, resource_id, **kwargs):
         self.calls.append(kwargs)
+        if "node eq '*'" in (kwargs.get("filter") or ""):
+            return self._per_node()
         split = kwargs.get("filter") == "nodepool eq '*'"
         dims = [("sys", 30.0, 40.0), ("user", 5.0, 9.0)] if split else [("", 12.0, 98.0)]
 
@@ -215,6 +217,26 @@ class FakeHistoryMonitor:
             )
 
         return SimpleNamespace(value=[metric(np_ops.CLUSTER_CPU_METRIC, 0), metric(np_ops.CLUSTER_MEMORY_METRIC, 20)])
+
+    @staticmethod
+    def _per_node():
+        # Ten nodes at 10%, 20%, ... 100% CPU; the first was removed after the first of three intervals.
+        def series(i, offset):
+            dims = [
+                SimpleNamespace(name=SimpleNamespace(value="nodepool"), value="np7"),
+                SimpleNamespace(name=SimpleNamespace(value="node"), value=f"aks-np7-1-vmss00000{i}"),
+            ]
+            value = 10.0 * (i + 1) + offset
+            later = None if i == 0 else value
+            return SimpleNamespace(
+                metadatavalues=dims,
+                data=[_hp(0, value, value), _hp(15, later, later), _hp(30, later, later)],
+            )
+
+        def metric(name, offset):
+            return SimpleNamespace(name=SimpleNamespace(value=name), timeseries=[series(i, offset) for i in range(10)])
+
+        return SimpleNamespace(value=[metric(np_ops.CLUSTER_CPU_METRIC, 0), metric(np_ops.CLUSTER_MEMORY_METRIC, -5)])
 
 
 @pytest.fixture
@@ -256,23 +278,58 @@ async def test_node_history_filters_to_that_node(history):
 
 
 async def test_history_split_per_node_pool(history):
-    svc, _monitor = history
+    svc, monitor = history
 
-    result = await svc.get_cluster_metrics(CLUSTER, "7d", split_by_pool=True)
+    result = await svc.get_cluster_metrics(CLUSTER, "7d", split="nodepool")
 
     assert result["scope"] == "nodepools"
+    # Azure Monitor would otherwise return only 10 pools.
+    assert monitor.calls[0]["top"] == np_ops.MAX_POOL_SERIES
     assert [(p["name"], p["cpu"]["current"], p["memory"]["current"]) for p in result["pools"]] == [
         ("sys", 31.0, 51.0),
         ("user", 6.0, 26.0),
     ]
 
 
+async def test_history_split_per_node_of_a_pool(history):
+    svc, monitor = history
+
+    result = await svc.get_cluster_metrics(CLUSTER, "24h", split="node", nodepool="np7")
+
+    call = monitor.calls[0]
+    assert call["filter"] == "nodepool eq 'np7' and node eq '*'"
+    assert call["top"] == np_ops.MAX_NODE_SERIES and call["orderby"] == "Average desc"
+    assert result["scope"] == "nodes" and result["nodepool"] == "np7" and result["truncated"] is False
+
+    # Keyed by the node, not the pool dimension that comes first.
+    assert len(result["nodes"]) == 10 and result["nodes"][0]["name"] == "aks-np7-1-vmss000000"
+    removed, busiest = result["nodes"][0], result["nodes"][9]
+    assert removed["reporting"] is False and removed["last_seen"].endswith("00:00:00+00:00")
+    assert busiest["reporting"] is True and busiest["cpu"] == {"current": 100.0, "average": 100.0, "peak": 100.0}
+
+    cpu = result["lines"]["cpu"]
+    # The eight busiest by average, listed by name; nodes 0 and 1 fold into "other".
+    assert [line["name"][-1] for line in cpu["top"]] == ["2", "3", "4", "5", "6", "7", "8", "9"]
+    assert cpu["other"]["count"] == 2
+    # 10% and 20% average 15% in the first interval; then only node 1 (20%) reports.
+    assert [p["v"] for p in cpu["other"]["series"]] == [15.0, 20.0, 20.0]
+    assert result["lines"]["memory"]["other"]["count"] == 2
+
+
+def test_node_lines_without_overflow_has_no_other_line():
+    by_node = {"b": [{"t": "1", "cpu_avg": 5.0, "cpu_max": 6.0}], "a": [{"t": "1", "cpu_avg": 50.0, "cpu_max": 60.0}]}
+
+    lines = np_ops.node_lines(by_node, "cpu")
+
+    assert [line["name"] for line in lines["top"]] == ["a", "b"] and lines["other"] is None
+
+
 class FakeClusterMetricsService:
     def __init__(self):
         self.calls: list[tuple] = []
 
-    async def get_cluster_metrics(self, cluster_id, range_key, node=None, split_by_pool=False):
-        self.calls.append((range_key, node, split_by_pool))
+    async def get_cluster_metrics(self, cluster_id, range_key, node=None, split="none", nodepool=None):
+        self.calls.append((range_key, node, split, nodepool))
         return {"scope": "cluster", "range": range_key, "series": []}
 
 
@@ -314,9 +371,17 @@ async def test_cluster_metrics_endpoint_validates_its_filter(app, db_session):
             both = await ac.get(
                 "/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "node": "aks-1", "split": "nodepool"}
             )
+            per_node = await ac.get(
+                "/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "split": "node", "nodepool": "np7"}
+            )
+            no_pool = await ac.get("/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "split": "node"})
+            bad_pool = await ac.get(
+                "/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "split": "node", "nodepool": "np7' or 1"}
+            )
     finally:
         app.dependency_overrides.clear()
 
-    assert ok.status_code == 200 and service.calls == [("7d", None, True)]
-    assert injected.status_code == 422  # a node name can't smuggle OData into the filter
-    assert both.status_code == 400
+    assert ok.status_code == 200 and per_node.status_code == 200
+    assert service.calls == [("7d", None, "nodepool", None), ("24h", None, "node", "np7")]
+    assert injected.status_code == 422 and bad_pool.status_code == 422  # names can't smuggle OData into the filter
+    assert both.status_code == 400 and no_pool.status_code == 400

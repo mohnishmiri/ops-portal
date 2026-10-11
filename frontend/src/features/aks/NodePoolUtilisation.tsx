@@ -2,7 +2,8 @@
  * CPU and memory utilisation history charts, from Azure Monitor:
  *
  * - a node pool: its scale set's "Percentage CPU" and memory used
- *   (100 - "Available Memory Percentage"), averaged across the pool's VMs;
+ *   (100 - "Available Memory Percentage"), averaged across the pool's VMs, or
+ *   split per node — the busiest nodes as their own lines, the rest as one;
  * - a cluster or one node: AKS platform metrics node_cpu_usage_percentage and
  *   node_memory_working_set_percentage, optionally split per node pool.
  *
@@ -16,6 +17,9 @@ import React, { useMemo, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   ClusterMetrics,
+  MetricLinePoint,
+  NodeMetricLines,
+  NodeMetricSummary,
   NodePoolMetricPoint,
   NodePoolMetricSummary,
   NodePoolMetricsRange,
@@ -33,6 +37,8 @@ const METRIC_COLORS = { cpu: "#2e80ac", memory: "#7a2e75" } as const;
 // table view is always available.
 const POOL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
 const MAX_POOL_LINES = POOL_COLORS.length;
+// "Other nodes" is a fold, not an entity: neutral and dashed, never a ninth hue.
+const OTHER_COLOR = "#7b8494";
 
 const RANGES: { value: NodePoolMetricsRange; label: string; hours: number }[] = [
   { value: "1h", label: "1 hour", hours: 1 },
@@ -147,22 +153,35 @@ function MetricChart({
   );
 }
 
-/** One line per node pool, coloured by the pool's fixed position in the list (never by rank). */
-function PoolsChart({ metric, label, pools, hours, formatDate }: { metric: Metric; label: string; pools: Pool[]; hours: number; formatDate: (v: string) => string }) {
-  const key = `${metric}_avg` as const;
+type ChartLine = {
+  name: string;
+  /** Legend and tooltip text; defaults to the name. */
+  label?: string;
+  color: string;
+  points: MetricLinePoint[];
+  value: number | null | undefined;
+  /** Legend suffix, e.g. "removed". */
+  note?: string;
+  dashed?: boolean;
+};
+
+const lastValue = (points: MetricLinePoint[]) => [...points].reverse().find((p) => p.v != null)?.v ?? null;
+
+/** Several lines on one percentage axis, with a legend carrying each line's latest value. */
+function LinesChart({ label, note, lines, hours, formatDate, footnote }: { label: string; note: string; lines: ChartLine[]; hours: number; formatDate: (v: string) => string; footnote?: React.ReactNode }) {
   const rows = useMemo(() => {
     const byTime = new Map<string, Record<string, number | string | null>>();
-    for (const pool of pools) {
-      for (const p of pool.series) {
+    for (const line of lines) {
+      for (const p of line.points) {
         const row = byTime.get(p.t) ?? { t: p.t };
-        row[pool.name] = p[key] ?? null;
+        row[line.name] = p.v;
         byTime.set(p.t, row);
       }
     }
     return [...byTime.values()].sort((a, b) => String(a.t).localeCompare(String(b.t)));
-  }, [pools, key]);
+  }, [lines]);
   return (
-    <ChartFrame label={label} note="Average across each pool's nodes, %">
+    <ChartFrame label={label} note={note}>
       <ResponsiveContainer width="100%" height={200}>
         <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: -12 }}>
           {axes(hours)}
@@ -173,14 +192,15 @@ function PoolsChart({ metric, label, pools, hours, formatDate }: { metric: Metri
             formatter={(value: number, name: string) => [`${value}%`, name]}
             contentStyle={{ borderRadius: 8, borderColor: "#d5ecf7", fontSize: 12 }}
           />
-          {pools.map((pool, i) => (
+          {lines.map((line) => (
             <Line
-              key={pool.name}
+              key={line.name}
               type="monotone"
-              dataKey={pool.name}
-              name={pool.name}
-              stroke={POOL_COLORS[i]}
+              dataKey={line.name}
+              name={line.label ?? line.name}
+              stroke={line.color}
               strokeWidth={2}
+              strokeDasharray={line.dashed ? "5 4" : undefined}
               dot={false}
               activeDot={{ r: 4, strokeWidth: 2, stroke: "#ffffff" }}
               connectNulls={false}
@@ -190,15 +210,121 @@ function PoolsChart({ metric, label, pools, hours, formatDate }: { metric: Metri
         </LineChart>
       </ResponsiveContainer>
       <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1" aria-label={`${label} legend`}>
-        {pools.map((pool, i) => (
-          <li key={pool.name} className="inline-flex items-center gap-1.5 text-xs text-slate-700">
-            <span className="h-0.5 w-4 rounded" style={{ background: POOL_COLORS[i] }} aria-hidden="true" />
-            {pool.name}
-            <span className="tabular-nums text-slate-500">{pool[metric]?.current != null ? `${pool[metric]!.current}%` : "—"}</span>
+        {lines.map((line) => (
+          <li key={line.name} className="inline-flex items-center gap-1.5 text-xs text-slate-700" title={line.name}>
+            <span
+              className="h-0.5 w-4 rounded"
+              style={line.dashed ? { backgroundImage: `linear-gradient(to right, ${line.color} 60%, transparent 60%)`, backgroundSize: "6px 2px" } : { background: line.color }}
+              aria-hidden="true"
+            />
+            {line.label ?? line.name}
+            <span className="tabular-nums text-slate-500">{line.value != null ? `${line.value}%` : "—"}</span>
+            {line.note && <span className="text-slate-400">({line.note})</span>}
           </li>
         ))}
       </ul>
+      {footnote && <p className="mt-1 text-xs text-slate-500">{footnote}</p>}
     </ChartFrame>
+  );
+}
+
+/** One line per node pool, coloured by the pool's fixed position in the list (never by rank). */
+function PoolsChart({ metric, label, pools, hours, formatDate }: { metric: Metric; label: string; pools: Pool[]; hours: number; formatDate: (v: string) => string }) {
+  const key = `${metric}_avg` as const;
+  const lines = useMemo(
+    () => pools.map((pool, i) => ({ name: pool.name, color: POOL_COLORS[i], points: pool.series.map((p) => ({ t: p.t, v: p[key] ?? null })), value: pool[metric]?.current })),
+    [pools, key, metric]
+  );
+  return <LinesChart label={label} note="Average across each pool's nodes, %" lines={lines} hours={hours} formatDate={formatDate} />;
+}
+
+/** "aks-np7-11356500-vmss000i1p" → "vmss000i1p": the part that differs between a pool's nodes. */
+export const shortNodeName = (name: string) => name.replace(/^aks-[a-z0-9]+-\d+-/, "");
+
+/** The busiest nodes of a pool, each its own line, and everything else as one dashed average. */
+function NodesChart({ label, lines, nodes, hours, formatDate }: { label: string; lines: NodeMetricLines; nodes: NodeMetricSummary[]; hours: number; formatDate: (v: string) => string }) {
+  const chartLines = useMemo(() => {
+    const reporting = new Map(nodes.map((n) => [n.name, n.reporting]));
+    const out: ChartLine[] = lines.top.map((line, i) => ({
+      name: line.name,
+      label: shortNodeName(line.name),
+      color: POOL_COLORS[i],
+      points: line.series,
+      value: lastValue(line.series),
+      note: reporting.get(line.name) === false ? "removed" : undefined,
+    }));
+    if (lines.other) {
+      const name = `Other ${lines.other.count} node${lines.other.count === 1 ? "" : "s"}, average`;
+      out.push({ name, color: OTHER_COLOR, points: lines.other.series, value: lastValue(lines.other.series), dashed: true });
+    }
+    return out;
+  }, [lines, nodes]);
+  const note = lines.other ? `The ${lines.top.length} busiest nodes by average, %` : "Each node, %";
+  return <LinesChart label={label} note={note} lines={chartLines} hours={hours} formatDate={formatDate} />;
+}
+
+function NodesTable({ nodes, range, emptyText, onOpenNode }: { nodes: NodeMetricSummary[]; range: NodePoolMetricsRange; emptyText: string; onOpenNode?: (name: string) => void }) {
+  return (
+    <DetailGrid
+      title={`Nodes, last ${RANGES.find((r) => r.value === range)?.label}`}
+      rows={nodes}
+      columns={[
+        {
+          key: "name",
+          header: "Node",
+          sortValue: (n) => n.name,
+          render: (n) =>
+            onOpenNode && n.reporting ? (
+              <button type="button" onClick={() => onOpenNode(n.name)} className="text-left font-mono text-xs font-medium text-att-700 hover:text-att-900 hover:underline">
+                {n.name}
+              </button>
+            ) : (
+              <span className="font-mono text-xs text-slate-700">{n.name}</span>
+            ),
+        },
+        {
+          key: "reporting",
+          header: "Status",
+          sortValue: (n) => (n.reporting ? 1 : 0),
+          render: (n) =>
+            n.reporting ? (
+              <span className="text-xs text-slate-700">Reporting</span>
+            ) : (
+              <span className="whitespace-nowrap text-xs text-slate-500" title={`Last reported ${n.last_seen}`}>Removed</span>
+            ),
+        },
+        { key: "cpu_now", header: "CPU Now", align: "right", sortValue: (n) => n.cpu?.current ?? -1, render: (n) => pctCell(n.cpu?.current) },
+        { key: "cpu_avg", header: "CPU Avg", align: "right", sortValue: (n) => n.cpu?.average ?? -1, render: (n) => pctCell(n.cpu?.average) },
+        { key: "cpu_peak", header: "CPU Peak", align: "right", sortValue: (n) => n.cpu?.peak ?? -1, render: (n) => pctCell(n.cpu?.peak) },
+        { key: "mem_now", header: "Memory Now", align: "right", sortValue: (n) => n.memory?.current ?? -1, render: (n) => pctCell(n.memory?.current) },
+        { key: "mem_avg", header: "Memory Avg", align: "right", sortValue: (n) => n.memory?.average ?? -1, render: (n) => pctCell(n.memory?.average) },
+        { key: "mem_peak", header: "Memory Peak", align: "right", sortValue: (n) => n.memory?.peak ?? -1, render: (n) => pctCell(n.memory?.peak) },
+      ]}
+      rowKey={(n) => n.name}
+      searchText={(n) => n.name}
+      searchPlaceholder="Search node…"
+      emptyText={emptyText}
+      initialSort={{ key: "cpu_avg", direction: "desc" }}
+      defaultPageSize={25}
+    />
+  );
+}
+
+function ModeToggle<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { value: T; label: string }[]; onChange: (v: T) => void }) {
+  return (
+    <div className="inline-flex rounded-lg border border-att-200 bg-white p-0.5" role="group" aria-label={label}>
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          aria-pressed={value === o.value}
+          onClick={() => onChange(o.value)}
+          className={`rounded-md px-2.5 py-1 text-xs font-medium ${value === o.value ? "bg-att-500 text-white" : "text-slate-600 hover:bg-att-50"}`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -253,26 +379,51 @@ export function NodePoolUtilisation({
   nodepoolName,
   formatDate,
   stopped,
+  onOpenNode,
 }: {
   clusterId: string;
   nodepoolName: string;
   formatDate: (value: string) => string;
   stopped: boolean;
+  /** Open a node's detail from the per-node table. */
+  onOpenNode?: (name: string) => void;
 }) {
   const [range, setRange] = useState<NodePoolMetricsRange>("24h");
+  const [mode, setMode] = useState<"pool" | "node">("pool");
   const [showTable, setShowTable] = useState(false);
-  const { data, isLoading, isFetching, isError, error } = useNodePoolMetrics(clusterId, nodepoolName, range);
+  const byNode = mode === "node";
+  const pool = useNodePoolMetrics(clusterId, nodepoolName, range);
+  const perNode = useClusterMetrics(clusterId, range, { split: "node", nodepool: nodepoolName }, byNode);
+  const { data, isLoading, isFetching, isError, error } = pool;
+  const nodesData = perNode.data?.scope === "nodes" && perNode.data.nodepool === nodepoolName ? perNode.data : undefined;
   const hours = RANGES.find((r) => r.value === range)?.hours ?? 24;
   const points = data?.series ?? [];
   const empty = stopped ? "The pool is stopped, so its VMs report nothing." : "No data in this range. A pool with no nodes reports nothing.";
   const note = "Average across the pool's VMs, %";
+  const nodes = nodesData?.nodes ?? [];
+  const reportingNow = nodes.filter((n) => n.reporting).length;
+
+  const subtitle = byNode
+    ? `AKS metrics node_cpu_usage_percentage and node_memory_working_set_percentage${grain(nodesData?.interval)}${
+        nodesData ? ` · ${reportingNow} node${reportingNow === 1 ? "" : "s"} reporting now, ${nodes.length} in this range` : ""
+      }`
+    : `Azure Monitor metrics of scale set ${data?.scale_set ?? "…"}${grain(data?.interval)}`;
 
   return (
     <DetailCard
       title="CPU & Memory Utilisation"
-      subtitle={`Azure Monitor metrics of scale set ${data?.scale_set ?? "…"}${grain(data?.interval)}`}
+      subtitle={subtitle}
       actions={
         <div className="flex flex-wrap items-center gap-2">
+          <ModeToggle<"pool" | "node">
+            label="Breakdown"
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: "pool", label: "Pool" },
+              { value: "node", label: "By node" },
+            ]}
+          />
           <RangePicker range={range} onChange={setRange} />
           <button type="button" onClick={() => setShowTable((v) => !v)} className={toggleBtn} aria-pressed={showTable}>
             {showTable ? "Show charts" : "Show table"}
@@ -280,15 +431,43 @@ export function NodePoolUtilisation({
         </div>
       }
     >
-      <PanelState isError={isError} error={error} isLoading={isLoading} hasData={!!data} />
-      {data && (showTable ? (
-        <SeriesTable points={points} range={range} formatDate={formatDate} emptyText={empty} />
+      {byNode ? (
+        <>
+          <PanelState isError={perNode.isError} error={perNode.error} isLoading={perNode.isLoading || (!!perNode.data && !nodesData)} hasData={!!nodesData} />
+          {nodesData &&
+            (showTable ? (
+              <NodesTable nodes={nodes} range={range} emptyText={empty} onOpenNode={onOpenNode} />
+            ) : nodes.length && nodesData.lines ? (
+              <div className={`space-y-2 ${perNode.isFetching ? "opacity-70" : ""}`}>
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <NodesChart label="CPU by node" lines={nodesData.lines.cpu} nodes={nodes} hours={hours} formatDate={formatDate} />
+                  <NodesChart label="Memory working set by node" lines={nodesData.lines.memory} nodes={nodes} hours={hours} formatDate={formatDate} />
+                </div>
+                <p className="text-xs text-slate-500">
+                  {nodesData.lines.cpu.other
+                    ? "Each chart draws the busiest nodes on its own and averages the rest into the dashed line. Show table lists every node."
+                    : "Show table lists every node with its current, average and peak use."}
+                  {nodesData.truncated && " Azure Monitor returned its maximum number of nodes, so some may be missing."}
+                </p>
+              </div>
+            ) : (
+              <p className="py-10 text-center text-sm text-slate-400">{empty}</p>
+            ))}
+        </>
       ) : (
-        <div className={`grid grid-cols-1 gap-4 lg:grid-cols-2 ${isFetching ? "opacity-70" : ""}`}>
-          <MetricChart metric="cpu" label="CPU" note={note} points={points} summary={data.cpu} hours={hours} formatDate={formatDate} emptyText={empty} peakLabel="peak" />
-          <MetricChart metric="memory" label="Memory used" note={note} points={points} summary={data.memory} hours={hours} formatDate={formatDate} emptyText={data.memory_error ?? empty} peakLabel="peak" />
-        </div>
-      ))}
+        <>
+          <PanelState isError={isError} error={error} isLoading={isLoading} hasData={!!data} />
+          {data &&
+            (showTable ? (
+              <SeriesTable points={points} range={range} formatDate={formatDate} emptyText={empty} />
+            ) : (
+              <div className={`grid grid-cols-1 gap-4 lg:grid-cols-2 ${isFetching ? "opacity-70" : ""}`}>
+                <MetricChart metric="cpu" label="CPU" note={note} points={points} summary={data.cpu} hours={hours} formatDate={formatDate} emptyText={empty} peakLabel="peak" />
+                <MetricChart metric="memory" label="Memory used" note={note} points={points} summary={data.memory} hours={hours} formatDate={formatDate} emptyText={data.memory_error ?? empty} peakLabel="peak" />
+              </div>
+            ))}
+        </>
+      )}
     </DetailCard>
   );
 }
@@ -334,19 +513,15 @@ export function ClusterUtilisation({
         <div className="flex flex-wrap items-center gap-2">
           {actions}
           {!node && (
-            <div className="inline-flex rounded-lg border border-att-200 bg-white p-0.5" role="group" aria-label="Breakdown">
-              {([false, true] as const).map((v) => (
-                <button
-                  key={String(v)}
-                  type="button"
-                  aria-pressed={byPool === v}
-                  onClick={() => setByPool(v)}
-                  className={`rounded-md px-2.5 py-1 text-xs font-medium ${byPool === v ? "bg-att-500 text-white" : "text-slate-600 hover:bg-att-50"}`}
-                >
-                  {v ? "By node pool" : "Cluster"}
-                </button>
-              ))}
-            </div>
+            <ModeToggle<"cluster" | "nodepool">
+              label="Breakdown"
+              value={byPool ? "nodepool" : "cluster"}
+              onChange={(v) => setByPool(v === "nodepool")}
+              options={[
+                { value: "cluster", label: "Cluster" },
+                { value: "nodepool", label: "By node pool" },
+              ]}
+            />
           )}
           <RangePicker range={range} onChange={setRange} />
           <button type="button" onClick={() => setShowTable((v) => !v)} className={toggleBtn} aria-pressed={showTable}>
