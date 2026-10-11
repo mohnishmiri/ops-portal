@@ -104,7 +104,8 @@ describe("NodeDetailModal", () => {
     expect(within(cpu).getByText("31.6%")).toBeTruthy();
     expect(within(cpu).getByText("600m of 1.90 cores in use · 65.8% requested")).toBeTruthy();
     expect(screen.getByText("2/30")).toBeTruthy();
-    expect(screen.getByText("Usage vs Requests")).toBeTruthy();
+    expect(screen.queryByText("Usage vs Requests")).toBeNull();
+    expect(screen.getByText("1.25 cores (65.8% of allocatable)")).toBeTruthy();
     expect(screen.getByText("Ubuntu 22.04.5 LTS")).toBeTruthy();
   });
 
@@ -123,7 +124,7 @@ describe("NodeDetailModal", () => {
 
     expect(screen.getByText("CPU Requested")).toBeTruthy();
     expect(screen.getByText("1.25 cores of 1.90 cores · live usage unavailable")).toBeTruthy();
-    expect(screen.getByText(/metrics-server isn't reporting for this cluster/)).toBeTruthy();
+    expect(screen.getByText("metrics-server not available")).toBeTruthy();
   });
 
   it("colours node problem conditions by their meaning", () => {

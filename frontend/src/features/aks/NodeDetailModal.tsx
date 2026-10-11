@@ -1,7 +1,7 @@
 /**
  * Node drill-down — what `kubectl describe node` shows: health and conditions,
- * system info, capacity, the share of allocatable CPU and memory that pod
- * requests take, every pod on the node, events, labels, and taints. Pod rows
+ * live usage and its history, system info, capacity with what pods request
+ * and limit, every pod on the node, events, labels, and taints. Pod rows
  * open the page's existing Pod detail.
  */
 
@@ -120,46 +120,6 @@ function PodsGrid({
       initialSort={{ key: sortKey, direction: sortKey === "name" ? "asc" : "desc" }}
       defaultPageSize={25}
     />
-  );
-}
-
-/** Used, requested, and limit shares of allocatable CPU and memory, side by side. */
-function AllocationCard({ detail }: { detail: KubernetesNodeDetail }) {
-  const rows = (kind: "cpu" | "memory") => {
-    const cpu = kind === "cpu";
-    return [
-      { label: "In use", pct: cpu ? detail.usage?.cpu_pct : detail.usage?.memory_pct, value: detail.usage ? (cpu ? formatCores(detail.usage.cpu_m) : formatBytes(detail.usage.memory_bytes)) : null, color: "bg-att-600" },
-      { label: "Requested", pct: cpu ? detail.allocated.cpu_request_pct : detail.allocated.memory_request_pct, value: cpu ? formatCores(detail.allocated.cpu_request_m) : formatBytes(detail.allocated.memory_request_bytes), color: "bg-att-300" },
-      { label: "Limits", pct: cpu ? detail.allocated.cpu_limit_pct : detail.allocated.memory_limit_pct, value: cpu ? formatCores(detail.allocated.cpu_limit_m) : formatBytes(detail.allocated.memory_limit_bytes), color: "bg-slate-300" },
-    ];
-  };
-  return (
-    <DetailCard title="Usage vs Requests" subtitle="Share of the node's allocatable resources. Requests are what the scheduler reserves; usage is what pods actually consume.">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {(["cpu", "memory"] as const).map((kind) => (
-          <div key={kind}>
-            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-              {kind === "cpu" ? `CPU · ${formatCores(detail.allocatable.cpu_m)} allocatable` : `Memory · ${formatBytes(detail.allocatable.memory_bytes)} allocatable`}
-            </h4>
-            <div className="space-y-2">
-              {rows(kind).map((r) => (
-                <div key={r.label} className="grid grid-cols-[5.5rem_1fr_7.5rem] items-center gap-3 text-xs">
-                  <span className="text-slate-600">{r.label}</span>
-                  <div className="h-2.5 rounded-full bg-slate-100" aria-hidden>
-                    {r.pct != null && <div className={`h-2.5 rounded-full ${r.color}`} style={{ width: `${Math.min(100, r.pct)}%` }} />}
-                  </div>
-                  <span className="text-right tabular-nums text-slate-700">
-                    {r.pct != null ? <span className="font-semibold">{r.pct}%</span> : "—"}
-                    {r.value ? <span className="text-slate-500"> · {r.value}</span> : null}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-      {!detail.usage && <p className="mt-3 text-xs text-slate-500">Live usage is unavailable: metrics-server isn't reporting for this cluster.</p>}
-    </DetailCard>
   );
 }
 
@@ -282,7 +242,6 @@ export function NodeDetailModal({
             />
           </KpiRow>
 
-          <AllocationCard detail={detail} />
           <ClusterUtilisation clusterId={clusterId} node={detail.name} formatDate={formatDate} title="CPU & Memory History" />
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -307,6 +266,8 @@ export function NodeDetailModal({
                   { label: "Memory (Allocatable / Capacity)", value: `${formatBytes(detail.allocatable.memory_bytes)} / ${formatBytes(detail.capacity.memory_bytes)}` },
                   { label: "Pods (Allocatable)", value: detail.allocatable.pods },
                   { label: "Ephemeral Storage", value: formatBytes(detail.allocatable.ephemeral_storage_bytes) },
+                  { label: "CPU Requests", value: `${formatCores(detail.allocated.cpu_request_m)} (${pct(detail.allocated.cpu_request_pct)} of allocatable)` },
+                  { label: "Memory Requests", value: `${formatBytes(detail.allocated.memory_request_bytes)} (${pct(detail.allocated.memory_request_pct)} of allocatable)` },
                   { label: "CPU Limits", value: `${formatCores(detail.allocated.cpu_limit_m)} (${pct(detail.allocated.cpu_limit_pct)} of allocatable)` },
                   { label: "Memory Limits", value: `${formatBytes(detail.allocated.memory_limit_bytes)} (${pct(detail.allocated.memory_limit_pct)} of allocatable)` },
                   { label: "Live Usage", value: detail.usage ? `${formatCores(detail.usage.cpu_m)} CPU · ${formatBytes(detail.usage.memory_bytes)} memory` : "metrics-server not available", wide: true },
