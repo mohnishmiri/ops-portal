@@ -58,6 +58,8 @@ interface Props {
   /** The run being followed in the live panel (polled by the page). */
   trackedExecution?: ExecutionHistory | null;
   onDismissExecution?: () => void;
+  /** Force stop a running sequence (write users). */
+  onForceStopExecution?: (executionId: number, rollback: boolean) => Promise<void>;
   onViewHistory?: () => void;
   isLoading: boolean;
   /** Write role: create, edit, run, and delete. Read-only users only view. */
@@ -107,6 +109,7 @@ const SequenceDesigner: React.FC<Props> = ({
   onExecuteStop,
   trackedExecution = null,
   onDismissExecution,
+  onForceStopExecution,
   onViewHistory,
   isLoading,
 }) => {
@@ -373,7 +376,12 @@ const SequenceDesigner: React.FC<Props> = ({
     <div className="space-y-4">
       {/* ── Live execution ── */}
       {trackedExecution && (
-        <SequenceExecutionPanel execution={trackedExecution} onClose={() => onDismissExecution?.()} onViewHistory={onViewHistory} />
+        <SequenceExecutionPanel
+          execution={trackedExecution}
+          onClose={() => onDismissExecution?.()}
+          onViewHistory={onViewHistory}
+          onForceStop={canWrite && onForceStopExecution ? (rollback) => onForceStopExecution(trackedExecution.id, rollback) : undefined}
+        />
       )}
 
       {/* ── Builder ── */}

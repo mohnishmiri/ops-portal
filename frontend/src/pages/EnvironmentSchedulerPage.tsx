@@ -38,6 +38,7 @@ import {
   useStartSequence,
   useStopSequence,
   useExecution,
+  useStopExecution,
   type AuditLogEntry,
   type ExecutionHistory,
 } from "../services/environmentApi";
@@ -123,6 +124,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
   const deleteSequence = useDeleteSequence();
   const startSequence = useStartSequence();
   const stopSequence = useStopSequence();
+  const stopExecution = useStopExecution();
 
   const nsList = useMemo(() => {
     const raw = namespacesData;
@@ -160,11 +162,14 @@ const EnvironmentSchedulerPage: React.FC = () => {
     if (previous !== "running" || trackedExecution.status === "running") return;
     const name = trackedExecution.sequence_name ?? "Sequence";
     const done = trackedExecution.status === "completed";
+    const stopped = trackedExecution.status === "cancelled";
     setToast({
       message: done
         ? `${name}: all ${trackedExecution.total_deployments} steps completed`
-        : `${name}: ${statusLabel(trackedExecution.status).toLowerCase()} — ${trackedExecution.failed_count} step(s) failed`,
-      type: done ? "success" : "error",
+        : stopped
+          ? `${name}: stopped by ${trackedExecution.cancel_requested_by ?? "a user"}`
+          : `${name}: ${statusLabel(trackedExecution.status).toLowerCase()} — ${trackedExecution.failed_count} step(s) failed`,
+      type: done ? "success" : stopped ? "warning" : "error",
     });
     queryClient.invalidateQueries({ queryKey: ["environment-status"] });
     queryClient.invalidateQueries({ queryKey: ["environment-history"] });
@@ -177,6 +182,21 @@ const EnvironmentSchedulerPage: React.FC = () => {
     trackedExecution && selectedCluster && trackedExecution.cluster_id === selectedCluster.id && trackedExecution.namespace === selectedNamespace
       ? trackedExecution
       : null;
+
+  const handleForceStop = useCallback(
+    async (executionId: number, rollback: boolean) => {
+      try {
+        await stopExecution.mutateAsync({ id: executionId, rollback });
+      } catch (err) {
+        throw new Error(apiErrorMessage(err, "Could not stop the run"));
+      }
+      // Follow it so the outcome shows even when stopped from History.
+      trackedStatusRef.current = "running";
+      setTrackedExecutionId(executionId);
+      setToast({ message: `Stop requested${rollback ? " with rollback" : ""} — the run stops within a few seconds`, type: "info" });
+    },
+    [stopExecution],
+  );
 
   const dismissTrackedExecution = useCallback(() => {
     if (trackedExecutionId != null) setDismissedExecutionIds((prev) => new Set(prev).add(trackedExecutionId));
@@ -776,6 +796,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
               onRunNow={handleRunScheduleNow}
               trackedExecution={visibleTrackedExecution}
               onDismissExecution={dismissTrackedExecution}
+              onForceStopExecution={handleForceStop}
               onViewHistory={() => setActiveTab("history")}
               isLoading={schedulesLoading || createSchedule.isPending}
             />
@@ -800,6 +821,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
               onExecuteStop={handleExecuteStop}
               trackedExecution={visibleTrackedExecution}
               onDismissExecution={dismissTrackedExecution}
+              onForceStopExecution={handleForceStop}
               onViewHistory={() => setActiveTab("history")}
               isLoading={sequencesLoading}
             />
@@ -807,7 +829,7 @@ const EnvironmentSchedulerPage: React.FC = () => {
         )}
 
         {activeTab === "history" && (
-          <ExecutionHistoryGrid history={history ?? []} isLoading={historyLoading} />
+          <ExecutionHistoryGrid history={history ?? []} isLoading={historyLoading} onForceStop={canWrite ? handleForceStop : undefined} />
         )}
 
         {activeTab === "audit" && (
@@ -869,6 +891,7 @@ const ACTION_LABELS: Record<string, string> = {
   environment_scale_up: "Scaled Up Environment",
   environment_scale_down: "Scaled Down Environment",
   sequence_execution_finished: "Sequence Run Finished",
+  stop_sequence_execution: "Force Stopped Sequence Run",
 };
 
 const AUDIT_STATUS_CLASS: Record<string, string> = {
@@ -878,6 +901,8 @@ const AUDIT_STATUS_CLASS: Record<string, string> = {
   running: "bg-blue-100 text-blue-700",
   dry_run: "bg-purple-100 text-purple-700",
   rolled_back: "bg-orange-100 text-orange-700",
+  requested: "bg-amber-100 text-amber-800",
+  cancelled: "bg-slate-200 text-slate-700",
 };
 
 const AuditLogsTab: React.FC<{ logs: AuditLogEntry[] }> = ({ logs }) => {

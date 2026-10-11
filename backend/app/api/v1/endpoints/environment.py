@@ -24,6 +24,7 @@ from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.schemas.environment import (
     EnvironmentScaleRequest,
+    ExecutionStopRequest,
     ScheduleCreate,
     SchedulePreviewRequest,
     ScheduleUpdate,
@@ -35,6 +36,7 @@ from app.services import environment_notifications as notifications
 from app.services.environment_notifications import parse_recipients
 from app.services.environment_scaling_service import (
     EnvironmentScalingService,
+    ExecutionNotRunningError,
     ScheduleValidationError,
     SequenceAlreadyRunningError,
     SequenceInUseError,
@@ -522,6 +524,41 @@ async def get_execution(
     if execution is None:
         raise HTTPException(status_code=404, detail=f"Execution {execution_id} not found")
     return execution
+
+
+@router.post("/history/{execution_id}/stop")
+async def stop_execution(
+    execution_id: int,
+    body: ExecutionStopRequest,
+    service: EnvironmentScalingService = Depends(_get_service),
+    user: UserContext = Depends(require_role(UserRole.WRITE)),
+):
+    """Force stop a running sequence, optionally rolling back what it scaled."""
+    try:
+        result = await service.request_stop(execution_id, user_email=user.email, rollback=body.rollback)
+    except ExecutionNotRunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    await service._write_audit(
+        user_id=user.user_id,
+        user_email=user.email,
+        action="stop_sequence_execution",
+        resource_type="environment_sequence",
+        resource_id=str(result.get("sequence_id") or ""),
+        status="requested",
+        details={
+            "execution_id": execution_id,
+            "name": result.get("sequence_name"),
+            "namespace": result.get("namespace"),
+            "rollback": body.rollback,
+        },
+    )
+    return result
 
 
 @router.post("/schedule/{schedule_id}/run")

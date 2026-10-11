@@ -37,6 +37,8 @@ interface Props {
   /** A sequence run being followed live (Run Now of a sequence-linked schedule). */
   trackedExecution?: ExecutionHistory | null;
   onDismissExecution?: () => void;
+  /** Force stop a running sequence (write users). */
+  onForceStopExecution?: (executionId: number, rollback: boolean) => Promise<void>;
   onViewHistory?: () => void;
   isLoading: boolean;
   /** Write role: create, edit, enable/disable, run, and delete. Read-only users only view. */
@@ -89,6 +91,7 @@ const ScheduleManagement: React.FC<Props> = ({
   onRunNow,
   trackedExecution = null,
   onDismissExecution,
+  onForceStopExecution,
   onViewHistory,
   isLoading,
 }) => {
@@ -507,7 +510,12 @@ const ScheduleManagement: React.FC<Props> = ({
       )}
 
       {trackedExecution && (
-        <SequenceExecutionPanel execution={trackedExecution} onClose={() => onDismissExecution?.()} onViewHistory={onViewHistory} />
+        <SequenceExecutionPanel
+          execution={trackedExecution}
+          onClose={() => onDismissExecution?.()}
+          onViewHistory={onViewHistory}
+          onForceStop={canWrite && onForceStopExecution ? (rollback) => onForceStopExecution(trackedExecution.id, rollback) : undefined}
+        />
       )}
 
       {/* Execution Progress Panel */}

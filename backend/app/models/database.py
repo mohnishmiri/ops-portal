@@ -1909,6 +1909,11 @@ class EnvironmentExecutionHistory(Base):
     schedule_id = Column(Integer, nullable=True)
     sequence_id = Column(Integer, nullable=True)
     step_details = Column(JSONB, nullable=True)  # [{deployment, status, old_replicas, new_replicas, error}]
+    # Force stop: whoever asked, when, and whether to roll back. The executor
+    # (on whichever replica runs it) checks these between steps and while waiting.
+    cancel_requested_at = Column(DateTime, nullable=True)
+    cancel_requested_by = Column(String(255), nullable=True)
+    cancel_rollback = Column(Boolean, nullable=False, default=False, server_default="false")
     initiated_by = Column(String(255), nullable=False)
     initiated_by_email = Column(String(255), nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

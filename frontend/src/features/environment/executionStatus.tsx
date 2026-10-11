@@ -30,6 +30,7 @@ const ICONS = {
   alert: icon(<><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /></>),
   eye: icon(<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></>),
   clock: icon(<><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>),
+  stop: icon(<rect x="6" y="6" width="12" height="12" rx="1.5" />),
 };
 
 interface StatusMeta {
@@ -48,6 +49,7 @@ export const STATUS_META: Record<string, StatusMeta> = {
   interrupted: { label: "Interrupted", className: "bg-amber-100 text-amber-800 ring-amber-200", icon: ICONS.alert },
   skipped: { label: "Skipped", className: "bg-yellow-100 text-yellow-800 ring-yellow-200", icon: ICONS.skip },
   rolled_back: { label: "Rolled back", className: "bg-orange-100 text-orange-800 ring-orange-200", icon: ICONS.undo },
+  cancelled: { label: "Stopped", className: "bg-slate-200 text-slate-800 ring-slate-300", icon: ICONS.stop },
   rollback_failed: { label: "Rollback failed", className: "bg-red-100 text-red-800 ring-red-200", icon: ICONS.alert },
   dry_run: { label: "Dry run", className: "bg-purple-100 text-purple-800 ring-purple-200", icon: ICONS.eye },
 };

@@ -166,7 +166,7 @@ class SequenceStep(BaseModel):
     order: int = Field(ge=1)
     # The same deployment may appear in several steps (scale to 1, later to 50).
     deployment_name: str = Field(min_length=1, max_length=253)
-    replicas: int = Field(default=1, ge=0, le=100)
+    replicas: int = Field(default=1, ge=0, le=1000)
     wait_condition: WaitCondition = WaitCondition.PODS_READY
     # Pod waits: fail after this long with no newly ready pod (restarts on
     # progress, capped at 2h). fixed_time: the wait itself.
@@ -222,6 +222,11 @@ class SequenceResponse(BaseModel):
 
 
 # ── Sequence Execution ──
+
+
+class ExecutionStopRequest(BaseModel):
+    # Also return the deployments this run already scaled to their previous counts.
+    rollback: bool = False
 
 
 class SequenceExecuteRequest(BaseModel):

@@ -13,6 +13,7 @@ import React, { useState, useEffect } from "react";
 import { gridStyles, SortableHeader, type SortState, nextSortState } from "../../components/gridStyles";
 import type { ExecutionHistory, StepDetail } from "../../services/environmentApi";
 import apiClient from "../../services/apiClient";
+import { ForceStopDialog, StopRequestedNote } from "./SequenceRunPanels";
 import {
   ExecutionStepsTable,
   StatusBadge,
@@ -27,13 +28,16 @@ import {
 interface Props {
   history: ExecutionHistory[];
   isLoading: boolean;
+  /** Force stop a running sequence (write users). */
+  onForceStop?: (executionId: number, rollback: boolean) => Promise<void>;
 }
 
 type HistoryField = "started_at" | "operation" | "status" | "namespace";
 
 const PAGE_SIZES = [10, 20, 50];
 
-const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
+const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading, onForceStop }) => {
+  const [stopTarget, setStopTarget] = useState<ExecutionHistory | null>(null);
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortState<HistoryField>>({ key: "started_at", direction: "desc" });
   const [page, setPage] = useState(1);
@@ -260,8 +264,20 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
                             {formatElapsed(runningElapsed[h.id] || 0)}
                           </span>
                           <span className="text-xs text-blue-600">{stepsCompleted} of {h.total_deployments} steps done{stepsRunning > 0 ? `, ${stepsRunning} running` : ""}</span>
+                          {onForceStop && h.sequence_id && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setStopTarget(h); }}
+                              disabled={!!h.cancel_requested_at}
+                              className="inline-flex items-center gap-1 rounded-lg border border-red-300 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
+                            >
+                              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+                              {h.cancel_requested_at ? "Stopping…" : "Force stop"}
+                            </button>
+                          )}
                         </div>
                       )}
+                      <StopRequestedNote execution={h} />
                       {/* Summary + detail search */}
                       <div className="flex flex-wrap items-center gap-2">
                         {counts && (
@@ -346,6 +362,16 @@ const ExecutionHistoryGrid: React.FC<Props> = ({ history, isLoading }) => {
           </tbody>
         </table>
 
+        {stopTarget && onForceStop && (
+          <ForceStopDialog
+            execution={history.find((x) => x.id === stopTarget.id) ?? stopTarget}
+            onCancel={() => setStopTarget(null)}
+            onConfirm={async (rollback) => {
+              await onForceStop(stopTarget.id, rollback);
+              setStopTarget(null);
+            }}
+          />
+        )}
         {/* Pagination — KeyVault style */}
         <div className={gridStyles.pager}>
           <span className="text-gray-600">Showing {start}-{end} of {sorted.length}</span>

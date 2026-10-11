@@ -97,6 +97,7 @@ _STATUS_STYLE = {
     "completed": ("Completed", "#027a48", "#ecfdf3", "#abefc6"),
     "failed": ("Failed", "#b42318", "#fef3f2", "#fecdca"),
     "rolled_back": ("Failed &middot; rolled back", "#b54708", "#fffaeb", "#fedf89"),
+    "cancelled": ("Stopped by user", "#344054", "#f2f4f7", "#d0d5dd"),
 }
 _STEP_STATUS = {
     "completed": ("Completed", "#027a48"),
@@ -106,6 +107,7 @@ _STEP_STATUS = {
     "pending": ("Not run", "#667085"),
     "interrupted": ("Interrupted", "#b54708"),
     "running": ("Interrupted", "#b54708"),
+    "cancelled": ("Stopped", "#344054"),
 }
 _WAIT_LABELS = {
     "pods_ready": "Pods ready",
@@ -192,18 +194,24 @@ def _counts(steps: list[dict]) -> dict[str, int]:
 
 def subject_for(report: RunReport) -> str:
     label = _OPERATION_LABELS.get(report.operation, report.operation.replace("_", " ").title())
-    outcome = {"completed": "Completed", "failed": "FAILED", "rolled_back": "FAILED (rolled back)"}.get(
-        report.status, report.status.replace("_", " ").title()
-    )
+    outcome = {
+        "completed": "Completed",
+        "failed": "FAILED",
+        "rolled_back": "FAILED (rolled back)",
+        "cancelled": "STOPPED",
+    }.get(report.status, report.status.replace("_", " ").title())
     what = f"{label} {report.name}" if report.name else label
     return f"[OpsPortal] {outcome}: {what} | {report.namespace} ({cluster_display_name(report.cluster_id)})"
 
 
 def _headline(report: RunReport) -> str:
     label = _OPERATION_LABELS.get(report.operation, report.operation.replace("_", " ").title())
-    verb = {"completed": "completed", "failed": "failed", "rolled_back": "failed and was rolled back"}.get(
-        report.status, report.status
-    )
+    verb = {
+        "completed": "completed",
+        "failed": "failed",
+        "rolled_back": "failed and was rolled back",
+        "cancelled": "was stopped",
+    }.get(report.status, report.status)
     return f"{label} {verb}"
 
 

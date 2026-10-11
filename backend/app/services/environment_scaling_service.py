@@ -57,6 +57,11 @@ DIAGNOSE_AFTER_SECONDS = 60
 
 # (pods counted, pods required, diagnosis or None) — persisted for live progress.
 ProgressCallback = Callable[[int, int, str | None], Awaitable[None]]
+# True once someone has asked to force stop the run.
+StopCheck = Callable[[], Awaitable[bool]]
+# A stop request the executor hasn't acted on by then means it is gone; the
+# sweep then records the run as stopped.
+STOP_ACK_SECONDS = 120
 
 
 def required_ready_count(desired: int, min_ready_percent: int | None) -> int:
@@ -118,6 +123,14 @@ class SequenceValidationError(ValueError):
 
 class SequenceInUseError(Exception):
     """Schedules still reference the sequence."""
+
+
+class ExecutionStoppedError(Exception):
+    """Raised inside a step when a force stop is requested."""
+
+
+class ExecutionNotRunningError(Exception):
+    """Only a running execution can be stopped."""
 
 
 class ScheduleValidationError(ValueError):
@@ -699,6 +712,26 @@ class EnvironmentScalingService:
         failed = 0
         failures: list[str] = []
         abort_index: int | None = None
+        stop_index: int | None = None
+        stop_request: dict[str, Any] = {}
+
+        async def stop_requested() -> bool:
+            """Read the stop request fresh from the DB: it may come in on any replica."""
+            if stop_request:
+                return True
+            row = (
+                await self.db.execute(
+                    select(
+                        EnvironmentExecutionHistory.cancel_requested_at,
+                        EnvironmentExecutionHistory.cancel_requested_by,
+                        EnvironmentExecutionHistory.cancel_rollback,
+                    ).where(EnvironmentExecutionHistory.id == execution.id)
+                )
+            ).one_or_none()
+            if row is not None and row[0] is not None:
+                stop_request.update(by=row[1] or "a user", rollback=bool(row[2]))
+                return True
+            return False
 
         async def persist() -> None:
             execution.step_details = [dict(s) for s in steps]
@@ -708,6 +741,11 @@ class EnvironmentScalingService:
 
         try:
             for idx, step in enumerate(steps):
+                if await stop_requested():
+                    stop_index = idx
+                    for later in steps[idx:]:
+                        later["status"] = "not_run"
+                    break
                 dep_name = step.get("deployment", "")
                 target = int(step.get("target_replicas") or 0)
                 step_start = datetime.now(UTC)
@@ -742,6 +780,7 @@ class EnvironmentScalingService:
                             desired_replicas=target,
                             timeout_seconds=int(step.get("timeout_seconds") or 0),
                             on_progress=on_stopping,
+                            should_stop=stop_requested,
                         )
                     # A fixed wait also applies after scaling to 0 ("stop X, wait 30s").
                     elif target > 0 or wait_condition == "fixed_time":
@@ -767,6 +806,7 @@ class EnvironmentScalingService:
                             wait_condition=wait_condition,
                             min_ready_percent=int(step.get("min_ready_percent") or 100),
                             on_progress=on_progress,
+                            should_stop=stop_requested,
                         )
                         if 0 < reached < target:
                             step["note"] = (
@@ -776,6 +816,11 @@ class EnvironmentScalingService:
                     step.pop("pod_issues", None)
                     completed += 1
                     step["status"] = "completed"
+                except ExecutionStoppedError:
+                    step.pop("pod_issues", None)
+                    step["status"] = "cancelled"
+                    step["note"] = f"Stopped by {stop_request.get('by')} while waiting; the scale itself was applied"
+                    stop_index = idx
                 except Exception as exc:
                     failed += 1
                     step["status"] = "failed"
@@ -786,6 +831,10 @@ class EnvironmentScalingService:
                 step["duration_seconds"] = round((datetime.now(UTC) - step_start).total_seconds(), 1)
                 await persist()
 
+                if stop_index is not None:
+                    for later in steps[idx + 1 :]:
+                        later["status"] = "not_run"
+                    break
                 if step["status"] == "failed" and step.get("on_failure", "abort") == "abort":
                     abort_index = idx
                     for later in steps[idx + 1 :]:
@@ -797,9 +846,19 @@ class EnvironmentScalingService:
             raise
 
         rolled_back = 0
+        if stop_index is not None and stop_request.get("rollback"):
+            # Asked for explicitly with the stop, so it applies to shutdowns too
+            # (e.g. a shutdown started on the wrong environment).
+            rolled_back = await self._rollback_steps(
+                [s for s in steps if s.get("scaled")],
+                cluster_id=sequence.cluster_id,
+                namespace=sequence.namespace,
+                user_id=user_id,
+                user_email=user_email,
+            )
         # Rollback undoes a startup. A failed shutdown is left as-is: restarting
         # what was already stopped is not what anyone running a shutdown wants.
-        if abort_index is not None and sequence.rollback_on_failure and sequence.sequence_type != "shutdown":
+        elif abort_index is not None and sequence.rollback_on_failure and sequence.sequence_type != "shutdown":
             rolled_back = await self._rollback_steps(
                 [s for s in steps[: abort_index + 1] if s.get("scaled")],
                 cluster_id=sequence.cluster_id,
@@ -808,7 +867,19 @@ class EnvironmentScalingService:
                 user_email=user_email,
             )
 
-        if failed == 0:
+        if stop_index is not None:
+            status = "cancelled"
+            where = steps[stop_index]
+            error_message = (
+                f"Stopped by {stop_request.get('by')} at step {where.get('step', stop_index + 1)} ({where.get('deployment', '')}). "
+                + (
+                    f"Rolled back {rolled_back} scaled step(s)."
+                    if stop_request.get("rollback")
+                    else "Deployments were left at their current replica counts."
+                )
+                + (f" {failed} earlier step(s) had failed." if failed else "")
+            )
+        elif failed == 0:
             status = "completed"
             error_message = None
         elif rolled_back:
@@ -892,6 +963,37 @@ class EnvironmentScalingService:
             "details": execution.step_details or [],
         }
 
+    async def request_stop(self, execution_id: int, *, user_email: str, rollback: bool) -> dict:
+        """Ask a running sequence to stop. The executor — on whichever replica
+        runs it — acts on it within one poll (about 5 seconds)."""
+        if not self.db:
+            raise ValueError("Database required")
+        await self.sweep_abandoned_executions()
+        execution = (
+            await self.db.execute(
+                select(EnvironmentExecutionHistory).where(EnvironmentExecutionHistory.id == execution_id)
+            )
+        ).scalar_one_or_none()
+        if execution is None:
+            raise ValueError(f"Execution {execution_id} not found")
+        assert_resource_access(execution.cluster_id, "write", context=f"stop_execution {execution_id}")
+        if execution.status != "running":
+            raise ExecutionNotRunningError(f"Execution #{execution_id} has already finished ({execution.status}).")
+        if not execution.sequence_id:
+            raise SequenceValidationError("Only sequence runs can be stopped; a namespace scale finishes in seconds.")
+        if execution.cancel_requested_at is None:
+            execution.cancel_requested_at = _utc_now()
+            execution.cancel_requested_by = user_email
+        # A later request may add the rollback until the executor has acted on it.
+        execution.cancel_rollback = bool(execution.cancel_rollback or rollback)
+        await self.db.commit()
+        sequence_names, schedule_names = await self._names_for([execution])
+        return self._execution_to_dict(
+            execution,
+            sequence_name=sequence_names.get(execution.sequence_id),
+            schedule_name=schedule_names.get(execution.schedule_id),
+        )
+
     async def _finalize_interrupted(self, execution: EnvironmentExecutionHistory, steps: list[dict]) -> None:
         try:
             for s in steps:
@@ -923,6 +1025,7 @@ class EnvironmentScalingService:
         wait_condition: str,
         min_ready_percent: int = 100,
         on_progress: ProgressCallback | None = None,
+        should_stop: StopCheck | None = None,
     ) -> int:
         """Wait until enough pods meet the step's condition; returns the count reached.
 
@@ -936,7 +1039,13 @@ class EnvironmentScalingService:
         if wait_condition == "skip":
             return 0
         if wait_condition == "fixed_time":
-            await asyncio.sleep(max(0, timeout_seconds))
+            # In slices, so a force stop doesn't have to wait out the whole delay.
+            loop = asyncio.get_running_loop()
+            until = loop.time() + max(0, timeout_seconds)
+            while (left := until - loop.time()) > 0:
+                if should_stop and await should_stop():
+                    raise ExecutionStoppedError()
+                await asyncio.sleep(min(POLL_SECONDS, left))
             return 0
 
         # "health_endpoint" steps carry no URL to probe. Readiness probes are the
@@ -963,6 +1072,8 @@ class EnvironmentScalingService:
                 observed = available if use_available else ready
             except ApiException:
                 pass
+            if should_stop and await should_stop():
+                raise ExecutionStoppedError()
             now = loop.time()
             if observed >= required:
                 if on_progress:
@@ -1007,6 +1118,7 @@ class EnvironmentScalingService:
         desired_replicas: int,
         timeout_seconds: int,
         on_progress: Callable[[int], Awaitable[None]] | None = None,
+        should_stop: StopCheck | None = None,
     ) -> int:
         """Wait until the deployment is down to its target number of pods.
 
@@ -1042,6 +1154,8 @@ class EnvironmentScalingService:
             except ApiException as exc:
                 if exc.status == 404:
                     return 0
+            if should_stop and await should_stop():
+                raise ExecutionStoppedError()
             now = loop.time()
             if remaining is not None:
                 if remaining <= desired_replicas:
@@ -1150,18 +1264,22 @@ class EnvironmentScalingService:
         for row in rows:
             if now < self._abandon_deadline(row):
                 continue
+            stopped = row.cancel_requested_at is not None
             steps = [dict(s) for s in (row.step_details or [])]
             for s in steps:
                 if s.get("status") == "running":
-                    s["status"] = "interrupted"
+                    s["status"] = "cancelled" if stopped else "interrupted"
                 elif s.get("status") == "pending":
                     s["status"] = "not_run"
             row.step_details = steps
-            row.status = "failed"
+            row.status = "cancelled" if stopped else "failed"
             row.completed_at = now
             row.duration_seconds = (now - row.started_at).total_seconds() if row.started_at else None
             row.error_message = (
-                "Execution stopped unexpectedly: the portal instance running it restarted or lost its "
+                f"Stopped by {row.cancel_requested_by or 'a user'}. The run was no longer responding, so it was "
+                "marked stopped without a rollback. Check the deployments' current replica counts."
+                if stopped
+                else "Execution stopped unexpectedly: the portal instance running it restarted or lost its "
                 "connection. Check the deployments' current replica counts before re-running."
             )
             if row.schedule_id:
@@ -1202,7 +1320,10 @@ class EnvironmentScalingService:
             else:
                 end = step_started + timedelta(seconds=s.get("duration_seconds") or 0)
             last_activity = max(last_activity, end)
-        return last_activity + timedelta(seconds=ABANDONED_GRACE_SECONDS)
+        deadline = last_activity + timedelta(seconds=ABANDONED_GRACE_SECONDS)
+        if row.cancel_requested_at is not None:
+            deadline = min(deadline, row.cancel_requested_at + timedelta(seconds=STOP_ACK_SECONDS))
+        return deadline
 
     # ── Environment Status ────────────────────────────────────────────
 
@@ -1921,6 +2042,9 @@ class EnvironmentScalingService:
             "sequence_name": sequence_name,
             "schedule_name": schedule_name,
             "status": e.status,
+            "cancel_requested_at": (e.cancel_requested_at.isoformat() + "Z") if e.cancel_requested_at else None,
+            "cancel_requested_by": e.cancel_requested_by,
+            "cancel_rollback": bool(e.cancel_rollback),
             "total_deployments": e.total_deployments,
             "completed_count": e.completed_count,
             "failed_count": e.failed_count,

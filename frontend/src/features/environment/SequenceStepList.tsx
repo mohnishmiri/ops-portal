@@ -23,7 +23,7 @@ export interface LiveDeployment {
 let uidSeq = 0;
 export const newStepUid = () => `step-${++uidSeq}`;
 
-export const MAX_REPLICAS = 100;
+export const MAX_REPLICAS = 1000;
 export const MAX_TIMEOUT_SECONDS = 3600;
 export const DEFAULT_TIMEOUT_SECONDS = 600;
 export const DEFAULT_FIXED_WAIT_SECONDS = 30;
@@ -415,6 +415,7 @@ export const SequenceStepList: React.FC<StepListProps> = ({
                       value={step.replicas}
                       min={0}
                       max={MAX_REPLICAS}
+                      widthClass="w-14"
                       stepper
                       ariaLabel={`Replicas for step ${idx + 1}`}
                       onCommit={(n) => {

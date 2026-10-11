@@ -262,12 +262,129 @@ export const DeleteSequenceDialog: React.FC<DeleteProps> = ({ sequence, linkedSc
   );
 };
 
+// ── Force stop ──────────────────────────────────────────────────────────
+
+interface ForceStopProps {
+  execution: ExecutionHistory;
+  onCancel: () => void;
+  onConfirm: (rollback: boolean) => Promise<void>;
+}
+
+export const ForceStopDialog: React.FC<ForceStopProps> = ({ execution, onCancel, onConfirm }) => {
+  const [rollback, setRollback] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const steps = execution.step_details ?? [];
+  const current = steps.find((s) => s.status === "running");
+  // What a rollback would undo: steps that ran (the one in progress has usually been scaled already).
+  // Steps already at their old count (e.g. 60 → 60) have nothing to undo.
+  const scaled = steps.filter(
+    (s) => (s.status === "completed" || s.status === "running") && s.current_replicas !== s.target_replicas,
+  );
+  const isShutdown = execution.operation === "sequence_shutdown";
+
+  const confirm = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onConfirm(rollback);
+    } catch (err) {
+      setError((err as Error).message);
+      setSubmitting(false);
+    }
+  };
+
+  const option = (value: boolean, title: string, detail: string, disabled = false) => (
+    <label
+      className={`flex gap-3 rounded-lg border px-3 py-2.5 ${rollback === value ? "border-att-400 bg-att-50" : "border-gray-200"} ${
+        disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+      }`}
+    >
+      <input type="radio" name="stop-mode" checked={rollback === value} disabled={disabled} onChange={() => setRollback(value)} className="mt-0.5 text-att-500" />
+      <span>
+        <span className="block text-sm font-semibold text-gray-800">{title}</span>
+        <span className="block text-xs text-gray-500">{detail}</span>
+      </span>
+    </label>
+  );
+
+  return (
+    <Modal
+      title="Force stop this run?"
+      subtitle={
+        <>
+          <span className="font-semibold text-gray-800">{execution.sequence_name ?? `Execution #${execution.id}`}</span> · namespace{" "}
+          <span className="font-mono">{execution.namespace}</span>
+          {current && (
+            <>
+              {" "}· step {current.step ?? "?"} of {execution.total_deployments}: <span className="font-mono">{current.deployment}</span>
+            </>
+          )}
+        </>
+      }
+      onClose={submitting ? () => undefined : onCancel}
+      footer={
+        <>
+          <button type="button" onClick={onCancel} disabled={submitting} className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+            Keep running
+          </button>
+          <button type="button" onClick={confirm} disabled={submitting} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60">
+            {submitting ? "Stopping…" : rollback ? "Force stop and roll back" : "Force stop"}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-sm text-gray-600">
+          The run stops at its next check, within a few seconds. Steps that haven't started are skipped. The step in progress keeps
+          the replica count it was already scaled to unless you roll back.
+        </p>
+        {option(false, "Stop and leave deployments as they are now", "Nothing is scaled back. Use this to pause, look, and decide.")}
+        {option(
+          true,
+          `Stop and roll back ${scaled.length} scaled step${scaled.length === 1 ? "" : "s"}`,
+          `Each deployment this run changed goes back to its previous replica count, newest first.${
+            isShutdown ? " For a shutdown this starts the stopped deployments again." : ""
+          }`,
+          scaled.length === 0,
+        )}
+        {rollback && scaled.length > 0 && (
+          <ul className="max-h-40 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700" aria-label="Deployments to roll back">
+            {[...scaled].reverse().map((s, i) => (
+              <li key={`${s.step}-${i}`} className="flex items-center justify-between gap-3 py-0.5">
+                <span className="font-mono">{s.deployment}</span>
+                {s.current_replicas != null ? <ScaleChange from={s.target_replicas} to={s.current_replicas} /> : <span className="text-gray-400">previous count</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+        <ErrorNote message={error} />
+      </div>
+    </Modal>
+  );
+};
+
+/** "Stop requested by X at 10:42 — stops within seconds." */
+export const StopRequestedNote: React.FC<{ execution: ExecutionHistory }> = ({ execution }) =>
+  execution.cancel_requested_at && execution.status === "running" ? (
+    <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" role="status">
+      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+      </svg>
+      Stop requested by {execution.cancel_requested_by ?? "a user"} at {new Date(execution.cancel_requested_at).toLocaleTimeString()}
+      {execution.cancel_rollback ? " (with rollback)" : ""}. The run stops at its next check, usually within a few seconds.
+    </div>
+  ) : null;
+
 // ── Live execution panel ────────────────────────────────────────────────
 
 interface PanelProps {
   execution: ExecutionHistory;
   onClose: () => void;
   onViewHistory?: () => void;
+  /** Present for users who may stop runs. */
+  onForceStop?: (rollback: boolean) => Promise<void>;
 }
 
 const HEADLINE: Record<string, string> = {
@@ -275,10 +392,13 @@ const HEADLINE: Record<string, string> = {
   completed: "Completed",
   failed: "Failed",
   rolled_back: "Failed and rolled back",
+  cancelled: "Stopped",
 };
 
-export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClose, onViewHistory }) => {
+export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClose, onViewHistory, onForceStop }) => {
   const running = execution.status === "running";
+  const [confirmStop, setConfirmStop] = useState(false);
+  const stopRequested = !!execution.cancel_requested_at;
   const liveElapsed = useElapsedSince(execution.started_at, running);
   const elapsed = running ? liveElapsed : execution.duration_seconds ?? liveElapsed;
   const steps = execution.step_details ?? [];
@@ -288,7 +408,15 @@ export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClos
   const pct = total > 0 ? Math.min(100, Math.round(((running ? finished : total) / total) * 100)) : 0;
   const current = steps.find((s) => effectiveStepStatus(s, execution.status) === "running");
   const tone =
-    running ? "border-att-300" : execution.status === "completed" ? "border-green-300" : execution.status === "rolled_back" ? "border-orange-300" : "border-red-300";
+    running
+      ? "border-att-300"
+      : execution.status === "completed"
+        ? "border-green-300"
+        : execution.status === "rolled_back"
+          ? "border-orange-300"
+          : execution.status === "cancelled"
+            ? "border-slate-300"
+            : "border-red-300";
 
   return (
     <section className={`space-y-4 rounded-xl border-2 bg-white p-5 shadow-sm ${tone}`} aria-live="polite">
@@ -312,6 +440,18 @@ export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClos
             <svg className="h-4 w-4 text-gray-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
             {formatDuration(elapsed)}
           </span>
+          {running && onForceStop && (
+            <button
+              type="button"
+              onClick={() => setConfirmStop(true)}
+              disabled={stopRequested}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
+              title="Stop this run now, optionally rolling back what it scaled"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+              {stopRequested ? "Stopping…" : "Force stop"}
+            </button>
+          )}
           {onViewHistory && (
             <button type="button" onClick={onViewHistory} className="rounded-lg border border-att-200 bg-white px-3 py-1.5 text-sm font-medium text-att-700 hover:bg-att-50">View in History</button>
           )}
@@ -352,7 +492,15 @@ export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClos
         <div className="h-2.5 w-full overflow-hidden rounded-full bg-gray-200">
           <div
             className={`h-2.5 rounded-full transition-all duration-700 ${
-              running ? "bg-gradient-to-r from-att-400 to-att-600" : execution.status === "completed" ? "bg-green-500" : execution.status === "rolled_back" ? "bg-orange-500" : "bg-red-500"
+              running
+                ? "bg-gradient-to-r from-att-400 to-att-600"
+                : execution.status === "completed"
+                  ? "bg-green-500"
+                  : execution.status === "rolled_back"
+                    ? "bg-orange-500"
+                    : execution.status === "cancelled"
+                      ? "bg-slate-400"
+                      : "bg-red-500"
             }`}
             style={{ width: `${pct}%` }}
           />
@@ -361,13 +509,29 @@ export const SequenceExecutionPanel: React.FC<PanelProps> = ({ execution, onClos
 
       <ExecutionStepsTable steps={steps} executionStatus={execution.status} maxHeightClass="max-h-80" />
 
+      <StopRequestedNote execution={execution} />
       {execution.error_message && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{execution.error_message}</div>
+        <div
+          className={`rounded-lg border px-4 py-3 text-sm ${execution.status === "cancelled" ? "border-slate-200 bg-slate-50 text-slate-800" : "border-red-200 bg-red-50 text-red-800"}`}
+          role="alert"
+        >
+          {execution.error_message}
+        </div>
       )}
       {execution.status === "completed" && (
         <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
           All {total} steps completed in {formatDuration(elapsed)}.
         </div>
+      )}
+      {confirmStop && onForceStop && (
+        <ForceStopDialog
+          execution={execution}
+          onCancel={() => setConfirmStop(false)}
+          onConfirm={async (rollback) => {
+            await onForceStop(rollback);
+            setConfirmStop(false);
+          }}
+        />
       )}
       {running && (
         <p className="text-xs text-gray-400">Progress updates every few seconds. The run continues on the server if you leave this page; follow it on the History tab.</p>

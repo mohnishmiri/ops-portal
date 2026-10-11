@@ -206,6 +206,10 @@ export interface ExecutionHistory {
   sequence_name?: string | null;
   schedule_name?: string | null;
   status: string;
+  /** Force stop requested (the run stops at its next check, within seconds). */
+  cancel_requested_at?: string | null;
+  cancel_requested_by?: string | null;
+  cancel_rollback?: boolean;
   total_deployments: number;
   completed_count: number;
   failed_count: number;
@@ -453,6 +457,21 @@ export function useExecutionHistory(cluster_id?: string, namespace?: string, lim
       const data = query.state.data;
       if (data && data.some((h) => h.status === "running")) return 5_000;
       return 30_000;
+    },
+  });
+}
+
+/** Force stop a running sequence; optionally roll back what it already scaled. */
+export function useStopExecution() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, rollback }: { id: number; rollback: boolean }) => {
+      const response = await apiClient.post<ExecutionHistory>(`/environment/history/${id}/stop`, { rollback });
+      return response.data;
+    },
+    onSuccess: (_data, { id }) => {
+      queryClient.invalidateQueries({ queryKey: ["environment-execution", id] });
+      queryClient.invalidateQueries({ queryKey: ["environment-history"] });
     },
   });
 }
