@@ -539,7 +539,10 @@ class DashboardService:
 
         from app.models.database import AdminConfig as _AdminCfg
         from app.models.database import AdminSubscription as _AdminSub
+        from app.services.admin_service import AdminService
 
+        # Probe Azure alongside the DB reads below rather than after them.
+        azure_probe = asyncio.create_task(AdminService(db).check_azure_api())
         cache_ok = await cache_manager.ping()
 
         # ── Database health ────────────────────────────────────────────
@@ -628,6 +631,7 @@ class DashboardService:
         cors_origins = await get_effective_cors_origins(db)
         cache_enabled = await get_cache_enabled(db)
         ollama_llm_enabled = await get_ollama_enabled(db)
+        azure_ok = await azure_probe
 
         return {
             "subscriptions": sub_details,
@@ -642,7 +646,7 @@ class DashboardService:
             "system_health": {
                 "database": "connected" if db_ok else "disconnected",
                 "cache": "connected" if cache_ok else "disconnected",
-                "api": "healthy",
+                "api": "healthy" if azure_ok else "unreachable",
             },
             "cors_origins": cors_origins,
             "generated_at": datetime.utcnow().isoformat(),

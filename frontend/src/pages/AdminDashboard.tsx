@@ -1,18 +1,17 @@
 /**
  * Admin Dashboard — subscription management, system health, and configuration.
  *
- * Supports CRUD for subscriptions via DB-backed endpoints:
+ * Supports subscription management via DB-backed endpoints:
  *  - Enable / disable / monitor toggle per subscription
  *  - Add new subscription manually
  *  - Discover subscriptions from Azure ARM
- *  - Delete subscriptions
  *  - Admin config management
  */
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import {
   useAdminDashboard,
-  useAdminSubscriptions,
+  useAdminConfigs,
   useAddSubscription,
   useToggleSubscription,
   useDiscoverSubscriptions,
@@ -20,7 +19,9 @@ import {
   useUpsertAdminConfig,
   useReleaseOperationalCache,
   SubscriptionInfo,
+  AdminConfigEntry,
 } from "../services/costApi";
+import { apiErrorMessage } from "../services/infraAlertApi";
 import {
   useAllCollections,
   useEnabledCollections,
@@ -70,9 +71,15 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
     enabled: "bg-green-100 text-green-800",
     Enabled: "bg-green-100 text-green-800",
     disconnected: "bg-red-100 text-red-800",
+    unreachable: "bg-red-100 text-red-800",
     degraded: "bg-yellow-100 text-yellow-800",
     configured: "bg-blue-100 text-blue-800",
     Unknown: "bg-gray-100 text-gray-600",
+    // Azure subscription states
+    Disabled: "bg-red-100 text-red-800",
+    Deleted: "bg-red-100 text-red-800",
+    Warned: "bg-yellow-100 text-yellow-800",
+    PastDue: "bg-yellow-100 text-yellow-800",
   };
 
   return (
@@ -88,24 +95,31 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 
 // ── Add Subscription Form ─────────────────────────────────────────────
 
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [subId, setSubId] = useState("");
   const [subName, setSubName] = useState("");
   const [env, setEnv] = useState("");
   const [notes, setNotes] = useState("");
   const addMutation = useAddSubscription();
+  const idValid = GUID_PATTERN.test(subId.trim());
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!subId.trim()) return;
-    await addMutation.mutateAsync({
-      subscription_id: subId.trim(),
-      subscription_name: subName.trim() || undefined,
-      environment: env.trim() || undefined,
-      notes: notes.trim() || undefined,
-      enabled: true,
-    });
-    onClose();
+    if (!idValid) return;
+    try {
+      await addMutation.mutateAsync({
+        subscription_id: subId.trim(),
+        subscription_name: subName.trim() || undefined,
+        environment: env.trim() || undefined,
+        notes: notes.trim() || undefined,
+        enabled: true,
+      });
+      onClose();
+    } catch {
+      // Shown inline from addMutation.error.
+    }
   };
 
   return (
@@ -125,6 +139,9 @@ const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => 
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               required
             />
+            {subId.trim() && !idValid && (
+              <p className="mt-1 text-xs text-red-600">Enter the subscription GUID (8-4-4-4-12 hex characters).</p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
@@ -132,7 +149,7 @@ const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => 
               type="text"
               value={subName}
               onChange={(e) => setSubName(e.target.value)}
-              placeholder="e.g. ATTCC Production"
+              placeholder="Defaults to the subscription ID"
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             />
           </div>
@@ -165,7 +182,7 @@ const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => 
         <div className="flex items-center gap-3">
           <button
             type="submit"
-            disabled={addMutation.isPending || !subId.trim()}
+            disabled={addMutation.isPending || !idValid}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {addMutation.isPending ? "Adding…" : "Add Subscription"}
@@ -179,7 +196,7 @@ const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => 
           </button>
           {addMutation.isError && (
             <span className="text-red-600 text-sm">
-              {(addMutation.error as Error)?.message || "Failed to add"}
+              {apiErrorMessage(addMutation.error, "Failed to add subscription.")}
             </span>
           )}
         </div>
@@ -190,13 +207,27 @@ const AddSubscriptionForm: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
 // ── Subscription Table ────────────────────────────────────────────────
 
+/** Background syncs and dashboards only cover subscriptions that are both enabled and monitored. */
+const isInScope = (sub: SubscriptionInfo) => sub.enabled && sub.monitored;
+
+type ScopeFilter = "all" | "in" | "out";
+
+const SCOPE_FILTER_LABEL: Record<ScopeFilter, string> = {
+  all: "All",
+  in: "In scope",
+  out: "Not in scope",
+};
+
 const SubscriptionTable: React.FC<{
   subs: SubscriptionInfo[];
   onShowAdd: () => void;
-}> = ({ subs, onShowAdd }) => {
+  scopeFilter: ScopeFilter;
+  onScopeFilterChange: (filter: ScopeFilter) => void;
+}> = ({ subs, onShowAdd, scopeFilter, onScopeFilterChange }) => {
   const toggleMutation = useToggleSubscription();
   const discoverMutation = useDiscoverSubscriptions();
   const syncMutation = useSyncSubscriptions();
+  const [search, setSearch] = useState("");
 
   const handleToggle = useCallback(
     (sub: SubscriptionInfo, field: "enabled" | "monitored") => {
@@ -209,7 +240,17 @@ const SubscriptionTable: React.FC<{
     [toggleMutation],
   );
 
-  const enabledCount = subs.filter((s) => s.enabled).length;
+  const inScopeCount = subs.filter(isInScope).length;
+  const visibleSubs = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return subs.filter((sub) => {
+      if (scopeFilter === "in" && !isInScope(sub)) return false;
+      if (scopeFilter === "out" && isInScope(sub)) return false;
+      if (!term) return true;
+      return [sub.subscription_name, sub.name, sub.subscription_id, sub.environment]
+        .some((value) => value?.toLowerCase().includes(term));
+    });
+  }, [subs, search, scopeFilter]);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
@@ -219,13 +260,14 @@ const SubscriptionTable: React.FC<{
             Managed Subscriptions
           </h3>
           <p className="text-sm text-gray-500">
-            {enabledCount} enabled of {subs.length} total
+            {inScopeCount} in scope (enabled &amp; monitored) of {subs.length} total
           </p>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => discoverMutation.mutate()}
             disabled={discoverMutation.isPending}
+            title="Add subscriptions the service principal can see but the portal doesn't know yet (added disabled)"
             className="inline-flex items-center gap-1.5 px-3 py-2 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg text-sm font-semibold hover:bg-purple-100 disabled:opacity-50"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -236,6 +278,7 @@ const SubscriptionTable: React.FC<{
           <button
             onClick={() => syncMutation.mutate()}
             disabled={syncMutation.isPending}
+            title="Refresh name and state of existing subscriptions from Azure"
             className="inline-flex items-center gap-1.5 px-3 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm font-semibold hover:bg-indigo-100 disabled:opacity-50"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -258,7 +301,7 @@ const SubscriptionTable: React.FC<{
       {discoverMutation.isSuccess && (
         <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
           Discovered {(discoverMutation.data as any)?.discovered ?? 0} subscriptions
-          ({(discoverMutation.data as any)?.new_count ?? 0} new).
+          ({(discoverMutation.data as any)?.new_count ?? 0} new, added disabled for review).
         </div>
       )}
       {syncMutation.isSuccess && (
@@ -267,6 +310,47 @@ const SubscriptionTable: React.FC<{
           {(syncMutation.data as any)?.discovered ?? 0} subscriptions.
         </div>
       )}
+      {discoverMutation.isError && (
+        <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+          Discover failed: {apiErrorMessage(discoverMutation.error, "Azure did not respond.")}
+        </div>
+      )}
+      {syncMutation.isError && (
+        <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+          Sync failed: {apiErrorMessage(syncMutation.error, "Azure did not respond.")}
+        </div>
+      )}
+      {toggleMutation.isError && (
+        <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
+          Could not update the subscription: {apiErrorMessage(toggleMutation.error, "request failed.")}
+        </div>
+      )}
+
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search name, ID or environment…"
+          aria-label="Search subscriptions"
+          className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+        />
+        <div className="inline-flex rounded-lg border border-gray-200 p-0.5" role="group" aria-label="Scope filter">
+          {(Object.keys(SCOPE_FILTER_LABEL) as ScopeFilter[]).map((key) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onScopeFilterChange(key)}
+              aria-pressed={scopeFilter === key}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
+                scopeFilter === key ? "bg-blue-600 text-white" : "text-gray-600 hover:bg-gray-100"
+              }`}
+            >
+              {SCOPE_FILTER_LABEL[key]}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -281,11 +365,11 @@ const SubscriptionTable: React.FC<{
             </tr>
           </thead>
           <tbody>
-            {subs.map((sub) => (
+            {visibleSubs.map((sub) => (
               <tr
                 key={sub.subscription_id}
                 className={`border-b border-gray-50 hover:bg-gray-50 ${
-                  !sub.enabled ? "opacity-60" : ""
+                  !isInScope(sub) ? "opacity-60" : ""
                 }`}
               >
                 <td className="py-3 px-3 font-medium text-gray-900">
@@ -332,6 +416,13 @@ const SubscriptionTable: React.FC<{
                 </td>
               </tr>
             )}
+            {subs.length > 0 && visibleSubs.length === 0 && (
+              <tr>
+                <td colSpan={6} className="py-8 text-center text-gray-400">
+                  No subscriptions match the current search or filter.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -342,16 +433,13 @@ const SubscriptionTable: React.FC<{
 // ── System Health ─────────────────────────────────────────────────────
 
 const SystemHealth: React.FC<{
-  health: { database: string; cache: string; api: string };
-  environment: string;
-  rateLimitRpm: number;
-  cacheTtl: number;
-  corsOrigins: string[];
-  generatedAtLabel: string;
-}> = ({ health, environment, rateLimitRpm, cacheTtl, corsOrigins, generatedAtLabel }) => {
+  health: { database: string; api: string };
+  checkedAtLabel: string;
+}> = ({ health, checkedAtLabel }) => {
   const components = [
     {
       name: "PostgreSQL Database",
+      detail: "Portal data and the page cache (both live in PostgreSQL).",
       status: health.database,
       icon: (
         <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -360,7 +448,8 @@ const SystemHealth: React.FC<{
       ),
     },
     {
-      name: "Azure Cost API",
+      name: "Azure Management API",
+      detail: "Service principal token plus a subscription list call to management.azure.com (re-checked at most once a minute).",
       status: health.api,
       icon: (
         <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -368,109 +457,39 @@ const SystemHealth: React.FC<{
         </svg>
       ),
     },
-    {
-      name: "DB Cache",
-      status: health.cache,
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-        </svg>
-      ),
-    },
   ];
-
-  const overall = components.every((c) => c.status === "healthy" || c.status === "connected")
-    ? "healthy"
-    : "degraded";
-  const currentOrigin = typeof window !== "undefined" ? window.location.origin : "Unknown";
-  const originAllowed = corsOrigins.includes(currentOrigin);
-  const cacheLabel = cacheTtl <= 0 ? "Unlimited retention" : `${Math.round(cacheTtl / 60)} min TTL`;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-semibold text-gray-800">System Health</h3>
-        <StatusBadge status={overall} />
+        <span className="text-xs text-gray-500">Checked {checkedAtLabel}</span>
       </div>
       <div className="space-y-3">
         {components.map((c) => (
-          <div key={c.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+          <div key={c.name} className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center gap-3">
               <span className="text-xl">{c.icon}</span>
-              <span className="font-medium text-gray-700">{c.name}</span>
+              <div>
+                <p className="font-medium text-gray-700">{c.name}</p>
+                <p className="text-xs text-gray-500">{c.detail}</p>
+              </div>
             </div>
             <StatusBadge status={c.status} />
           </div>
         ))}
       </div>
-
-      <div className="mt-5 rounded-xl border border-att-100 bg-gradient-to-br from-att-50/80 via-white to-att-50/40 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Runtime Overview</p>
-            <p className="mt-1 text-sm text-slate-600">Operational context for the current browser session and API configuration.</p>
-          </div>
-          <StatusBadge status={originAllowed ? "enabled" : "degraded"} />
-        </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border border-white/80 bg-white/90 p-3 shadow-sm">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Browser Origin</p>
-            <p className="mt-1 break-all font-mono text-xs text-slate-700">{currentOrigin}</p>
-            <p className={`mt-2 text-xs font-medium ${originAllowed ? "text-green-700" : "text-amber-700"}`}>
-              {originAllowed ? "Allowed by current CORS configuration" : "Not present in current CORS configuration"}
-            </p>
-          </div>
-
-          <div className="rounded-lg border border-white/80 bg-white/90 p-3 shadow-sm">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Allowed Origins</p>
-            <p className="mt-1 text-2xl font-bold text-slate-900">{corsOrigins.length}</p>
-            <p className="mt-2 text-xs text-slate-500">Admin-managed origins applied at runtime by the API.</p>
-          </div>
-
-          <div className="rounded-lg border border-white/80 bg-white/90 p-3 shadow-sm">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Environment</p>
-            <p className="mt-1 text-sm font-semibold text-slate-800">{environment.toUpperCase()}</p>
-            <p className="mt-2 text-xs text-slate-500">Rate limit configured at {rateLimitRpm} requests per minute.</p>
-          </div>
-
-          <div className="rounded-lg border border-white/80 bg-white/90 p-3 shadow-sm">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Cache Policy</p>
-            <p className="mt-1 text-sm font-semibold text-slate-800">{cacheLabel}</p>
-            <p className="mt-2 text-xs text-slate-500">Dashboard snapshot generated {generatedAtLabel}.</p>
-          </div>
-        </div>
-      </div>
     </div>
   );
 };
 
-// ── Page Footer Area ─────────────────────────────────────────────────
-
-const PageFooterArea: React.FC = () => (
-  <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-    <div>
-      {/* Admin utilities */}
-      <div className="bg-white rounded-xl p-4 border">
-        <h3 className="text-sm font-semibold mb-2">Admin Utilities</h3>
-        <div className="flex gap-3">
-          <Link to="/admin/permissions" className="px-3 py-2 bg-att-50 text-att-700 border border-att-100 rounded-md text-sm font-medium hover:bg-att-100">Manage Permissions</Link>
-        </div>
-      </div>
-    </div>
-    <div>
-      {/* Placeholder for future admin widgets */}
-    </div>
-  </div>
-);
-
-// Add AdminUtilities into the dashboard lower down — simple link to permissions UI
-
 // ── Certificate Collections Admin ─────────────────────────────────
 
+const sameIds = (a: Set<number>, b: number[]) => a.size === b.length && b.every((id) => a.has(id));
+
 const CertificateCollectionsAdmin: React.FC = () => {
-  const { data: allCollections, isLoading: loadingAll } = useAllCollections();
-  const { data: enabledConfig, isLoading: loadingEnabled } = useEnabledCollections();
+  const { data: allCollections, isLoading: loadingAll, error: allError } = useAllCollections();
+  const { data: enabledConfig, isLoading: loadingEnabled, error: enabledError } = useEnabledCollections();
   const setEnabled = useSetEnabledCollections();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [initialized, setInitialized] = useState(false);
@@ -493,20 +512,26 @@ const CertificateCollectionsAdmin: React.FC = () => {
     });
   };
 
-  const selectAll = () => {
-    if (allCollections) setSelected(new Set(allCollections.map((c) => c.id)));
-  };
-  const deselectAll = () => setSelected(new Set());
-
-  const handleSave = async () => {
-    await setEnabled.mutateAsync(Array.from(selected));
-  };
-
   const filteredCollections = (allCollections ?? []).filter(
     (c) => !search.trim() || c.name.toLowerCase().includes(search.toLowerCase())
   );
 
+  // With a search active these act on the matching collections only.
+  const selectAll = () => {
+    setSelected((prev) => new Set([...prev, ...filteredCollections.map((c) => c.id)]));
+  };
+  const deselectAll = () => {
+    const visible = new Set(filteredCollections.map((c) => c.id));
+    setSelected((prev) => new Set([...prev].filter((id) => !visible.has(id))));
+  };
+
+  const handleSave = () => {
+    setEnabled.mutate(Array.from(selected));
+  };
+
   const isLoading = loadingAll || loadingEnabled;
+  const loadError = allError || enabledError;
+  const isDirty = initialized && !sameIds(selected, enabledConfig?.collection_ids ?? []);
 
   return (
     <div className="mt-6 bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -516,11 +541,18 @@ const CertificateCollectionsAdmin: React.FC = () => {
           <p className="text-xs text-gray-500 mt-0.5">Select which Keyfactor collections are visible in the Certificate module. Unselected collections will be hidden from all users.</p>
         </div>
         <div className="flex items-center gap-2">
+          {setEnabled.isError ? (
+            <span className="text-xs text-red-600">{apiErrorMessage(setEnabled.error, "Save failed.")}</span>
+          ) : setEnabled.isSuccess && !isDirty ? (
+            <span className="text-xs text-green-700">Saved</span>
+          ) : isDirty ? (
+            <span className="text-xs text-amber-700">Unsaved changes</span>
+          ) : null}
           <span className="text-xs text-gray-500">{selected.size} of {allCollections?.length ?? 0} enabled</span>
           <button
             type="button"
             onClick={handleSave}
-            disabled={setEnabled.isPending}
+            disabled={setEnabled.isPending || !isDirty}
             className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
           >
             {setEnabled.isPending ? "Saving…" : "Save"}
@@ -543,6 +575,10 @@ const CertificateCollectionsAdmin: React.FC = () => {
       <div className="max-h-[320px] overflow-y-auto px-5 py-3">
         {isLoading ? (
           <p className="text-sm text-gray-500 py-4 text-center">Loading collections from Keyfactor…</p>
+        ) : loadError ? (
+          <p role="alert" className="text-sm text-red-600 py-4 text-center">
+            Could not load collections: {apiErrorMessage(loadError, "Keyfactor did not respond.")}
+          </p>
         ) : !filteredCollections.length ? (
           <p className="text-sm text-gray-500 py-4 text-center">No collections found.</p>
         ) : (
@@ -564,9 +600,9 @@ const CertificateCollectionsAdmin: React.FC = () => {
         )}
       </div>
 
-      {enabledConfig?.mode === "all" && selected.size === 0 && (
+      {initialized && selected.size === 0 && (
         <div className="px-5 py-2 bg-amber-50 border-t border-amber-100 text-xs text-amber-700">
-          No collections selected — all collections will be visible. Select specific collections to restrict access.
+          No collections selected — all collections {isDirty ? "will be" : "are"} visible. Select specific collections to restrict access.
         </div>
       )}
     </div>
@@ -576,7 +612,7 @@ const CertificateCollectionsAdmin: React.FC = () => {
 // ── Admin Utilities Link ─────────────────────────────────────────────
 
 const AdminUtilities: React.FC = () => (
-  <div className="mt-6 bg-white rounded-xl p-4 border">
+  <div className="bg-white rounded-xl p-4 border">
     <h3 className="text-sm font-semibold mb-2">Admin Utilities</h3>
     <div className="flex gap-3">
       <Link to="/admin/permissions" className="px-3 py-2 bg-att-50 text-att-700 border border-att-100 rounded-md text-sm font-medium hover:bg-att-100">Manage Permissions</Link>
@@ -584,9 +620,26 @@ const AdminUtilities: React.FC = () => (
   </div>
 );
 
+// ── Config helpers ────────────────────────────────────────────────────
+
+/** "Changed by x · date" from the admin_config row, so admins can see who last touched a setting. */
+const ConfigChangedBy: React.FC<{ entry?: AdminConfigEntry }> = ({ entry }) => {
+  const { formatDate } = usePortalTimezone();
+  if (!entry?.updated_at) return null;
+  return (
+    <p className="mt-1 text-[11px] text-gray-400">
+      Changed {entry.updated_by ? `by ${entry.updated_by} · ` : ""}
+      {formatDate(entry.updated_at)}
+    </p>
+  );
+};
+
+const InlineError: React.FC<{ error: unknown; fallback: string }> = ({ error, fallback }) =>
+  error ? <p role="alert" className="mt-2 text-xs text-red-700">{apiErrorMessage(error, fallback)}</p> : null;
+
 // ── Timezone Selector ─────────────────────────────────────────────────
 
-const TimezoneSelector: React.FC = () => {
+const TimezoneSelector: React.FC<{ entry?: AdminConfigEntry }> = ({ entry }) => {
   const { timezone } = usePortalTimezone();
   const tzMutation = useUpdatePortalTimezone();
   const [selected, setSelected] = useState(timezone);
@@ -598,7 +651,11 @@ const TimezoneSelector: React.FC = () => {
   const handleChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const tz = e.target.value;
     setSelected(tz);
-    await tzMutation.mutateAsync(tz);
+    try {
+      await tzMutation.mutateAsync(tz);
+    } catch {
+      setSelected(timezone);
+    }
   };
 
   const currentLabel = TIMEZONE_OPTIONS.find((o) => o.value === timezone)?.label ?? timezone;
@@ -611,6 +668,7 @@ const TimezoneSelector: React.FC = () => {
           value={selected}
           onChange={handleChange}
           disabled={tzMutation.isPending}
+          aria-label="Portal timezone"
           className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
         >
           {TIMEZONE_OPTIONS.map((opt) => (
@@ -626,14 +684,20 @@ const TimezoneSelector: React.FC = () => {
           <span className="text-xs text-green-600">Saved</span>
         )}
       </div>
+      <InlineError error={tzMutation.error} fallback="Failed to save the timezone." />
       <p className="text-xs text-gray-500 mt-1">
         All dates and times across the portal will be displayed in <strong>{currentLabel}</strong>.
       </p>
+      <ConfigChangedBy entry={entry} />
     </div>
   );
 };
 
 // ── Configuration Panel ───────────────────────────────────────────────
+
+const RPM_MIN = 10;
+const RPM_MAX = 10000;
+const TTL_MAX_MINUTES = 10080;
 
 const ConfigPanel: React.FC<{
   environment: string;
@@ -655,35 +719,39 @@ const ConfigPanel: React.FC<{
     cacheTtl <= 0 ? "60" : String(Math.max(1, Math.round(cacheTtl / 60)))
   );
   const [corsText, setCorsText] = useState(corsOrigins.join("\n"));
-  const upsertConfig = useUpsertAdminConfig();
+  // One mutation per setting, so a save or failure on one control never
+  // shows up as "Saved"/an error beside another.
+  const rpmMutation = useUpsertAdminConfig();
+  const ttlMutation = useUpsertAdminConfig();
+  const corsMutation = useUpsertAdminConfig();
+  const cacheMutation = useUpsertAdminConfig();
+  const ollamaMutation = useUpsertAdminConfig();
   const releaseCache = useReleaseOperationalCache();
-  const [togglingCache, setTogglingCache] = useState(false);
-  const [togglingOllama, setTogglingOllama] = useState(false);
+  const { data: configEntries } = useAdminConfigs();
+  const configByKey = useMemo(
+    () => new Map((configEntries ?? []).map((entry) => [entry.config_key, entry])),
+    [configEntries],
+  );
 
   const isUnlimitedCache = cacheTtl <= 0;
+  const rpmParsed = Number(rpmValue);
+  const rpmInvalid = !Number.isInteger(rpmParsed) || rpmParsed < RPM_MIN || rpmParsed > RPM_MAX;
+  const ttlParsed = Number(ttlMinutes);
+  const ttlInvalid =
+    ttlMode === "timed" && (!Number.isInteger(ttlParsed) || ttlParsed < 1 || ttlParsed > TTL_MAX_MINUTES);
 
-  const handleToggleCache = async () => {
-    setTogglingCache(true);
-    try {
-      await upsertConfig.mutateAsync({
-        config_key: "cache_enabled",
-        config_value: cacheEnabled ? "false" : "true",
-      });
-    } finally {
-      setTogglingCache(false);
-    }
+  const handleToggleCache = () => {
+    cacheMutation.mutate({
+      config_key: "cache_enabled",
+      config_value: cacheEnabled ? "false" : "true",
+    });
   };
 
-  const handleToggleOllama = async () => {
-    setTogglingOllama(true);
-    try {
-      await upsertConfig.mutateAsync({
-        config_key: "ollama_enabled",
-        config_value: ollamaEnabled ? "false" : "true",
-      });
-    } finally {
-      setTogglingOllama(false);
-    }
+  const handleToggleOllama = () => {
+    ollamaMutation.mutate({
+      config_key: "ollama_enabled",
+      config_value: ollamaEnabled ? "false" : "true",
+    });
   };
 
   // Sync local state when the prop updates after a refetch
@@ -706,42 +774,34 @@ const ConfigPanel: React.FC<{
     }
   }, [rateLimitRpm, editingRpm]);
 
-  const handleSaveRpm = async () => {
-    const rpm = parseInt(rpmValue, 10);
-    if (isNaN(rpm) || rpm < 10 || rpm > 10000) return;
-    await upsertConfig.mutateAsync({
-      config_key: "rate_limit_rpm",
-      config_value: String(rpm),
-    });
-    setEditingRpm(false);
+  const handleSaveRpm = () => {
+    if (rpmInvalid) return;
+    rpmMutation.mutate(
+      { config_key: "rate_limit_rpm", config_value: String(rpmParsed) },
+      { onSuccess: () => setEditingRpm(false) },
+    );
   };
 
-  const handleSaveTtl = async () => {
-    if (ttlMode === "unlimited") {
-      await upsertConfig.mutateAsync({
+  const handleSaveTtl = () => {
+    if (ttlInvalid) return;
+    ttlMutation.mutate(
+      {
         config_key: "cache_ttl_seconds",
-        config_value: "0",
-      });
-      setEditingTtl(false);
-      return;
-    }
-
-    const minutes = parseInt(ttlMinutes, 10);
-    if (isNaN(minutes) || minutes < 1) return;
-    await upsertConfig.mutateAsync({
-      config_key: "cache_ttl_seconds",
-      config_value: String(minutes * 60),
-    });
-    setEditingTtl(false);
+        config_value: ttlMode === "unlimited" ? "0" : String(ttlParsed * 60),
+      },
+      { onSuccess: () => setEditingTtl(false) },
+    );
   };
 
-  const handleSaveCors = async () => {
-    await upsertConfig.mutateAsync({
-      config_key: "cors_origins",
-      config_value: corsText,
-      description: "Allowed browser origins for Ops Portal API CORS.",
-    });
-    setEditingCors(false);
+  const handleSaveCors = () => {
+    corsMutation.mutate(
+      {
+        config_key: "cors_origins",
+        config_value: corsText,
+        description: "Allowed browser origins for Ops Portal API CORS.",
+      },
+      { onSuccess: () => setEditingCors(false) },
+    );
   };
 
   const envColor =
@@ -769,27 +829,29 @@ const ConfigPanel: React.FC<{
           <div className="p-3 bg-gray-50 rounded-lg">
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Rate Limit</p>
             {editingRpm ? (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   type="number"
-                  min={10}
-                  max={10000}
+                  min={RPM_MIN}
+                  max={RPM_MAX}
                   value={rpmValue}
                   onChange={(e) => setRpmValue(e.target.value)}
+                  aria-label="Rate limit (requests per minute)"
                   className="w-24 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
                 <span className="text-sm text-gray-500">req/min</span>
                 <button
                   onClick={handleSaveRpm}
-                  disabled={upsertConfig.isPending}
+                  disabled={rpmMutation.isPending || rpmInvalid}
                   className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {upsertConfig.isPending ? "…" : "Save"}
+                  {rpmMutation.isPending ? "…" : "Save"}
                 </button>
                 <button
                   onClick={() => {
                     setEditingRpm(false);
                     setRpmValue(String(rateLimitRpm));
+                    rpmMutation.reset();
                   }}
                   className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-semibold hover:bg-gray-200"
                 >
@@ -805,6 +867,7 @@ const ConfigPanel: React.FC<{
                   onClick={() => setEditingRpm(true)}
                   className="p-1 text-gray-400 hover:text-blue-600 rounded transition-colors"
                   title="Edit Rate Limit"
+                  aria-label="Edit rate limit"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
@@ -812,18 +875,27 @@ const ConfigPanel: React.FC<{
                 </button>
               </div>
             )}
+            {editingRpm && rpmInvalid && (
+              <p className="mt-2 text-xs text-red-700">Enter a whole number between {RPM_MIN} and {RPM_MAX}.</p>
+            )}
+            <InlineError error={rpmMutation.error} fallback="Failed to save the rate limit." />
+            <p className="mt-2 text-xs text-gray-500">
+              Per client IP, counted separately by each API worker. Other workers apply a change within 30 seconds.
+            </p>
+            <ConfigChangedBy entry={configByKey.get("rate_limit_rpm")} />
           </div>
           <div className="p-3 bg-gray-50 rounded-lg">
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Page Cache TTL</p>
             {editingTtl ? (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   type="number"
                   min={1}
-                  max={10080}
+                  max={TTL_MAX_MINUTES}
                   value={ttlMinutes}
                   onChange={(e) => setTtlMinutes(e.target.value)}
                   disabled={ttlMode === "unlimited"}
+                  aria-label="Page cache TTL (minutes)"
                   className="w-20 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
                 <span className="text-sm text-gray-500">min</span>
@@ -838,16 +910,17 @@ const ConfigPanel: React.FC<{
                 </label>
                 <button
                   onClick={handleSaveTtl}
-                  disabled={upsertConfig.isPending}
+                  disabled={ttlMutation.isPending || ttlInvalid}
                   className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {upsertConfig.isPending ? "…" : "Save"}
+                  {ttlMutation.isPending ? "…" : "Save"}
                 </button>
                 <button
                   onClick={() => {
                     setEditingTtl(false);
                     setTtlMode(cacheTtl <= 0 ? "unlimited" : "timed");
                     setTtlMinutes(cacheTtl <= 0 ? "60" : String(Math.max(1, Math.round(cacheTtl / 60))));
+                    ttlMutation.reset();
                   }}
                   className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-semibold hover:bg-gray-200"
                 >
@@ -871,6 +944,7 @@ const ConfigPanel: React.FC<{
                   onClick={() => setEditingTtl(true)}
                   className="p-1 text-gray-400 hover:text-blue-600 rounded transition-colors"
                   title="Edit Cache TTL"
+                  aria-label="Edit page cache TTL"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
@@ -878,9 +952,14 @@ const ConfigPanel: React.FC<{
                 </button>
               </div>
             )}
+            {editingTtl && ttlInvalid && (
+              <p className="mt-2 text-xs text-red-700">Enter whole minutes between 1 and {TTL_MAX_MINUTES} (7 days).</p>
+            )}
+            <InlineError error={ttlMutation.error} fallback="Failed to save the cache TTL." />
             <p className="mt-2 text-xs text-gray-500">
               Applies to Leadership dashboard, Leadership advisor/forecast, and Amortized payload caches only. Other pages use database snapshots or live API calls instead of page cache.
             </p>
+            <ConfigChangedBy entry={configByKey.get("cache_ttl_seconds")} />
           </div>
         </div>
 
@@ -892,10 +971,13 @@ const ConfigPanel: React.FC<{
               <p className="text-xs text-gray-500">
                 When disabled, Leadership Dashboard reads directly from the database (or Azure API fallback). Advisor and forecast caches are also bypassed.
               </p>
+              <ConfigChangedBy entry={configByKey.get("cache_enabled")} />
             </div>
             <button
               onClick={handleToggleCache}
-              disabled={togglingCache}
+              disabled={cacheMutation.isPending}
+              aria-pressed={cacheEnabled}
+              aria-label="Page cache"
               className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:opacity-50 ${
                 cacheEnabled
                   ? "border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
@@ -909,9 +991,10 @@ const ConfigPanel: React.FC<{
                   <path strokeLinecap="round" strokeLinejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 )}
               </svg>
-              {togglingCache ? "Updating…" : cacheEnabled ? "Enabled" : "Disabled"}
+              {cacheMutation.isPending ? "Updating…" : cacheEnabled ? "Enabled" : "Disabled"}
             </button>
           </div>
+          <InlineError error={cacheMutation.error} fallback="Failed to update the page cache setting." />
         </div>
 
         {/* Ollama LLM Toggle */}
@@ -922,10 +1005,13 @@ const ConfigPanel: React.FC<{
               <p className="text-xs text-gray-500">
                 When enabled, Leadership Dashboard uses Ollama LLM for AI-powered forecasts and executive advisor guidance. When disabled, the system falls back to local heuristic projections.
               </p>
+              <ConfigChangedBy entry={configByKey.get("ollama_enabled")} />
             </div>
             <button
               onClick={handleToggleOllama}
-              disabled={togglingOllama}
+              disabled={ollamaMutation.isPending}
+              aria-pressed={ollamaEnabled}
+              aria-label="Ollama LLM"
               className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:opacity-50 ${
                 ollamaEnabled
                   ? "border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
@@ -939,9 +1025,10 @@ const ConfigPanel: React.FC<{
                   <path strokeLinecap="round" strokeLinejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 )}
               </svg>
-              {togglingOllama ? "Updating…" : ollamaEnabled ? "Enabled" : "Disabled"}
+              {ollamaMutation.isPending ? "Updating…" : ollamaEnabled ? "Enabled" : "Disabled"}
             </button>
           </div>
+          <InlineError error={ollamaMutation.error} fallback="Failed to update the Ollama setting." />
         </div>
 
         <div className="rounded-xl border border-att-100 bg-att-50/50 p-4">
@@ -968,9 +1055,7 @@ const ConfigPanel: React.FC<{
               Released {releaseCache.data.released_keys} cached key(s). The next dashboard requests will rebuild fresh payloads.
             </p>
           ) : null}
-          {releaseCache.isError ? (
-            <p className="mt-3 text-xs text-red-700">Failed to release cached data.</p>
-          ) : null}
+          <InlineError error={releaseCache.error} fallback="Failed to release cached data." />
         </div>
 
         <div>
@@ -981,6 +1066,7 @@ const ConfigPanel: React.FC<{
                 value={corsText}
                 onChange={(e) => setCorsText(e.target.value)}
                 rows={5}
+                aria-label="CORS origins"
                 placeholder="One origin per line, for example:
 http://localhost:5173
 http://127.0.0.1:5173"
@@ -989,26 +1075,23 @@ http://127.0.0.1:5173"
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleSaveCors}
-                  disabled={upsertConfig.isPending}
+                  disabled={corsMutation.isPending || !corsText.trim()}
                   className="px-3 py-1.5 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {upsertConfig.isPending ? "Saving…" : "Save CORS"}
+                  {corsMutation.isPending ? "Saving…" : "Save CORS"}
                 </button>
                 <button
                   onClick={() => {
                     setEditingCors(false);
                     setCorsText(corsOrigins.join("\n"));
+                    corsMutation.reset();
                   }}
                   className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded text-xs font-semibold hover:bg-gray-200"
                 >
                   Cancel
                 </button>
               </div>
-              {upsertConfig.isError ? (
-                <p className="text-xs text-red-700">
-                  {(upsertConfig.error as any)?.response?.data?.detail || "Failed to update CORS origins."}
-                </p>
-              ) : null}
+              <InlineError error={corsMutation.error} fallback="Failed to update CORS origins." />
             </div>
           ) : (
             <>
@@ -1029,19 +1112,20 @@ http://127.0.0.1:5173"
                   </svg>
                   Edit CORS Origins
                 </button>
-                {upsertConfig.isSuccess && !upsertConfig.isPending ? (
-                  <span className="text-xs text-green-700">Saved</span>
-                ) : null}
+                {corsMutation.isSuccess ? <span className="text-xs text-green-700">Saved</span> : null}
               </div>
             </>
           )}
           <p className="mt-2 text-xs text-gray-500">
-            Applies to API CORS checks at runtime for Ops Portal origins. One origin per line. Use full `http://` or `https://` URLs only.
+            Only needed for browser apps that call the API from a different origin — the portal itself reaches the API
+            same-origin through its <code>/api</code> proxy. One full <code>http://</code> or <code>https://</code> origin per
+            line; other workers pick up changes within 30 seconds.
           </p>
+          <ConfigChangedBy entry={configByKey.get("cors_origins")} />
         </div>
 
         {/* Portal Timezone */}
-        <TimezoneSelector />
+        <TimezoneSelector entry={configByKey.get("portal_timezone")} />
       </div>
     </div>
   );
@@ -1053,6 +1137,7 @@ const AdminDashboard: React.FC = () => {
   const { data, isLoading, error } = useAdminDashboard();
   const { formatDate } = usePortalTimezone();
   const [showAddForm, setShowAddForm] = useState(false);
+  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
 
   if (isLoading) {
     return (
@@ -1070,13 +1155,21 @@ const AdminDashboard: React.FC = () => {
       <div className="py-6">
         <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
           <p className="text-red-700 font-semibold">Failed to load admin dashboard</p>
-          <p className="text-red-600 text-sm mt-1">{String(error)}</p>
+          <p className="text-red-600 text-sm mt-1">{apiErrorMessage(error, String(error ?? "No data returned."))}</p>
         </div>
       </div>
     );
   }
 
-  const enabledCount = data.enabled_count ?? data.subscriptions.filter((s) => s.enabled).length;
+  const inScopeCount = data.subscriptions.filter(isInScope).length;
+  const outOfScopeCount = data.subscriptions.length - inScopeCount;
+  const unhealthy = [
+    data.system_health.database !== "connected" && "Database",
+    data.system_health.api !== "healthy" && "Azure API",
+  ].filter(Boolean) as string[];
+
+  const toggleScopeFilter = (filter: ScopeFilter) =>
+    setScopeFilter((current) => (current === filter ? "all" : filter));
 
   return (
     <div className="py-6 space-y-6">
@@ -1096,45 +1189,48 @@ const AdminDashboard: React.FC = () => {
         <MetricCard
           title="Total Subscriptions"
           value={data.subscription_count}
-          subtitle="configured in system"
+          subtitle="registered in the portal"
           icon={MetricCardIcons.layers()}
           tone="blue"
+          onClick={() => setScopeFilter("all")}
+          active={scopeFilter === "all"}
+          actionLabel="Show all subscriptions"
         />
         <MetricCard
-          title="Enabled"
-          value={enabledCount}
-          subtitle="actively monitored"
+          title="In Scope"
+          value={inScopeCount}
+          subtitle="enabled & monitored — synced and on dashboards"
           icon={MetricCardIcons.checkCircle()}
           tone="emerald"
+          onClick={() => toggleScopeFilter("in")}
+          active={scopeFilter === "in"}
+          actionLabel="Show in-scope subscriptions"
         />
         <MetricCard
-          title="API Status"
-          value={data.system_health.api}
-          subtitle="Azure Cost Management API"
+          title="Not In Scope"
+          value={outOfScopeCount}
+          subtitle="disabled or unmonitored — not synced"
+          icon={MetricCardIcons.alert()}
+          tone={outOfScopeCount ? "amber" : "slate"}
+          onClick={() => toggleScopeFilter("out")}
+          active={scopeFilter === "out"}
+          actionLabel="Show subscriptions that are not in scope"
+        />
+        <MetricCard
+          title="System Health"
+          value={unhealthy.length ? "Degraded" : "Healthy"}
+          subtitle={unhealthy.length ? `${unhealthy.join(" & ")} failing` : "Database & Azure API reachable"}
           icon={MetricCardIcons.activity()}
-          tone="green"
-          valueClassName="capitalize"
-        />
-        <MetricCard
-          title="Cache"
-          value={data.system_health.cache}
-          subtitle="Database cache layer"
-          icon={MetricCardIcons.cloud()}
-          tone={data.system_health.cache === "connected" ? "green" : "amber"}
-          valueClassName="capitalize"
+          tone={unhealthy.length ? "red" : "green"}
         />
       </div>
 
       {/* Main content grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <SystemHealth
-          health={data.system_health}
-          environment={data.environment}
-          rateLimitRpm={data.rate_limit_rpm}
-          cacheTtl={data.cache_ttl_seconds}
-          corsOrigins={data.cors_origins}
-          generatedAtLabel={formatDate(data.generated_at)}
-        />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        <div className="space-y-6">
+          <SystemHealth health={data.system_health} checkedAtLabel={formatDate(data.generated_at)} />
+          <AdminUtilities />
+        </div>
         <ConfigPanel
           environment={data.environment}
           version={data.version}
@@ -1150,13 +1246,15 @@ const AdminDashboard: React.FC = () => {
       {showAddForm && <AddSubscriptionForm onClose={() => setShowAddForm(false)} />}
 
       {/* Subscription Table */}
-      <SubscriptionTable subs={data.subscriptions} onShowAdd={() => setShowAddForm(true)} />
+      <SubscriptionTable
+        subs={data.subscriptions}
+        onShowAdd={() => setShowAddForm(true)}
+        scopeFilter={scopeFilter}
+        onScopeFilterChange={setScopeFilter}
+      />
 
       {/* Certificate Collections Admin */}
       <CertificateCollectionsAdmin />
-
-      {/* Admin Utilities — links to RBAC/permissions management */}
-      <AdminUtilities />
     </div>
   );
 };

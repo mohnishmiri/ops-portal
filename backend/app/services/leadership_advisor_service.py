@@ -17,7 +17,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.admin_config import get_effective_cache_ttl_seconds, get_ollama_enabled
+from app.core.admin_config import get_cache_enabled, get_effective_cache_ttl_seconds, get_ollama_enabled
 from app.core.config import settings
 from app.core.db_cache import cache_manager
 from app.schemas.cost import (
@@ -41,7 +41,7 @@ class LeadershipAdvisorService:
     async def generate_forecast(self, payload: LeadershipAdvisorRequest) -> LeadershipForecastResponse:
         started = perf_counter()
         cache_key = self._forecast_cache_key(payload)
-        cached = await cache_manager.get_cached(cache_key)
+        cached = await self._get_cached(cache_key)
         if cached:
             try:
                 response = LeadershipForecastResponse.model_validate_json(cached)
@@ -143,7 +143,7 @@ class LeadershipAdvisorService:
     async def generate_advice(self, payload: LeadershipAdvisorRequest) -> LeadershipAdvisorResponse:
         started = perf_counter()
         cache_key = self._advisor_cache_key(payload)
-        cached = await cache_manager.get_cached(cache_key)
+        cached = await self._get_cached(cache_key)
         if cached:
             try:
                 response = LeadershipAdvisorResponse.model_validate_json(cached)
@@ -636,11 +636,19 @@ class LeadershipAdvisorService:
         )
         return f"pagecache:leadership:forecast:{report_key}"
 
+    async def _get_cached(self, key: str) -> str | None:
+        # The Admin "Page Cache" toggle covers advisor and forecast payloads too.
+        if not await get_cache_enabled(self._db):
+            return None
+        return await cache_manager.get_cached(key)
+
     async def _cache_model(
         self,
         key: str,
         model: LeadershipAdvisorResponse | LeadershipForecastResponse,
     ) -> None:
+        if not await get_cache_enabled(self._db):
+            return
         ttl = await get_effective_cache_ttl_seconds(self._db)
         await cache_manager.set_cached(key, model.model_dump_json(), ttl=ttl)
 

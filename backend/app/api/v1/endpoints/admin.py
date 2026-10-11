@@ -1,7 +1,10 @@
 """Admin API endpoints for subscription management and portal config."""
 
+import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_role
@@ -22,14 +25,30 @@ router = APIRouter()
 # ── Request / Response schemas ────────────────────────────────────────
 
 
+_GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# 0 = keep page-cache keys until released; otherwise 1 minute to 7 days.
+_MAX_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
 class AddSubscriptionRequest(BaseModel):
     subscription_id: str = Field(..., min_length=1, description="Azure subscription GUID")
-    subscription_name: str = Field(..., min_length=1)
+    subscription_name: str | None = Field(default=None, description="Defaults to the subscription ID")
     state: str = Field(default="Unknown")
     enabled: bool = Field(default=True)
     monitored: bool = Field(default=True)
     environment: str | None = None
     notes: str | None = None
+
+    @field_validator("subscription_id")
+    @classmethod
+    def _normalise_subscription_id(cls, value: str) -> str:
+        # ARM returns lower-case GUIDs and lookups are exact, so an upper-case
+        # entry would sit beside the discovered row as a duplicate.
+        value = value.strip().lower()
+        if not _GUID_RE.match(value):
+            raise ValueError("must be a subscription GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)")
+        return value
 
 
 class ToggleSubscriptionRequest(BaseModel):
@@ -86,7 +105,7 @@ async def add_subscription(
     try:
         result = await service.add_subscription(
             subscription_id=body.subscription_id,
-            subscription_name=body.subscription_name,
+            subscription_name=(body.subscription_name or "").strip() or body.subscription_id,
             state=body.state,
             enabled=body.enabled,
             monitored=body.monitored,
@@ -290,6 +309,26 @@ async def upsert_admin_config(
         config_type = "bool"
         if description is None:
             description = "Enable or disable page caching for Leadership Dashboard."
+
+    if key == "cache_ttl_seconds":
+        try:
+            ttl_val = int(value)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="cache_ttl_seconds must be an integer.") from exc
+        if ttl_val != 0 and not 60 <= ttl_val <= _MAX_CACHE_TTL_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail="cache_ttl_seconds must be 0 (unlimited) or between 60 and 604800 (7 days).",
+            )
+        value = str(ttl_val)
+        config_type = "integer"
+
+    if key == "portal_timezone":
+        value = value.strip()
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Unknown IANA timezone: {value!r}") from exc
 
     if key == "ollama_enabled":
         normalised = value.strip().lower()

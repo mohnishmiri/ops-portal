@@ -8,6 +8,7 @@ Backed by an in-memory SQLite database so the real SQL aggregates run.
 import csv
 import io
 from datetime import date, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -682,3 +683,31 @@ async def test_query_amortized_cost_detail_keeps_full_precision_and_exact_locati
     assert {r["resource_location"] for r in detail.rows} == {"westus3"}
     assert detail.rows[0]["resource_group"] == "RG-Data"
     assert detail.daily_totals() == pytest.approx(detail.reference_daily_totals())
+
+
+@pytest.mark.anyio
+async def test_waste_cost_uses_the_billed_run_rate(db):
+    from app.services.optimization_service import OptimizationService
+
+    # 10 billed days at $0.27/day for a snapshot created mid-window.
+    db.add_all(
+        [
+            _rec(
+                d.isoformat(),
+                NONPROD,
+                0.27,
+                resource_group="Pre-RG",
+                resource_name="Backup-0918",
+                resource_type="Microsoft.Compute/snapshots",
+                meter_category="Storage",
+            )
+            for d in _days(date(2026, 9, 28), date(2026, 10, 7))
+        ]
+    )
+    db.add(_rec("2026-10-07", NONPROD, 99.0, resource_name="vm-1"))  # other resource types are ignored
+    await db.commit()
+
+    billed = await OptimizationService()._billed_monthly_costs("microsoft.compute/snapshots", [NONPROD], db)
+
+    # Daily average x 365/12 — not the 10-day sum, and keyed case-insensitively.
+    assert billed == {(NONPROD, "pre-rg", "backup-0918"): Decimal("8.21")}

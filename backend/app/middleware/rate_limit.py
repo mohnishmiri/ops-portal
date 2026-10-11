@@ -4,8 +4,13 @@ Rate limiting middleware using an in-memory sliding window.
 Protects API from abuse while allowing legitimate burst traffic.
 The effective limit can be changed at runtime via the admin config
 (``rate_limit_rpm`` key in ``admin_configs`` table).
+
+Counters and the override are per process. The admin PUT only reaches the
+worker that served it, so every worker re-reads the override from the DB
+every ``_OVERRIDE_REFRESH_SECONDS`` (the same approach as DynamicCORSMiddleware).
 """
 
+import asyncio
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -15,13 +20,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app.core.admin_config import get_admin_config_value
+from app.core.database import get_db_session
+
 logger = structlog.get_logger(__name__)
 
 # In-memory store: ip → list of request timestamps (epoch seconds)
 _request_log: dict[str, list[float]] = defaultdict(list)
 
-# Admin-overridden RPM value — updated from DB on startup and admin upsert.
+# Admin-overridden RPM value — updated from DB on startup, admin upsert,
+# and the periodic refresh below.
 _admin_rpm_override: int | None = None
+
+_OVERRIDE_REFRESH_SECONDS = 30.0
 
 
 def set_rate_limit_override(rpm: int | None) -> None:
@@ -41,6 +52,27 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: object, requests_per_minute: int = 120) -> None:  # noqa: ANN001
         super().__init__(app)  # type: ignore[arg-type]
         self.rpm = requests_per_minute
+        # Startup already seeded the override, so the first refresh can wait.
+        self._last_override_refresh = time.monotonic()
+        self._refresh_lock = asyncio.Lock()
+
+    async def _refresh_override_if_due(self) -> None:
+        """Pick up ``rate_limit_rpm`` changes saved through another worker."""
+        if time.monotonic() - self._last_override_refresh < _OVERRIDE_REFRESH_SECONDS:
+            return
+        async with self._refresh_lock:
+            if time.monotonic() - self._last_override_refresh < _OVERRIDE_REFRESH_SECONDS:
+                return
+            try:
+                raw: str | None = None
+                async for db in get_db_session():
+                    raw = await get_admin_config_value(db, "rate_limit_rpm")
+                if raw:
+                    set_rate_limit_override(int(raw))
+            except Exception as exc:
+                logger.warning("rate_limit_override_refresh_failed", error=str(exc)[:200])
+            finally:
+                self._last_override_refresh = time.monotonic()
 
     def _get_effective_rpm(self) -> int:
         """Return the current rate limit — admin override or startup default."""
@@ -65,6 +97,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in ("/healthz", "/readyz", "/metrics"):
             return await call_next(request)
 
+        await self._refresh_override_if_due()
         client_ip = request.client.host if request.client else "unknown"
 
         effective_rpm = self._get_effective_rpm()

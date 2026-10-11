@@ -1,7 +1,11 @@
+from decimal import Decimal
+from types import SimpleNamespace
+
 import pytest
 
-from app.models.optimization import RecommendationCategory
+from app.models.optimization import RecommendationCategory, RecommendationPriority
 from app.services.optimization_service import (
+    QUERY_ORPHANED_NICS,
     OptimizationService,
     _advisor_display_name,
     _iso_duration_label,
@@ -189,20 +193,123 @@ async def _fake_resource_graph(self, query: str, subscription_ids=None):
 
 
 @pytest.mark.anyio
-async def test_detect_idle_resources_filters_non_orphaned_snapshots(
+async def test_every_snapshot_past_the_age_threshold_is_flagged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The query returns snapshots older than 30 days; all are retirable, orphans ranked higher."""
     service = OptimizationService()
-
     monkeypatch.setattr(OptimizationService, "_run_resource_graph_query", _fake_resource_graph)
 
     recommendations = await service.detect_idle_resources(["sub-1"])
+    snaps = {
+        r.resource.resource_name: r for r in recommendations if r.category == RecommendationCategory.ORPHANED_SNAPSHOTS
+    }
 
-    orphaned = [r for r in recommendations if r.category == RecommendationCategory.ORPHANED_SNAPSHOTS]
+    assert set(snaps) == {"orphaned-snap", "attached-snap", "manual-snap"}
+    assert snaps["orphaned-snap"].orphaned is True
+    assert snaps["orphaned-snap"].title == "Orphaned snapshot: orphaned-snap"
+    assert snaps["orphaned-snap"].priority == RecommendationPriority.MEDIUM
+    assert snaps["attached-snap"].orphaned is False
+    assert snaps["attached-snap"].title == "Old snapshot: attached-snap"
+    assert snaps["attached-snap"].priority == RecommendationPriority.LOW
+    assert snaps["manual-snap"].orphaned is False  # no recorded source is not "orphaned"
+    assert "estimated from size" in snaps["orphaned-snap"].description
 
-    assert len(orphaned) == 1
-    assert orphaned[0].resource.resource_name == "orphaned-snap"
-    assert orphaned[0].title == "Orphaned snapshot: orphaned-snap"
+
+@pytest.mark.anyio
+async def test_snapshot_cost_uses_billed_amount_when_synced(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = OptimizationService()
+    monkeypatch.setattr(OptimizationService, "_run_resource_graph_query", _fake_resource_graph)
+
+    async def billed(self, resource_type, subscription_ids, db):
+        if resource_type == "microsoft.compute/snapshots":
+            return {("sub-1", "rg", "orphaned-snap"): Decimal("8.19")}
+        return {}
+
+    monkeypatch.setattr(OptimizationService, "_billed_monthly_costs", billed)
+    recommendations = await service.detect_idle_resources(["sub-1"])
+    snap = next(r for r in recommendations if r.resource.resource_name == "orphaned-snap")
+
+    # 128 GB x $0.05 would claim $6.40; Azure billed $8.19.
+    assert snap.estimated_monthly_savings == Decimal("8.19")
+    assert "billed cost, last 30 days" in snap.description
+
+
+@pytest.mark.anyio
+async def test_failed_check_is_reported_unavailable_not_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def flaky(self, query: str, subscription_ids=None):
+        if "microsoft.compute/snapshots" in query:
+            raise RuntimeError("Resource Graph 429")
+        return await _fake_resource_graph(self, query, subscription_ids)
+
+    async def no_advisor(self, subscription_ids=None, unavailable=None):
+        return []
+
+    service = OptimizationService()
+    monkeypatch.setattr(OptimizationService, "_run_resource_graph_query", flaky)
+    monkeypatch.setattr(OptimizationService, "_get_advisor_recommendations", no_advisor)
+
+    summary = await service._optimization_summary_live(["sub-1"])
+
+    assert summary.wastage.unavailable_checks == ["Snapshots"]
+    assert summary.wastage.orphaned_snapshots_count == 0
+    # The other checks still ran.
+    assert summary.wastage.disconnected_private_endpoints_count == 1
+
+
+@pytest.mark.anyio
+async def test_summary_counts_every_recommendation_not_the_first_50(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def many_nics(self, query: str, subscription_ids=None):
+        if "microsoft.network/networkinterfaces" in query:
+            return [
+                {"id": f"nic-{i}", "name": f"nic-{i}", "resourceGroup": "rg", "subscriptionId": "sub-1"}
+                for i in range(60)
+            ]
+        return await _fake_resource_graph(self, query, subscription_ids)
+
+    async def no_advisor(self, subscription_ids=None, unavailable=None):
+        return []
+
+    service = OptimizationService()
+    monkeypatch.setattr(OptimizationService, "_run_resource_graph_query", many_nics)
+    monkeypatch.setattr(OptimizationService, "_get_advisor_recommendations", no_advisor)
+
+    summary = await service._optimization_summary_live(["sub-1"])
+
+    assert summary.total_recommendations == 60 + 3 + 1  # NICs + snapshots + private endpoint
+    idle = next(d for d in summary.wastage.details if d.category == "Idle Resources")
+    assert idle.count == 60
+    assert summary.wastage.snapshots_source_deleted_count == 1
+
+
+@pytest.mark.anyio
+async def test_resource_graph_query_follows_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = [
+        SimpleNamespace(data=[{"id": "a"}, {"id": "b"}], skip_token="page-2"),
+        SimpleNamespace(data=[{"id": "c"}], skip_token=None),
+    ]
+    tokens: list[str | None] = []
+
+    class _Client:
+        def resources(self, request):
+            tokens.append(request.options.skip_token)
+            return pages.pop(0)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("app.services.optimization_service._get_resource_graph_client", lambda _cred: _Client())
+    rows = await OptimizationService()._run_resource_graph_query("Resources", ["sub-1"])
+
+    assert [r["id"] for r in rows] == ["a", "b", "c"]
+    assert tokens == [None, "page-2"]
+
+
+def test_orphaned_nic_query_excludes_nics_owned_by_private_endpoints() -> None:
+    # 532 of 535 VM-less NICs in ATTCC belonged to private endpoints / private link services.
+    assert "isnull(properties.privateEndpoint)" in QUERY_ORPHANED_NICS
+    assert "isnull(properties.privateLinkService)" in QUERY_ORPHANED_NICS
+    assert "isempty(managedBy)" in QUERY_ORPHANED_NICS
 
 
 @pytest.mark.anyio

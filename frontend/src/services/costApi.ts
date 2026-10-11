@@ -179,8 +179,14 @@ export interface OptimizationSummary {
     idle_vms_count: number;
     unattached_disks_count: number;
     disconnected_private_endpoints_count: number;
+    /** Snapshots older than snapshot_min_age_days (source disk present or not). */
     orphaned_snapshots_count: number;
+    /** Of those, how many have lost their source disk. */
+    snapshots_source_deleted_count?: number;
+    snapshot_min_age_days?: number;
     overprovisioned_count: number;
+    /** Checks whose Azure query failed — their counts are unknown, not zero. */
+    unavailable_checks?: string[];
     details: WastageDetailItem[];
   };
   top_recommendations: CostRecommendation[];

@@ -335,7 +335,10 @@ interface WastageDetailTileProps {
     unattached_disks_count: number;
     disconnected_private_endpoints_count: number;
     orphaned_snapshots_count: number;
+    snapshots_source_deleted_count?: number;
+    snapshot_min_age_days?: number;
     overprovisioned_count: number;
+    unavailable_checks?: string[];
     details: WastageDetailItem[];
   };
   totalAnnualSavings: number;
@@ -446,25 +449,37 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
     [getFilteredResources, currentPage, pageSize]
   );
 
+  // A check whose Azure query failed shows "—", never a confident 0.
+  const unavailable = new Set(wastage.unavailable_checks ?? []);
+  const countOrUnknown = (check: string, count: number | undefined, subtitle: string) =>
+    unavailable.has(check)
+      ? { value: "—", subtitle: "Check unavailable — Azure query failed" }
+      : { value: (count ?? 0).toLocaleString(), subtitle };
+  const snapshotAge = wastage.snapshot_min_age_days ?? 30;
+  const sourceDeleted = wastage.snapshots_source_deleted_count ?? 0;
+
   const wastageCards = [
     {
       title: "Unattached Disks",
-      value: wastage.unattached_disks_count.toLocaleString(),
-      subtitle: "Detached from workloads",
+      ...countOrUnknown("Unattached disks", wastage.unattached_disks_count, "Detached from workloads"),
       icon: MetricCardIcons.database(),
       tone: "amber" as const,
     },
     {
       title: "Disconnected PEs",
-      value: (wastage.disconnected_private_endpoints_count ?? 0).toLocaleString(),
-      subtitle: "Private link disconnected",
+      ...countOrUnknown("Private endpoints", wastage.disconnected_private_endpoints_count, "Private link disconnected"),
       icon: MetricCardIcons.layers(),
       tone: "red" as const,
     },
     {
-      title: "Orphaned Snapshots",
-      value: wastage.orphaned_snapshots_count.toLocaleString(),
-      subtitle: "Likely retirable",
+      title: `Snapshots ${snapshotAge}+ Days`,
+      ...countOrUnknown(
+        "Snapshots",
+        wastage.orphaned_snapshots_count,
+        sourceDeleted > 0
+          ? `${sourceDeleted} with source disk deleted`
+          : `Older than ${snapshotAge} days — review retention`,
+      ),
       icon: MetricCardIcons.layers(),
       tone: "red" as const,
     },
@@ -495,6 +510,13 @@ const WastageDetailTile: React.FC<WastageDetailTileProps> = ({
           <p className="text-xs text-slate-500">Current optimization groupings</p>
         </div>
       </div>
+
+      {unavailable.size > 0 && (
+        <p role="alert" className="mt-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Some checks couldn't run: {[...unavailable].join(", ")}. Their counts and savings are unknown, not zero — they
+          retry on the next refresh.
+        </p>
+      )}
 
       {statusMessage && (
         <div

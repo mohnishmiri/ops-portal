@@ -305,6 +305,26 @@ describe("LeadershipDashboard (Cost Forecast)", () => {
     expect(screen.getByTestId("insight-tiles").className).toContain("lg:grid-cols-3");
   });
 
+  it("names the snapshot tile after its rule and never shows a failed check as 0", async () => {
+    const optimization = structuredClone(OPTIMIZATION);
+    Object.assign(optimization.wastage, {
+      orphaned_snapshots_count: 4,
+      snapshots_source_deleted_count: 1,
+      snapshot_min_age_days: 30,
+      unavailable_checks: ["Private endpoints"],
+    });
+    vi.mocked(apiClient.get).mockImplementation(async (url: string) =>
+      (url.startsWith("/optimize/summary") ? { data: optimization } : routeGet(url)) as never,
+    );
+    renderPage(<LeadershipDashboard />);
+
+    expect(await screen.findByText("Snapshots 30+ Days")).toBeInTheDocument();
+    expect(screen.getByText("1 with source disk deleted")).toBeInTheDocument();
+    expect(screen.queryByText("Orphaned Snapshots")).not.toBeInTheDocument();
+    expect(screen.getByText("Check unavailable — Azure query failed")).toBeInTheDocument();
+    expect(screen.getByText(/Some checks couldn't run: Private endpoints/)).toBeInTheDocument();
+  });
+
   it("surfaces missing data and shows commitment coverage and savings without fake deltas", async () => {
     renderPage(<LeadershipDashboard />);
 

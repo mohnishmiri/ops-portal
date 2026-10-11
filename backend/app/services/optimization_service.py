@@ -17,11 +17,12 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import perf_counter
 
 import structlog
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -71,6 +72,12 @@ def _get_query_request(**kwargs):
     return QueryRequest(**kwargs)
 
 
+def _get_query_options(**kwargs):
+    from azure.mgmt.resourcegraph.models import QueryRequestOptions
+
+    return QueryRequestOptions(**kwargs)
+
+
 # ── Azure Resource Graph Queries ───────────────────────────────────────
 
 QUERY_UNATTACHED_DISKS = """
@@ -92,10 +99,15 @@ Resources
 | project id, name, resourceGroup, subscriptionId, location, vmSize, powerState, tags
 """
 
+# A NIC without a VM is not necessarily orphaned: private endpoints and
+# private link services own NICs that Azure creates and deletes with them
+# (507 + 25 of 535 "VM-less" NICs in ATTCC were these, Oct 2026).
 QUERY_ORPHANED_NICS = """
 Resources
 | where type =~ 'microsoft.network/networkinterfaces'
 | where isnull(properties.virtualMachine)
+| where isnull(properties.privateEndpoint) and isnull(properties.privateLinkService)
+| where isempty(managedBy) and array_length(coalesce(properties.hostedWorkloads, dynamic([]))) == 0
 | project id, name, resourceGroup, subscriptionId, location, tags
 """
 
@@ -119,22 +131,31 @@ Resources
 | project id, name, resourceGroup, subscriptionId, location, connectionStatus, tags
 """
 
-QUERY_ORPHANED_SNAPSHOTS = """
+# Snapshots older than this are flagged as retirable whether or not the disk
+# they were taken from still exists; those whose source is gone are marked
+# orphaned and ranked higher.
+SNAPSHOT_MIN_AGE_DAYS = 30
+
+QUERY_OLD_SNAPSHOTS = f"""
 Resources
 | where type =~ 'microsoft.compute/snapshots'
 | extend timeCreated = todatetime(properties.timeCreated),
          sourceResourceId = tolower(tostring(properties.creationData.sourceResourceId))
-| where timeCreated < ago(30d)
-| where isnotempty(sourceResourceId)
+| where timeCreated < ago({SNAPSHOT_MIN_AGE_DAYS}d)
 | join kind=leftouter (
     Resources
     | where type in~ ('microsoft.compute/disks', 'microsoft.compute/snapshots')
     | project sourceResourceId = tolower(id), sourceExists = true
 ) on sourceResourceId
-| where sourceExists != true
-| project id, name, resourceGroup, subscriptionId, location,
-          diskSizeGB = tostring(properties.diskSizeGB), tags, sourceResourceId, sourceExists
+| project id, name, resourceGroup, subscriptionId, location, timeCreated,
+          diskSizeGB = tostring(properties.diskSizeGB), incremental = tobool(properties.incremental),
+          sku = tostring(sku.name), tags, sourceResourceId, sourceExists = coalesce(sourceExists, false)
 """
+
+# Fallback only when a snapshot has no billed cost in the synced data yet.
+# Azure bills snapshots on the data they hold, not the provisioned size, so
+# this overstates — a 512 GB full snapshot billed ~$8/month, not $25.60.
+SNAPSHOT_GB_MONTH_ESTIMATE = Decimal("0.05")
 
 # ── Estimated monthly costs by disk SKU ────────────────────────────────
 
@@ -323,37 +344,132 @@ class OptimizationService:
 
     # ── Resource Graph Queries ─────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10), reraise=True)
     async def _run_resource_graph_query(
         self,
         query: str,
         subscription_ids: list[str] | None = None,
     ) -> list[dict]:
-        """Execute an Azure Resource Graph query."""
+        """Execute an Azure Resource Graph query, following every result page.
+
+        Raises on failure (after retries). Returning [] used to make a failed
+        query look like "no waste found", so tiles showed a confident 0.
+        """
         subs = subscription_ids or await get_scoped_subscription_ids()
         client = _get_resource_graph_client(self._credential)
-
+        rows: list[dict] = []
         try:
-            request = _get_query_request(
-                subscriptions=subs,
-                query=query,
-            )
-            async with AZURE_API_SEMAPHORE:
-                result = await asyncio.to_thread(client.resources, request)
-            return [dict(row) for row in (result.data or [])]
+            skip_token: str | None = None
+            while True:
+                options = (
+                    _get_query_options(top=1000, skip_token=skip_token) if skip_token else _get_query_options(top=1000)
+                )
+                request = _get_query_request(subscriptions=subs, query=query, options=options)
+                async with AZURE_API_SEMAPHORE:
+                    result = await asyncio.to_thread(client.resources, request)
+                rows.extend(dict(row) for row in (result.data or []))
+                skip_token = getattr(result, "skip_token", None)
+                if not skip_token:
+                    return rows
         except Exception as e:
-            logger.error("resource_graph_query_failed", error=str(e))
-            return []
+            logger.error("resource_graph_query_failed", error=str(e)[:300])
+            raise
         finally:
             client.close()
+
+    async def _run_check(
+        self,
+        label: str,
+        query: str,
+        subscription_ids: list[str] | None,
+        unavailable: list[str],
+    ) -> list[dict]:
+        """Run one waste check; on failure record it as unavailable (not "zero found")."""
+        try:
+            return await self._run_resource_graph_query(query, subscription_ids)
+        except Exception as exc:
+            unavailable.append(label)
+            logger.error("optimization_check_failed", check=label, error=str(exc)[:300])
+            return []
+
+    async def _billed_monthly_costs(
+        self,
+        resource_type: str,
+        subscription_ids: list[str] | None,
+        db: AsyncSession | None,
+    ) -> dict[tuple[str, str, str], Decimal]:
+        """Actual monthly run-rate per resource from the synced amortized cost data.
+
+        Keyed by lower-cased (subscription_id, resource_group, resource_name).
+        Uses the last 30 closed UTC days, scaled by the days each resource was
+        billed so one created mid-window isn't understated. Empty when the
+        cost data is unavailable — callers then fall back to an estimate.
+        """
+        from app.models.database import AmortizedCostRecord as R
+        from app.services.amortized_cost_sync_service import utc_today
+
+        end = utc_today() - timedelta(days=1)
+        start = end - timedelta(days=29)
+        stmt = (
+            select(
+                func.lower(R.subscription_id),
+                func.lower(R.resource_group),
+                func.lower(R.resource_name),
+                func.sum(R.cost_amount),
+                func.count(distinct(R.cost_date)),
+            )
+            .where(
+                func.lower(R.resource_type) == resource_type.lower(),
+                R.cost_date >= start.isoformat(),
+                R.cost_date <= end.isoformat(),
+            )
+            .group_by(func.lower(R.subscription_id), func.lower(R.resource_group), func.lower(R.resource_name))
+        )
+        if subscription_ids:
+            stmt = stmt.where(R.subscription_id.in_(subscription_ids))
+        try:
+            if db is not None:
+                rows = (await db.execute(stmt)).all()
+            else:
+                from app.core.database import get_db_session
+
+                rows = []
+                async for session in get_db_session():
+                    rows = (await session.execute(stmt)).all()
+                    break
+        except Exception as exc:
+            logger.warning("optimization_billed_cost_lookup_failed", resource_type=resource_type, error=str(exc)[:200])
+            return {}
+        return {
+            (sid or "", rg or "", name or ""): Decimal(str(round(max(float(total or 0), 0.0) / days * 365 / 12, 2)))
+            for sid, rg, name, total, days in rows
+            if days
+        }
+
+    @staticmethod
+    def _billed_or_estimate(
+        row: dict,
+        billed: dict[tuple[str, str, str], Decimal],
+        estimate: Decimal,
+    ) -> tuple[Decimal, bool]:
+        """(monthly cost, came_from_billing) for a Resource Graph row."""
+        key = (
+            str(row.get("subscriptionId") or "").lower(),
+            str(row.get("resourceGroup") or "").lower(),
+            str(row.get("name") or "").lower(),
+        )
+        if key in billed:
+            return billed[key], True
+        return estimate.quantize(Decimal("0.01")), False
 
     # ── Advisor Recommendations ────────────────────────────────────────
 
     async def _get_advisor_recommendations(
         self,
         subscription_ids: list[str] | None = None,
+        unavailable: list[str] | None = None,
     ) -> list[CostRecommendation]:
-        """Fetch Azure Advisor cost recommendations."""
+        """Fetch Azure Advisor cost recommendations; failed subscriptions go to ``unavailable``."""
         subs = subscription_ids or await get_scoped_subscription_ids()
         recommendations: list[CostRecommendation] = []
 
@@ -435,6 +551,8 @@ class OptimizationService:
 
             except Exception as e:
                 logger.error("advisor_fetch_failed", subscription_id=sub_id, error=str(e))
+                if unavailable is not None:
+                    unavailable.append(f"Azure Advisor ({sub_id})")
 
         return recommendations
 
@@ -443,16 +561,30 @@ class OptimizationService:
     async def detect_idle_resources(
         self,
         subscription_ids: list[str] | None = None,
+        db: AsyncSession | None = None,
     ) -> list[CostRecommendation]:
-        """Detect idle VMs, unattached disks, orphaned snapshots/NICs/IPs."""
+        """Detect idle VMs, unattached disks, old snapshots, orphaned NICs/IPs."""
+        return await self._detect_idle_resources(subscription_ids, db, unavailable=[])
+
+    async def _detect_idle_resources(
+        self,
+        subscription_ids: list[str] | None,
+        db: AsyncSession | None,
+        unavailable: list[str],
+    ) -> list[CostRecommendation]:
         recommendations: list[CostRecommendation] = []
 
-        # Unattached disks
-        disks = await self._run_resource_graph_query(QUERY_UNATTACHED_DISKS, subscription_ids)
+        # Unattached disks — billed cost where synced, else a per-GB SKU estimate
+        disks = await self._run_check("Unattached disks", QUERY_UNATTACHED_DISKS, subscription_ids, unavailable)
+        billed_disks = (
+            await self._billed_monthly_costs("microsoft.compute/disks", subscription_ids, db) if disks else {}
+        )
         for disk in disks:
-            size_gb = int(disk.get("diskSizeGB", 0))
+            size_gb = int(float(disk.get("diskSizeGB") or 0))
             sku = disk.get("sku", "Standard_LRS")
-            monthly_cost = Decimal(str(size_gb * DISK_COST_ESTIMATES.get(sku, 0.04))).quantize(Decimal("0.01"))
+            monthly_cost, _billed = self._billed_or_estimate(
+                disk, billed_disks, Decimal(str(size_gb * DISK_COST_ESTIMATES.get(sku, 0.04)))
+            )
 
             recommendations.append(
                 CostRecommendation(
@@ -487,27 +619,43 @@ class OptimizationService:
                 )
             )
 
-        # Orphaned snapshots (>30 days old)
-        snapshots = await self._run_resource_graph_query(QUERY_ORPHANED_SNAPSHOTS, subscription_ids)
+        # Snapshots older than SNAPSHOT_MIN_AGE_DAYS — orphaned (source disk
+        # gone) ones first. Cost is what Azure actually billed when synced.
+        snapshots = await self._run_check("Snapshots", QUERY_OLD_SNAPSHOTS, subscription_ids, unavailable)
+        billed_snaps = (
+            await self._billed_monthly_costs("microsoft.compute/snapshots", subscription_ids, db) if snapshots else {}
+        )
+        now = datetime.now(UTC)
         for snap in snapshots:
-            source_resource_id = str(snap.get("sourceResourceId") or "").strip()
-            source_exists = str(snap.get("sourceExists") or "").lower()
-
-            if not source_resource_id or source_exists == "true":
-                continue
-
-            size_gb = int(snap.get("diskSizeGB", 0))
-            monthly_cost = Decimal(str(size_gb * 0.05)).quantize(Decimal("0.01"))
+            source_id = str(snap.get("sourceResourceId") or "").strip()
+            orphaned = bool(source_id) and str(snap.get("sourceExists")).lower() not in ("true", "1")
+            size_gb = int(float(snap.get("diskSizeGB") or 0))
+            incremental = str(snap.get("incremental")).lower() in ("true", "1")
+            monthly_cost, from_billing = self._billed_or_estimate(
+                snap, billed_snaps, Decimal(size_gb) * SNAPSHOT_GB_MONTH_ESTIMATE
+            )
+            try:
+                created = datetime.fromisoformat(str(snap.get("timeCreated")).replace("Z", "+00:00"))
+                age = f"{(now - created).days} days old (created {created:%Y-%m-%d})"
+            except ValueError:
+                age = f"over {SNAPSHOT_MIN_AGE_DAYS} days old"
+            if orphaned:
+                source_note = "its source disk has been deleted"
+            elif source_id:
+                source_note = "its source disk still exists"
+            else:
+                source_note = "it has no recorded source disk"
+            cost_note = "billed cost, last 30 days" if from_billing else "estimated from size"
 
             recommendations.append(
                 CostRecommendation(
                     id=f"snap-{uuid.uuid4().hex[:12]}",
                     category=RecommendationCategory.ORPHANED_SNAPSHOTS,
-                    priority=RecommendationPriority.MEDIUM,
-                    title=f"Orphaned snapshot: {snap.get('name', 'unknown')}",
+                    priority=RecommendationPriority.MEDIUM if orphaned else RecommendationPriority.LOW,
+                    title=f"{'Orphaned snapshot' if orphaned else 'Old snapshot'}: {snap.get('name', 'unknown')}",
                     description=(
-                        f"Snapshot source resource is no longer present ({size_gb} GB). "
-                        "Review retention policy and delete if no longer required."
+                        f"Snapshot is {age}, {size_gb} GB{' incremental' if incremental else ''}; {source_note}. "
+                        f"${monthly_cost}/month ({cost_note})."
                     ),
                     resource=ResourceInfo(
                         resource_id=snap.get("id", ""),
@@ -517,21 +665,30 @@ class OptimizationService:
                         subscription_id=snap.get("subscriptionId", ""),
                         subscription_name=snap.get("subscriptionId", ""),
                         location=snap.get("location", ""),
+                        sku=snap.get("sku") or None,
+                        tags=snap.get("tags") or {},
                     ),
                     current_monthly_cost=monthly_cost,
                     estimated_monthly_savings=monthly_cost,
                     estimated_annual_savings=(monthly_cost * 12).quantize(Decimal("0.01")),
-                    confidence=ConfidenceLevel.HIGH,
-                    confidence_score=90.0,
-                    action_required="Review orphaned snapshot and delete it if the source workload is gone",
+                    confidence=ConfidenceLevel.HIGH if orphaned else ConfidenceLevel.MEDIUM,
+                    confidence_score=90.0 if orphaned else 70.0,
+                    action_required=(
+                        "Delete the snapshot if the workload it backed up is gone"
+                        if orphaned
+                        else "Confirm the backup is still needed under your retention policy; delete it if not"
+                    ),
                     risk_level="medium",
                     source="resource_graph",
-                    created_at=datetime.now(UTC),
+                    created_at=now,
+                    orphaned=orphaned,
                 )
             )
 
         # Disconnected private endpoints
-        private_endpoints = await self._run_resource_graph_query(QUERY_DISCONNECTED_PRIVATE_ENDPOINTS, subscription_ids)
+        private_endpoints = await self._run_check(
+            "Private endpoints", QUERY_DISCONNECTED_PRIVATE_ENDPOINTS, subscription_ids, unavailable
+        )
         seen_pe_ids: set[str] = set()
         for pe in private_endpoints:
             pe_id = pe.get("id", "")
@@ -572,7 +729,7 @@ class OptimizationService:
             )
 
         # Orphaned NICs
-        nics = await self._run_resource_graph_query(QUERY_ORPHANED_NICS, subscription_ids)
+        nics = await self._run_check("Network interfaces", QUERY_ORPHANED_NICS, subscription_ids, unavailable)
         for nic in nics:
             recommendations.append(
                 CostRecommendation(
@@ -639,7 +796,7 @@ class OptimizationService:
 
         source = "live"
         try:
-            summary = await self._optimization_summary_live(subs)
+            summary = await self._optimization_summary_live(subs, db)
         except Exception:
             if settings.ENVIRONMENT == "development":
                 logger.warning(
@@ -695,12 +852,29 @@ class OptimizationService:
             subscriptions_analyzed=len(subscription_ids or []) or 1,
         )
 
+    async def _collect_recommendations(
+        self,
+        subscription_ids: list[str] | None,
+        db: AsyncSession | None = None,
+    ) -> tuple[list[CostRecommendation], list[str]]:
+        """Every recommendation from every source, plus the checks that failed."""
+        unavailable: list[str] = []
+        advisor_recs = await self._get_advisor_recommendations(subscription_ids, unavailable)
+        idle_recs = await self._detect_idle_resources(subscription_ids, db, unavailable)
+        return advisor_recs + idle_recs, unavailable
+
     async def _optimization_summary_live(
         self,
         subscription_ids: list[str] | None = None,
+        db: AsyncSession | None = None,
     ) -> OptimizationSummary:
-        """Live implementation that queries Azure Advisor/Resource Graph."""
-        all_recs = await self.list_recommendations(subscription_ids=subscription_ids)
+        """Live implementation that queries Azure Advisor/Resource Graph.
+
+        Aggregates every recommendation — the paginated list endpoint's default
+        of 50 used to truncate the summary, dropping the cheapest findings.
+        """
+        all_recs, unavailable = await self._collect_recommendations(subscription_ids, db)
+        all_recs.sort(key=lambda r: r.estimated_annual_savings, reverse=True)
 
         total_monthly = sum(r.estimated_monthly_savings for r in all_recs)
         total_annual = sum(r.estimated_annual_savings for r in all_recs)
@@ -712,7 +886,7 @@ class OptimizationService:
         _cat_label = {
             RecommendationCategory.UNDERUTILIZED_VMS: "Idle VMs",
             RecommendationCategory.UNATTACHED_DISKS: "Unattached Disks",
-            RecommendationCategory.ORPHANED_SNAPSHOTS: "Orphaned Snapshots",
+            RecommendationCategory.ORPHANED_SNAPSHOTS: f"Snapshots {SNAPSHOT_MIN_AGE_DAYS}+ Days Old",
             RecommendationCategory.OVERPROVISIONED_SKUS: "Overprovisioned Resources",
             RecommendationCategory.RIGHT_SIZING: "Right-Sizing",
             RecommendationCategory.IDLE_RESOURCES: "Idle Resources",
@@ -726,6 +900,8 @@ class OptimizationService:
         wastage = WastageSummary(
             total_monthly_waste=total_monthly,
             total_annual_waste=total_annual,
+            snapshot_min_age_days=SNAPSHOT_MIN_AGE_DAYS,
+            unavailable_checks=unavailable,
         )
 
         for rec in all_recs:
@@ -740,6 +916,8 @@ class OptimizationService:
                 wastage.disconnected_private_endpoints_count += 1
             elif rec.category == RecommendationCategory.ORPHANED_SNAPSHOTS:
                 wastage.orphaned_snapshots_count += 1
+                if rec.orphaned:
+                    wastage.snapshots_source_deleted_count += 1
             elif rec.category == RecommendationCategory.OVERPROVISIONED_SKUS:
                 wastage.overprovisioned_count += 1
 
@@ -825,7 +1003,9 @@ class OptimizationService:
     def _summary_cache_key(self, subscription_ids: list[str]) -> str:
         raw = json.dumps(sorted(subscription_ids), sort_keys=True)
         digest = hashlib.md5(raw.encode()).hexdigest()[:16]
-        return f"pagecache:optimization:summary:{digest}"
+        # v2: snapshot rule, uncapped totals and check status changed the payload;
+        # never serve a summary cached by an older release (dev machines share Redis).
+        return f"pagecache:optimization:v2:summary:{digest}"
 
     async def list_recommendations(
         self,
@@ -838,16 +1018,12 @@ class OptimizationService:
     ) -> list[CostRecommendation]:
         """List all recommendations from all sources with filtering."""
         try:
-            # Gather from all sources
-            advisor_recs = await self._get_advisor_recommendations(subscription_ids)
-            idle_recs = await self.detect_idle_resources(subscription_ids)
+            all_recs, _unavailable = await self._collect_recommendations(subscription_ids)
         except Exception:
             if settings.ENVIRONMENT == "development":
                 logger.warning("azure_api_unreachable_using_demo_data", endpoint="recommendations")
                 return []
             raise
-
-        all_recs = advisor_recs + idle_recs
 
         # Apply filters
         if category:

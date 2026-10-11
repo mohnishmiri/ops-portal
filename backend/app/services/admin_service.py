@@ -2,6 +2,9 @@
 Admin Service — DB-backed subscription management, admin config, and system health.
 """
 
+import asyncio
+import time
+import urllib.request
 from datetime import datetime
 
 import structlog
@@ -14,6 +17,12 @@ from app.core.db_cache import cache_manager
 from app.models.database import AdminConfig, AdminSubscription
 
 logger = structlog.get_logger(__name__)
+
+# The Admin dashboard polls every 2 minutes per open tab and each probe is a
+# token fetch plus an ARM round-trip, so a worker re-probes at most once a
+# minute. (monotonic timestamp, reachable)
+_AZURE_PROBE_TTL_SECONDS = 60
+_azure_probe_result: tuple[float, bool] | None = None
 
 
 class AdminService:
@@ -231,9 +240,7 @@ class AdminService:
 
         Returns a summary dict with counts.
         """
-        import asyncio
         import json as _json
-        import urllib.request
 
         discovered: list[dict] = []
         new_rows: list[AdminSubscription] = []
@@ -414,22 +421,7 @@ class AdminService:
         except Exception as e:
             logger.warning("database_health_check_failed", error=str(e))
 
-        # Check Azure connectivity
-        azure_ok = False
-        try:
-            import urllib.request
-
-            token = self._credential.get_token("https://management.azure.com/.default")
-            url = "https://management.azure.com/subscriptions?api-version=2022-12-01"
-            req = urllib.request.Request(
-                url,
-                headers={"Authorization": f"Bearer {token.token}"},
-            )
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(req, timeout=10) as resp:
-                azure_ok = resp.status == 200
-        except Exception as e:
-            logger.warning("azure_health_check_failed", error=str(e))
+        azure_ok = await self.check_azure_api()
 
         all_ok = cache_ok and db_ok and azure_ok
 
@@ -448,6 +440,35 @@ class AdminService:
             "environment": settings.ENVIRONMENT,
             "checked_at": datetime.utcnow().isoformat(),
         }
+
+    async def check_azure_api(self) -> bool:
+        """Return whether the service principal can list subscriptions via ARM.
+
+        Runs in a thread: ``get_token`` and ``urlopen`` are blocking and would
+        otherwise stall every request on this worker for up to the timeout.
+        """
+        global _azure_probe_result  # noqa: PLW0603
+        if _azure_probe_result and time.monotonic() - _azure_probe_result[0] < _AZURE_PROBE_TTL_SECONDS:
+            return _azure_probe_result[1]
+
+        def _probe() -> bool:
+            token = self._credential.get_token("https://management.azure.com/.default")
+            req = urllib.request.Request(
+                "https://management.azure.com/subscriptions?api-version=2022-12-01",
+                headers={"Authorization": f"Bearer {token.token}"},
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=8) as resp:
+                return resp.status == 200
+
+        try:
+            # The socket timeout doesn't cover token acquisition, so cap the whole probe.
+            reachable = await asyncio.wait_for(asyncio.to_thread(_probe), timeout=10)
+        except Exception as e:
+            logger.warning("azure_health_check_failed", error=str(e)[:200] or type(e).__name__)
+            reachable = False
+        _azure_probe_result = (time.monotonic(), reachable)
+        return reachable
 
     async def release_cached_data(self) -> dict:
         """Release page-cache payloads and cost query caches."""

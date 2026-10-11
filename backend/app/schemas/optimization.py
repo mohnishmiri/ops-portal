@@ -107,6 +107,10 @@ class CostRecommendation(BaseModel):
     source: str = Field(description="Source: azure_advisor | custom_analysis | resource_graph")
     created_at: datetime
     expires_at: datetime | None = None
+    orphaned: bool = Field(
+        default=False,
+        description="The resource this one was created from (e.g. a snapshot's source disk) no longer exists",
+    )
 
 
 class WastageDetailItem(BaseModel):
@@ -130,8 +134,19 @@ class WastageSummary(BaseModel):
     idle_vms_count: int = 0
     unattached_disks_count: int = 0
     disconnected_private_endpoints_count: int = 0
+    # Snapshots older than snapshot_min_age_days (source disk present or not);
+    # the field keeps its historical name for API compatibility.
     orphaned_snapshots_count: int = 0
+    snapshots_source_deleted_count: int = Field(
+        default=0,
+        description="Of the old snapshots, how many have lost their source disk",
+    )
+    snapshot_min_age_days: int = 30
     overprovisioned_count: int = 0
+    unavailable_checks: list[str] = Field(
+        default_factory=list,
+        description="Checks whose Azure query failed; their counts are unknown, not zero",
+    )
     details: list["WastageDetailItem"] = Field(
         default_factory=list,
         description="Per-category wastage breakdown with resource lists",
