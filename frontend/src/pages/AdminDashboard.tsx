@@ -73,8 +73,8 @@ const Toggle: React.FC<{
     aria-label={label}
     disabled={disabled}
     onClick={onChange}
-    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
-      checked ? "bg-blue-600" : "bg-gray-200"
+    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-att-300 focus:ring-offset-2 ${
+      checked ? "bg-att-400" : "bg-gray-200"
     } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
   >
     <span
@@ -87,18 +87,11 @@ const Toggle: React.FC<{
 
 // ── Status Badge ──────────────────────────────────────────────────────
 
+/** Azure subscription state (Enabled / Disabled / Warned / PastDue / Deleted). */
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const colorMap: Record<string, string> = {
-    connected: "bg-green-100 text-green-800",
-    healthy: "bg-green-100 text-green-800",
-    enabled: "bg-green-100 text-green-800",
     Enabled: "bg-green-100 text-green-800",
-    disconnected: "bg-red-100 text-red-800",
-    unreachable: "bg-red-100 text-red-800",
-    degraded: "bg-yellow-100 text-yellow-800",
-    configured: "bg-blue-100 text-blue-800",
     Unknown: "bg-gray-100 text-gray-600",
-    // Azure subscription states
     Disabled: "bg-red-100 text-red-800",
     Deleted: "bg-red-100 text-red-800",
     Warned: "bg-yellow-100 text-yellow-800",
@@ -364,6 +357,10 @@ const SubscriptionTable: React.FC<{
     deleteMutation.mutate(deleteTarget.subscription_id, { onSuccess: () => setDeleteTarget(null) });
   };
 
+  const environmentLabels = useMemo(
+    () => new Map(environmentOptions.map((option) => [option.value, option.label])),
+    [environmentOptions],
+  );
   const inScopeCount = subs.filter(isInScope).length;
   const scoped = useMemo(
     () =>
@@ -495,7 +492,7 @@ const SubscriptionTable: React.FC<{
                   <td className={gridStyles.cell}>
                     {sub.environment ? (
                       <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">
-                        {sub.environment}
+                        {environmentLabels.get(sub.environment) ?? sub.environment}
                       </span>
                     ) : (
                       <span className="text-gray-400 text-xs">Not set</span>
@@ -586,59 +583,6 @@ const SubscriptionTable: React.FC<{
           onCancel={() => setDeleteTarget(null)}
         />
       )}
-    </div>
-  );
-};
-
-// ── System Health ─────────────────────────────────────────────────────
-
-const SystemHealth: React.FC<{
-  health: { database: string; api: string };
-  checkedAtLabel: string;
-}> = ({ health, checkedAtLabel }) => {
-  const components = [
-    {
-      name: "PostgreSQL Database",
-      detail: "Portal data and the page cache (both live in PostgreSQL).",
-      status: health.database,
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-        </svg>
-      ),
-    },
-    {
-      name: "Azure Management API",
-      detail: "Service principal token plus a subscription list call to management.azure.com (re-checked at most once a minute).",
-      status: health.api,
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z" />
-        </svg>
-      ),
-    },
-  ];
-
-  return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-gray-800">System Health</h3>
-        <span className="text-xs text-gray-500">Checked {checkedAtLabel}</span>
-      </div>
-      <div className="space-y-3">
-        {components.map((c) => (
-          <div key={c.name} className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg">
-            <div className="flex items-center gap-3">
-              <span className="text-xl">{c.icon}</span>
-              <div>
-                <p className="font-medium text-gray-700">{c.name}</p>
-                <p className="text-xs text-gray-500">{c.detail}</p>
-              </div>
-            </div>
-            <StatusBadge status={c.status} />
-          </div>
-        ))}
-      </div>
     </div>
   );
 };
@@ -880,24 +824,6 @@ const AdminActivity: React.FC = () => {
   );
 };
 
-// ── Admin Utilities Link ─────────────────────────────────────────────
-
-const utilityLink =
-  "px-3 py-2 bg-att-50 text-att-700 border border-att-100 rounded-md text-sm font-medium hover:bg-att-100";
-
-const AdminUtilities: React.FC = () => (
-  <div className="bg-white rounded-xl p-4 border">
-    <h3 className="text-sm font-semibold mb-2">Admin Utilities</h3>
-    <div className="flex flex-wrap gap-3">
-      <Link to="/admin/permissions" className={utilityLink}>Manage Permissions</Link>
-      <Link to="/access/manage" className={utilityLink}>Access Management</Link>
-    </div>
-    <p className="mt-2 text-xs text-gray-500">
-      Access Management places subscriptions into projects and Prod / Non-Prod tiers and handles access requests.
-    </p>
-  </div>
-);
-
 // ── Config helpers ────────────────────────────────────────────────────
 
 /** "Changed by x · date" from the admin_config row, so admins can see who last touched a setting. */
@@ -915,9 +841,66 @@ const ConfigChangedBy: React.FC<{ entry?: AdminConfigEntry }> = ({ entry }) => {
 const InlineError: React.FC<{ error: unknown; fallback: string }> = ({ error, fallback }) =>
   error ? <p role="alert" className="mt-2 text-xs text-red-700">{apiErrorMessage(error, fallback)}</p> : null;
 
-// ── Timezone Selector ─────────────────────────────────────────────────
+// ── Portal Settings ───────────────────────────────────────────────────
 
-const TimezoneSelector: React.FC<{ entry?: AdminConfigEntry }> = ({ entry }) => {
+const settingButton =
+  "inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-att-200 bg-white px-3 py-1.5 text-xs font-semibold text-att-700 hover:bg-att-50 disabled:opacity-50";
+const settingSaveButton =
+  "rounded-lg bg-att-400 px-2.5 py-1 text-xs font-semibold text-white hover:bg-att-500 disabled:opacity-50";
+const settingCancelButton = "rounded-lg px-2 py-1 text-xs font-semibold text-gray-600 hover:bg-gray-100";
+const settingInput =
+  "w-24 rounded-lg border border-att-200 px-2 py-1 text-sm focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100";
+
+const PencilIcon = () => (
+  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+  </svg>
+);
+
+/** One setting: name, one-line description and last change on the left, its control on the right. */
+const SettingRow: React.FC<{
+  title: string;
+  description: React.ReactNode;
+  entry?: AdminConfigEntry;
+  control: React.ReactNode;
+  children?: React.ReactNode;
+}> = ({ title, description, entry, control, children }) => (
+  <div className="py-3.5">
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-gray-900">{title}</p>
+        <p className="mt-0.5 text-xs text-gray-500">{description}</p>
+        <ConfigChangedBy entry={entry} />
+      </div>
+      <div className="flex shrink-0 items-center gap-2">{control}</div>
+    </div>
+    {children}
+  </div>
+);
+
+/** On/off switch with its state spelled out, so it never relies on colour alone. */
+const SettingSwitch: React.FC<{ label: string; checked: boolean; pending: boolean; onToggle: () => void }> = ({
+  label,
+  checked,
+  pending,
+  onToggle,
+}) => (
+  <>
+    <span className={`w-16 text-right text-xs font-medium ${checked ? "text-att-700" : "text-gray-500"}`}>
+      {pending ? "Saving…" : checked ? "On" : "Off"}
+    </span>
+    <Toggle checked={checked} onChange={onToggle} disabled={pending} label={label} />
+  </>
+);
+
+const SettingsGroup: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <section className="px-5 pb-1 pt-4">
+    <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-att-700">{title}</h3>
+    <div className="divide-y divide-gray-100">{children}</div>
+  </section>
+);
+
+const TimezoneSetting: React.FC<{ entry?: AdminConfigEntry }> = ({ entry }) => {
   const { timezone } = usePortalTimezone();
   const tzMutation = useUpdatePortalTimezone();
   const [selected, setSelected] = useState(timezone);
@@ -936,63 +919,55 @@ const TimezoneSelector: React.FC<{ entry?: AdminConfigEntry }> = ({ entry }) => 
     }
   };
 
-  const currentLabel = TIMEZONE_OPTIONS.find((o) => o.value === timezone)?.label ?? timezone;
-
   return (
-    <div>
-      <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Portal Timezone</p>
-      <div className="flex items-center gap-3">
-        <select
-          value={selected}
-          onChange={handleChange}
-          disabled={tzMutation.isPending}
-          aria-label="Portal timezone"
-          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
-        >
-          {TIMEZONE_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-        {tzMutation.isPending && (
-          <span className="text-xs text-gray-500 animate-pulse">Saving…</span>
-        )}
-        {tzMutation.isSuccess && !tzMutation.isPending && (
-          <span className="text-xs text-green-600">Saved</span>
-        )}
-      </div>
+    <SettingRow
+      title="Portal timezone"
+      description="Every date and time in the portal is shown in this zone."
+      entry={entry}
+      control={
+        <>
+          {tzMutation.isPending ? (
+            <span className="text-xs text-gray-500">Saving…</span>
+          ) : tzMutation.isSuccess ? (
+            <span className="text-xs text-green-700">Saved</span>
+          ) : null}
+          <select
+            value={selected}
+            onChange={handleChange}
+            disabled={tzMutation.isPending}
+            aria-label="Portal timezone"
+            className="rounded-lg border border-att-200 bg-white px-2 py-1.5 text-sm focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100 disabled:opacity-50"
+          >
+            {TIMEZONE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </>
+      }
+    >
       <InlineError error={tzMutation.error} fallback="Failed to save the timezone." />
-      <p className="text-xs text-gray-500 mt-1">
-        All dates and times across the portal will be displayed in <strong>{currentLabel}</strong>.
-      </p>
-      <ConfigChangedBy entry={entry} />
-    </div>
+    </SettingRow>
   );
 };
-
-// ── Configuration Panel ───────────────────────────────────────────────
 
 const RPM_MIN = 10;
 const RPM_MAX = 10000;
 const TTL_MAX_MINUTES = 10080;
 
-const ConfigPanel: React.FC<{
-  environment: string;
-  version: string;
+const PortalSettings: React.FC<{
   rateLimitRpm: number;
   cacheTtl: number;
   corsOrigins: string[];
   cacheEnabled: boolean;
   ollamaEnabled: boolean;
-}> = ({ environment, version, rateLimitRpm, cacheTtl, corsOrigins, cacheEnabled, ollamaEnabled }) => {
+}> = ({ rateLimitRpm, cacheTtl, corsOrigins, cacheEnabled, ollamaEnabled }) => {
   const [editingTtl, setEditingTtl] = useState(false);
   const [editingCors, setEditingCors] = useState(false);
   const [editingRpm, setEditingRpm] = useState(false);
   const [rpmValue, setRpmValue] = useState(String(rateLimitRpm));
-  const [ttlMode, setTtlMode] = useState<"timed" | "unlimited">(
-    cacheTtl <= 0 ? "unlimited" : "timed"
-  );
+  const [ttlMode, setTtlMode] = useState<"timed" | "unlimited">(cacheTtl <= 0 ? "unlimited" : "timed");
   const [ttlMinutes, setTtlMinutes] = useState(
     cacheTtl <= 0 ? "60" : String(Math.max(1, Math.round(cacheTtl / 60)))
   );
@@ -1011,26 +986,11 @@ const ConfigPanel: React.FC<{
     [configEntries],
   );
 
-  const isUnlimitedCache = cacheTtl <= 0;
   const rpmParsed = Number(rpmValue);
   const rpmInvalid = !Number.isInteger(rpmParsed) || rpmParsed < RPM_MIN || rpmParsed > RPM_MAX;
   const ttlParsed = Number(ttlMinutes);
   const ttlInvalid =
     ttlMode === "timed" && (!Number.isInteger(ttlParsed) || ttlParsed < 1 || ttlParsed > TTL_MAX_MINUTES);
-
-  const handleToggleCache = () => {
-    cacheMutation.mutate({
-      config_key: "cache_enabled",
-      config_value: cacheEnabled ? "false" : "true",
-    });
-  };
-
-  const handleToggleOllama = () => {
-    ollamaMutation.mutate({
-      config_key: "ollama_enabled",
-      config_value: ollamaEnabled ? "false" : "true",
-    });
-  };
 
   // Sync local state when the prop updates after a refetch
   useEffect(() => {
@@ -1082,329 +1042,258 @@ const ConfigPanel: React.FC<{
     );
   };
 
-  const envColor =
-    environment === "production"
-      ? "bg-red-100 text-red-800"
-      : environment === "staging"
-        ? "bg-yellow-100 text-yellow-800"
-        : "bg-green-100 text-green-800";
+  const cancelRpm = () => {
+    setEditingRpm(false);
+    setRpmValue(String(rateLimitRpm));
+    rpmMutation.reset();
+  };
+
+  const cancelTtl = () => {
+    setEditingTtl(false);
+    setTtlMode(cacheTtl <= 0 ? "unlimited" : "timed");
+    setTtlMinutes(cacheTtl <= 0 ? "60" : String(Math.max(1, Math.round(cacheTtl / 60))));
+    ttlMutation.reset();
+  };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-      <h3 className="text-lg font-semibold text-gray-800 mb-4">Portal Configuration</h3>
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="p-3 bg-gray-50 rounded-lg">
-            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Environment</p>
-            <span className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-bold ${envColor}`}>
-              {environment.toUpperCase()}
-            </span>
-          </div>
-          <div className="p-3 bg-gray-50 rounded-lg">
-            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Version</p>
-            <p className="text-lg font-bold text-gray-900">v{version}</p>
-          </div>
-          <div className="p-3 bg-gray-50 rounded-lg">
-            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Rate Limit</p>
-            {editingRpm ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="number"
-                  min={RPM_MIN}
-                  max={RPM_MAX}
-                  value={rpmValue}
-                  onChange={(e) => setRpmValue(e.target.value)}
-                  aria-label="Rate limit (requests per minute)"
-                  className="w-24 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <span className="text-sm text-gray-500">req/min</span>
-                <button
-                  onClick={handleSaveRpm}
-                  disabled={rpmMutation.isPending || rpmInvalid}
-                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {rpmMutation.isPending ? "…" : "Save"}
-                </button>
-                <button
-                  onClick={() => {
-                    setEditingRpm(false);
-                    setRpmValue(String(rateLimitRpm));
-                    rpmMutation.reset();
-                  }}
-                  className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-semibold hover:bg-gray-200"
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <p className="text-lg font-bold text-gray-900">
-                  {rateLimitRpm} <span className="text-sm font-normal text-gray-500">req/min</span>
-                </p>
-                <button
-                  onClick={() => setEditingRpm(true)}
-                  className="p-1 text-gray-400 hover:text-blue-600 rounded transition-colors"
-                  title="Edit Rate Limit"
-                  aria-label="Edit rate limit"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                  </svg>
-                </button>
-              </div>
-            )}
+    <div className={gridStyles.shell}>
+      <div className={gridStyles.panelHeader}>
+        <div>
+          <h2 className={gridStyles.sectionTitle}>Portal Settings</h2>
+          <p className="mt-0.5 text-xs text-gray-500">Stored in the database and applied at runtime — no redeploy needed.</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 lg:divide-x lg:divide-att-100">
+        <SettingsGroup title="Performance & caching">
+          <SettingRow
+            title="Rate limit"
+            description="Requests per minute per client IP, shared across every API worker. Applies within 30 seconds."
+            entry={configByKey.get("rate_limit_rpm")}
+            control={
+              editingRpm ? (
+                <>
+                  <input
+                    type="number"
+                    min={RPM_MIN}
+                    max={RPM_MAX}
+                    value={rpmValue}
+                    onChange={(e) => setRpmValue(e.target.value)}
+                    aria-label="Rate limit (requests per minute)"
+                    className={settingInput}
+                  />
+                  <button onClick={handleSaveRpm} disabled={rpmMutation.isPending || rpmInvalid} className={settingSaveButton}>
+                    {rpmMutation.isPending ? "…" : "Save"}
+                  </button>
+                  <button onClick={cancelRpm} className={settingCancelButton}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-sm font-semibold text-gray-900">
+                    {rateLimitRpm.toLocaleString()} <span className="font-normal text-gray-500">req/min</span>
+                  </span>
+                  <button
+                    onClick={() => setEditingRpm(true)}
+                    className="rounded p-1 text-gray-400 transition-colors hover:text-att-600"
+                    title="Edit rate limit"
+                    aria-label="Edit rate limit"
+                  >
+                    <PencilIcon />
+                  </button>
+                </>
+              )
+            }
+          >
             {editingRpm && rpmInvalid && (
               <p className="mt-2 text-xs text-red-700">Enter a whole number between {RPM_MIN} and {RPM_MAX}.</p>
             )}
             <InlineError error={rpmMutation.error} fallback="Failed to save the rate limit." />
-            <p className="mt-2 text-xs text-gray-500">
-              Per client IP across every API worker and replica (counts are shared every 5 seconds). A change applies
-              everywhere within 30 seconds.
-            </p>
-            <ConfigChangedBy entry={configByKey.get("rate_limit_rpm")} />
-          </div>
-          <div className="p-3 bg-gray-50 rounded-lg">
-            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Page Cache TTL</p>
-            {editingTtl ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="number"
-                  min={1}
-                  max={TTL_MAX_MINUTES}
-                  value={ttlMinutes}
-                  onChange={(e) => setTtlMinutes(e.target.value)}
-                  disabled={ttlMode === "unlimited"}
-                  aria-label="Page cache TTL (minutes)"
-                  className="w-20 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <span className="text-sm text-gray-500">min</span>
-                <label className="inline-flex items-center gap-2 text-sm text-gray-600">
+          </SettingRow>
+
+          <SettingRow
+            title="Page cache"
+            description="Serve the Leadership dashboard, advisor and forecast from cache. Off reads straight from the database."
+            entry={configByKey.get("cache_enabled")}
+            control={
+              <SettingSwitch
+                label="Page cache"
+                checked={cacheEnabled}
+                pending={cacheMutation.isPending}
+                onToggle={() =>
+                  cacheMutation.mutate({ config_key: "cache_enabled", config_value: cacheEnabled ? "false" : "true" })
+                }
+              />
+            }
+          >
+            <InlineError error={cacheMutation.error} fallback="Failed to update the page cache setting." />
+          </SettingRow>
+
+          <SettingRow
+            title="Page cache TTL"
+            description="How long Leadership and Amortized payloads stay cached. Unlimited keeps them until released."
+            entry={configByKey.get("cache_ttl_seconds")}
+            control={
+              editingTtl ? (
+                <>
                   <input
-                    type="checkbox"
-                    checked={ttlMode === "unlimited"}
-                    onChange={(e) => setTtlMode(e.target.checked ? "unlimited" : "timed")}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    type="number"
+                    min={1}
+                    max={TTL_MAX_MINUTES}
+                    value={ttlMinutes}
+                    onChange={(e) => setTtlMinutes(e.target.value)}
+                    disabled={ttlMode === "unlimited"}
+                    aria-label="Page cache TTL (minutes)"
+                    className={`${settingInput} w-20 disabled:bg-gray-50`}
                   />
-                  Unlimited
-                </label>
-                <button
-                  onClick={handleSaveTtl}
-                  disabled={ttlMutation.isPending || ttlInvalid}
-                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {ttlMutation.isPending ? "…" : "Save"}
-                </button>
-                <button
-                  onClick={() => {
-                    setEditingTtl(false);
-                    setTtlMode(cacheTtl <= 0 ? "unlimited" : "timed");
-                    setTtlMinutes(cacheTtl <= 0 ? "60" : String(Math.max(1, Math.round(cacheTtl / 60))));
-                    ttlMutation.reset();
-                  }}
-                  className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-semibold hover:bg-gray-200"
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <p className="text-lg font-bold text-gray-900">
-                  {isUnlimitedCache ? (
-                    <>
-                      Unlimited <span className="text-sm font-normal text-gray-500">retention</span>
-                    </>
-                  ) : (
-                    <>
-                      {Math.round(cacheTtl / 60)} <span className="text-sm font-normal text-gray-500">min</span>
-                    </>
-                  )}
-                </p>
-                <button
-                  onClick={() => setEditingTtl(true)}
-                  className="p-1 text-gray-400 hover:text-blue-600 rounded transition-colors"
-                  title="Edit Cache TTL"
-                  aria-label="Edit page cache TTL"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                  </svg>
-                </button>
-              </div>
-            )}
+                  <span className="text-xs text-gray-500">min</span>
+                  <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={ttlMode === "unlimited"}
+                      onChange={(e) => setTtlMode(e.target.checked ? "unlimited" : "timed")}
+                      className="rounded border-gray-300 text-att-500 focus:ring-att-400"
+                    />
+                    Unlimited
+                  </label>
+                  <button onClick={handleSaveTtl} disabled={ttlMutation.isPending || ttlInvalid} className={settingSaveButton}>
+                    {ttlMutation.isPending ? "…" : "Save"}
+                  </button>
+                  <button onClick={cancelTtl} className={settingCancelButton}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-sm font-semibold text-gray-900">
+                    {cacheTtl <= 0 ? "Unlimited" : `${Math.round(cacheTtl / 60)} min`}
+                  </span>
+                  <button
+                    onClick={() => setEditingTtl(true)}
+                    className="rounded p-1 text-gray-400 transition-colors hover:text-att-600"
+                    title="Edit page cache TTL"
+                    aria-label="Edit page cache TTL"
+                  >
+                    <PencilIcon />
+                  </button>
+                </>
+              )
+            }
+          >
             {editingTtl && ttlInvalid && (
               <p className="mt-2 text-xs text-red-700">Enter whole minutes between 1 and {TTL_MAX_MINUTES} (7 days).</p>
             )}
             <InlineError error={ttlMutation.error} fallback="Failed to save the cache TTL." />
-            <p className="mt-2 text-xs text-gray-500">
-              Applies to Leadership dashboard, Leadership advisor/forecast, and Amortized payload caches only. Other pages use database snapshots or live API calls instead of page cache.
-            </p>
-            <ConfigChangedBy entry={configByKey.get("cache_ttl_seconds")} />
-          </div>
-        </div>
+          </SettingRow>
 
-        {/* Page Cache Toggle */}
-        <div className="rounded-xl border border-att-100 bg-att-50/50 p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold text-gray-800">Page Cache</p>
-              <p className="text-xs text-gray-500">
-                When disabled, Leadership Dashboard reads directly from the database (or Azure API fallback). Advisor and forecast caches are also bypassed.
+          <SettingRow
+            title="Cached data"
+            description="Clear cached payloads now so the next request rebuilds from the database."
+            control={
+              <button onClick={() => releaseCache.mutate()} disabled={releaseCache.isPending} className={settingButton}>
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-7 0l1 12h6l1-12M10 11v6m4-6v6" />
+                </svg>
+                {releaseCache.isPending ? "Releasing…" : "Release cache"}
+              </button>
+            }
+          >
+            {releaseCache.isSuccess ? (
+              <p className="mt-2 text-xs text-green-700">
+                Released {releaseCache.data.released_keys} cached key(s). The next requests rebuild fresh payloads.
               </p>
-              <ConfigChangedBy entry={configByKey.get("cache_enabled")} />
-            </div>
-            <button
-              onClick={handleToggleCache}
-              disabled={cacheMutation.isPending}
-              aria-pressed={cacheEnabled}
-              aria-label="Page cache"
-              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:opacity-50 ${
-                cacheEnabled
-                  ? "border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
-                  : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
-              }`}
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                {cacheEnabled ? (
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                ) : (
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                )}
-              </svg>
-              {cacheMutation.isPending ? "Updating…" : cacheEnabled ? "Enabled" : "Disabled"}
-            </button>
-          </div>
-          <InlineError error={cacheMutation.error} fallback="Failed to update the page cache setting." />
-        </div>
+            ) : null}
+            <InlineError error={releaseCache.error} fallback="Failed to release cached data." />
+          </SettingRow>
+        </SettingsGroup>
 
-        {/* Ollama LLM Toggle */}
-        <div className="rounded-xl border border-att-100 bg-att-50/50 p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold text-gray-800">Ollama LLM (AI Forecasts &amp; Advisor)</p>
-              <p className="text-xs text-gray-500">
-                When enabled, Leadership Dashboard uses Ollama LLM for AI-powered forecasts and executive advisor guidance. When disabled, the system falls back to local heuristic projections.
-              </p>
-              <ConfigChangedBy entry={configByKey.get("ollama_enabled")} />
-            </div>
-            <button
-              onClick={handleToggleOllama}
-              disabled={ollamaMutation.isPending}
-              aria-pressed={ollamaEnabled}
-              aria-label="Ollama LLM"
-              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:opacity-50 ${
-                ollamaEnabled
-                  ? "border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
-                  : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
-              }`}
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                {ollamaEnabled ? (
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                ) : (
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                )}
-              </svg>
-              {ollamaMutation.isPending ? "Updating…" : ollamaEnabled ? "Enabled" : "Disabled"}
-            </button>
-          </div>
-          <InlineError error={ollamaMutation.error} fallback="Failed to update the Ollama setting." />
-        </div>
-
-        <div className="rounded-xl border border-att-100 bg-att-50/50 p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold text-gray-800">Cached data release</p>
-              <p className="text-xs text-gray-500">
-                Clear cached page payloads immediately when you want the next request to rebuild from DB or fresh Azure-backed sync data.
-              </p>
-            </div>
-            <button
-              onClick={() => releaseCache.mutate()}
-              disabled={releaseCache.isPending}
-              className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 7h12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-7 0l1 12h6l1-12M10 11v6m4-6v6" />
-              </svg>
-              {releaseCache.isPending ? "Releasing…" : "Release Cached Data"}
-            </button>
-          </div>
-          {releaseCache.isSuccess ? (
-            <p className="mt-3 text-xs text-green-700">
-              Released {releaseCache.data.released_keys} cached key(s). The next dashboard requests will rebuild fresh payloads.
-            </p>
-          ) : null}
-          <InlineError error={releaseCache.error} fallback="Failed to release cached data." />
-        </div>
-
-        <div>
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">CORS Origins</p>
-          {editingCors ? (
-            <div className="space-y-3">
-              <textarea
-                value={corsText}
-                onChange={(e) => setCorsText(e.target.value)}
-                rows={5}
-                aria-label="CORS origins"
-                placeholder="One origin per line, for example:
-http://localhost:5173
-http://127.0.0.1:5173"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-700 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        <SettingsGroup title="Features & display">
+          <SettingRow
+            title="Ollama LLM"
+            description="AI forecasts and executive advice on the Leadership dashboard. Off uses local heuristic projections."
+            entry={configByKey.get("ollama_enabled")}
+            control={
+              <SettingSwitch
+                label="Ollama LLM"
+                checked={ollamaEnabled}
+                pending={ollamaMutation.isPending}
+                onToggle={() =>
+                  ollamaMutation.mutate({ config_key: "ollama_enabled", config_value: ollamaEnabled ? "false" : "true" })
+                }
               />
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSaveCors}
-                  disabled={corsMutation.isPending || !corsText.trim()}
-                  className="px-3 py-1.5 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {corsMutation.isPending ? "Saving…" : "Save CORS"}
-                </button>
-                <button
-                  onClick={() => {
-                    setEditingCors(false);
-                    setCorsText(corsOrigins.join("\n"));
-                    corsMutation.reset();
-                  }}
-                  className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded text-xs font-semibold hover:bg-gray-200"
-                >
-                  Cancel
-                </button>
+            }
+          >
+            <InlineError error={ollamaMutation.error} fallback="Failed to update the Ollama setting." />
+          </SettingRow>
+
+          <TimezoneSetting entry={configByKey.get("portal_timezone")} />
+
+          <SettingRow
+            title="CORS origins"
+            description={
+              <>
+                Only for browser apps calling the API from another origin — the portal itself uses its same-origin{" "}
+                <code>/api</code> proxy.
+              </>
+            }
+            entry={configByKey.get("cors_origins")}
+            control={
+              editingCors ? null : (
+                <>
+                  {corsMutation.isSuccess ? <span className="text-xs text-green-700">Saved</span> : null}
+                  <button onClick={() => setEditingCors(true)} className={settingButton}>
+                    <PencilIcon />
+                    Edit
+                  </button>
+                </>
+              )
+            }
+          >
+            {editingCors ? (
+              <div className="mt-3 space-y-2">
+                <textarea
+                  value={corsText}
+                  onChange={(e) => setCorsText(e.target.value)}
+                  rows={4}
+                  aria-label="CORS origins"
+                  placeholder={"One origin per line, for example:\nhttp://localhost:5173"}
+                  className="w-full rounded-lg border border-att-200 px-3 py-2 font-mono text-xs text-gray-700 focus:border-att-400 focus:outline-none focus:ring-2 focus:ring-att-100"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleSaveCors}
+                    disabled={corsMutation.isPending || !corsText.trim()}
+                    className={settingSaveButton}
+                  >
+                    {corsMutation.isPending ? "Saving…" : "Save CORS"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditingCors(false);
+                      setCorsText(corsOrigins.join("\n"));
+                      corsMutation.reset();
+                    }}
+                    className={settingCancelButton}
+                  >
+                    Cancel
+                  </button>
+                  <span className="text-[11px] text-gray-400">
+                    Full <code>http://</code> or <code>https://</code> origins, one per line.
+                  </span>
+                </div>
+                <InlineError error={corsMutation.error} fallback="Failed to update CORS origins." />
               </div>
-              <InlineError error={corsMutation.error} fallback="Failed to update CORS origins." />
-            </div>
-          ) : (
-            <>
-              <div className="flex flex-wrap gap-2">
+            ) : (
+              <div className="mt-2 flex flex-wrap gap-1.5">
                 {corsOrigins.map((origin) => (
-                  <span key={origin} className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded font-mono">
+                  <span key={origin} className="rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-700">
                     {origin}
                   </span>
                 ))}
               </div>
-              <div className="mt-3 flex items-center gap-3">
-                <button
-                  onClick={() => setEditingCors(true)}
-                  className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                  </svg>
-                  Edit CORS Origins
-                </button>
-                {corsMutation.isSuccess ? <span className="text-xs text-green-700">Saved</span> : null}
-              </div>
-            </>
-          )}
-          <p className="mt-2 text-xs text-gray-500">
-            Only needed for browser apps that call the API from a different origin — the portal itself reaches the API
-            same-origin through its <code>/api</code> proxy. One full <code>http://</code> or <code>https://</code> origin per
-            line; other workers pick up changes within 30 seconds.
-          </p>
-          <ConfigChangedBy entry={configByKey.get("cors_origins")} />
-        </div>
-
-        {/* Portal Timezone */}
-        <TimezoneSelector entry={configByKey.get("portal_timezone")} />
+            )}
+          </SettingRow>
+        </SettingsGroup>
       </div>
     </div>
   );
@@ -1443,10 +1332,13 @@ const AdminDashboard: React.FC = () => {
   const environmentOptions = data.environment_options ?? [];
   const inScopeCount = data.subscriptions.filter(isInScope).length;
   const outOfScopeCount = data.subscriptions.length - inScopeCount;
-  const unhealthy = [
-    data.system_health.database !== "connected" && "Database",
-    data.system_health.api !== "healthy" && "Azure API",
-  ].filter(Boolean) as string[];
+  const unhealthy = data.system_health.database !== "connected" || data.system_health.api !== "healthy";
+  const envBadge =
+    data.environment === "production"
+      ? "bg-red-100 text-red-800"
+      : data.environment === "staging"
+        ? "bg-yellow-100 text-yellow-800"
+        : "bg-green-100 text-green-800";
 
   const toggleScopeFilter = (filter: ScopeFilter) =>
     setScopeFilter((current) => (current === filter ? "all" : filter));
@@ -1454,14 +1346,26 @@ const AdminDashboard: React.FC = () => {
   return (
     <div className="py-6 space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
-          <svg className="h-8 w-8 text-att-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-          Admin Dashboard
-        </h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Last updated {formatDate(data.generated_at)}
-        </p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <svg className="h-8 w-8 text-att-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+            Admin Dashboard
+          </h1>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-gray-500">
+            <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${envBadge}`}>
+              {data.environment.toUpperCase()}
+            </span>
+            <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-700">
+              v{data.version}
+            </span>
+            <span>Last updated {formatDate(data.generated_at)}</span>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Link to="/admin/permissions" className={secondaryButton}>Manage Permissions</Link>
+          <Link to="/access/manage" className={secondaryButton}>Access Management</Link>
+        </div>
       </div>
 
       {/* KPI cards */}
@@ -1498,29 +1402,24 @@ const AdminDashboard: React.FC = () => {
         />
         <MetricCard
           title="System Health"
-          value={unhealthy.length ? "Degraded" : "Healthy"}
-          subtitle={unhealthy.length ? `${unhealthy.join(" & ")} failing` : "Database & Azure API reachable"}
+          value={unhealthy ? "Degraded" : "Healthy"}
+          subtitle={
+            <span title="Database: SELECT 1 against PostgreSQL (data and page cache). Azure API: service principal token plus a subscription list call to management.azure.com, re-checked at most once a minute.">
+              Database {data.system_health.database} · Azure API {data.system_health.api}
+            </span>
+          }
           icon={MetricCardIcons.activity()}
-          tone={unhealthy.length ? "red" : "green"}
+          tone={unhealthy ? "red" : "green"}
         />
       </div>
 
-      {/* Main content grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-        <div className="space-y-6">
-          <SystemHealth health={data.system_health} checkedAtLabel={formatDate(data.generated_at)} />
-          <AdminUtilities />
-        </div>
-        <ConfigPanel
-          environment={data.environment}
-          version={data.version}
-          rateLimitRpm={data.rate_limit_rpm}
-          cacheTtl={data.cache_ttl_seconds}
-          corsOrigins={data.cors_origins}
-          cacheEnabled={data.cache_enabled ?? true}
-          ollamaEnabled={data.ollama_enabled ?? true}
-        />
-      </div>
+      <PortalSettings
+        rateLimitRpm={data.rate_limit_rpm}
+        cacheTtl={data.cache_ttl_seconds}
+        corsOrigins={data.cors_origins}
+        cacheEnabled={data.cache_enabled ?? true}
+        ollamaEnabled={data.ollama_enabled ?? true}
+      />
 
       {/* Add Subscription Form */}
       {showAddForm && (

@@ -5,6 +5,7 @@ All sensitive values are loaded from environment variables or Azure Key Vault.
 Never hardcode secrets in this file.
 """
 
+import tomllib
 from pathlib import Path
 
 from pydantic import Field, field_validator
@@ -13,11 +14,25 @@ from pydantic_settings import BaseSettings
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
+def _project_version() -> str:
+    """Version from backend/pyproject.toml, the file bump_version.sh treats as canonical.
+
+    A literal here drifted (the API said 1.3.0 while the UI footer said 1.3.11)
+    because the bump script doesn't edit this file.
+    """
+    try:
+        with (_BACKEND_DIR / "pyproject.toml").open("rb") as fh:
+            return str(tomllib.load(fh)["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "unknown"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ── Application ───────────────────────────────────────────────────
-    APP_VERSION: str = "1.3.0"
+    # An APP_VERSION environment variable still overrides this.
+    APP_VERSION: str = Field(default_factory=_project_version)
     # Defaults to "production" deliberately: a missing or mis-provisioned
     # ENVIRONMENT value must never silently degrade the portal into the
     # permissive development auth path.

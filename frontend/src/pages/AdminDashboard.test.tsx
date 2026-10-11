@@ -120,8 +120,7 @@ describe("AdminDashboard", () => {
     renderPage();
 
     expect(await screen.findByText("Degraded")).toBeInTheDocument();
-    expect(screen.getByText("Azure API failing")).toBeInTheDocument();
-    expect(screen.getByText("unreachable")).toBeInTheDocument();
+    expect(screen.getByText("Database connected · Azure API unreachable")).toBeInTheDocument();
   });
 
   it("shows the API's validation message when adding a subscription fails", async () => {
@@ -148,7 +147,7 @@ describe("AdminDashboard", () => {
     });
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Ollama LLM" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "Ollama LLM" }));
     expect(await screen.findByText("ollama_enabled must be a boolean value (true/false).")).toBeInTheDocument();
 
     // The Ollama failure is not reported as a CORS problem, and no "Saved" appears beside CORS.
@@ -230,6 +229,19 @@ describe("AdminDashboard", () => {
     fireEvent.change(within(grid).getByLabelText("Search Admin Activity"), { target: { value: "from 3 to" } });
     expect(within(grid).getByText("Changed cache_ttl_seconds from 3 to 4")).toBeInTheDocument();
     expect(within(grid).getByText("Showing 1–1 of 1 changes")).toBeInTheDocument();
+  });
+
+  it("shows environment, version and admin links in the header instead of separate cards", async () => {
+    renderPage();
+
+    expect(await screen.findByText("DEVELOPMENT")).toBeInTheDocument();
+    expect(screen.getByText("v1.3.0")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Access Management" })).toHaveAttribute("href", "/access/manage");
+    expect(screen.queryByText("System Health", { selector: "h3" })).not.toBeInTheDocument();
+    // Toggles are switches with their state written out, not colour alone.
+    const cache = screen.getByRole("switch", { name: "Page cache" });
+    expect(cache).toHaveAttribute("aria-checked", "true");
+    expect(within(cache.parentElement as HTMLElement).getByText("On")).toBeInTheDocument();
   });
 
   it("only enables certificate collection Save when the selection changed, and flags an empty selection", async () => {
