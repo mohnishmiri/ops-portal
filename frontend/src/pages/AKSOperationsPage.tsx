@@ -79,6 +79,7 @@ import { PodDetailModal } from "../features/aks/PodDetailModal";
 import { DownloadLogsButton, LogArchiveProgress, useLogArchiveDownload } from "../features/aks/LogArchiveDownload";
 import { AkvSyncTab } from "../features/aks/AkvSyncTab";
 import { NodePoolsTab } from "../features/aks/NodePoolsTab";
+import { ClusterUtilisation } from "../features/aks/NodePoolUtilisation";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { formatAxiosError } from "../services/apiErrors";
 import {
@@ -271,6 +272,7 @@ const AKSOperationsPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("clusters");
   // KPI tiles filter the grid beneath them; clicking an active tile again clears it.
   const [clusterTile, setClusterTile] = useState<"all" | "running" | "with-nodes" | "region">("all");
+  const [utilisationClusterId, setUtilisationClusterId] = useState<string | null>(null);
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
   const [scaleDialog, setScaleDialog] = useState<{ deployment: Deployment; replicas: number } | null>(null);
@@ -1180,6 +1182,10 @@ const AKSOperationsPage: React.FC = () => {
 
   // ── Render Clusters Tab ─────────────────────────────────────────────
 
+  const runningClusterList = allClusters.filter((c) => c.power_state === "Running");
+  const utilisationCluster =
+    runningClusterList.find((c) => c.id === (utilisationClusterId ?? selectedCluster?.id)) ?? runningClusterList[0];
+
   const renderClustersTab = () => {
     const { search: cSearch, setSearch: setCSearch, setPage: setCPage } = clustersPag;
     const pagedClusters = pagedTileClusters;
@@ -1372,6 +1378,28 @@ const AKSOperationsPage: React.FC = () => {
       {clustersData?.clusters && clustersData.clusters.length > 0 && (
         <div className="mt-6">
           <h3 className="text-lg font-semibold text-gray-800 mb-4">Cluster Insights</h3>
+          {utilisationCluster && (
+            <div className="mb-6">
+              <ClusterUtilisation
+                key={utilisationCluster.id}
+                clusterId={utilisationCluster.id}
+                formatDate={formatDate}
+                title={`CPU & Memory Utilisation · ${utilisationCluster.name}`}
+                actions={
+                  <select
+                    aria-label="Cluster for utilisation"
+                    value={utilisationCluster.id}
+                    onChange={(e) => setUtilisationClusterId(e.target.value)}
+                    className="rounded-lg border border-att-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  >
+                    {runningClusterList.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                }
+              />
+            </div>
+          )}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
             <div className="rounded-2xl border border-att-100 bg-white p-5 shadow-sm shadow-att-100/40 xl:col-span-2">
               <div className="mb-4 flex items-center justify-between gap-3">

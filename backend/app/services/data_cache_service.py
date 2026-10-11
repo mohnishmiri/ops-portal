@@ -143,6 +143,10 @@ class CacheKeys:
         return f"{CacheKeys.PREFIX}:namespaces:{_hash_params(cluster_id)}"
 
     @staticmethod
+    def cluster_metrics(cluster_id: str, range_key: str, node: str, split: str) -> str:
+        return f"{CacheKeys.PREFIX}:clustermetrics:{_hash_params(cluster_id.lower(), range_key, node, split)}"
+
+    @staticmethod
     def node_pool_metrics(scale_set_id: str, range_key: str) -> str:
         return f"{CacheKeys.PREFIX}:nodepoolmetrics:{_hash_params(scale_set_id.lower(), range_key)}"
 

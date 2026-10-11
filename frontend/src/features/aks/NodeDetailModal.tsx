@@ -23,6 +23,7 @@ import {
   ResourceUsage,
   Truncate,
 } from "./detailShared";
+import { ClusterUtilisation } from "./NodePoolUtilisation";
 import { DetailCard, KpiRow, PropertyList, ResourceDetailShell, ResourceKindIcons } from "./ResourceDetailShell";
 
 type Section = "overview" | "pods" | "events" | "labels";
@@ -282,6 +283,7 @@ export function NodeDetailModal({
           </KpiRow>
 
           <AllocationCard detail={detail} />
+          <ClusterUtilisation clusterId={clusterId} node={detail.name} formatDate={formatDate} title="CPU & Memory History" />
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <DetailCard title="System">

@@ -2376,6 +2376,43 @@ export function useNodePoolPower() {
   });
 }
 
+/** GET /aks/cluster-metrics — AKS platform metrics for the cluster, one node, or each node pool. */
+export interface ClusterMetrics {
+  scope: "cluster" | "node" | "nodepools";
+  range: NodePoolMetricsRange;
+  interval: string;
+  node: string | null;
+  series?: NodePoolMetricPoint[];
+  cpu?: NodePoolMetricSummary | null;
+  memory?: NodePoolMetricSummary | null;
+  pools?: { name: string; series: NodePoolMetricPoint[]; cpu: NodePoolMetricSummary | null; memory: NodePoolMetricSummary | null }[];
+}
+
+export function useClusterMetrics(
+  clusterId: string,
+  range: NodePoolMetricsRange,
+  opts: { node?: string; split?: "none" | "nodepool" } = {},
+  enabled = true
+) {
+  const split = opts.split ?? "none";
+  return useQuery({
+    queryKey: ["aks-cluster-metrics", clusterId, range, opts.node ?? "", split],
+    queryFn: async () => {
+      const { data } = await apiClient.get(`${API_PREFIX}/cluster-metrics`, {
+        params: { cluster_id: clusterId, range, split, ...(opts.node ? { node: opts.node } : {}) },
+        timeout: 60000,
+      });
+      return data as ClusterMetrics;
+    },
+    enabled: !!clusterId && enabled,
+    placeholderData: (prev) => prev,
+    staleTime: 60_000,
+    refetchInterval: safeInterval(120_000),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useNodePoolMetrics(clusterId: string, nodepoolName: string, range: NodePoolMetricsRange, enabled = true) {
   return useQuery({
     queryKey: ["aks-nodepool-metrics", clusterId, nodepoolName, range],

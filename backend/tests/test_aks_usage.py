@@ -181,3 +181,142 @@ async def test_cluster_utilisation_from_aks_platform_metrics(monkeypatch):
     }
     assert clusters[1]["utilisation"] is None  # one failure doesn't hide the others
     assert clusters[2]["utilisation"] is None  # a stopped cluster reports nothing
+
+
+# ── Cluster / node utilisation history (AKS platform metrics) ─────────
+
+
+def _series(dim, points):
+    return SimpleNamespace(
+        metadatavalues=[SimpleNamespace(name=SimpleNamespace(value="nodepool"), value=dim)] if dim else [], data=points
+    )
+
+
+def _hp(minute, average, maximum):
+    return SimpleNamespace(time_stamp=datetime(2026, 10, 11, 0, minute, tzinfo=UTC), average=average, maximum=maximum)
+
+
+class FakeHistoryMonitor:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.metrics = SimpleNamespace(list=self._list)
+
+    def _list(self, resource_id, **kwargs):
+        self.calls.append(kwargs)
+        split = kwargs.get("filter") == "nodepool eq '*'"
+        dims = [("sys", 30.0, 40.0), ("user", 5.0, 9.0)] if split else [("", 12.0, 98.0)]
+
+        def metric(name, offset):
+            return SimpleNamespace(
+                name=SimpleNamespace(value=name),
+                timeseries=[
+                    _series(d, [_hp(0, avg + offset, mx), _hp(15, avg + offset + 1, mx)]) for d, avg, mx in dims
+                ],
+            )
+
+        return SimpleNamespace(value=[metric(np_ops.CLUSTER_CPU_METRIC, 0), metric(np_ops.CLUSTER_MEMORY_METRIC, 20)])
+
+
+@pytest.fixture
+def history(monkeypatch):
+    monitor = FakeHistoryMonitor()
+    monkeypatch.setattr(np_ops, "MonitorManagementClient", lambda credential, subscription: monitor)
+
+    async def _get_or_fetch(key, ttl, fetch_fn):
+        return await fetch_fn(), "live"
+
+    monkeypatch.setattr(np_ops.data_cache, "get_or_fetch", _get_or_fetch)
+    svc = AKSOperationsService.__new__(AKSOperationsService)
+    svc.credential = None
+    return svc, monitor
+
+
+CLUSTER = "/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.ContainerService/managedClusters/aks-01"
+
+
+async def test_cluster_history_marks_the_busiest_node_as_peak(history):
+    svc, monitor = history
+
+    result = await svc.get_cluster_metrics(CLUSTER, "24h")
+
+    assert result["scope"] == "cluster" and result["interval"] == "PT15M"
+    assert result["cpu"] == {"current": 13.0, "average": 12.5, "peak": 98.0}
+    assert result["memory"]["current"] == 33.0
+    assert monitor.calls[0]["filter"] is None
+
+
+async def test_node_history_filters_to_that_node(history):
+    svc, monitor = history
+
+    result = await svc.get_cluster_metrics(CLUSTER, "6h", node="aks-np1-123-vmss00000b")
+
+    assert result["scope"] == "node" and result["node"] == "aks-np1-123-vmss00000b"
+    assert monitor.calls[0]["filter"] == "node eq 'aks-np1-123-vmss00000b'"
+    assert monitor.calls[0]["interval"] == "PT5M"
+
+
+async def test_history_split_per_node_pool(history):
+    svc, _monitor = history
+
+    result = await svc.get_cluster_metrics(CLUSTER, "7d", split_by_pool=True)
+
+    assert result["scope"] == "nodepools"
+    assert [(p["name"], p["cpu"]["current"], p["memory"]["current"]) for p in result["pools"]] == [
+        ("sys", 31.0, 51.0),
+        ("user", 6.0, 26.0),
+    ]
+
+
+class FakeClusterMetricsService:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def get_cluster_metrics(self, cluster_id, range_key, node=None, split_by_pool=False):
+        self.calls.append((range_key, node, split_by_pool))
+        return {"scope": "cluster", "range": range_key, "series": []}
+
+
+async def test_cluster_metrics_endpoint_validates_its_filter(app, db_session):
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api.v1.endpoints.aks_operations import _get_service
+    from app.auth import get_current_user
+    from app.core.database import get_db
+    from app.schemas.auth import UserContext, UserRole
+
+    service = FakeClusterMetricsService()
+    user = UserContext(
+        user_id="u",
+        object_id="00000000-0000-0000-0000-000000000000",
+        display_name="u",
+        email="u@example.com",
+        roles=[UserRole.READ],
+        raw_roles=["read"],
+        tenant_id="t",
+        allowed_subscriptions=[],
+    )
+
+    async def _db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[_get_service] = lambda: service
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            ok = await ac.get(
+                "/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "range": "7d", "split": "nodepool"}
+            )
+            injected = await ac.get(
+                "/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "node": "x' or node eq '*"}
+            )
+            both = await ac.get(
+                "/api/v1/aks/cluster-metrics", params={"cluster_id": CLUSTER, "node": "aks-1", "split": "nodepool"}
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert ok.status_code == 200 and service.calls == [("7d", None, True)]
+    assert injected.status_code == 422  # a node name can't smuggle OData into the filter
+    assert both.status_code == 400

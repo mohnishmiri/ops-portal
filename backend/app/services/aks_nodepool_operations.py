@@ -263,6 +263,26 @@ def latest_average(points: list[Any]) -> tuple[float | None, str | None]:
     return None, None
 
 
+def aks_metric_series(metrics: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    """AKS node metrics → rows per dimension value ("" when the response isn't split).
+
+    CPU and memory working set are percentages already; Maximum is the busiest
+    node within each interval.
+    """
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for metric in metrics:
+        key = "cpu" if metric.name.value == CLUSTER_CPU_METRIC else "memory"
+        for ts in metric.timeseries or []:
+            dim = ts.metadatavalues[0].value if getattr(ts, "metadatavalues", None) else ""
+            rows = out.setdefault(dim, {})
+            for p in ts.data or []:
+                t = p.time_stamp.isoformat()
+                row = rows.setdefault(t, {"t": t})
+                row[f"{key}_avg"] = round(p.average, 1) if p.average is not None else None
+                row[f"{key}_max"] = round(p.maximum, 1) if getattr(p, "maximum", None) is not None else None
+    return {dim: [rows[t] for t in sorted(rows)] for dim, rows in out.items()}
+
+
 def summarize_series(series: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
     averages = [r[f"{key}_avg"] for r in series if r.get(f"{key}_avg") is not None]
     if not averages:
@@ -571,6 +591,56 @@ class AKSNodePoolOperationsMixin:
             await asyncio.wait_for(asyncio.gather(*(_one(c) for c in clusters)), timeout=UTILISATION_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("cluster_utilisation_timeout", clusters=len(clusters))
+
+    async def get_cluster_metrics(
+        self, cluster_id: str, range_key: str = "24h", node: str | None = None, split_by_pool: bool = False
+    ) -> dict[str, Any]:
+        """CPU and memory working-set history from AKS platform metrics: the cluster, one node, or per node pool."""
+        lookback, grain = METRIC_RANGES[range_key]
+        subscription_id, _rg, _name = cluster_parts(cluster_id)
+        # node names are validated by the endpoint (Kubernetes name syntax), so they can't break the filter.
+        metric_filter = f"node eq '{node}'" if node else ("nodepool eq '*'" if split_by_pool else None)
+
+        async def _fetch() -> dict[str, Any]:
+            client = MonitorManagementClient(self.credential, subscription_id)  # type: ignore[attr-defined]
+            response = await asyncio.to_thread(
+                client.metrics.list,
+                cluster_id,
+                timespan=_timespan(lookback),
+                interval=grain,
+                metricnames=f"{CLUSTER_CPU_METRIC},{CLUSTER_MEMORY_METRIC}",
+                aggregation="Average,Maximum",
+                filter=metric_filter,
+            )
+            by_dim = aks_metric_series(response.value)
+            base = {"range": range_key, "interval": grain, "node": node}
+            if split_by_pool:
+                pools = [
+                    {
+                        "name": name,
+                        "series": series,
+                        "cpu": summarize_series(series, "cpu"),
+                        "memory": summarize_series(series, "memory"),
+                    }
+                    for name, series in sorted(by_dim.items())
+                    if name and any(r.get("cpu_avg") is not None for r in series)
+                ]
+                return {**base, "scope": "nodepools", "pools": pools}
+            series = next(iter(by_dim.values()), [])
+            return {
+                **base,
+                "scope": "node" if node else "cluster",
+                "series": series,
+                "cpu": summarize_series(series, "cpu"),
+                "memory": summarize_series(series, "memory"),
+            }
+
+        result, _tier = await data_cache.get_or_fetch(
+            key=CacheKeys.cluster_metrics(cluster_id, range_key, node or "", "nodepool" if split_by_pool else ""),
+            ttl=60,
+            fetch_fn=_fetch,
+        )
+        return result  # type: ignore[no-any-return]
 
     async def get_node_pool_metrics(
         self, cluster_id: str, nodepool_name: str, range_key: str = "24h"

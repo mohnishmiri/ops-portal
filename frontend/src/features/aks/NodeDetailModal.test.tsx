@@ -13,7 +13,28 @@ vi.mock("../../services/apiClient", () => ({
 vi.mock("../../services/aksApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../services/aksApi")>()),
   useNodeDetail: vi.fn(),
+  useClusterMetrics: vi.fn(() => ({
+    data: {
+      scope: "node",
+      range: "24h",
+      interval: "PT15M",
+      node: "aks-np-1",
+      series: [{ t: "2026-10-10T22:00:00Z", cpu_avg: 31.6, cpu_max: 40.0, memory_avg: 42.9, memory_max: 44.0 }],
+      cpu: { current: 31.6, average: 30.0, peak: 40.0 },
+      memory: { current: 42.9, average: 42.0, peak: 44.0 },
+    },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+  })),
 }));
+
+// recharts' ResponsiveContainer needs ResizeObserver, which jsdom lacks.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
 
 import * as aksApi from "../../services/aksApi";
 import { formatBytes, formatCores, NodeDetailModal } from "./NodeDetailModal";
@@ -85,6 +106,15 @@ describe("NodeDetailModal", () => {
     expect(screen.getByText("2/30")).toBeTruthy();
     expect(screen.getByText("Usage vs Requests")).toBeTruthy();
     expect(screen.getByText("Ubuntu 22.04.5 LTS")).toBeTruthy();
+  });
+
+  it("charts the node's CPU and memory history from Azure Monitor", () => {
+    renderModal();
+
+    expect(screen.getByText("CPU & Memory History")).toBeTruthy();
+    expect(aksApi.useClusterMetrics).toHaveBeenLastCalledWith("c1", "24h", { node: "aks-np-1", split: "none" });
+    expect(within(screen.getByLabelText("CPU summary")).getByText("40%")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Breakdown" })).toBeNull();
   });
 
   it("falls back to requested shares without metrics-server", () => {
