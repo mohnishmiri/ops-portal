@@ -60,7 +60,6 @@ import {
   AKS_PAGE_SIZE as PAGE_SIZE,
   GridPager,
   GridSearchBar,
-  PercentMeter,
   TileFilterNotice,
   useSearchPagination,
 } from "../features/aks/aksGridShared";
@@ -82,21 +81,7 @@ import { NodePoolsTab } from "../features/aks/NodePoolsTab";
 import { ClusterUtilisation } from "../features/aks/NodePoolUtilisation";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { formatAxiosError } from "../services/apiErrors";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  RadialBarChart,
-  RadialBar,
-} from "recharts";
+import { ResponsiveContainer, RadialBarChart, RadialBar } from "recharts";
 
 // ── SVG Icons ─────────────────────────────────────────────────────────
 
@@ -228,20 +213,6 @@ type TabKey =
   | "clusters" | "nodepools" | "deployments" | "statefulsets" | "daemonsets" | "pods"
   | "services" | "secrets" | "akvsync" | "configmaps" | "ingress" | "helm"
   | "cronjobs" | "jobs" | "history" | "audit";
-
-// ── Color Constants ───────────────────────────────────────────────────
-
-const COLORS = {
-  primary: "#3f9bca",
-  primaryDark: "#2d7aa8",
-  primaryLight: "#6bb8d8",
-  success: "#10b981",
-  warning: "#f59e0b",
-  danger: "#ef4444",
-  neutral: "#6b7280",
-};
-
-const PIE_COLORS = ["#3f9bca", "#2d7aa8", "#10b981", "#f59e0b", "#ef4444", "#6b7280"];
 
 // ── Reusable Helpers ──────────────────────────────────────────────────
 
@@ -903,29 +874,8 @@ const AKSOperationsPage: React.FC = () => {
     const runningClusters = filteredClusterInventory.filter((cluster) => cluster.power_state === "Running");
     const succeededClusters = filteredClusterInventory.filter((cluster) => cluster.provisioning_state === "Succeeded");
     const totalNodes = filteredClusterInventory.reduce((sum, cluster) => sum + (cluster.node_count || 0), 0);
-    // Cluster-wide CPU / memory in use, weighting each running cluster by its node count.
-    const inUse = (metric: "cpu_pct" | "memory_pct") => {
-      const measured = filteredClusterInventory.filter((c) => c.power_state === "Running" && c.utilisation?.[metric] != null && c.node_count);
-      const weight = measured.reduce((n, c) => n + c.node_count, 0);
-      return weight ? Math.round((measured.reduce((n, c) => n + (c.utilisation![metric] as number) * c.node_count, 0) / weight) * 10) / 10 : null;
-    };
-    const cpuInUse = inUse("cpu_pct");
-    const memoryInUse = inUse("memory_pct");
-
     const locationCounts = filteredClusterInventory.reduce((acc, cluster) => {
       acc[cluster.location] = (acc[cluster.location] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-
-    const environmentCounts = filteredClusterInventory.reduce((acc, cluster) => {
-      const key = cluster.environment || "unassigned";
-      acc[key] = (acc[key] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-
-    const statusCounts = filteredClusterInventory.reduce((acc, cluster) => {
-      const key = cluster.provisioning_state || "Unknown";
-      acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
 
@@ -933,35 +883,13 @@ const AKSOperationsPage: React.FC = () => {
       .map(([location, count]) => ({ location, count }))
       .sort((left, right) => right.count - left.count);
 
-    const environmentData = Object.entries(environmentCounts)
-      .map(([name, value]) => ({ name: name.toUpperCase(), value }))
-      .sort((left, right) => right.value - left.value);
-
-    const statusData = Object.entries(statusCounts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((left, right) => right.value - left.value);
-
-    const nodeFootprintData = [...filteredClusterInventory]
-      .sort((left, right) => (right.node_count || 0) - (left.node_count || 0))
-      .slice(0, 6)
-      .map((cluster) => ({
-        name: cluster.name.replace(/^attcc-/, ""),
-        nodes: cluster.node_count || 0,
-      }));
-
     return {
       totalClusters: filteredClusterInventory.length,
       runningClusters: runningClusters.length,
       succeededClusters: succeededClusters.length,
       totalNodes,
-      cpuInUse,
-      memoryInUse,
       locations: Object.keys(locationCounts).length,
       dominantLocation: locationData[0],
-      locationData,
-      environmentData,
-      statusData,
-      nodeFootprintData,
     };
   }, [filteredClusterInventory]);
 
@@ -1264,11 +1192,7 @@ const AKSOperationsPage: React.FC = () => {
         <MetricCard
           title="Total Nodes"
           value={clustersPending ? <Spinner className="h-6 w-6" /> : clusterOverview.totalNodes}
-          subtitle={
-            clusterOverview.cpuInUse != null || clusterOverview.memoryInUse != null
-              ? `CPU ${clusterOverview.cpuInUse ?? "—"}% · memory ${clusterOverview.memoryInUse ?? "—"}% in use`
-              : "Combined worker footprint across filtered inventory"
-          }
+          subtitle="Combined worker footprint across filtered inventory"
           icon={MetricCardIcons.server()}
           tone="blue"
           onClick={() => toggleClusterTile("with-nodes")}
@@ -1330,12 +1254,6 @@ const AKSOperationsPage: React.FC = () => {
                         {cluster.power_state || "Unknown"}
                       </span>
                     </div>
-                    {cluster.power_state === "Running" && (
-                      <div className="space-y-1 pt-1">
-                        <PercentMeter label="CPU" pct={cluster.utilisation?.cpu_pct} title="CPU in use across the cluster's nodes (AKS metrics, 5-minute average)" />
-                        <PercentMeter label="Memory" pct={cluster.utilisation?.memory_pct} title="Memory working set across the cluster's nodes (AKS metrics, 5-minute average)" />
-                      </div>
-                    )}
                   </div>
                 }
                 meta={
@@ -1379,7 +1297,7 @@ const AKSOperationsPage: React.FC = () => {
         <div className="mt-6">
           <h3 className="text-lg font-semibold text-gray-800 mb-4">Cluster Insights</h3>
           {utilisationCluster && (
-            <div className="mb-6">
+            <div>
               <ClusterUtilisation
                 key={utilisationCluster.id}
                 clusterId={utilisationCluster.id}
@@ -1400,80 +1318,6 @@ const AKSOperationsPage: React.FC = () => {
               />
             </div>
           )}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-            <div className="rounded-2xl border border-att-100 bg-white p-5 shadow-sm shadow-att-100/40 xl:col-span-2">
-              <div className="mb-4 flex items-center justify-between gap-3">
-                <div>
-                  <h4 className="font-semibold text-slate-800">Node Footprint by Cluster</h4>
-                  <p className="text-sm text-slate-500">Largest worker pools across the filtered AKS inventory</p>
-                </div>
-                <span className="rounded-full bg-att-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-att-700">
-                  Top {clusterOverview.nodeFootprintData.length}
-                </span>
-              </div>
-              <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={clusterOverview.nodeFootprintData} layout="vertical" margin={{ top: 8, right: 24, left: 8, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#d9ebf5" />
-                  <XAxis type="number" tick={{ fontSize: 12 }} />
-                  <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 12 }} />
-                  <Tooltip formatter={(value: number) => [`${value} nodes`, "Nodes"]} />
-                  <Bar dataKey="nodes" fill={COLORS.primary} radius={[0, 8, 8, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="rounded-2xl border border-att-100 bg-white p-5 shadow-sm shadow-att-100/40">
-              <h4 className="font-semibold text-slate-800">Provisioning Health</h4>
-              <p className="mb-4 text-sm text-slate-500">Current Azure provisioning state across visible clusters</p>
-              <ResponsiveContainer width="100%" height={260}>
-                <PieChart>
-                  <Pie
-                    data={clusterOverview.statusData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={58}
-                    outerRadius={88}
-                    dataKey="value"
-                    label={({ name, value }) => `${name}: ${value}`}
-                  >
-                    {clusterOverview.statusData.map((_, index) => (
-                      <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value: number) => [value, "Clusters"]} />
-                  <Legend verticalAlign="bottom" height={36} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="rounded-2xl border border-att-100 bg-white p-5 shadow-sm shadow-att-100/40">
-              <h4 className="font-semibold text-slate-800">By Location</h4>
-              <p className="mb-4 text-sm text-slate-500">Regional distribution of filtered clusters</p>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={clusterOverview.locationData} margin={{ top: 8, right: 12, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#d9ebf5" />
-                  <XAxis dataKey="location" tick={{ fontSize: 12 }} />
-                  <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
-                  <Tooltip formatter={(value: number) => [value, "Clusters"]} />
-                  <Bar dataKey="count" fill={COLORS.primaryDark} radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="rounded-2xl border border-att-100 bg-white p-5 shadow-sm shadow-att-100/40 xl:col-span-2">
-              <h4 className="font-semibold text-slate-800">By Environment</h4>
-              <p className="mb-4 text-sm text-slate-500">Environment mix based on the current cluster result set</p>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={clusterOverview.environmentData} margin={{ top: 8, right: 12, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#d9ebf5" />
-                  <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                  <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
-                  <Tooltip formatter={(value: number) => [value, "Clusters"]} />
-                  <Bar dataKey="value" fill={COLORS.primaryLight} radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
         </div>
       )}
     </div>

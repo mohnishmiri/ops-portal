@@ -280,7 +280,6 @@ class AKSOperationsService(
             except Exception as e:
                 logger.error("cluster_list_failed", subscription_id=sub["id"], error=str(e))
 
-        await self.attach_cluster_utilisation(clusters)
         logger.info("cluster_discovery_complete", total=len(clusters))
         return clusters
 

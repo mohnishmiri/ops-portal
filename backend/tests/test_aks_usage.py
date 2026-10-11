@@ -131,58 +131,6 @@ def test_pod_detail_containers_compare_usage_with_requests():
     assert detail["usage_available"] is False and detail["containers"][0]["cpu_usage_m"] is None
 
 
-def _point(minute, average):
-    return SimpleNamespace(
-        time_stamp=datetime(2026, 10, 11, 0, minute, tzinfo=UTC), average=average, maximum=None, minimum=None
-    )
-
-
-class FakeMonitor:
-    def __init__(self, fail_for: str | None = None):
-        self.fail_for = fail_for
-        self.metrics = SimpleNamespace(list=self._list)
-
-    def _list(self, resource_id, **kwargs):
-        if self.fail_for and self.fail_for in resource_id:
-            raise ValueError("AuthorizationFailed")
-        return SimpleNamespace(
-            value=[
-                SimpleNamespace(
-                    name=SimpleNamespace(value=np_ops.CLUSTER_CPU_METRIC),
-                    timeseries=[SimpleNamespace(data=[_point(0, 7.1), _point(5, 7.5), _point(10, None)])],
-                ),
-                SimpleNamespace(
-                    name=SimpleNamespace(value=np_ops.CLUSTER_MEMORY_METRIC),
-                    timeseries=[SimpleNamespace(data=[_point(0, 26.0), _point(5, 27.04)])],
-                ),
-            ]
-        )
-
-
-async def test_cluster_utilisation_from_aks_platform_metrics(monkeypatch):
-    monkeypatch.setattr(
-        np_ops, "MonitorManagementClient", lambda credential, subscription: FakeMonitor(fail_for="broken")
-    )
-    svc = AKSOperationsService.__new__(AKSOperationsService)
-    svc.credential = None
-    clusters = [
-        {"name": "uat", "id": "/subs/s/clusters/uat", "subscription_id": "s", "power_state": "Running"},
-        {"name": "broken", "id": "/subs/s/clusters/broken", "subscription_id": "s", "power_state": "Running"},
-        {"name": "dr", "id": "/subs/s/clusters/dr", "subscription_id": "s", "power_state": "Stopped"},
-    ]
-
-    await svc.attach_cluster_utilisation(clusters)
-
-    assert clusters[0]["utilisation"] == {
-        "cpu_pct": 7.5,
-        "memory_pct": 27.0,
-        "at": "2026-10-11T00:05:00+00:00",
-        "source": "azure-monitor",
-    }
-    assert clusters[1]["utilisation"] is None  # one failure doesn't hide the others
-    assert clusters[2]["utilisation"] is None  # a stopped cluster reports nothing
-
-
 # ── Cluster / node utilisation history (AKS platform metrics) ─────────
 
 

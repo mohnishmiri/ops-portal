@@ -59,13 +59,3 @@ describe("WorkloadPodsGrid", () => {
     expect(screen.getByText("128 MiB")).toBeTruthy();
   });
 });
-
-describe("PercentMeter", () => {
-  it("shows a percentage, or unknown without data", async () => {
-    const { PercentMeter } = await import("./aksGridShared");
-    const { rerender } = render(<PercentMeter label="CPU" pct={7.5} title="cpu" />);
-    expect(screen.getByTitle("cpu").textContent).toBe("CPU8%");
-    rerender(<PercentMeter label="CPU" pct={null} title="cpu" />);
-    expect(screen.getByTitle("cpu").textContent).toBe("CPU—");
-  });
-});

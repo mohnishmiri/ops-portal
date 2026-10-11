@@ -15,8 +15,6 @@ import apiClient from "./apiClient";
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface AKSCluster {
-  /** Current CPU / memory working set across the cluster's nodes (AKS platform metrics). */
-  utilisation?: { cpu_pct: number | null; memory_pct: number | null; at: string | null; source: string } | null;
   id: string;
   name: string;
   subscription_id: string;
