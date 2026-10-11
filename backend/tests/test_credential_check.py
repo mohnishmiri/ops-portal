@@ -1,167 +1,110 @@
-"""Credential checks: the guards, the audit trail, and the AD verdicts.
+"""Credential checks: the AD verdicts, the lockout guard, and what never happens.
 
 No directory, Artifactory or AAF is contacted — httpx and the LDAP bind are
-faked. What is exercised for real is everything that decides whether a
-credential leaves the portal at all, because that is the part that must not
-regress.
+faked. What is covered for real is the guard that decides whether a
+credential leaves the portal at all, and the mapping that turns a bind
+failure into an operationally useful answer.
 """
-
-from datetime import datetime, timedelta
-from types import SimpleNamespace
 
 import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.compiler import compiles
 
 from app.core.config import settings
-from app.models.database import AuditLog
 from app.services import credential_check_service as module
 from app.services.credential_check_service import (
-    AUDIT_ACTION,
     CheckOutcome,
     CredentialCheckError,
     CredentialCheckService,
+    assert_target_not_blocked,
+    record_outcome,
 )
 
-
-@compiles(JSONB, "sqlite")
-def _jsonb_as_json_on_sqlite(_type, _compiler, **_kw):
-    return "JSON"
+TARGET = "ITSERVICES\\m52142"
 
 
-@pytest.fixture
-async def factory(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cred.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(lambda c: AuditLog.__table__.create(c))
-    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
-    yield maker
-    await engine.dispose()
+@pytest.fixture(autouse=True)
+def _clean_guard():
+    """The guard is process state, so each test starts from empty."""
+    module.reset_guard()
+    yield
+    module.reset_guard()
 
 
-USER = SimpleNamespace(user_id="u1", email="ops@att.com", is_admin=False)
-OTHER = SimpleNamespace(user_id="u2", email="other@att.com", is_admin=False)
-ADMIN = SimpleNamespace(user_id="admin", email="admin@att.com", is_admin=True)
+def _service() -> CredentialCheckService:
+    return CredentialCheckService()
 
 
-async def _audit(db, *, user=USER, target="ITSERVICES\\m1", status="failure", when=None):
-    db.add(
-        AuditLog(
-            user_id=user.user_id,
-            user_email=user.email,
-            action=AUDIT_ACTION,
-            resource_type="credential_check",
-            resource_id=target,
-            details={"kind": "domain", "status": "invalid", "message": "nope"},
-            status=status,
-            timestamp=when or datetime.utcnow(),
-        )
-    )
-    await db.commit()
+def _fail(status: str = "invalid") -> CheckOutcome:
+    return CheckOutcome(valid=False, status=status, message="nope")
 
 
-# ── Rate limit and lockout guard ───────────────────────────────────────
+# ── Lockout guard ──────────────────────────────────────────────────────
 
 
-@pytest.mark.anyio
-async def test_user_is_rate_limited_after_the_window_fills(factory):
-    async with factory() as db:
-        for i in range(module._MAX_CHECKS_PER_WINDOW):
-            await _audit(db, target=f"ITSERVICES\\u{i}", status="success")
-        with pytest.raises(CredentialCheckError) as excinfo:
-            await CredentialCheckService(db).assert_within_limits(USER, "ITSERVICES\\new")
-    assert excinfo.value.status == "rate_limited"
+def test_a_clean_target_is_allowed():
+    assert_target_not_blocked(TARGET)
 
 
-@pytest.mark.anyio
-async def test_older_checks_fall_out_of_the_window(factory):
-    stale = datetime.utcnow() - timedelta(minutes=module._WINDOW_MINUTES + 1)
-    async with factory() as db:
-        for i in range(module._MAX_CHECKS_PER_WINDOW):
-            await _audit(db, target=f"ITSERVICES\\u{i}", status="success", when=stale)
-        await CredentialCheckService(db).assert_within_limits(USER, "ITSERVICES\\new")
-
-
-@pytest.mark.anyio
-async def test_another_users_checks_do_not_consume_the_limit(factory):
-    async with factory() as db:
-        for i in range(module._MAX_CHECKS_PER_WINDOW):
-            await _audit(db, user=OTHER, target=f"ITSERVICES\\u{i}", status="success")
-        await CredentialCheckService(db).assert_within_limits(USER, "ITSERVICES\\new")
-
-
-@pytest.mark.anyio
-async def test_repeated_failures_against_one_target_are_blocked(factory):
+def test_repeated_failures_pause_a_target():
     """The guard that keeps a retry loop from locking the account out."""
-    async with factory() as db:
-        for _ in range(module._MAX_FAILURES_PER_TARGET):
-            await _audit(db, target="ITSERVICES\\m52142", status="failure")
-        with pytest.raises(CredentialCheckError) as excinfo:
-            await CredentialCheckService(db).assert_within_limits(USER, "ITSERVICES\\m52142")
+    for _ in range(module._MAX_FAILURES_PER_TARGET):
+        record_outcome(TARGET, _fail())
+
+    with pytest.raises(CredentialCheckError) as excinfo:
+        assert_target_not_blocked(TARGET)
     assert excinfo.value.status == "lockout_guard"
 
 
-@pytest.mark.anyio
-async def test_the_lockout_guard_counts_every_users_failures(factory):
-    """One account, two people guessing: the account is what gets locked."""
-    async with factory() as db:
-        for _ in range(module._MAX_FAILURES_PER_TARGET):
-            await _audit(db, user=OTHER, target="ITSERVICES\\m52142", status="failure")
-        with pytest.raises(CredentialCheckError) as excinfo:
-            await CredentialCheckService(db).assert_within_limits(USER, "ITSERVICES\\m52142")
-    assert excinfo.value.status == "lockout_guard"
+def test_one_failure_short_of_the_limit_still_runs():
+    for _ in range(module._MAX_FAILURES_PER_TARGET - 1):
+        record_outcome(TARGET, _fail())
+    assert_target_not_blocked(TARGET)
 
 
-@pytest.mark.anyio
-async def test_successful_checks_of_a_target_do_not_block_it(factory):
-    """Only failures risk a lockout, so only failures close the target off."""
-    async with factory() as db:
-        for _ in range(module._MAX_FAILURES_PER_TARGET + 1):
-            await _audit(db, target="ITSERVICES\\m52142", status="success")
-        # Below the per-user volume limit, so if this raises it is the target
-        # guard miscounting successes as failures.
-        await CredentialCheckService(db).assert_within_limits(USER, "ITSERVICES\\m52142")
+def test_a_success_clears_the_count():
+    """Someone who mistypes once then gets it right must not be left blocked."""
+    for _ in range(module._MAX_FAILURES_PER_TARGET - 1):
+        record_outcome(TARGET, _fail())
+    record_outcome(TARGET, CheckOutcome(valid=True, status="valid", message="ok"))
+
+    for _ in range(module._MAX_FAILURES_PER_TARGET - 1):
+        record_outcome(TARGET, _fail())
+    assert_target_not_blocked(TARGET)
 
 
-# ── Audit trail ────────────────────────────────────────────────────────
+def test_unreachable_services_do_not_count_toward_a_block():
+    """A network failure says nothing about the password, so it cannot lock it out."""
+    for _ in range(module._MAX_FAILURES_PER_TARGET * 2):
+        record_outcome(TARGET, _fail(status="error"))
+    assert_target_not_blocked(TARGET)
 
 
-@pytest.mark.anyio
-async def test_the_audit_row_records_the_outcome_and_never_the_secret(factory):
-    async with factory() as db:
-        await CredentialCheckService(db).record(
-            user=USER,
-            ip="10.0.0.1",
-            kind="domain",
-            target="ITSERVICES\\m52142",
-            outcome=CheckOutcome(valid=False, status="expired", message="The password is correct but has expired."),
-        )
-        rows = list((await db.execute(select(AuditLog))).scalars().all())
+def test_the_block_expires(monkeypatch):
+    for _ in range(module._MAX_FAILURES_PER_TARGET):
+        record_outcome(TARGET, _fail())
+    with pytest.raises(CredentialCheckError):
+        assert_target_not_blocked(TARGET)
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.status == "failure"
-    assert row.resource_id == "ITSERVICES\\m52142"
-    assert row.details["status"] == "expired"
-    assert row.details["kind"] == "domain"
-    serialised = str(row.details) + str(row.resource_id)
-    assert "password" not in serialised.lower() or "hunter2" not in serialised
+    later = module.time.monotonic() + module._TARGET_BLOCK_SECONDS + 1
+    monkeypatch.setattr(module.time, "monotonic", lambda: later)
+    assert_target_not_blocked(TARGET)
 
 
-@pytest.mark.anyio
-async def test_history_is_scoped_to_the_caller_but_admins_see_everyone(factory):
-    async with factory() as db:
-        await _audit(db, user=USER, target="ITSERVICES\\mine")
-        await _audit(db, user=OTHER, target="ITSERVICES\\theirs")
+def test_the_guard_is_per_target():
+    for _ in range(module._MAX_FAILURES_PER_TARGET):
+        record_outcome(TARGET, _fail())
+    assert_target_not_blocked("ITSERVICES\\someone-else")
 
-        mine = await CredentialCheckService(db).history(USER)
-        everyone = await CredentialCheckService(db).history(ADMIN)
 
-    assert [row["target"] for row in mine] == ["ITSERVICES\\mine"]
-    assert {row["target"] for row in everyone} == {"ITSERVICES\\mine", "ITSERVICES\\theirs"}
+# ── Nothing is persisted ───────────────────────────────────────────────
+
+
+def test_the_service_needs_no_database():
+    """A check writes nothing, so it takes no session and has no history."""
+    service = CredentialCheckService()
+    assert not hasattr(service, "db")
+    for gone in ("record", "history", "assert_within_limits"):
+        assert not hasattr(service, gone), f"{gone} should have gone with the audit trail"
 
 
 # ── Active Directory verdicts ──────────────────────────────────────────
@@ -196,7 +139,6 @@ class _Conn:
 )
 def test_ad_subcodes_separate_wrong_from_expired_locked_and_disabled(monkeypatch, subcode, status):
     """The whole point of the tool: 'wrong password' is not the only answer."""
-    service = CredentialCheckService(db=None)  # type: ignore[arg-type]
     monkeypatch.setattr(module, "Server", lambda *a, **k: object())
     monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
     monkeypatch.setattr(
@@ -205,7 +147,7 @@ def test_ad_subcodes_separate_wrong_from_expired_locked_and_disabled(monkeypatch
         lambda *a, **k: _Conn(False, {"message": f"80090308: data {subcode}, v4563"}),
     )
 
-    outcome = service._bind("ldaps://dc.example.com:636", "ITSERVICES\\m52142", "secret")
+    outcome = _service()._bind("ldaps://dc.example.com:636", TARGET, "secret")
 
     assert outcome.valid is False
     assert outcome.status == status
@@ -218,7 +160,7 @@ def test_a_successful_bind_is_valid_and_unbinds(monkeypatch):
     monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
     monkeypatch.setattr(module, "Connection", lambda *a, **k: conn)
 
-    outcome = CredentialCheckService(db=None)._bind("ldaps://dc:636", "ITSERVICES\\m1", "s")  # type: ignore[arg-type]
+    outcome = _service()._bind("ldaps://dc:636", TARGET, "s")
 
     assert outcome.valid is True
     assert outcome.status == "valid"
@@ -234,7 +176,7 @@ def test_an_unreachable_directory_is_an_error_not_a_rejection(monkeypatch):
     monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
     monkeypatch.setattr(module, "Server", _raise)
 
-    outcome = CredentialCheckService(db=None)._bind("ldaps://dc:636", "ITSERVICES\\m1", "s")  # type: ignore[arg-type]
+    outcome = _service()._bind("ldaps://dc:636", TARGET, "s")
 
     assert outcome.status == "error"
     assert outcome.valid is False
@@ -243,7 +185,7 @@ def test_an_unreachable_directory_is_an_error_not_a_rejection(monkeypatch):
 @pytest.mark.anyio
 async def test_an_unconfigured_domain_is_refused_before_any_bind():
     with pytest.raises(CredentialCheckError) as excinfo:
-        await CredentialCheckService(db=None).check_domain("ITSERVICES", "m1", "s")  # type: ignore[arg-type]
+        await _service().check_domain("ITSERVICES", "m1", "s")
     assert excinfo.value.status == "unconfigured"
 
 
@@ -251,6 +193,8 @@ async def test_an_unconfigured_domain_is_refused_before_any_bind():
 
 
 def _http(monkeypatch, *, status_code: int, payload: dict | None = None, raises: Exception | None = None):
+    seen: list[tuple[str, object]] = []
+
     class _Client:
         def __init__(self, *a, **k):
             pass
@@ -261,12 +205,14 @@ def _http(monkeypatch, *, status_code: int, payload: dict | None = None, raises:
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, _url, **_kwargs):
+        async def get(self, url, **kwargs):
+            seen.append((url, kwargs.get("auth")))
             if raises is not None:
                 raise raises
             return httpx.Response(status_code, json=payload if payload is not None else {})
 
     monkeypatch.setattr(module.httpx, "AsyncClient", _Client)
+    return seen
 
 
 @pytest.mark.anyio
@@ -274,16 +220,23 @@ def _http(monkeypatch, *, status_code: int, payload: dict | None = None, raises:
     ("code", "valid", "status"),
     [(200, True, "valid"), (401, False, "invalid"), (403, False, "invalid"), (502, False, "error")],
 )
-async def test_jfrog_token_verdicts(monkeypatch, code, valid, status):
+async def test_jfrog_verdicts(monkeypatch, code, valid, status):
     _http(monkeypatch, status_code=code, payload={"version": "7.77.3"})
-    outcome = await CredentialCheckService(db=None).check_jfrog("tok")  # type: ignore[arg-type]
+    outcome = await _service().check_jfrog("m52142@att.com", "tok")
     assert (outcome.valid, outcome.status) == (valid, status)
+
+
+@pytest.mark.anyio
+async def test_jfrog_sends_the_username_and_token_as_basic_auth(monkeypatch):
+    seen = _http(monkeypatch, status_code=200, payload={"version": "7.77.3"})
+    await _service().check_jfrog("m52142@att.com", "tok")
+    assert seen[0][1] == ("m52142@att.com", "tok")
 
 
 @pytest.mark.anyio
 async def test_jfrog_timeout_is_not_reported_as_an_invalid_token(monkeypatch):
     _http(monkeypatch, status_code=200, raises=httpx.TimeoutException("timed out"))
-    outcome = await CredentialCheckService(db=None).check_jfrog("tok")  # type: ignore[arg-type]
+    outcome = await _service().check_jfrog("m52142@att.com", "tok")
     assert outcome.status == "error"
     assert "Timed out" in outcome.message
 
@@ -295,33 +248,17 @@ async def test_jfrog_timeout_is_not_reported_as_an_invalid_token(monkeypatch):
 )
 async def test_aaf_account_verdicts(monkeypatch, code, valid, status):
     _http(monkeypatch, status_code=code)
-    outcome = await CredentialCheckService(db=None).check_aaf("prod", "m1@com.att.attcc", "s")  # type: ignore[arg-type]
+    outcome = await _service().check_aaf("prod", "m1@com.att.attcc", "s")
     assert (outcome.valid, outcome.status) == (valid, status)
 
 
 @pytest.mark.anyio
 async def test_aaf_uses_the_environment_specific_host(monkeypatch):
-    seen: list[str] = []
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, **_kwargs):
-            seen.append(url)
-            return httpx.Response(200)
-
-    monkeypatch.setattr(module.httpx, "AsyncClient", _Client)
-    service = CredentialCheckService(db=None)  # type: ignore[arg-type]
+    seen = _http(monkeypatch, status_code=200)
+    service = _service()
 
     await service.check_aaf("prod", "m1@com.att.attcc", "s")
     await service.check_aaf("nonprod", "m1@com.att.attcc", "s")
 
-    assert seen[0].startswith(settings.CRED_CHECK_AAF_URL_PROD)
-    assert seen[1].startswith(settings.CRED_CHECK_AAF_URL_NONPROD)
+    assert seen[0][0].startswith(settings.CRED_CHECK_AAF_URL_PROD)
+    assert seen[1][0].startswith(settings.CRED_CHECK_AAF_URL_NONPROD)

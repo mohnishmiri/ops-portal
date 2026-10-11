@@ -23,8 +23,8 @@
  *  4. Register the resource in backend resource_registry.py.
  */
 
-import React, { Component, ErrorInfo, ReactNode, useEffect } from "react";
-import { BrowserRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
+import React, { Component, ErrorInfo, ReactNode, useCallback, useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { MsalProvider, AuthenticatedTemplate, UnauthenticatedTemplate, useMsal } from "@azure/msal-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { msalInstance } from "./services/apiClient";
@@ -91,6 +91,12 @@ interface NavItem {
   label: string;
   module?: string;
   page?: string;
+  /**
+   * Rendered as a dropdown under this item. The parent stays a link to its
+   * own page; the children are separate pages grouped beneath it. Used to
+   * keep the nav bar from overflowing as pages are added.
+   */
+  children?: NavItem[];
 }
 
 const ALL_NAV_ITEMS: NavItem[] = [
@@ -99,16 +105,92 @@ const ALL_NAV_ITEMS: NavItem[] = [
   { to: "/keyvault",   label: "Key Vault",             module: "keyvault",         page: "keyvault_main" },
   { to: "/certificates", label: "Certificates",         module: "certificates",     page: "certificates_main" },
   { to: "/aks",        label: "AKS Operations",        module: "aks_operations",   page: "aks_main" },
-  { to: "/compliance", label: "Compliance",            module: "compliance",       page: "compliance_main" },
+  {
+    to: "/compliance", label: "Compliance",            module: "compliance",       page: "compliance_main",
+    children: [
+      { to: "/compliance", label: "Compliance & Drift", module: "compliance", page: "compliance_main" },
+      { to: "/tools/credential-check", label: "Credential Check", module: "compliance", page: "credential_check_main" },
+    ],
+  },
   { to: "/infra-alerts", label: "Infra Alerts",        module: "infra_alerts",     page: "infra_alerts_main" },
   { to: "/env-scheduler", label: "Env Scheduler",      module: "aks_operations",   page: "env_scheduler" },
-  { to: "/tools/credential-check", label: "Credential Check", module: "tools",      page: "credential_check_main" },
 ];
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-2 rounded-md text-sm font-medium transition ${
     isActive ? "bg-att-50 text-att-600" : "text-gray-600 hover:text-att-500 hover:bg-att-50"
   }`;
+
+/**
+ * A nav entry with children: the label opens a dropdown of its pages rather
+ * than navigating. Highlighted whenever any of its children is the active
+ * route, so the group still reads as "where you are".
+ */
+const NavDropdown: React.FC<{ item: NavItem; isVisible: (child: NavItem) => boolean }> = ({ item, isVisible }) => {
+  const [open, setOpen] = useState(false);
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const location = useLocation();
+  const children = (item.children ?? []).filter(isVisible);
+  const active = children.some((child) => location.pathname === child.to);
+
+  // Close on an outside click or Escape, the way a menu is expected to behave.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  if (children.length === 0) return null;
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className={`${navLinkClass({ isActive: active })} inline-flex items-center gap-1`}
+      >
+        {item.label}
+        <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="currentColor" aria-hidden="true">
+          <path d="M6 9 1.5 4h9L6 9Z" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 z-20 mt-1 min-w-[13rem] overflow-hidden rounded-lg border border-att-100 bg-white py-1 shadow-lg"
+        >
+          {children.map((child) => (
+            <NavLink
+              key={child.to}
+              to={child.to}
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className={({ isActive }) =>
+                `block px-4 py-2 text-sm transition ${
+                  isActive ? "bg-att-50 text-att-600 font-medium" : "text-gray-700 hover:bg-att-50 hover:text-att-600"
+                }`
+              }
+            >
+              {child.label}
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const Navigation: React.FC = () => {
   const msal = isDevMode ? null : useMsal();
@@ -120,12 +202,16 @@ const Navigation: React.FC = () => {
 
   // Filter nav items to only those the user can view.
   // While permissions are still loading we show all items (they'll be guarded at the route level).
-  const visibleNavItems = ALL_NAV_ITEMS.filter((item) => {
-    if (isAdmin || permsLoading) return true;
-    const modOk  = item.module ? canViewModule(item.module) : true;
-    const pageOk = item.page   ? canViewPage(item.page)   : true;
-    return modOk && pageOk;
-  });
+  const isVisible = useCallback(
+    (item: NavItem) => {
+      if (isAdmin || permsLoading) return true;
+      const modOk  = item.module ? canViewModule(item.module) : true;
+      const pageOk = item.page   ? canViewPage(item.page)   : true;
+      return modOk && pageOk;
+    },
+    [isAdmin, permsLoading, canViewModule, canViewPage],
+  );
+  const visibleNavItems = ALL_NAV_ITEMS.filter(isVisible);
 
   return (
     <nav className="bg-white shadow-sm border-b border-att-400/20">
@@ -141,11 +227,15 @@ const Navigation: React.FC = () => {
             </div>
 
             <div className="hidden md:flex items-center gap-1">
-              {visibleNavItems.map((item) => (
-                <NavLink key={item.to} to={item.to} end={item.to === "/"} className={navLinkClass}>
-                  {item.label}
-                </NavLink>
-              ))}
+              {visibleNavItems.map((item) =>
+                item.children ? (
+                  <NavDropdown key={item.to} item={item} isVisible={isVisible} />
+                ) : (
+                  <NavLink key={item.to} to={item.to} end={item.to === "/"} className={navLinkClass}>
+                    {item.label}
+                  </NavLink>
+                ),
+              )}
               {/* Every signed-in user: see and request project / app access. */}
               <NavLink to="/access" end className={navLinkClass}>
                 My Access
@@ -398,13 +488,14 @@ const MainContent: React.FC = () => (
 
           {/* Project / app / subscription access */}
           {/*
-            Tools pages read no Azure subscription, so they do not require a
-            subscription grant the way every module page above does.
+            Grouped under the Compliance nav dropdown, but its own page: it
+            reads no Azure subscription, so unlike the module pages above it
+            does not require a subscription grant.
           */}
           <Route
             path="/tools/credential-check"
             element={
-              <ProtectedRoute module="tools" page="credential_check_main" label="Credential Check" requiresSubscription={false}>
+              <ProtectedRoute module="compliance" page="credential_check_main" label="Credential Check" requiresSubscription={false}>
                 <CredentialCheckPage />
               </ProtectedRoute>
             }

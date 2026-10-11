@@ -4,9 +4,11 @@
  * Secrets are sent once, over the portal's own API, and are never stored in
  * React Query state: the mutations below take the credential as an argument
  * and keep only the result. Do not add a query that caches a request body.
+ *
+ * There is no history endpoint — a check is not recorded anywhere.
  */
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import apiClient from "./apiClient";
 
 const BASE = "/tools/credential-checks";
@@ -26,17 +28,6 @@ export interface CredentialCheckResult {
   details: Record<string, unknown>;
 }
 
-export interface CredentialCheckHistoryEntry {
-  id: number;
-  checked_at: string | null;
-  user_email: string | null;
-  target: string | null;
-  kind: string;
-  status: string;
-  message: string;
-  valid: boolean;
-}
-
 export interface DomainCheckInput {
   domain: DomainName;
   username: string;
@@ -44,6 +35,7 @@ export interface DomainCheckInput {
 }
 
 export interface JFrogCheckInput {
+  username: string;
   token: string;
 }
 
@@ -53,32 +45,12 @@ export interface AafCheckInput {
   password: string;
 }
 
-export const credentialCheckKeys = {
-  history: ["tools", "credential-checks", "history"] as const,
-};
-
-export function useCredentialCheckHistory(enabled = true) {
-  return useQuery({
-    queryKey: credentialCheckKeys.history,
-    queryFn: async () => {
-      const { data } = await apiClient.get<CredentialCheckHistoryEntry[]>(`${BASE}/history`);
-      return data;
-    },
-    enabled,
-    staleTime: 30_000,
-  });
-}
-
-/** Shared by the three checks: run it, then refresh the history grid. */
+/** Shared by the three checks. Nothing is cached: the result is the answer. */
 function useCheckMutation<TInput>(path: string) {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (input: TInput) => {
       const { data } = await apiClient.post<CredentialCheckResult>(`${BASE}/${path}`, input);
       return data;
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: credentialCheckKeys.history });
     },
   });
 }

@@ -12,39 +12,25 @@
  *  • a credential is held in component state only until its check returns,
  *    then cleared — nothing is cached by React Query or written to storage;
  *  • inputs are type="password" with autoComplete off;
- *  • the backend audits the target and the outcome, never the secret.
+ *  • nothing is persisted anywhere: no audit row, no history, no result log.
  *
  * Gating matches the API exactly: canWrite && hasCapability("credential_check").
  */
 
-import React, { useCallback, useMemo, useState } from "react";
-import { MetricCard, MetricCardIcons } from "../components/MetricCard";
-import { SortableHeader, gridStyles } from "../components/gridStyles";
+import React, { useCallback, useState } from "react";
+import { MetricCardIcons } from "../components/MetricCard";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
-import {
-  GridHeader,
-  GridMessageRow,
-  GridPagerBar,
-  fieldLabel,
-  fmtWhen,
-  inputClass,
-  panelClass,
-  primaryButton,
-  textMatches,
-  useGridRows,
-} from "../features/access/accessShared";
+import { fieldLabel, inputClass, panelClass, primaryButton } from "../features/access/accessShared";
 import { formatAxiosError } from "../services/apiErrors";
 import {
   type AafEnvironment,
   type CheckKind,
-  type CredentialCheckHistoryEntry,
   type CredentialCheckResult,
   type DomainName,
   useCheckAafPassword,
   useCheckDomainPassword,
   useCheckJFrogToken,
-  useCredentialCheckHistory,
 } from "../services/toolsApi";
 
 // ── Status presentation ──────────────────────────────────────────────────────
@@ -76,12 +62,6 @@ const StatusChip: React.FC<{ status: string }> = ({ status }) => {
       {style.label}
     </span>
   );
-};
-
-const KIND_LABELS: Record<string, string> = {
-  domain: "Domain account",
-  jfrog: "JFrog token",
-  aaf: "AAF account",
 };
 
 // ── Result panel ─────────────────────────────────────────────────────────────
@@ -124,17 +104,20 @@ const CheckCard: React.FC<{
   description: string;
   icon: React.ReactNode;
   onSubmit: () => void;
-  disabled: boolean;
+  /** False only when the user genuinely lacks permission. */
+  allowed: boolean;
+  /** True while a required field is still empty. */
+  incomplete: boolean;
   pending: boolean;
   result: CredentialCheckResult | null;
   error: string | null;
   children: React.ReactNode;
-}> = ({ title, description, icon, onSubmit, disabled, pending, result, error, children }) => (
+}> = ({ title, description, icon, onSubmit, allowed, incomplete, pending, result, error, children }) => (
   <form
     className={`${panelClass} flex flex-col gap-4`}
     onSubmit={(event) => {
       event.preventDefault();
-      if (!disabled && !pending) onSubmit();
+      if (allowed && !incomplete && !pending) onSubmit();
     }}
   >
     <div className="flex items-start gap-3">
@@ -148,134 +131,28 @@ const CheckCard: React.FC<{
     <div className="space-y-3">{children}</div>
 
     <div className="flex items-center gap-3">
-      <button type="submit" className={primaryButton} disabled={disabled || pending}>
+      <button type="submit" className={primaryButton} disabled={!allowed || incomplete || pending}>
         {pending ? "Checking…" : "Check"}
       </button>
-      {disabled && <span className="text-xs text-gray-500">You do not have permission to run checks.</span>}
+      {/* Only a real permission problem says so — an empty field is not one. */}
+      {!allowed && <span className="text-xs text-gray-500">You do not have permission to run checks.</span>}
     </div>
 
     <ResultPanel result={result} error={error} />
   </form>
 );
 
-// ── History grid ─────────────────────────────────────────────────────────────
-
-type HistorySortKey = "checked_at" | "kind" | "target" | "status" | "user_email";
-
-const historyAccessor = (row: CredentialCheckHistoryEntry, key: HistorySortKey): string | number => {
-  switch (key) {
-    case "checked_at":
-      return row.checked_at ?? "";
-    case "kind":
-      return KIND_LABELS[row.kind] ?? row.kind;
-    case "target":
-      return row.target ?? "";
-    case "status":
-      return statusStyle(row.status).label;
-    case "user_email":
-      return row.user_email ?? "";
-  }
-};
-
-const HistoryGrid: React.FC<{
-  rows: CredentialCheckHistoryEntry[];
-  isLoading: boolean;
-  error: string | null;
-  showUser: boolean;
-}> = ({ rows, isLoading, error, showUser }) => {
-  const grid = useGridRows<CredentialCheckHistoryEntry, HistorySortKey>(rows, {
-    matches: (row, query) =>
-      textMatches(query, row.target, KIND_LABELS[row.kind] ?? row.kind, statusStyle(row.status).label, row.user_email),
-    accessor: historyAccessor,
-    initialSort: { key: "checked_at", direction: "desc" },
-  });
-
-  const header = (label: string, key: HistorySortKey) => (
-    <th className={gridStyles.headerCell}>
-      <SortableHeader
-        label={label}
-        active={grid.sort.key === key}
-        direction={grid.sort.direction}
-        onClick={() => grid.toggleSort(key)}
-      />
-    </th>
-  );
-
-  const columns = showUser ? 5 : 4;
-
-  return (
-    <div className={gridStyles.shell}>
-      <GridHeader
-        title="Recent checks"
-        subtitle={
-          showUser
-            ? "Every credential check run in the portal. The credential itself is never recorded."
-            : "The checks you have run. The credential itself is never recorded."
-        }
-        search={grid.search}
-        onSearch={grid.setSearch}
-        placeholder="Search target, type, result…"
-      />
-      <div className="overflow-x-auto">
-        <table className={gridStyles.table}>
-          <thead className={gridStyles.head}>
-            <tr>
-              {header("When", "checked_at")}
-              {header("Type", "kind")}
-              {header("Target", "target")}
-              {showUser && header("Checked by", "user_email")}
-              {header("Result", "status")}
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              <GridMessageRow colSpan={columns}>Loading checks…</GridMessageRow>
-            ) : error ? (
-              <GridMessageRow colSpan={columns} tone="error">
-                {error}
-              </GridMessageRow>
-            ) : grid.pageRows.length === 0 ? (
-              <GridMessageRow colSpan={columns}>No credential checks yet.</GridMessageRow>
-            ) : (
-              grid.pageRows.map((row) => (
-                <tr key={row.id} className={gridStyles.row}>
-                  <td className={gridStyles.cell}>{fmtWhen(row.checked_at)}</td>
-                  <td className={gridStyles.cell}>{KIND_LABELS[row.kind] ?? row.kind}</td>
-                  <td className={gridStyles.monoCell}>{row.target ?? "—"}</td>
-                  {showUser && <td className={gridStyles.cell}>{row.user_email ?? "—"}</td>}
-                  <td className={gridStyles.cell}>
-                    <span title={row.message}>
-                      <StatusChip status={row.status} />
-                    </span>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-      <GridPagerBar
-        page={grid.page}
-        totalPages={grid.totalPages}
-        total={grid.total}
-        pageSize={grid.pageSize}
-        onPage={grid.setPage}
-        noun="checks"
-      />
-    </div>
-  );
-};
-
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 const CredentialCheckPage: React.FC = () => {
-  const { canWrite, isAdmin } = useAuth();
+  const { canWrite } = useAuth();
   const { hasCapability } = usePermissions();
   const canCheck = canWrite && hasCapability("credential_check");
 
   const [domain, setDomain] = useState<DomainName>("ITSERVICES");
   const [username, setUsername] = useState("");
   const [domainPassword, setDomainPassword] = useState("");
+  const [jfrogUsername, setJfrogUsername] = useState("");
   const [jfrogToken, setJfrogToken] = useState("");
   const [aafEnvironment, setAafEnvironment] = useState<AafEnvironment>("prod");
   const [aafAccount, setAafAccount] = useState("");
@@ -287,9 +164,6 @@ const CredentialCheckPage: React.FC = () => {
   const domainCheck = useCheckDomainPassword();
   const jfrogCheck = useCheckJFrogToken();
   const aafCheck = useCheckAafPassword();
-
-  const history = useCredentialCheckHistory();
-  const rows = useMemo(() => history.data ?? [], [history.data]);
 
   /**
    * Run one check and clear its secret afterwards, whatever the outcome —
@@ -316,11 +190,6 @@ const CredentialCheckPage: React.FC = () => {
     [],
   );
 
-  const validCount = rows.filter((row) => row.valid).length;
-  const attentionCount = rows.filter((row) =>
-    ["invalid", "expired", "locked", "disabled", "must_change"].includes(row.status),
-  ).length;
-
   return (
     <div className="py-6 space-y-6">
       {/* Header */}
@@ -330,40 +199,15 @@ const CredentialCheckPage: React.FC = () => {
           Credential Check
         </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Check whether a domain password, JFrog token or AAF account password still authenticates. One credential at a
-          time — the portal records who checked what and the result, never the credential.
+          Check whether a domain password, a JFrog token or an AAF account password still authenticates. Nothing is
+          stored — the credential and the result are gone as soon as the answer is shown.
         </p>
       </div>
 
       <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
         <span className="font-semibold">A failed check counts as a failed sign-in.</span> Repeated wrong passwords can
-        lock the account out in Active Directory, so the portal blocks a target after a few failures. Check a password
-        you believe is current — this is not a way to find one.
-      </div>
-
-      {/* KPIs */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <MetricCard
-          title="Checks recorded"
-          value={String(rows.length)}
-          icon={MetricCardIcons.activity()}
-          subtitle={isAdmin ? "Across the portal" : "Run by you"}
-          tone="att"
-        />
-        <MetricCard
-          title="Valid"
-          value={String(validCount)}
-          icon={MetricCardIcons.checkCircle()}
-          subtitle="Authenticated successfully"
-          tone="green"
-        />
-        <MetricCard
-          title="Need attention"
-          value={String(attentionCount)}
-          icon={MetricCardIcons.alert()}
-          subtitle="Rejected, expired, locked or disabled"
-          tone={attentionCount > 0 ? "amber" : "slate"}
-        />
+        lock the account out in Active Directory, so the portal pauses a target after a few failures in a row. Check a
+        password you believe is current — this is not a way to find one.
       </div>
 
       {/* Checks */}
@@ -380,7 +224,8 @@ const CredentialCheckPage: React.FC = () => {
               () => setDomainPassword(""),
             )
           }
-          disabled={!canCheck || !username.trim() || !domainPassword}
+          allowed={canCheck}
+          incomplete={!username.trim() || !domainPassword}
           pending={domainCheck.isPending}
           result={results.domain ?? null}
           error={errors.domain ?? null}
@@ -429,14 +274,35 @@ const CredentialCheckPage: React.FC = () => {
 
         <CheckCard
           title="JFrog token"
-          description="Access token or API key, checked against artifact.it.att.com."
+          description="Username and token, checked against artifact.it.att.com."
           icon={MetricCardIcons.layers("h-5 w-5")}
-          onSubmit={() => run("jfrog", jfrogCheck.mutateAsync, { token: jfrogToken }, () => setJfrogToken(""))}
-          disabled={!canCheck || !jfrogToken}
+          onSubmit={() =>
+            run(
+              "jfrog",
+              jfrogCheck.mutateAsync,
+              { username: jfrogUsername.trim(), token: jfrogToken },
+              () => setJfrogToken(""),
+            )
+          }
+          allowed={canCheck}
+          incomplete={!jfrogUsername.trim() || !jfrogToken}
           pending={jfrogCheck.isPending}
           result={results.jfrog ?? null}
           error={errors.jfrog ?? null}
         >
+          <div>
+            <label className={fieldLabel} htmlFor="cc-jfrog-username">
+              Username
+            </label>
+            <input
+              id="cc-jfrog-username"
+              className={inputClass}
+              value={jfrogUsername}
+              onChange={(event) => setJfrogUsername(event.target.value)}
+              placeholder="m52142@att.com"
+              autoComplete="off"
+            />
+          </div>
           <div>
             <label className={fieldLabel} htmlFor="cc-jfrog-token">
               Token
@@ -451,7 +317,7 @@ const CredentialCheckPage: React.FC = () => {
               autoComplete="off"
             />
             <p className="mt-1 text-xs text-gray-500">
-              Recorded as a fingerprint, so the same token is recognisable in the history without being stored.
+              An identity token, access token or API key. It is used for this one request and not stored.
             </p>
           </div>
         </CheckCard>
@@ -468,7 +334,8 @@ const CredentialCheckPage: React.FC = () => {
               () => setAafPassword(""),
             )
           }
-          disabled={!canCheck || !aafAccount.trim() || !aafPassword}
+          allowed={canCheck}
+          incomplete={!aafAccount.trim() || !aafPassword}
           pending={aafCheck.isPending}
           result={results.aaf ?? null}
           error={errors.aaf ?? null}
@@ -516,12 +383,6 @@ const CredentialCheckPage: React.FC = () => {
         </CheckCard>
       </div>
 
-      <HistoryGrid
-        rows={rows}
-        isLoading={history.isLoading}
-        error={history.isError ? formatAxiosError(history.error) : null}
-        showUser={isAdmin}
-      />
     </div>
   );
 };

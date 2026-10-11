@@ -195,6 +195,15 @@ RESOURCE_SEEDS: list[dict] = [
         "parent_name": "infra_alerts",
         "is_system": True,
     },
+    # ── Pages under compliance (shown as a Compliance submenu) ───────────
+    {
+        "resource_type": "page",
+        "resource_name": "credential_check_main",
+        "description": "Credential check tool — domain, AAF and JFrog credentials",
+        "route_path": "/tools/credential-check",
+        "parent_name": "compliance",
+        "is_system": True,
+    },
     # ── Pages under certificates ─────────────────────────────────────────
     {
         "resource_type": "page",
@@ -202,23 +211,6 @@ RESOURCE_SEEDS: list[dict] = [
         "description": "Certificate lifecycle dashboard (list, enroll, renew, revoke, delete)",
         "route_path": "/certificates",
         "parent_name": "certificates",
-        "is_system": True,
-    },
-    # ── Tools module ─────────────────────────────────────────────────────
-    {
-        "resource_type": "module",
-        "resource_name": "tools",
-        "description": "Operational self-service tools",
-        "route_path": "/tools",
-        "parent_name": None,
-        "is_system": True,
-    },
-    {
-        "resource_type": "page",
-        "resource_name": "credential_check_main",
-        "description": "Credential check tool — domain, AAF and JFrog credentials",
-        "route_path": "/tools/credential-check",
-        "parent_name": "tools",
         "is_system": True,
     },
     # ── Admin module ─────────────────────────────────────────────────────
@@ -416,7 +408,7 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
         "Check whether a domain, AAF or JFrog credential still authenticates",
         "edit",
         ("write",),
-        "tools",
+        "compliance",
     ),
     (
         "cost_resource_cleanup",
@@ -476,10 +468,9 @@ DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     ("read", "amortized_costs", "view"),
     ("read", "aks_main", "view"),
     ("read", "compliance_main", "view"),
+    ("read", "credential_check_main", "view"),
     ("read", "keyvault_main", "view"),
     ("read", "infra_alerts_main", "view"),
-    ("read", "tools", "view"),
-    ("read", "credential_check_main", "view"),
     ("read", "certificates", "view"),
     ("read", "certificates_main", "view"),
     # write role — view + edit on all non-admin resources
@@ -501,14 +492,12 @@ DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     ("write", "aks_main", "edit"),
     ("write", "compliance_main", "view"),
     ("write", "compliance_main", "edit"),
+    ("write", "credential_check_main", "view"),
+    ("write", "credential_check_main", "edit"),
     ("write", "keyvault_main", "view"),
     ("write", "keyvault_main", "edit"),
     ("write", "infra_alerts_main", "view"),
     ("write", "infra_alerts_main", "edit"),
-    ("write", "tools", "view"),
-    ("write", "tools", "edit"),
-    ("write", "credential_check_main", "view"),
-    ("write", "credential_check_main", "edit"),
     ("write", "certificates", "view"),
     ("write", "certificates", "edit"),
     ("write", "certificates_main", "view"),

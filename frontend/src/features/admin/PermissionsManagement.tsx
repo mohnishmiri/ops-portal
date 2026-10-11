@@ -44,7 +44,6 @@ const RESOURCE_LABELS: Record<string, { label: string; description: string }> = 
   keyvault:          { label: "Key Vault",           description: "Secrets, keys & certificate lifecycle" },
   infra_alerts:      { label: "Infra Alerts",        description: "Infrastructure alerting & threshold monitoring" },
   admin:             { label: "Admin Panel",         description: "System administration — subscriptions, config & access control" },
-  tools:             { label: "Tools",               description: "Operational self-service tools" },
   // Pages
   leadership_dashboard: { label: "Leadership Dashboard", description: "Cost KPIs, advisor & executive summary" },
   amortized_costs:      { label: "Amortized Costs",      description: "Amortized cost breakdown & trend analysis" },

@@ -1,30 +1,26 @@
 """Credential checks — "does this password / token still work?"
 
 Operators here own mechIDs, ITSERVICES domain accounts, AAF identities and
-JFrog tokens whose passwords expire on their own schedules.  The portal
-already *tracks* those expiry dates (Infrastructure Alerts → Expiry
-Tracking); this service answers the other half of the question: the date
-says it is still good, but does the credential actually authenticate today?
+JFrog tokens whose passwords expire on their own schedules.  Compliance ->
+Expiry Tracking already *tracks* those dates; this answers the other half of
+the question: the date says it is still good, but does the credential
+actually authenticate today?
 
-A distinguishing AD bind result is the point of the tool.  "Wrong password"
-and "password expired" and "account locked" are three very different
-operational answers, and the AD sub-codes below separate them.
+A distinguishing AD bind result is the point of the tool.  "Wrong password",
+"password expired" and "account locked" are three very different operational
+answers, and the AD sub-codes below separate them.
 
-Safeguards.  These are what keep this a self-service check rather than a
-credential-testing harness, and they are deliberate:
+Nothing is persisted.  A check is a question asked and answered: no audit
+row, no history, no record of the credential or the result.  The secret is
+held only for the duration of the call and is never logged.
 
-* **One account per request.**  There is no bulk, list or file input, and
-  none should ever be added.
-* **WRITE role plus the ``credential_check`` capability** — the operation is
-  revocable on its own from the Permissions UI.
-* **A per-user rate limit** counted in ``audit_logs``, so it holds across
-  every uvicorn worker and replica rather than per process.
-* **An account-lockout guard**: repeated failures against the *same* target
-  are refused before they reach the directory, because a failed LDAP bind
-  counts against the AD lockout policy and a careless retry loop would lock
-  the very account the user is trying to verify.
-* **Every attempt is audited** — who checked which target, and the outcome.
-  The secret itself is never logged, never stored and never echoed back.
+The one piece of state kept is the **lockout guard** below, in memory.  A
+failed LDAP bind counts against the Active Directory lockout policy, so a
+careless retry loop would lock the very account the user is verifying.  The
+guard pauses a target after a few consecutive failures.  It is per process
+(so several workers each allow their own few attempts) and resets on
+restart; the threshold is deliberately far below a normal AD lockout
+threshold so that even multiplied across workers it stays safe.
 """
 
 from __future__ import annotations
@@ -33,20 +29,16 @@ import asyncio
 import contextlib
 import re
 import ssl
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Literal
 
 import certifi
 import httpx
 import structlog
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.auth import UserContext
-from app.models.database import AuditLog
 
 logger = structlog.get_logger(__name__)
 
@@ -63,25 +55,20 @@ except ModuleNotFoundError:  # pragma: no cover - import guard
     LDAP_AVAILABLE = False
 
 
-AUDIT_ACTION = "credential_check"
-AUDIT_RESOURCE_TYPE = "credential_check"
-
 CheckKind = Literal["domain", "jfrog", "aaf"]
 
-# Rate limits.  Counted from audit_logs so they are shared by every worker
-# and replica — a per-process counter would multiply by workers x replicas
-# exactly the way the rate-limit middleware used to.
-_MAX_CHECKS_PER_WINDOW = 10
-_WINDOW_MINUTES = 10
-# A failed bind counts against the AD lockout policy, so the same target is
-# cut off well before the directory's own threshold.
+# Lockout guard.  Consecutive failures against one target before the portal
+# stops trying, and how long that pause lasts.
 _MAX_FAILURES_PER_TARGET = 3
-_TARGET_WINDOW_MINUTES = 15
+_TARGET_BLOCK_SECONDS = 15 * 60
+
+# target -> (consecutive failures, monotonic time of the most recent failure)
+_failures: dict[str, tuple[int, float]] = {}
 
 # AD returns the real reason as a sub-code inside the bind diagnostic, e.g.
 # "...data 532, v4563".  Without this mapping every one of these looks
 # identical to the caller ("invalid credentials"), which is precisely the
-# distinction an expiry check exists to make.
+# distinction this tool exists to make.
 _AD_SUBCODES: dict[str, tuple[str, str]] = {
     "525": ("invalid", "No such user in this domain."),
     "52e": ("invalid", "Incorrect password."),
@@ -112,11 +99,58 @@ class CheckOutcome:
 
 
 class CredentialCheckError(Exception):
-    """Refused before any credential left the portal (rate limit, config)."""
+    """Refused before any credential left the portal (lockout guard, config)."""
 
     def __init__(self, message: str, *, status: str = "refused") -> None:
         super().__init__(message)
         self.status = status
+
+
+# ── Lockout guard ──────────────────────────────────────────────────────
+
+
+def assert_target_not_blocked(target: str) -> None:
+    """Refuse a target that has just failed repeatedly.
+
+    Checked before any credential leaves the portal, because the risk being
+    managed is the directory locking the account, not the portal's own load.
+    """
+    entry = _failures.get(target)
+    if entry is None:
+        return
+
+    count, last_seen = entry
+    if time.monotonic() - last_seen > _TARGET_BLOCK_SECONDS:
+        _failures.pop(target, None)
+        return
+
+    if count >= _MAX_FAILURES_PER_TARGET:
+        minutes = _TARGET_BLOCK_SECONDS // 60
+        raise CredentialCheckError(
+            f"{target} has failed {count} checks in a row. Further attempts are paused for up to "
+            f"{minutes} minutes so they cannot lock the account out. Reset the password, or wait.",
+            status="lockout_guard",
+        )
+
+
+def record_outcome(target: str, outcome: CheckOutcome) -> None:
+    """Feed the guard.
+
+    Only a verdict about the credential counts.  A transport failure says
+    nothing about the password, so it must not push a target toward a pause.
+    """
+    if outcome.status == "error":
+        return
+    if outcome.valid:
+        _failures.pop(target, None)
+        return
+    count = _failures.get(target, (0, 0.0))[0]
+    _failures[target] = (count + 1, time.monotonic())
+
+
+def reset_guard() -> None:
+    """Clear the guard — tests only."""
+    _failures.clear()
 
 
 # ── TLS / transport ────────────────────────────────────────────────────
@@ -166,92 +200,11 @@ def _transport_outcome(target_name: str, exc: Exception) -> CheckOutcome:
 
 
 class CredentialCheckService:
-    """Validates one credential at a time against the directory it lives in."""
+    """Validates one credential at a time against the directory it lives in.
 
-    def __init__(self, db: AsyncSession) -> None:
-        self.db = db
-
-    # ── Guards ─────────────────────────────────────────────────────────
-
-    async def assert_within_limits(self, user: UserContext, target: str) -> None:
-        """Refuse before the credential leaves the portal.
-
-        Two independent counts, both read from ``audit_logs`` so they are
-        deployment-wide: how much this user has checked lately, and how often
-        this particular target has just failed.
-        """
-        now = datetime.utcnow()
-
-        recent = (
-            await self.db.execute(
-                select(func.count())
-                .select_from(AuditLog)
-                .where(AuditLog.action == AUDIT_ACTION)
-                .where(AuditLog.user_id == user.user_id)
-                .where(AuditLog.timestamp >= now - timedelta(minutes=_WINDOW_MINUTES))
-            )
-        ).scalar_one()
-
-        if recent >= _MAX_CHECKS_PER_WINDOW:
-            raise CredentialCheckError(
-                f"Too many credential checks — up to {_MAX_CHECKS_PER_WINDOW} every "
-                f"{_WINDOW_MINUTES} minutes. Try again shortly.",
-                status="rate_limited",
-            )
-
-        failures = (
-            await self.db.execute(
-                select(func.count())
-                .select_from(AuditLog)
-                .where(AuditLog.action == AUDIT_ACTION)
-                .where(AuditLog.resource_id == target)
-                .where(AuditLog.status == "failure")
-                .where(AuditLog.timestamp >= now - timedelta(minutes=_TARGET_WINDOW_MINUTES))
-            )
-        ).scalar_one()
-
-        if failures >= _MAX_FAILURES_PER_TARGET:
-            raise CredentialCheckError(
-                f"{target} has already failed {failures} checks in the last "
-                f"{_TARGET_WINDOW_MINUTES} minutes. Further attempts are blocked here so they "
-                "cannot lock the account out. Reset the password, or wait for the window to pass.",
-                status="lockout_guard",
-            )
-
-    async def record(
-        self,
-        *,
-        user: UserContext,
-        ip: str | None,
-        kind: CheckKind,
-        target: str,
-        outcome: CheckOutcome,
-    ) -> None:
-        """Audit the attempt.  Called for every outcome, including refusals."""
-        self.db.add(
-            AuditLog(
-                user_id=user.user_id,
-                user_email=user.email,
-                action=AUDIT_ACTION,
-                resource_type=AUDIT_RESOURCE_TYPE,
-                resource_id=target,
-                details={
-                    "page": "CredentialCheckPage",
-                    "feature": "credential-check",
-                    "kind": kind,
-                    "status": outcome.status,
-                    "message": outcome.message,
-                    **outcome.details,
-                },
-                ip_address=ip,
-                status="success" if outcome.valid else "failure",
-            )
-        )
-        try:
-            await self.db.commit()
-        except Exception as exc:
-            await self.db.rollback()
-            logger.warning("credential_check_audit_failed", kind=kind, error=str(exc)[:200])
+    Stateless and dependency-free: it holds no database session because it
+    writes nothing.
+    """
 
     # ── Domain (Active Directory over LDAPS) ───────────────────────────
 
@@ -320,10 +273,16 @@ class CredentialCheckService:
             return CheckOutcome(valid=False, status=status, message=message, details={"ad_subcode": match.group(1)})
         return CheckOutcome(valid=False, status=INVALID, message="The password was rejected by the directory.")
 
-    # ── JFrog Artifactory token ────────────────────────────────────────
+    # ── JFrog Artifactory ──────────────────────────────────────────────
 
-    async def check_jfrog(self, token: str) -> CheckOutcome:
-        """A token is valid when Artifactory answers an authenticated read."""
+    async def check_jfrog(self, username: str, token: str) -> CheckOutcome:
+        """Username + token, checked with basic auth against Artifactory.
+
+        Basic auth rather than a bearer header: an Artifactory identity token
+        or API key belongs to a named user and is presented alongside it, and
+        the same call still works when an access token is used as the
+        password.
+        """
         base = settings.CRED_CHECK_JFROG_URL.strip().rstrip("/")
         if not base:
             raise CredentialCheckError("No JFrog URL is configured. Set CRED_CHECK_JFROG_URL.", status="unconfigured")
@@ -331,7 +290,7 @@ class CredentialCheckService:
         url = f"{base}/artifactory/api/system/version"
         try:
             async with httpx.AsyncClient(timeout=settings.CRED_CHECK_TIMEOUT_SECONDS, verify=_verify()) as client:
-                response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+                response = await client.get(url, auth=(username, token))
         except httpx.HTTPError as exc:
             return _transport_outcome("JFrog Artifactory", exc)
 
@@ -342,14 +301,14 @@ class CredentialCheckService:
             return CheckOutcome(
                 valid=True,
                 status=VALID,
-                message="The token is valid and Artifactory accepted it.",
+                message="Artifactory accepted the username and token.",
                 details={"artifactory_version": version} if version else {},
             )
         if response.status_code in (401, 403):
             return CheckOutcome(
                 valid=False,
                 status=INVALID,
-                message="Artifactory rejected the token — it is wrong, revoked or expired.",
+                message="Artifactory rejected it — the username or token is wrong, revoked or expired.",
             )
         return CheckOutcome(
             valid=False,
@@ -390,31 +349,3 @@ class CredentialCheckService:
             status="error",
             message=f"AAF answered HTTP {response.status_code}; the credential could not be checked.",
         )
-
-    # ── History ────────────────────────────────────────────────────────
-
-    async def history(self, user: UserContext, *, limit: int = 200) -> list[dict]:
-        """Past checks: the caller's own, or everyone's for a Super Admin."""
-        stmt = (
-            select(AuditLog)
-            .where(AuditLog.action == AUDIT_ACTION)
-            .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
-            .limit(limit)
-        )
-        if not user.is_admin:
-            stmt = stmt.where(AuditLog.user_id == user.user_id)
-
-        rows = (await self.db.execute(stmt)).scalars().all()
-        return [
-            {
-                "id": row.id,
-                "checked_at": row.timestamp.isoformat() if row.timestamp else None,
-                "user_email": row.user_email,
-                "target": row.resource_id,
-                "kind": (row.details or {}).get("kind", ""),
-                "status": (row.details or {}).get("status", row.status),
-                "message": (row.details or {}).get("message", ""),
-                "valid": row.status == "success",
-            }
-            for row in rows
-        ]
