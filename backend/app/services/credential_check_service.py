@@ -157,23 +157,30 @@ def reset_guard() -> None:
 
 
 @lru_cache(maxsize=4)
-def _ssl_context_with_bundle(ca_bundle: str) -> ssl.SSLContext:
-    ctx = ssl.create_default_context(cafile=certifi.where())
-    ctx.load_verify_locations(cafile=ca_bundle)
+def _tls_context(ca_bundle: str) -> ssl.SSLContext:
+    """Trust the host's own CA store first, then public roots, then any override.
+
+    Internal services (a domain controller, AAF) present certificates from the
+    corporate PKI, which is in the host/container trust store but *not* in
+    certifi.  Verifying against certifi alone fails the handshake before any
+    credential is sent — and looks indistinguishable from the host being down.
+    Loading the system store first fixes that without weakening verification;
+    certifi is added so publicly-issued certificates still validate on a host
+    with a sparse CA store.
+    """
+    ctx = ssl.create_default_context()  # system trust store
+    with contextlib.suppress(OSError, ssl.SSLError):
+        ctx.load_verify_locations(cafile=certifi.where())
+    if ca_bundle:
+        ctx.load_verify_locations(cafile=ca_bundle)
     return ctx
 
 
-def _verify() -> ssl.SSLContext | bool:
-    """TLS verification for outbound JFrog / AAF calls.
-
-    Mirrors the Keyfactor client: a TLS-inspecting proxy in the path needs
-    the corporate root added, not verification turned off.
-    """
+def _verify() -> ssl.SSLContext:
+    """TLS verification for outbound JFrog / AAF calls."""
     bundle = settings.CRED_CHECK_CA_BUNDLE.strip()
-    if not bundle:
-        return True
     try:
-        return _ssl_context_with_bundle(bundle)
+        return _tls_context(bundle)
     except (OSError, ssl.SSLError) as exc:
         raise CredentialCheckError(
             "CRED_CHECK_CA_BUNDLE could not be loaded as a PEM CA file.",
@@ -181,19 +188,49 @@ def _verify() -> ssl.SSLContext | bool:
         ) from exc
 
 
-def _transport_outcome(target_name: str, exc: Exception) -> CheckOutcome:
-    """A transport failure says nothing about the credential — never 'invalid'."""
+def _transport_reason(exc: Exception) -> str:
+    """Plain-language cause of a connection failure.
+
+    "Could not reach it" is not actionable: a DNS miss, a refused port, a
+    firewall drop and a TLS-inspecting proxy need four different fixes.  All
+    of these are reached only by an authenticated WRITE user against hosts
+    the operator configured, so naming the cause leaks nothing useful.
+    """
     text = str(exc)
-    if isinstance(exc, httpx.TimeoutException):
-        message = f"Timed out contacting {target_name}."
-    elif "CERTIFICATE_VERIFY_FAILED" in text:
-        message = (
-            f"TLS verification failed contacting {target_name}. If a TLS-inspecting proxy is in "
-            "the path, set CRED_CHECK_CA_BUNDLE to the corporate root CA."
+    lowered = text.lower()
+    if isinstance(exc, httpx.TimeoutException) or "timed out" in lowered or "timeout" in lowered:
+        return "the connection timed out — the host may be firewalled from the portal"
+    if "certificate_verify_failed" in lowered or "certificate verify failed" in lowered:
+        return (
+            "TLS verification failed — if a TLS-inspecting proxy is in the path, point "
+            "CRED_CHECK_CA_BUNDLE at the corporate root CA"
         )
-    else:
-        message = f"Could not reach {target_name}. The credential was not checked."
-    return CheckOutcome(valid=False, status="error", message=message)
+    if any(
+        marker in lowered
+        for marker in ("nodename nor servname", "name or service not known", "getaddrinfo", "name resolution")
+    ):
+        return "the hostname did not resolve (DNS)"
+    if "refused" in lowered:
+        return "the connection was refused — nothing is listening on that port"
+    if "no route to host" in lowered or "network is unreachable" in lowered:
+        return "the host is unreachable from the portal"
+    return text[:200] if text else "no further detail was reported"
+
+
+def _transport_outcome(target_name: str, target_url: str, exc: Exception) -> CheckOutcome:
+    """A transport failure says nothing about the credential — never 'invalid'."""
+    reason = _transport_reason(exc)
+    logger.warning(
+        "credential_check_transport_failed",
+        target=target_name,
+        url=target_url,
+        error=str(exc)[:300],
+    )
+    return CheckOutcome(
+        valid=False,
+        status="error",
+        message=f"Could not reach {target_name} at {target_url} — {reason}. The credential was not checked.",
+    )
 
 
 # ── Service ────────────────────────────────────────────────────────────
@@ -217,7 +254,8 @@ class CredentialCheckService:
 
         if not server_url:
             raise CredentialCheckError(
-                f"No LDAP server is configured for {domain}. Set CRED_CHECK_LDAP_{domain}.",
+                f"No LDAP server is configured for {domain}. Set CRED_CHECK_LDAP_{domain} to the domain "
+                f"controller, e.g. ldaps://dc.example.com:636, and restart the backend.",
                 status="unconfigured",
             )
         if not LDAP_AVAILABLE:
@@ -231,7 +269,9 @@ class CredentialCheckService:
     def _bind(self, server_url: str, bind_user: str, password: str) -> CheckOutcome:
         """Blocking LDAP bind — always called through ``asyncio.to_thread``."""
         try:
-            ca_file = settings.CRED_CHECK_CA_BUNDLE.strip() or certifi.where()
+            # None = the system trust store, which is where the corporate
+            # root lives.  Pinning certifi here rejected every internal DC.
+            ca_file = settings.CRED_CHECK_CA_BUNDLE.strip() or None
             tls = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=ca_file)
             server = Server(
                 server_url,
@@ -248,12 +288,21 @@ class CredentialCheckService:
             )
             bound = conn.bind()
         except LDAPException as exc:
-            logger.warning("credential_check_ldap_transport_failed", error=str(exc)[:200])
             domain_name = bind_user.split("\\")[0]
+            reason = _transport_reason(exc)
+            logger.warning(
+                "credential_check_ldap_transport_failed",
+                domain=domain_name,
+                server=server_url,
+                error=str(exc)[:300],
+            )
             return CheckOutcome(
                 valid=False,
                 status="error",
-                message=f"Could not reach the {domain_name} directory. The password was not checked.",
+                message=(
+                    f"Could not reach the {domain_name} directory at {server_url} — {reason}. "
+                    "The password was not checked."
+                ),
             )
 
         if bound:
@@ -292,7 +341,7 @@ class CredentialCheckService:
             async with httpx.AsyncClient(timeout=settings.CRED_CHECK_TIMEOUT_SECONDS, verify=_verify()) as client:
                 response = await client.get(url, auth=(username, token))
         except httpx.HTTPError as exc:
-            return _transport_outcome("JFrog Artifactory", exc)
+            return _transport_outcome("JFrog Artifactory", url, exc)
 
         if response.status_code == 200:
             version = ""
@@ -334,7 +383,7 @@ class CredentialCheckService:
             async with httpx.AsyncClient(timeout=settings.CRED_CHECK_TIMEOUT_SECONDS, verify=_verify()) as client:
                 response = await client.get(url, auth=(account, password))
         except httpx.HTTPError as exc:
-            return _transport_outcome("AAF", exc)
+            return _transport_outcome("AAF", url, exc)
 
         if response.status_code == 200:
             return CheckOutcome(valid=True, status=VALID, message="AAF accepted the credential.")

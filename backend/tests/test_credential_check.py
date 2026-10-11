@@ -238,7 +238,58 @@ async def test_jfrog_timeout_is_not_reported_as_an_invalid_token(monkeypatch):
     _http(monkeypatch, status_code=200, raises=httpx.TimeoutException("timed out"))
     outcome = await _service().check_jfrog("m52142@att.com", "tok")
     assert outcome.status == "error"
-    assert "Timed out" in outcome.message
+    assert "timed out" in outcome.message.lower()
+
+
+# ── Diagnosing an unreachable service ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (httpx.TimeoutException("timed out"), "timed out"),
+        (httpx.ConnectError("[Errno 8] nodename nor servname provided"), "did not resolve"),
+        (httpx.ConnectError("[Errno 61] Connection refused"), "refused"),
+        (httpx.ConnectError("[Errno 65] No route to host"), "unreachable"),
+        (httpx.ConnectError("CERTIFICATE_VERIFY_FAILED: unable to get local issuer"), "CRED_CHECK_CA_BUNDLE"),
+    ],
+)
+def test_transport_failures_name_the_actual_cause(exc, expected):
+    """'Could not reach it' is not actionable; DNS, refused and TLS differ."""
+    assert expected in module._transport_reason(exc)
+
+
+@pytest.mark.anyio
+async def test_an_unreachable_service_names_the_url_it_tried(monkeypatch):
+    _http(monkeypatch, status_code=200, raises=httpx.ConnectError("[Errno 8] nodename nor servname provided"))
+    outcome = await _service().check_aaf("nonprod", "m1@com.att.attcc", "s")
+
+    assert outcome.status == "error"
+    assert settings.CRED_CHECK_AAF_URL_NONPROD in outcome.message
+    assert "did not resolve" in outcome.message
+
+
+def test_an_unreachable_directory_names_the_server_and_cause(monkeypatch):
+    def _raise(*_a, **_k):
+        raise module.LDAPException("socket connection error: [Errno 61] Connection refused")
+
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Server", _raise)
+
+    outcome = _service()._bind("ldaps://dc.example.com:636", TARGET, "s")
+
+    assert outcome.status == "error"
+    assert "ldaps://dc.example.com:636" in outcome.message
+    assert "refused" in outcome.message
+
+
+@pytest.mark.anyio
+async def test_an_unconfigured_domain_says_what_to_set():
+    with pytest.raises(CredentialCheckError) as excinfo:
+        await _service().check_domain("TESTITSERVICES", "m1", "s")
+    message = str(excinfo.value)
+    assert "CRED_CHECK_LDAP_TESTITSERVICES" in message
+    assert "ldaps://" in message
 
 
 @pytest.mark.anyio
