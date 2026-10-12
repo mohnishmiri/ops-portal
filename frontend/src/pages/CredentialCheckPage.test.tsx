@@ -267,3 +267,31 @@ describe("CredentialCheckPage — reading and clearing an answer", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
+
+describe("CredentialCheckPage — the lockout caution", () => {
+  it("is not on the page until a password is actually refused", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({ data: [] });
+    renderPage();
+
+    expect(screen.queryByText(/counted as a failed sign-in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/lock this account out/)).not.toBeInTheDocument();
+  });
+
+  it("appears with a refused domain password", async () => {
+    await checkDomain(
+      result({ valid: false, status: "invalid", message: "Incorrect password.", account: null }),
+    );
+
+    expect(screen.getByText(/That counted as a failed sign-in/)).toBeInTheDocument();
+    expect(screen.getByText(/lock this account out in Active Directory/)).toBeInTheDocument();
+  });
+
+  it("stays away when the password was right, or was never the problem", async () => {
+    await checkDomain(result({ valid: false, status: "expired", message: "The password has expired." }));
+    expect(screen.queryByText(/counted as a failed sign-in/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Dismiss the result/ }));
+    await checkDomain(result({ status: "error", valid: false, message: "Could not reach the directory." }));
+    expect(screen.queryByText(/counted as a failed sign-in/)).not.toBeInTheDocument();
+  });
+});

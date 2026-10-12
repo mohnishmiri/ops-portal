@@ -211,6 +211,15 @@ const ResultPanel: React.FC<{
       </div>
       <DismissButton onClick={onDismiss} label={`Dismiss the result for ${result.target}`} />
       <p className="mt-1.5">{result.message}</p>
+      {/* The lockout risk is real only once a password has been refused, so it
+          is said then rather than standing on the page for everyone. */}
+      {result.kind === "domain" && result.status === "invalid" && (
+        <p className="mt-2 rounded-md bg-black/5 px-2.5 py-1.5 text-xs">
+          <span className="font-semibold">That counted as a failed sign-in.</span> A few more wrong passwords in a row
+          can lock this account out in Active Directory, so the portal pauses it after a few failures. Check a password
+          you believe is current — this is not a way to find one.
+        </p>
+      )}
       {result.account && <AccountDetails kind={result.kind} account={result.account} />}
       <p className="mt-2 text-xs opacity-70">
         Checked {formatDateTime(result.checked_at)}
@@ -363,12 +372,6 @@ const CredentialCheckPage: React.FC = () => {
           the source reports it, when it expires and when it was last used. The password or token is never stored;
           checking an account listed in the inventory below updates its row with the result.
         </p>
-      </div>
-
-      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        <span className="font-semibold">A failed check counts as a failed sign-in.</span> Repeated wrong passwords can
-        lock the account out in Active Directory, so the portal pauses a target after a few failures in a row. Check a
-        password you believe is current — this is not a way to find one.
       </div>
 
       {/* Checks */}
