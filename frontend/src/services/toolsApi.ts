@@ -17,6 +17,27 @@ export type CheckKind = "domain" | "jfrog" | "aaf";
 export type DomainName = "ITSERVICES" | "TESTITSERVICES";
 export type AafEnvironment = "prod" | "nonprod";
 
+/**
+ * What the source reports about the credential beyond yes / no. Every field
+ * is optional — AD, Artifactory and AAF each expose a different subset — and
+ * null means "not reported", never "none". Datetimes are UTC ISO strings.
+ */
+export interface CredentialAccountDetails {
+  /** AD display name, or the JFrog token description. */
+  display_name: string | null;
+  expires_at: string | null;
+  /** The source says explicitly that it does not expire. */
+  never_expires: boolean;
+  /** Password last set, or token issued. */
+  last_changed_at: string | null;
+  last_used_at: string | null;
+  /** How far to trust last_used_at, or why it is not shown. */
+  last_used_note: string | null;
+  /** AD account (not password) expiry; null when the account does not expire. */
+  account_expires_at: string | null;
+  notes: string[];
+}
+
 export interface CredentialCheckResult {
   kind: CheckKind;
   target: string;
@@ -26,6 +47,8 @@ export interface CredentialCheckResult {
   message: string;
   checked_at: string;
   details: Record<string, unknown>;
+  /** Expiry / last-used details, when the source would report them. */
+  account: CredentialAccountDetails | null;
 }
 
 export interface DomainCheckInput {

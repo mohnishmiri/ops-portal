@@ -6,7 +6,8 @@ knows when a credential is *due* to expire but not whether it still
 authenticates.
 
 Nothing is stored: no audit row, no history.  The request carries the
-credential, the response carries the verdict, and that is the end of it.
+credential, the response carries the verdict — plus whatever the source
+reports about expiry and last use — and that is the end of it.
 
 Authorization is the WRITE role plus the ``credential_check`` capability.  A
 check alters nothing anywhere, but a failed bind counts against the AD
@@ -68,6 +69,7 @@ async def _run_check(*, kind: CheckKind, target: str, check) -> CredentialCheckR
         message=outcome.message,
         checked_at=datetime.utcnow(),
         details=outcome.details,
+        account=outcome.account,
     )
 
 

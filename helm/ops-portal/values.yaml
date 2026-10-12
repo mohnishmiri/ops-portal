@@ -107,6 +107,7 @@ backend:
     CRED_CHECK_AAF_URL_PROD: "https://aaf-azure.it.att.com"
     CRED_CHECK_AAF_URL_NONPROD: "https://aafist-azure.it.att.com"
     CRED_CHECK_AAF_PATH: "/authn/basicAuth"
+    CRED_CHECK_AAF_CREDS_PATH: "/authn/creds/id/{id}"
     CRED_CHECK_TIMEOUT_SECONDS: "15"
     CRED_CHECK_CA_BUNDLE: ""
 

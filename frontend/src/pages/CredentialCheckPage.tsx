@@ -8,6 +8,11 @@
  * authenticates right now, and for Active Directory it distinguishes a wrong
  * password from an expired one, a locked account and a disabled account.
  *
+ * A result also carries what the source will say about the credential —
+ * expiry, last change, last use. Each source exposes a different subset (AAF
+ * records no last use; AD's last sign-in is only accurate to 9–14 days), so
+ * a missing value reads "Not reported", with the backend's reason.
+ *
  * Handling of secrets on this page:
  *  • a credential is held in component state only until its check returns,
  *    then cleared — nothing is cached by React Query or written to storage;
@@ -22,16 +27,19 @@ import { MetricCardIcons } from "../components/MetricCard";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import { fieldLabel, inputClass, panelClass, primaryButton } from "../features/access/accessShared";
+import { DaysLeftBadge, daysUntil } from "../features/keyvault/kvShared";
 import { formatAxiosError } from "../services/apiErrors";
 import {
   type AafEnvironment,
   type CheckKind,
+  type CredentialAccountDetails,
   type CredentialCheckResult,
   type DomainName,
   useCheckAafPassword,
   useCheckDomainPassword,
   useCheckJFrogToken,
 } from "../services/toolsApi";
+import { formatDate, formatDateTime, parseApiDate } from "../utils/dateFormat";
 
 // ── Status presentation ──────────────────────────────────────────────────────
 
@@ -64,6 +72,102 @@ const StatusChip: React.FC<{ status: string }> = ({ status }) => {
   );
 };
 
+// ── Account details ──────────────────────────────────────────────────────────
+
+/** Row labels differ by source: a JFrog token is "issued", a password "changed". */
+const DETAIL_LABELS: Record<CheckKind, { name: string; expires: string; changed: string; used: string }> = {
+  domain: { name: "Name", expires: "Password expires", changed: "Password last changed", used: "Last sign-in" },
+  jfrog: { name: "Description", expires: "Token expires", changed: "Issued", used: "Last used" },
+  aaf: { name: "Name", expires: "Password expires", changed: "Password last changed", used: "Last used" },
+};
+
+/** "in 3 days" / "27 days ago" / "today". */
+const relativeDays = (iso: string): string => {
+  const date = parseApiDate(iso);
+  if (!date) return "";
+  const days = Math.round((date.getTime() - Date.now()) / 86_400_000);
+  if (days === 0) return "today";
+  const count = `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"}`;
+  return days > 0 ? `in ${count}` : `${count} ago`;
+};
+
+/** Local calendar date, with the full time on hover. */
+const DateValue: React.FC<{ iso: string }> = ({ iso }) => (
+  <span title={formatDateTime(iso)}>{formatDate(parseApiDate(iso))}</span>
+);
+
+const DetailRow: React.FC<{ label: string; hint?: string | null; children: React.ReactNode }> = ({
+  label,
+  hint,
+  children,
+}) => (
+  <>
+    <dt className="font-medium opacity-75">{label}</dt>
+    <dd>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">{children}</div>
+      {hint && <p className="mt-0.5 opacity-75">{hint}</p>}
+    </dd>
+  </>
+);
+
+const NotReported: React.FC<{ text?: string | null }> = ({ text }) => (
+  <span className="opacity-75">{text || "Not reported"}</span>
+);
+
+/**
+ * Expiry and last use, as far as the source would say. Expiry and last use
+ * always get a row, so a gap reads as "not reported" rather than vanishing.
+ */
+const AccountDetails: React.FC<{ kind: CheckKind; account: CredentialAccountDetails }> = ({ kind, account }) => {
+  const labels = DETAIL_LABELS[kind];
+  return (
+    <div className="mt-3 border-t border-black/5 pt-3 text-xs">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
+        {account.display_name && <DetailRow label={labels.name}>{account.display_name}</DetailRow>}
+        <DetailRow label={labels.expires}>
+          {account.never_expires ? (
+            <span>Never</span>
+          ) : account.expires_at ? (
+            <>
+              <DateValue iso={account.expires_at} />
+              <DaysLeftBadge days={daysUntil(account.expires_at)} />
+            </>
+          ) : (
+            <NotReported />
+          )}
+        </DetailRow>
+        {account.last_changed_at && (
+          <DetailRow label={labels.changed}>
+            <DateValue iso={account.last_changed_at} />
+            <span className="opacity-75">{relativeDays(account.last_changed_at)}</span>
+          </DetailRow>
+        )}
+        <DetailRow label={labels.used} hint={account.last_used_at ? account.last_used_note : null}>
+          {account.last_used_at ? (
+            <>
+              <DateValue iso={account.last_used_at} />
+              <span className="opacity-75">{relativeDays(account.last_used_at)}</span>
+            </>
+          ) : (
+            <NotReported text={account.last_used_note} />
+          )}
+        </DetailRow>
+        {account.account_expires_at && (
+          <DetailRow label="Account expires">
+            <DateValue iso={account.account_expires_at} />
+            <DaysLeftBadge days={daysUntil(account.account_expires_at)} />
+          </DetailRow>
+        )}
+      </dl>
+      {account.notes.map((note) => (
+        <p key={note} className="mt-2 opacity-75">
+          {note}
+        </p>
+      ))}
+    </div>
+  );
+};
+
 // ── Result panel ─────────────────────────────────────────────────────────────
 
 const ResultPanel: React.FC<{ result: CredentialCheckResult | null; error: string | null }> = ({ result, error }) => {
@@ -93,6 +197,7 @@ const ResultPanel: React.FC<{ result: CredentialCheckResult | null; error: strin
         <span className="font-mono text-xs">{result.target}</span>
       </div>
       <p className="mt-1.5">{result.message}</p>
+      {result.account && <AccountDetails kind={result.kind} account={result.account} />}
     </div>
   );
 };
@@ -199,8 +304,9 @@ const CredentialCheckPage: React.FC = () => {
           Credential Check
         </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Check whether a domain password, a JFrog token or an AAF account password still authenticates. Nothing is
-          stored — the credential and the result are gone as soon as the answer is shown.
+          Check whether a domain password, a JFrog token or an AAF account password still authenticates — and, where
+          the source reports it, when it expires and when it was last used. Nothing is stored — the credential and the
+          result are gone as soon as the answer is shown.
         </p>
       </div>
 

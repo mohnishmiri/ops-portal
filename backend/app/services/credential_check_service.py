@@ -31,26 +31,35 @@ import re
 import ssl
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import quote
 
 import certifi
 import httpx
 import structlog
+from jose import JWTError
+from jose import jwt as jose_jwt
 
 from app.core.config import settings
+from app.schemas.tools import CredentialAccountDetails
 
 logger = structlog.get_logger(__name__)
 
 # ldap3 is an optional import: the backend must still start (and every other
 # check must still work) in an environment where it was not installed.
 try:  # pragma: no cover - import guard
-    from ldap3 import Connection, Server, Tls
+    from ldap3 import BASE, SUBTREE, Connection, Server, Tls
+    from ldap3 import NONE as NO_SERVER_INFO
     from ldap3.core.exceptions import LDAPException
+    from ldap3.utils.conv import escape_filter_chars
 
     LDAP_AVAILABLE = True
 except ModuleNotFoundError:  # pragma: no cover - import guard
     Connection = Server = Tls = None  # type: ignore[assignment]
+    BASE = SUBTREE = NO_SERVER_INFO = None  # type: ignore[assignment]
+    escape_filter_chars = None  # type: ignore[assignment]
     LDAPException = Exception  # type: ignore[assignment,misc]
     LDAP_AVAILABLE = False
 
@@ -96,6 +105,8 @@ class CheckOutcome:
     status: str
     message: str
     details: dict = field(default_factory=dict)
+    # Expiry / last-use details, when the source would report them.
+    account: CredentialAccountDetails | None = None
 
 
 class CredentialCheckError(Exception):
@@ -233,6 +244,226 @@ def _transport_outcome(target_name: str, target_url: str, exc: Exception) -> Che
     )
 
 
+# ── Account details: expiry and last use ───────────────────────────────
+#
+# Each source is asked, after (or alongside) the verdict, what it knows about
+# the credential.  This is always best effort: a refusal or an unexpected
+# payload becomes a note on the result, never a different verdict.
+
+# A details lookup is a nicety, so it gets a shorter leash than the check:
+# a slow lookup must not double the wait on an unreachable host.
+_DETAILS_TIMEOUT_SECONDS = 5
+
+# A last-use time this close to "now" may have been written by the check.
+_THIS_CHECK_WINDOW = timedelta(minutes=2)
+
+
+def _epoch(value: Any) -> datetime | None:
+    """Epoch seconds (Artifactory, JWT claims) as UTC; 0 and junk are None."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+# Active Directory stores times as FILETIME: 100 ns ticks since 1601-01-01
+# UTC.  0 and the largest int64 both mean "never".
+_FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
+_FILETIME_NEVER = 0x7FFFFFFFFFFFFFFF
+_UF_DONT_EXPIRE_PASSWD = 0x10000
+
+_AD_ACCOUNT_ATTRIBUTES = [
+    "displayName",
+    "pwdLastSet",
+    # Computed by the DC, so it honours fine-grained password policies.
+    "msDS-UserPasswordExpiryTimeComputed",
+    "accountExpires",
+    "lastLogonTimestamp",
+    "userAccountControl",
+]
+
+
+def _filetime(value: int | None) -> datetime | None:
+    if value is None or value <= 0 or value >= _FILETIME_NEVER:
+        return None
+    try:
+        return _FILETIME_EPOCH + timedelta(microseconds=value // 10)
+    except OverflowError:
+        return None
+
+
+def _ad_raw(entry: dict, name: str) -> bytes | None:
+    """First raw value of an attribute.
+
+    Raw rather than ldap3's formatted values, so the result does not depend
+    on whether the directory schema was loaded.
+    """
+    for key, values in (entry.get("raw_attributes") or {}).items():
+        if key.lower() == name.lower() and values:
+            value = values[0]
+            return value if isinstance(value, bytes) else str(value).encode()
+    return None
+
+
+def _ad_int(entry: dict, name: str) -> int | None:
+    raw = _ad_raw(entry, name)
+    try:
+        return int(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
+def _ad_text(entry: dict, name: str) -> str | None:
+    raw = _ad_raw(entry, name)
+    return (raw.decode("utf-8", errors="replace").strip() or None) if raw is not None else None
+
+
+def _first_entry(response: Any) -> dict | None:
+    """First real entry of a search, skipping referrals."""
+    return next((item for item in response or [] if item.get("type") == "searchResEntry"), None)
+
+
+def ad_account_details(entry: dict, *, now: datetime) -> CredentialAccountDetails:
+    """Expiry, last change and last sign-in from the account's own AD entry."""
+    computed = _ad_int(entry, "msDS-UserPasswordExpiryTimeComputed")
+    uac = _ad_int(entry, "userAccountControl") or 0
+    never_expires = computed == _FILETIME_NEVER or bool(uac & _UF_DONT_EXPIRE_PASSWD)
+
+    # The bind is itself a sign-in.  lastLogonTimestamp is only rewritten
+    # once it is 9-14 days old, so a value written seconds ago is this check
+    # — which also means none had been recorded for 9+ days before it.
+    last_logon = _filetime(_ad_int(entry, "lastLogonTimestamp"))
+    if last_logon is None:
+        last_used_at, last_used_note = None, "No earlier sign-in is recorded in the directory."
+    elif now - last_logon <= _THIS_CHECK_WINDOW:
+        last_used_at, last_used_note = (
+            None,
+            ("None recorded in the 9+ days before this check — the check itself is now the latest sign-in."),
+        )
+    else:
+        last_used_at = last_logon
+        last_used_note = "Approximate — Active Directory records sign-ins only every 9 to 14 days."
+
+    return CredentialAccountDetails(
+        display_name=_ad_text(entry, "displayName"),
+        expires_at=None if never_expires else _filetime(computed),
+        never_expires=never_expires,
+        last_changed_at=_filetime(_ad_int(entry, "pwdLastSet")),
+        last_used_at=last_used_at,
+        last_used_note=last_used_note,
+        account_expires_at=_filetime(_ad_int(entry, "accountExpires")),
+    )
+
+
+# Artifactory's record of the calling token.  GET only: DELETE on this same
+# path revokes the token making the call.
+_JFROG_TOKEN_INFO_PATH = "/access/api/v1/tokens/me"
+_JFROG_NO_LAST_USE = "Not reported — needs Artifactory 7.108.3+ with token last-used tracking enabled."
+
+
+def _jwt_claims(token: str) -> dict:
+    """Unverified claims of a JWT access token; {} for any other kind.
+
+    Used only to *describe* a token.  Whether it works is always
+    Artifactory's answer, never these claims'.
+    """
+    try:
+        claims = jose_jwt.get_unverified_claims(token)
+    except JWTError:
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def jfrog_token_details(info: dict | None, claims: dict, *, now: datetime) -> CredentialAccountDetails | None:
+    """Artifactory's record of the token, filled in from its own claims.
+
+    The record wins: it is the only source of last use, and identity /
+    reference tokens carry no claims at all.
+    """
+    if not info and not claims:
+        return None
+    info = info or {}
+
+    expiry = _epoch(info.get("expiry")) or _epoch(claims.get("exp"))
+    last_used = _epoch(info.get("last_used"))
+    if last_used is None:
+        last_used_note = _JFROG_NO_LAST_USE
+    elif now - last_used <= _THIS_CHECK_WINDOW:
+        last_used_note = "This may be the check itself."
+    else:
+        last_used_note = None
+
+    return CredentialAccountDetails(
+        display_name=str(info.get("description") or "").strip() or None,
+        expires_at=expiry,
+        # Artifactory omits the expiry of a non-expiring token.
+        never_expires=expiry is None,
+        last_changed_at=_epoch(info.get("issued_at")) or _epoch(claims.get("iat")),
+        last_used_at=last_used,
+        last_used_note=last_used_note,
+        notes=[] if info else ["Read from the token itself — Artifactory did not return its record of it."],
+    )
+
+
+# CredDAO types for a password (MD5 and salted SHA-256); the rest are
+# certificates and placeholders, which do not answer a basic-auth check.
+_AAF_PASSWORD_TYPES = {1, 2}
+_AAF_ACCEPT = "application/Users+json;charset=utf-8;version=2.1,application/json;version=2.1,*/*"
+_AAF_NO_LAST_USE = "AAF does not record when a credential was last used."
+
+
+def _aaf_time(value: Any) -> datetime | None:
+    """AAF's xs:dateTime as UTC; epoch milliseconds accepted too."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return _epoch(value / 1000 if value > 1e11 else value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def aaf_account_details(payload: Any, *, now: datetime) -> CredentialAccountDetails:
+    """Password expiry from AAF's credential list for one identity.
+
+    AAF keeps one row per password (and certificate), each with its own
+    expiry, and several passwords can be live at once — so when more than one
+    still works, the latest is shown and the rest are named.
+    """
+    details = CredentialAccountDetails(last_used_note=_AAF_NO_LAST_USE)
+    entries = payload.get("user") if isinstance(payload, dict) else None
+
+    expiries: list[datetime] = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            kind = int(entry.get("type"))
+        except (TypeError, ValueError):
+            continue
+        expires = _aaf_time(entry.get("expires"))
+        if kind in _AAF_PASSWORD_TYPES and expires is not None and expires > now:
+            expiries.append(expires)
+
+    if not expiries:
+        details.notes.append("AAF returned no current password for this identity.")
+        return details
+
+    expiries.sort()
+    details.expires_at = expiries[-1]
+    if len(expiries) > 1:
+        dates = ", ".join(f"{when:%d %b %Y}" for when in expiries)
+        details.notes.append(
+            f"This identity has {len(expiries)} passwords that still work (expiring {dates}). "
+            "AAF does not say which one was checked, so the latest is shown."
+        )
+    return details
+
+
 # ── Service ────────────────────────────────────────────────────────────
 
 
@@ -278,6 +509,9 @@ class CredentialCheckService:
                 use_ssl=server_url.lower().startswith("ldaps://"),
                 tls=tls,
                 connect_timeout=settings.CRED_CHECK_TIMEOUT_SECONDS,
+                # The default downloads the whole AD schema on every bind;
+                # the account details below read raw values instead.
+                get_info=NO_SERVER_INFO,
             )
             conn = Connection(
                 server,
@@ -285,6 +519,8 @@ class CredentialCheckService:
                 password=password,
                 auto_bind=False,
                 receive_timeout=settings.CRED_CHECK_TIMEOUT_SECONDS,
+                # Following a referral would present the password to another server.
+                auto_referrals=False,
             )
             bound = conn.bind()
         except LDAPException as exc:
@@ -306,12 +542,16 @@ class CredentialCheckService:
             )
 
         if bound:
-            with contextlib.suppress(LDAPException):
-                conn.unbind()
+            try:
+                account = self._read_ad_account(conn, bind_user.split("\\", 1)[-1])
+            finally:
+                with contextlib.suppress(LDAPException):
+                    conn.unbind()
             return CheckOutcome(
                 valid=True,
                 status=VALID,
                 message="The password is correct and the account can sign in.",
+                account=account,
             )
 
         # Not bound: read the sub-code before falling back to a generic answer.
@@ -321,6 +561,34 @@ class CredentialCheckService:
             status, message = _AD_SUBCODES.get(match.group(1).lower(), (INVALID, "The password was rejected."))
             return CheckOutcome(valid=False, status=status, message=message, details={"ad_subcode": match.group(1)})
         return CheckOutcome(valid=False, status=INVALID, message="The password was rejected by the directory.")
+
+    @staticmethod
+    def _read_ad_account(conn: Any, username: str) -> CredentialAccountDetails:
+        """Read the account's own entry over the connection it just bound.
+
+        Best effort: the bind has already given the verdict, and a hardened
+        directory may not let an account read itself — that is a note, not a
+        failure.  Only possible after a successful bind, so an expired or
+        locked account gets its verdict without details.
+        """
+        unavailable = CredentialAccountDetails(notes=["The directory did not return details for this account."])
+        try:
+            conn.search("", "(objectClass=*)", search_scope=BASE, attributes=["defaultNamingContext"])
+            root = _first_entry(conn.response)
+            base_dn = _ad_text(root, "defaultNamingContext") if root else None
+            if not base_dn:
+                return unavailable
+            conn.search(
+                base_dn,
+                f"(&(objectClass=user)(sAMAccountName={escape_filter_chars(username)}))",
+                search_scope=SUBTREE,
+                attributes=_AD_ACCOUNT_ATTRIBUTES,
+            )
+            entry = _first_entry(conn.response)
+        except LDAPException as exc:
+            logger.info("credential_check_ad_details_unavailable", error=str(exc)[:200])
+            return unavailable
+        return ad_account_details(entry, now=datetime.now(UTC)) if entry else unavailable
 
     # ── JFrog Artifactory ──────────────────────────────────────────────
 
@@ -337,23 +605,46 @@ class CredentialCheckService:
             raise CredentialCheckError("No JFrog URL is configured. Set CRED_CHECK_JFROG_URL.", status="unconfigured")
 
         url = f"{base}/artifactory/api/system/version"
+        claims = _jwt_claims(token)
         try:
             async with httpx.AsyncClient(timeout=settings.CRED_CHECK_TIMEOUT_SECONDS, verify=_verify()) as client:
+                # Before the check, not after: the check is itself a use of
+                # the token and would otherwise be the "last used" reported.
+                info = await self._jfrog_token_info(client, base, token)
                 response = await client.get(url, auth=(username, token))
         except httpx.HTTPError as exc:
             return _transport_outcome("JFrog Artifactory", url, exc)
 
+        now = datetime.now(UTC)
         if response.status_code == 200:
             version = ""
-            with contextlib.suppress(ValueError):
+            with contextlib.suppress(ValueError, AttributeError):
                 version = str(response.json().get("version", ""))
             return CheckOutcome(
                 valid=True,
                 status=VALID,
                 message="Artifactory accepted the username and token.",
                 details={"artifactory_version": version} if version else {},
+                account=jfrog_token_details(info, claims, now=now)
+                or CredentialAccountDetails(
+                    notes=[
+                        "Artifactory did not return details for this token. Legacy API keys have none, "
+                        "and older Artifactory versions do not report them."
+                    ]
+                ),
             )
         if response.status_code in (401, 403):
+            # A JWT says when it expires, which turns "rejected" into the
+            # actual reason.  The claims only explain the rejection; they
+            # never make a token valid.
+            expired_at = _epoch(claims.get("exp"))
+            if expired_at is not None and expired_at <= now:
+                return CheckOutcome(
+                    valid=False,
+                    status="expired",
+                    message=f"Artifactory rejected the token — it expired on {expired_at:%d %b %Y, %H:%M} UTC.",
+                    account=jfrog_token_details(None, claims, now=now),
+                )
             return CheckOutcome(
                 valid=False,
                 status=INVALID,
@@ -364,6 +655,31 @@ class CredentialCheckService:
             status="error",
             message=f"Artifactory answered HTTP {response.status_code}; the token could not be checked.",
         )
+
+    @staticmethod
+    async def _jfrog_token_info(client: httpx.AsyncClient, base: str, token: str) -> dict | None:
+        """Artifactory's record of the token (expiry, issued, last used), or None.
+
+        The documented auth for this endpoint is a bearer token.  Anything
+        other than a token record — a legacy API key, an older Artifactory, a
+        timeout — is None, and the verdict call that follows decides.
+        """
+        url = f"{base}{_JFROG_TOKEN_INFO_PATH}"
+        try:
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_DETAILS_TIMEOUT_SECONDS,
+            )
+            data = response.json() if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("credential_check_jfrog_token_info_unavailable", url=url, error=str(exc)[:200])
+            return None
+        # Only a token record: a proxy page or another payload must not be
+        # read as "this token never expires".
+        if isinstance(data, dict) and ("token_id" in data or "subject" in data):
+            return data
+        return None
 
     # ── AAF account ────────────────────────────────────────────────────
 
@@ -382,11 +698,16 @@ class CredentialCheckService:
         try:
             async with httpx.AsyncClient(timeout=settings.CRED_CHECK_TIMEOUT_SECONDS, verify=_verify()) as client:
                 response = await client.get(url, auth=(account, password))
+                # Only once the password is known to work — never a second
+                # attempt with a wrong one.
+                details = (
+                    await self._aaf_account(client, base, account, password) if response.status_code == 200 else None
+                )
         except httpx.HTTPError as exc:
             return _transport_outcome("AAF", url, exc)
 
         if response.status_code == 200:
-            return CheckOutcome(valid=True, status=VALID, message="AAF accepted the credential.")
+            return CheckOutcome(valid=True, status=VALID, message="AAF accepted the credential.", account=details)
         if response.status_code in (401, 403):
             return CheckOutcome(
                 valid=False,
@@ -398,3 +719,42 @@ class CredentialCheckService:
             status="error",
             message=f"AAF answered HTTP {response.status_code}; the credential could not be checked.",
         )
+
+    @staticmethod
+    async def _aaf_account(
+        client: httpx.AsyncClient, base: str, account: str, password: str
+    ) -> CredentialAccountDetails:
+        """Password expiry from AAF's credential list for the identity.
+
+        AAF answers this only to someone with read on the identity's
+        namespace (an admin of it), and an identity reading itself gets no
+        exemption — so a 403 here is common, and is a note, not an error.
+        """
+        path = settings.CRED_CHECK_AAF_CREDS_PATH.replace("{id}", quote(account, safe="@."))
+        url = f"{base}{path}"
+
+        def _unavailable(note: str) -> CredentialAccountDetails:
+            return CredentialAccountDetails(last_used_note=_AAF_NO_LAST_USE, notes=[note])
+
+        try:
+            response = await client.get(
+                url,
+                auth=(account, password),
+                headers={"Accept": _AAF_ACCEPT},
+                timeout=_DETAILS_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError as exc:
+            logger.info("credential_check_aaf_details_unavailable", url=url, error=str(exc)[:200])
+            return _unavailable("AAF did not answer the request for the password's expiry.")
+
+        if response.status_code == 403:
+            return _unavailable(
+                "AAF shows password expiry only to admins of the identity's namespace, and this identity is not one."
+            )
+        if response.status_code != 200:
+            return _unavailable(f"AAF answered HTTP {response.status_code} when asked for the password's expiry.")
+        try:
+            payload = response.json()
+        except ValueError:
+            return _unavailable("AAF's answer about the password's expiry was not JSON.")
+        return aaf_account_details(payload, now=datetime.now(UTC))

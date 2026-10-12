@@ -338,6 +338,10 @@ class Settings(BaseSettings):
         default="/authn/basicAuth",
         description="AAF path that answers 200 for a valid basic-auth credential",
     )
+    CRED_CHECK_AAF_CREDS_PATH: str = Field(
+        default="/authn/creds/id/{id}",
+        description="AAF path listing an identity's credentials and their expiry; {id} is the identity",
+    )
 
     # ── RBAC Roles ────────────────────────────────────────────────────
     # Super Admin manages every project. It is deliberately an Entra app role

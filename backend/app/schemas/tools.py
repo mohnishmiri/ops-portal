@@ -43,6 +43,30 @@ class AafCheckRequest(BaseModel):
     password: SecretStr
 
 
+class CredentialAccountDetails(BaseModel):
+    """What the source reports about the credential beyond yes / no.
+
+    Every field is optional: AD, Artifactory and AAF each expose a different
+    subset, and ``None`` means "not reported", never "none".  Datetimes are
+    UTC.
+    """
+
+    display_name: str | None = Field(default=None, description="AD display name, or the JFrog token description")
+    expires_at: datetime | None = Field(default=None, description="When this password / token stops working")
+    never_expires: bool = Field(default=False, description="The source says explicitly that it does not expire")
+    last_changed_at: datetime | None = Field(default=None, description="Password last set, or token issued")
+    last_used_at: datetime | None = None
+    last_used_note: str | None = Field(
+        default=None,
+        description="How far to trust last_used_at, or why it is not shown",
+    )
+    account_expires_at: datetime | None = Field(
+        default=None,
+        description="AD account (not password) expiry; None when the account does not expire",
+    )
+    notes: list[str] = Field(default_factory=list, description="Other caveats about where the details came from")
+
+
 class CredentialCheckResponse(BaseModel):
     """Outcome of a single check.  Carries no credential material."""
 
@@ -53,3 +77,7 @@ class CredentialCheckResponse(BaseModel):
     message: str
     checked_at: datetime
     details: dict = Field(default_factory=dict)
+    account: CredentialAccountDetails | None = Field(
+        default=None,
+        description="Expiry / last-used details, when the source would report them",
+    )
