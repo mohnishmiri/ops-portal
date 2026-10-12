@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
     checksum_schedules,
     compliance,
     costs,
+    credential_accounts,
     dashboards,
     environment,
     infra_alerts,
@@ -82,6 +83,7 @@ api_router.include_router(checksum_schedules.router, prefix="/checksum-schedules
 
 # Operational self-service tools (credential checks)
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
+api_router.include_router(credential_accounts.router, prefix="/tools/accounts", tags=["tools"])
 
 # Background sync job queue — non-blocking refresh + polling
 api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])

@@ -17,60 +17,35 @@
  *  • a credential is held in component state only until its check returns,
  *    then cleared — nothing is cached by React Query or written to storage;
  *  • inputs are type="password" with autoComplete off;
- *  • nothing is persisted anywhere: no audit row, no history, no result log.
+ *  • the credential is never persisted: no audit row, no history of checks.
+ *    When the checked account is in the inventory below, its row records the
+ *    verdict and the reported expiry / last sign-in — never the secret.
  *
  * Gating matches the API exactly: canWrite && hasCapability("credential_check").
  */
 
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { MetricCardIcons } from "../components/MetricCard";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import { fieldLabel, inputClass, panelClass, primaryButton } from "../features/access/accessShared";
 import { DaysLeftBadge, daysUntil } from "../features/keyvault/kvShared";
+import AccountInventory from "../features/tools/AccountInventory";
+import { StatusChip, statusStyle } from "../features/tools/credentialStatus";
 import { formatAxiosError } from "../services/apiErrors";
 import {
   type AafEnvironment,
   type CheckKind,
   type CredentialAccountDetails,
+  type CredentialAccount,
   type CredentialCheckResult,
   type DomainName,
+  type JFrogInstance,
   useCheckAafPassword,
   useCheckDomainPassword,
   useCheckJFrogToken,
 } from "../services/toolsApi";
 import { formatDate, formatDateTime, parseApiDate } from "../utils/dateFormat";
-
-// ── Status presentation ──────────────────────────────────────────────────────
-
-/**
- * Every status the backend can return. "error" means the check never reached
- * a verdict (DNS, TLS, timeout) and must never read as "wrong password".
- */
-const STATUS_STYLES: Record<string, { label: string; chip: string; tone: "green" | "red" | "amber" | "slate" }> = {
-  valid:        { label: "Valid",            chip: "bg-green-100 text-green-700", tone: "green" },
-  invalid:      { label: "Rejected",         chip: "bg-red-100 text-red-700",     tone: "red" },
-  expired:      { label: "Expired",          chip: "bg-amber-100 text-amber-800", tone: "amber" },
-  must_change:  { label: "Must change",      chip: "bg-amber-100 text-amber-800", tone: "amber" },
-  locked:       { label: "Locked out",       chip: "bg-red-100 text-red-700",     tone: "red" },
-  disabled:     { label: "Disabled",         chip: "bg-red-100 text-red-700",     tone: "red" },
-  denied:       { label: "Sign-in denied",   chip: "bg-amber-100 text-amber-800", tone: "amber" },
-  rate_limited: { label: "Rate limited",     chip: "bg-slate-100 text-slate-700", tone: "slate" },
-  lockout_guard:{ label: "Blocked",          chip: "bg-slate-100 text-slate-700", tone: "slate" },
-  unconfigured: { label: "Not configured",   chip: "bg-slate-100 text-slate-700", tone: "slate" },
-  error:        { label: "Unreachable",      chip: "bg-slate-100 text-slate-700", tone: "slate" },
-};
-
-const statusStyle = (status: string) => STATUS_STYLES[status] ?? STATUS_STYLES.error;
-
-const StatusChip: React.FC<{ status: string }> = ({ status }) => {
-  const style = statusStyle(status);
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${style.chip}`}>
-      {style.label}
-    </span>
-  );
-};
 
 // ── Account details ──────────────────────────────────────────────────────────
 
@@ -198,6 +173,9 @@ const ResultPanel: React.FC<{ result: CredentialCheckResult | null; error: strin
       </div>
       <p className="mt-1.5">{result.message}</p>
       {result.account && <AccountDetails kind={result.kind} account={result.account} />}
+      {result.inventory_updated && (
+        <p className="mt-2 text-xs opacity-75">Saved to this account&apos;s row in the inventory below.</p>
+      )}
     </div>
   );
 };
@@ -257,6 +235,7 @@ const CredentialCheckPage: React.FC = () => {
   const [domain, setDomain] = useState<DomainName>("ITSERVICES");
   const [username, setUsername] = useState("");
   const [domainPassword, setDomainPassword] = useState("");
+  const [jfrogInstance, setJfrogInstance] = useState<JFrogInstance>("bronze");
   const [jfrogUsername, setJfrogUsername] = useState("");
   const [jfrogToken, setJfrogToken] = useState("");
   const [aafEnvironment, setAafEnvironment] = useState<AafEnvironment>("prod");
@@ -265,6 +244,13 @@ const CredentialCheckPage: React.FC = () => {
 
   const [results, setResults] = useState<Partial<Record<CheckKind, CredentialCheckResult>>>({});
   const [errors, setErrors] = useState<Partial<Record<CheckKind, string>>>({});
+
+  // The secret field each card focuses when the inventory's "Check" fills it in.
+  const secretInputs = {
+    domain: useRef<HTMLInputElement>(null),
+    jfrog: useRef<HTMLInputElement>(null),
+    aaf: useRef<HTMLInputElement>(null),
+  };
 
   const domainCheck = useCheckDomainPassword();
   const jfrogCheck = useCheckJFrogToken();
@@ -295,6 +281,26 @@ const CredentialCheckPage: React.FC = () => {
     [],
   );
 
+  /** The inventory's "Check": fill in the card for that account and put the cursor in its secret field. */
+  const prefillCheck = (account: CredentialAccount) => {
+    const kind = account.account_type;
+    if (kind === "domain") {
+      setDomain(account.directory as DomainName);
+      setUsername(account.account_name);
+    } else if (kind === "jfrog") {
+      setJfrogInstance(account.directory as JFrogInstance);
+      setJfrogUsername(account.account_name);
+    } else {
+      setAafEnvironment(account.directory as AafEnvironment);
+      setAafAccount(account.account_name);
+    }
+    setResults((current) => ({ ...current, [kind]: undefined }));
+    setErrors((current) => ({ ...current, [kind]: undefined }));
+    const input = secretInputs[kind].current;
+    input?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    input?.focus({ preventScroll: true });
+  };
+
   return (
     <div className="py-6 space-y-6">
       {/* Header */}
@@ -305,8 +311,8 @@ const CredentialCheckPage: React.FC = () => {
         </h1>
         <p className="mt-1 text-sm text-gray-500">
           Check whether a domain password, a JFrog token or an AAF account password still authenticates — and, where
-          the source reports it, when it expires and when it was last used. Nothing is stored — the credential and the
-          result are gone as soon as the answer is shown.
+          the source reports it, when it expires and when it was last used. The password or token is never stored;
+          checking an account listed in the inventory below updates its row with the result.
         </p>
       </div>
 
@@ -369,6 +375,7 @@ const CredentialCheckPage: React.FC = () => {
             </label>
             <input
               id="cc-domain-password"
+              ref={secretInputs.domain}
               type="password"
               className={inputClass}
               value={domainPassword}
@@ -380,13 +387,13 @@ const CredentialCheckPage: React.FC = () => {
 
         <CheckCard
           title="JFrog token"
-          description="Username and token, checked against artifact.it.att.com."
+          description="Username and token, checked against Artifactory Bronze (artifact.it.att.com) or Gold (artifact-gold.it.att.com)."
           icon={MetricCardIcons.layers("h-5 w-5")}
           onSubmit={() =>
             run(
               "jfrog",
               jfrogCheck.mutateAsync,
-              { username: jfrogUsername.trim(), token: jfrogToken },
+              { instance: jfrogInstance, username: jfrogUsername.trim(), token: jfrogToken },
               () => setJfrogToken(""),
             )
           }
@@ -396,6 +403,20 @@ const CredentialCheckPage: React.FC = () => {
           result={results.jfrog ?? null}
           error={errors.jfrog ?? null}
         >
+          <div>
+            <label className={fieldLabel} htmlFor="cc-jfrog-instance">
+              Instance
+            </label>
+            <select
+              id="cc-jfrog-instance"
+              className={inputClass}
+              value={jfrogInstance}
+              onChange={(event) => setJfrogInstance(event.target.value as JFrogInstance)}
+            >
+              <option value="bronze">Bronze — artifact.it.att.com</option>
+              <option value="gold">Gold — artifact-gold.it.att.com</option>
+            </select>
+          </div>
           <div>
             <label className={fieldLabel} htmlFor="cc-jfrog-username">
               Username
@@ -415,6 +436,7 @@ const CredentialCheckPage: React.FC = () => {
             </label>
             <input
               id="cc-jfrog-token"
+              ref={secretInputs.jfrog}
               type="password"
               className={inputClass}
               value={jfrogToken}
@@ -479,6 +501,7 @@ const CredentialCheckPage: React.FC = () => {
             </label>
             <input
               id="cc-aaf-password"
+              ref={secretInputs.aaf}
               type="password"
               className={inputClass}
               value={aafPassword}
@@ -489,6 +512,7 @@ const CredentialCheckPage: React.FC = () => {
         </CheckCard>
       </div>
 
+      <AccountInventory canCheck={canCheck} onCheck={prefillCheck} />
     </div>
   );
 };

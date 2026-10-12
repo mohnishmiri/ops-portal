@@ -324,7 +324,11 @@ class Settings(BaseSettings):
     )
     CRED_CHECK_JFROG_URL: str = Field(
         default="https://artifact.it.att.com",
-        description="Base URL of the JFrog Artifactory instance",
+        description="Base URL of the JFrog Artifactory Bronze instance",
+    )
+    CRED_CHECK_JFROG_URL_GOLD: str = Field(
+        default="https://artifact-gold.it.att.com",
+        description="Base URL of the JFrog Artifactory Gold instance",
     )
     CRED_CHECK_AAF_URL_PROD: str = Field(
         default="https://aaf-azure.it.att.com",

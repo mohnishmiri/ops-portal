@@ -588,3 +588,24 @@ async def test_aaf_expiry_lookup_targets_the_checked_identity(monkeypatch):
 
     assert seen[1][0] == f"{settings.CRED_CHECK_AAF_URL_NONPROD}/authn/creds/id/m1@com.att.attcc"
     assert seen[1][1] == ("m1@com.att.attcc", "s")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("instance", "setting"), [("bronze", "CRED_CHECK_JFROG_URL"), ("gold", "CRED_CHECK_JFROG_URL_GOLD")]
+)
+async def test_jfrog_checks_the_instance_the_token_was_issued_on(monkeypatch, instance, setting):
+    """Bronze and Gold are separate instances — a Gold token means nothing to Bronze."""
+    seen = _http(monkeypatch, status_code=200, payload={"version": "7.77.3"})
+
+    await _service().check_jfrog("m52142@att.com", "tok", instance)
+
+    assert seen and all(url.startswith(getattr(settings, setting)) for url, *_ in seen)
+
+
+@pytest.mark.anyio
+async def test_an_unconfigured_jfrog_gold_says_what_to_set(monkeypatch):
+    monkeypatch.setattr(settings, "CRED_CHECK_JFROG_URL_GOLD", "")
+    with pytest.raises(CredentialCheckError) as excinfo:
+        await _service().check_jfrog("m52142@att.com", "tok", "gold")
+    assert "CRED_CHECK_JFROG_URL_GOLD" in str(excinfo.value)

@@ -103,7 +103,9 @@ backend:
     # The network policy below must also allow egress to 636 for LDAPS.
     CRED_CHECK_LDAP_ITSERVICES: ""
     CRED_CHECK_LDAP_TESTITSERVICES: ""
+    # JFrog Bronze / Gold — separate instances, separate tokens.
     CRED_CHECK_JFROG_URL: "https://artifact.it.att.com"
+    CRED_CHECK_JFROG_URL_GOLD: "https://artifact-gold.it.att.com"
     CRED_CHECK_AAF_URL_PROD: "https://aaf-azure.it.att.com"
     CRED_CHECK_AAF_URL_NONPROD: "https://aafist-azure.it.att.com"
     CRED_CHECK_AAF_PATH: "/authn/basicAuth"

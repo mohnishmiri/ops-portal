@@ -31,6 +31,7 @@ from app.models.database import (
     CertificateAutomationClaim,
     CertificateCollectionSnapshot,
     CertificateKeyEscrow,
+    CredentialAccount,
     Permission,
     PortalUser,
     Project,
@@ -196,6 +197,8 @@ async def db_engine():
             AccessRequest,
             AccessRequestItem,
             UserSubscriptionPreference,
+            # Credential account inventory (no JSONB).
+            CredentialAccount,
         ):
             await conn.run_sync(lambda c, m=model: m.__table__.create(c, checkfirst=True))
         await conn.execute(text(_AUDIT_LOGS_SQLITE_DDL))

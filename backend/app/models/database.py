@@ -13,6 +13,7 @@ from enum import Enum
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -1925,6 +1926,55 @@ class EnvironmentExecutionHistory(Base):
         Index("ix_env_exec_cluster_ns", "cluster_id", "namespace"),
         Index("ix_env_exec_started", "started_at"),
     )
+
+
+# =============================================================================
+# TOOLS: CREDENTIAL ACCOUNT INVENTORY
+# =============================================================================
+
+
+class CredentialAccount(Base):
+    """One service account the team owns, listed by application.
+
+    A domain account (ITSERVICES / TESTITSERVICES), an AAF identity or a JFrog
+    user.  **Never holds a password or token.**  Owner, reset link and notes
+    are typed in or imported; expiry, password change and last login come
+    from an import, the form, or a successful Credential Check of the same
+    account; failed logins only from an import or the form.
+
+    ``directory`` is where the account lives and depends on ``account_type``:
+    ITSERVICES / TESTITSERVICES for domain, prod / nonprod for AAF, bronze /
+    gold for JFrog.  ``account_key`` is the lower-cased name, so "M52142" and
+    "m52142" are one account.  Dates are UTC calendar dates.
+    """
+
+    __tablename__ = "credential_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    application = Column(String(200), nullable=False, index=True)
+    app_code = Column(String(32), nullable=True)
+    account_type = Column(String(20), nullable=False)  # domain | aaf | jfrog
+    directory = Column(String(32), nullable=False)
+    account_name = Column(String(256), nullable=False)
+    account_key = Column(String(256), nullable=False)
+    owner = Column(String(255), nullable=True)
+    expiry_date = Column(Date, nullable=True)
+    never_expires = Column(Boolean, nullable=False, default=False)
+    password_changed_date = Column(Date, nullable=True)
+    last_login_date = Column(Date, nullable=True)
+    failed_logins = Column(Integer, nullable=True)
+    reset_url = Column(String(1000), nullable=True)
+    notes = Column(Text, nullable=True)
+    # The most recent Credential Check of this account: the verdict only.
+    last_checked_at = Column(DateTime, nullable=True)
+    last_check_status = Column(String(20), nullable=True)
+    last_checked_by = Column(String(255), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_by = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("account_type", "directory", "account_key", name="uq_credential_account"),)
 
 
 # =============================================================================

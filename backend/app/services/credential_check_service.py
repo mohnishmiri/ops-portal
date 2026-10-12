@@ -10,11 +10,13 @@ A distinguishing AD bind result is the point of the tool.  "Wrong password",
 "password expired" and "account locked" are three very different operational
 answers, and the AD sub-codes below separate them.
 
-Nothing is persisted.  A check is a question asked and answered: no audit
-row, no history, no record of the credential or the result.  The secret is
-held only for the duration of the call and is never logged.
+This service persists nothing.  A check is a question asked and answered: no
+audit row, no history, no record of the credential.  The secret is held only
+for the duration of the call and is never logged.  (The endpoint copies the
+verdict — never the secret — onto the account's inventory row when it is
+listed; see ``credential_inventory_service``.)
 
-The one piece of state kept is the **lockout guard** below, in memory.  A
+The one piece of state kept here is the **lockout guard** below, in memory.  A
 failed LDAP bind counts against the Active Directory lockout policy, so a
 careless retry loop would lock the very account the user is verifying.  The
 guard pauses a target after a few consecutive failures.  It is per process
@@ -65,6 +67,7 @@ except ModuleNotFoundError:  # pragma: no cover - import guard
 
 
 CheckKind = Literal["domain", "jfrog", "aaf"]
+JFROG_INSTANCE_LABELS = {"bronze": "Bronze", "gold": "Gold"}
 
 # Lockout guard.  Consecutive failures against one target before the portal
 # stops trying, and how long that pause lasts.
@@ -592,17 +595,22 @@ class CredentialCheckService:
 
     # ── JFrog Artifactory ──────────────────────────────────────────────
 
-    async def check_jfrog(self, username: str, token: str) -> CheckOutcome:
-        """Username + token, checked with basic auth against Artifactory.
+    async def check_jfrog(self, username: str, token: str, instance: str = "bronze") -> CheckOutcome:
+        """Username + token, checked with basic auth against Artifactory Bronze or Gold.
 
         Basic auth rather than a bearer header: an Artifactory identity token
         or API key belongs to a named user and is presented alongside it, and
         the same call still works when an access token is used as the
-        password.
+        password.  Bronze and Gold are separate instances with their own
+        users and tokens, so a token is only ever checked where it was issued.
         """
-        base = settings.CRED_CHECK_JFROG_URL.strip().rstrip("/")
+        setting = "CRED_CHECK_JFROG_URL_GOLD" if instance == "gold" else "CRED_CHECK_JFROG_URL"
+        base = str(getattr(settings, setting)).strip().rstrip("/")
         if not base:
-            raise CredentialCheckError("No JFrog URL is configured. Set CRED_CHECK_JFROG_URL.", status="unconfigured")
+            raise CredentialCheckError(
+                f"No JFrog {JFROG_INSTANCE_LABELS[instance]} URL is configured. Set {setting}.",
+                status="unconfigured",
+            )
 
         url = f"{base}/artifactory/api/system/version"
         claims = _jwt_claims(token)
@@ -613,7 +621,7 @@ class CredentialCheckService:
                 info = await self._jfrog_token_info(client, base, token)
                 response = await client.get(url, auth=(username, token))
         except httpx.HTTPError as exc:
-            return _transport_outcome("JFrog Artifactory", url, exc)
+            return _transport_outcome(f"JFrog Artifactory {JFROG_INSTANCE_LABELS[instance]}", url, exc)
 
         now = datetime.now(UTC)
         if response.status_code == 200:

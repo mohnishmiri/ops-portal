@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, SecretStr
 
 DomainName = Literal["ITSERVICES", "TESTITSERVICES"]
 AafEnvironment = Literal["prod", "nonprod"]
+JFrogInstance = Literal["bronze", "gold"]
 
 
 class DomainCheckRequest(BaseModel):
@@ -25,6 +26,7 @@ class DomainCheckRequest(BaseModel):
 
 
 class JFrogCheckRequest(BaseModel):
+    instance: JFrogInstance = Field(default="bronze", description="Artifactory Bronze or Gold")
     username: str = Field(
         min_length=1,
         max_length=256,
@@ -80,4 +82,8 @@ class CredentialCheckResponse(BaseModel):
     account: CredentialAccountDetails | None = Field(
         default=None,
         description="Expiry / last-used details, when the source would report them",
+    )
+    inventory_updated: bool = Field(
+        default=False,
+        description="The account is in the inventory and its row now holds this verdict",
     )

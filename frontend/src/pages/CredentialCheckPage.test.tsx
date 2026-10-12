@@ -15,7 +15,9 @@ vi.mock("../services/apiClient", () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 vi.mock("../contexts/AuthContext", () => ({ useAuth: () => ({ canWrite: true }) }));
-vi.mock("../contexts/PermissionsContext", () => ({ usePermissions: () => ({ hasCapability: () => true }) }));
+vi.mock("../contexts/PermissionsContext", () => ({
+  usePermissions: () => ({ hasCapability: () => true, canEditPage: () => true }),
+}));
 
 import apiClient from "../services/apiClient";
 import type { CredentialAccountDetails, CredentialCheckResult } from "../services/toolsApi";
@@ -44,6 +46,7 @@ const result = (overrides: Partial<CredentialCheckResult>): CredentialCheckResul
   checked_at: "2026-10-12T12:00:00",
   details: {},
   account: null,
+  inventory_updated: false,
   ...overrides,
 });
 
@@ -57,6 +60,7 @@ function renderPage() {
 }
 
 async function checkDomain(response: CredentialCheckResult) {
+  vi.mocked(apiClient.get).mockResolvedValue({ data: [] });
   vi.mocked(apiClient.post).mockResolvedValueOnce({ data: response });
   renderPage();
   fireEvent.change(screen.getAllByLabelText("Username")[0], { target: { value: "m52142" } });
@@ -128,5 +132,63 @@ describe("CredentialCheckPage — account details", () => {
 
     expect(screen.getByText("The account is locked out.")).toBeInTheDocument();
     expect(screen.queryByText("Password expires")).not.toBeInTheDocument();
+  });
+});
+
+describe("CredentialCheckPage — JFrog instance and the inventory", () => {
+  it("checks a JFrog token on the instance chosen", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({ data: [] });
+    vi.mocked(apiClient.post).mockResolvedValueOnce({ data: result({ kind: "jfrog", target: "svc@att.com (Gold)" }) });
+    renderPage();
+
+    fireEvent.change(screen.getByLabelText("Instance"), { target: { value: "gold" } });
+    fireEvent.change(screen.getAllByLabelText("Username")[1], { target: { value: "svc@att.com" } });
+    fireEvent.change(screen.getByLabelText("Token"), { target: { value: "tok" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Check" })[1]);
+
+    await waitFor(() =>
+      expect(apiClient.post).toHaveBeenCalledWith("/tools/credential-checks/jfrog", {
+        instance: "gold",
+        username: "svc@att.com",
+        token: "tok",
+      }),
+    );
+  });
+
+  it("fills in the check card from an inventory row and focuses its secret field", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({
+      data: [
+        {
+          id: 7,
+          application: "ATTCC",
+          app_code: null,
+          account_type: "aaf",
+          directory: "nonprod",
+          account_name: "m1@com.att.attcc",
+          owner: null,
+          expiry_date: null,
+          never_expires: false,
+          password_changed_date: null,
+          last_login_date: null,
+          failed_logins: null,
+          reset_url: null,
+          notes: null,
+          last_checked_at: null,
+          last_check_status: null,
+          last_checked_by: null,
+          created_by: null,
+          created_at: null,
+          updated_by: null,
+          updated_at: null,
+        },
+      ],
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Check m1@com.att.attcc" }));
+
+    expect((screen.getByLabelText("Environment") as HTMLSelectElement).value).toBe("nonprod");
+    expect((screen.getByLabelText("Account") as HTMLInputElement).value).toBe("m1@com.att.attcc");
+    expect(document.activeElement).toBe(screen.getAllByLabelText("Password")[1]);
   });
 });

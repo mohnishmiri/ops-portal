@@ -5,9 +5,12 @@ token, or an AAF account password still work?  Compliance -> Expiry Tracking
 knows when a credential is *due* to expire but not whether it still
 authenticates.
 
-Nothing is stored: no audit row, no history.  The request carries the
-credential, the response carries the verdict — plus whatever the source
-reports about expiry and last use — and that is the end of it.
+The credential is never stored or logged: the request carries it, the
+response carries the verdict plus whatever the source reports about expiry
+and last use.  There is no audit row and no history of checks.  The one
+thing kept: when the checked account is in the inventory below the checks,
+its row records the verdict and the reported expiry / last sign-in, so the
+inventory stays current without anyone retyping dates.
 
 Authorization is the WRITE role plus the ``credential_check`` capability.  A
 check alters nothing anywhere, but a failed bind counts against the AD
@@ -17,12 +20,15 @@ revocable on its own from the Permissions UI.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.authz import require_capability
+from app.core.database import get_db
 from app.models.auth import UserContext
 from app.schemas.tools import (
     AafCheckRequest,
@@ -31,6 +37,7 @@ from app.schemas.tools import (
     JFrogCheckRequest,
 )
 from app.services.credential_check_service import (
+    JFROG_INSTANCE_LABELS,
     CheckKind,
     CheckOutcome,
     CredentialCheckError,
@@ -38,6 +45,7 @@ from app.services.credential_check_service import (
     assert_target_not_blocked,
     record_outcome,
 )
+from app.services.credential_inventory_service import CredentialInventoryService
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -46,7 +54,42 @@ _CHECK_CAPABILITY = require_capability("credential_check")
 _service = CredentialCheckService()
 
 
-async def _run_check(*, kind: CheckKind, target: str, check) -> CredentialCheckResponse:
+async def _record_in_inventory(
+    db: AsyncSession | None,
+    *,
+    kind: CheckKind,
+    directory: str,
+    account_name: str,
+    outcome: CheckOutcome,
+    user: UserContext,
+) -> bool:
+    """Save the verdict on the account's inventory row, if it has one.  Never fails the check."""
+    if db is None:
+        return False
+    try:
+        return await CredentialInventoryService(db).record_check(
+            account_type=kind,
+            directory=directory,
+            account_name=account_name,
+            outcome=outcome,
+            checked_by=user.email or user.user_id,
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.warning("credential_check_inventory_update_failed", kind=kind, error=str(exc)[:200])
+        return False
+
+
+async def _run_check(
+    *,
+    kind: CheckKind,
+    directory: str,
+    account_name: str,
+    target: str,
+    check: Callable[[], Awaitable[CheckOutcome]],
+    user: UserContext,
+    db: AsyncSession | None,
+) -> CredentialCheckResponse:
     """Guard, run, report — the same shape for every credential type."""
     try:
         assert_target_not_blocked(target)
@@ -60,6 +103,9 @@ async def _run_check(*, kind: CheckKind, target: str, check) -> CredentialCheckR
     record_outcome(target, outcome)
     # Target and verdict only — the credential is never logged.
     logger.info("credential_checked", kind=kind, target=target, outcome=outcome.status)
+    inventory_updated = await _record_in_inventory(
+        db, kind=kind, directory=directory, account_name=account_name, outcome=outcome, user=user
+    )
 
     return CredentialCheckResponse(
         kind=kind,
@@ -70,6 +116,7 @@ async def _run_check(*, kind: CheckKind, target: str, check) -> CredentialCheckR
         checked_at=datetime.utcnow(),
         details=outcome.details,
         account=outcome.account,
+        inventory_updated=inventory_updated,
     )
 
 
@@ -80,11 +127,16 @@ async def _run_check(*, kind: CheckKind, target: str, check) -> CredentialCheckR
 )
 async def check_domain_password(
     payload: DomainCheckRequest,
-    _user: UserContext = Depends(_CHECK_CAPABILITY),
+    user: UserContext = Depends(_CHECK_CAPABILITY),
+    db: AsyncSession = Depends(get_db),
 ) -> CredentialCheckResponse:
     return await _run_check(
         kind="domain",
+        directory=payload.domain,
+        account_name=payload.username,
         target=f"{payload.domain}\\{payload.username}",
+        user=user,
+        db=db,
         check=lambda: _service.check_domain(
             payload.domain,
             payload.username,
@@ -96,17 +148,23 @@ async def check_domain_password(
 @router.post(
     "/credential-checks/jfrog",
     response_model=CredentialCheckResponse,
-    summary="Check a JFrog Artifactory username and token",
+    summary="Check a JFrog Artifactory (Bronze or Gold) username and token",
 )
 async def check_jfrog_token(
     payload: JFrogCheckRequest,
-    _user: UserContext = Depends(_CHECK_CAPABILITY),
+    user: UserContext = Depends(_CHECK_CAPABILITY),
+    db: AsyncSession = Depends(get_db),
 ) -> CredentialCheckResponse:
     username = payload.username.strip()
     return await _run_check(
         kind="jfrog",
-        target=username,
-        check=lambda: _service.check_jfrog(username, payload.token.get_secret_value()),
+        directory=payload.instance,
+        account_name=username,
+        # Bronze and Gold are separate instances: separate lockout counts.
+        target=f"{username} ({JFROG_INSTANCE_LABELS[payload.instance]})",
+        user=user,
+        db=db,
+        check=lambda: _service.check_jfrog(username, payload.token.get_secret_value(), payload.instance),
     )
 
 
@@ -117,12 +175,17 @@ async def check_jfrog_token(
 )
 async def check_aaf_password(
     payload: AafCheckRequest,
-    _user: UserContext = Depends(_CHECK_CAPABILITY),
+    user: UserContext = Depends(_CHECK_CAPABILITY),
+    db: AsyncSession = Depends(get_db),
 ) -> CredentialCheckResponse:
     account = payload.account.strip()
     return await _run_check(
         kind="aaf",
+        directory=payload.environment,
+        account_name=account,
         target=account,
+        user=user,
+        db=db,
         check=lambda: _service.check_aaf(
             payload.environment,
             account,
