@@ -117,7 +117,7 @@ const VIEW_TESTS: Record<View, (a: CredentialAccount) => boolean> = {
 const searchLabel = (a: CredentialAccount) => `${TYPE_LABELS[a.account_type]} ${DIRECTORY_SHORT[a.directory]}`;
 
 const accountMatches = (a: CredentialAccount, query: string) =>
-  textMatches(query, a.application, a.app_code, a.account_name, a.owner, a.notes, searchLabel(a));
+  textMatches(query, a.application, a.app_code, a.account_name, a.display_name, a.owner, a.notes, searchLabel(a));
 
 const accountAccessor = (a: CredentialAccount, key: SortKey): string | number => {
   switch (key) {
@@ -138,9 +138,19 @@ const accountAccessor = (a: CredentialAccount, key: SortKey): string | number =>
   }
 };
 
-const Muted: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <span className="text-xs text-gray-400">{children}</span>
+const Muted: React.FC<{ children: React.ReactNode; title?: string }> = ({ children, title }) => (
+  <span className="text-xs text-gray-400" title={title}>
+    {children}
+  </span>
 );
+
+/** A blank directory-sourced value: say whether a check would fill it. */
+const NotRecorded: React.FC<{ account: CredentialAccount }> = ({ account }) =>
+  account.last_checked_at ? (
+    <Muted>Not reported</Muted>
+  ) : (
+    <Muted title="Run a check of this account above to read it from the directory">Not checked yet</Muted>
+  );
 
 const ExpiryCell: React.FC<{ account: CredentialAccount }> = ({ account }) => (
   <>
@@ -152,7 +162,7 @@ const ExpiryCell: React.FC<{ account: CredentialAccount }> = ({ account }) => (
         <DaysLeftBadge days={calendarDaysUntil(account.expiry_date)} />
       </span>
     ) : (
-      <Muted>Not recorded</Muted>
+      <NotRecorded account={account} />
     )}
     {account.password_changed_date && (
       <p className="mt-0.5 text-[11px] text-gray-500">Password changed {formatDate(account.password_changed_date)}</p>
@@ -489,6 +499,7 @@ const AccountInventory: React.FC<{
                     </td>
                     <td className={gridStyles.cell}>
                       <div className="break-all font-mono text-xs text-gray-800">{a.account_name}</div>
+                      {a.display_name && <p className="mt-0.5 text-[11px] text-gray-600">{a.display_name}</p>}
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <span className="rounded bg-att-50 px-1.5 py-0.5 text-[11px] font-medium text-att-700">
                           {directoryLabel(a.directory)}
@@ -515,7 +526,7 @@ const AccountInventory: React.FC<{
                           <p className="text-[11px] text-gray-500">{daysAgoText(a.last_login_date)}</p>
                         </>
                       ) : (
-                        <Muted>Not recorded</Muted>
+                        <NotRecorded account={a} />
                       )}
                     </td>
                     <td className={gridStyles.centerCell}>

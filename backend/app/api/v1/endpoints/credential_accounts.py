@@ -24,6 +24,7 @@ from app.core.authz import require_capability
 from app.core.database import get_db
 from app.models.auth import UserContext, UserRole
 from app.schemas.credential_inventory import (
+    CredentialAccountCreate,
     CredentialAccountIn,
     CredentialAccountOut,
     ImportApplyRequest,
@@ -79,7 +80,7 @@ async def list_accounts(
     summary="Add an account to the inventory",
 )
 async def create_account(
-    payload: CredentialAccountIn,
+    payload: CredentialAccountCreate,
     request: Request,
     user: UserContext = Depends(_EDIT),
     db: AsyncSession = Depends(get_db),

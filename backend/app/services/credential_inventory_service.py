@@ -437,6 +437,7 @@ def _export_columns(today: date) -> list[tuple[str, Callable[[CredentialAccount]
         ("Type", lambda a: TYPE_LABELS[a.account_type]),
         ("Directory", lambda a: DIRECTORY_LABELS.get(a.directory, a.directory)),
         ("Account", lambda a: a.account_name),
+        ("Directory Name", lambda a: a.display_name),
         ("Owner", lambda a: a.owner),
         ("Expiry Date", lambda a: "Never" if a.never_expires else a.expiry_date),
         ("Days Left", lambda a: _days_left(a, today)),
@@ -619,6 +620,7 @@ def filter_accounts(accounts: list[CredentialAccount], flt: AccountFilter, *, to
                 account.application,
                 account.app_code,
                 account.account_name,
+                account.display_name,
                 account.owner,
                 account.notes,
                 f"{TYPE_LABELS[account.account_type]} {DIRECTORY_LABELS.get(account.directory, account.directory)}",
@@ -805,6 +807,10 @@ class CredentialInventoryService:
                 account.last_login_date = _utc_date(details.last_used_at)
             if details.last_changed_at is not None:
                 account.password_changed_date = _utc_date(details.last_changed_at)
+            # AD's displayName names the account; a JFrog "display name" is
+            # only the token's description, so it is not kept.
+            if account_type == "domain" and details.display_name:
+                account.display_name = details.display_name[:255]
         await self._db.commit()
         return True
 

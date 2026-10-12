@@ -47,6 +47,8 @@ const result = (overrides: Partial<CredentialCheckResult>): CredentialCheckResul
   details: {},
   account: null,
   inventory_updated: false,
+  directory: "ITSERVICES",
+  account_name: "m52142",
   ...overrides,
 });
 
@@ -166,6 +168,7 @@ describe("CredentialCheckPage — JFrog instance and the inventory", () => {
           directory: "nonprod",
           account_name: "m1@com.att.attcc",
           owner: null,
+          display_name: null,
           expiry_date: null,
           never_expires: false,
           password_changed_date: null,
@@ -190,5 +193,47 @@ describe("CredentialCheckPage — JFrog instance and the inventory", () => {
     expect((screen.getByLabelText("Environment") as HTMLSelectElement).value).toBe("nonprod");
     expect((screen.getByLabelText("Account") as HTMLInputElement).value).toBe("m1@com.att.attcc");
     expect(document.activeElement).toBe(screen.getAllByLabelText("Password")[1]);
+  });
+});
+
+describe("CredentialCheckPage — add a checked account to the inventory", () => {
+  it("lists the account with the expiry, last sign-in and name the check just read", async () => {
+    await checkDomain(
+      result({
+        directory: "TESTITSERVICES",
+        account_name: "m47355",
+        account: account({
+          display_name: "m47355 - KAREN RIDGEWAY (kr873u)",
+          expires_at: "2027-09-30T15:00:00Z",
+          last_changed_at: "2026-09-30T15:00:00Z",
+          last_used_at: "2026-10-11T08:00:00Z",
+        }),
+      }),
+    );
+    vi.mocked(apiClient.post).mockResolvedValueOnce({ data: { id: 1, application: "ATTCC" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add to inventory" }));
+    fireEvent.change(screen.getByLabelText("Add to the inventory under application"), { target: { value: "ATTCC" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => expect(screen.getByText(/Added to the inventory under/)).toBeInTheDocument());
+    expect(apiClient.post).toHaveBeenLastCalledWith(
+      "/tools/accounts",
+      expect.objectContaining({
+        application: "ATTCC",
+        account_type: "domain",
+        directory: "TESTITSERVICES",
+        account_name: "m47355",
+        expiry_date: "2027-09-30",
+        password_changed_date: "2026-09-30",
+        last_login_date: "2026-10-11",
+        display_name: "m47355 - KAREN RIDGEWAY (kr873u)",
+      }),
+    );
+  });
+
+  it("is not offered once the account is listed, or for a credential that failed", async () => {
+    await checkDomain(result({ inventory_updated: true }));
+    expect(screen.queryByRole("button", { name: "Add to inventory" })).not.toBeInTheDocument();
   });
 });

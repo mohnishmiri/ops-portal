@@ -87,3 +87,10 @@ class CredentialCheckResponse(BaseModel):
         default=False,
         description="The account is in the inventory and its row now holds this verdict",
     )
+    # What was checked, so the page can add the account to the inventory
+    # without re-reading a form that may have changed since.
+    directory: str | None = Field(
+        default=None,
+        description="ITSERVICES / TESTITSERVICES, prod / nonprod, or bronze / gold",
+    )
+    account_name: str | None = None

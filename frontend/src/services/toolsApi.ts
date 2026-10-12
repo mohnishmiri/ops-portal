@@ -54,6 +54,9 @@ export interface CredentialCheckResult {
   account: CredentialAccountDetails | null;
   /** The account is in the inventory and its row now holds this verdict. */
   inventory_updated: boolean;
+  /** What was checked — lets the result add the account to the inventory. */
+  directory: AccountDirectory | null;
+  account_name: string | null;
 }
 
 export interface DomainCheckInput {
@@ -146,8 +149,15 @@ export interface CredentialAccountInput {
   notes: string | null;
 }
 
+/** Add — from the form, or from a check result carrying the directory's name for the account. */
+export interface CredentialAccountCreateInput extends CredentialAccountInput {
+  display_name?: string | null;
+}
+
 export interface CredentialAccount extends CredentialAccountInput {
   id: number;
+  /** The directory's own name for the account (AD displayName), set by a check. */
+  display_name: string | null;
   /** The most recent Credential Check of this account: the verdict only. */
   last_checked_at: string | null;
   last_check_status: string | null;
@@ -203,7 +213,9 @@ function useAccountMutation<TInput, TResult>(mutationFn: (input: TInput) => Prom
 }
 
 export const useCreateCredentialAccount = () =>
-  useAccountMutation(async (input: CredentialAccountInput) => (await apiClient.post<CredentialAccount>(ACCOUNTS, input)).data);
+  useAccountMutation(
+    async (input: CredentialAccountCreateInput) => (await apiClient.post<CredentialAccount>(ACCOUNTS, input)).data,
+  );
 
 export const useUpdateCredentialAccount = () =>
   useAccountMutation(

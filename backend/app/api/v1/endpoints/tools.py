@@ -117,6 +117,8 @@ async def _run_check(
         details=outcome.details,
         account=outcome.account,
         inventory_updated=inventory_updated,
+        directory=directory,
+        account_name=account_name.strip(),
     )
 
 

@@ -86,6 +86,20 @@ class CredentialAccountIn(_AccountFields):
         return self
 
 
+class CredentialAccountCreate(CredentialAccountIn):
+    """Add — also from a check result, which carries the directory's name for the account.
+
+    Editing never touches ``display_name``: only a check sets it.
+    """
+
+    display_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def _strip_display_name(cls, value: object) -> object:
+        return _clean(value) if isinstance(value, str) or value is None else value
+
+
 class CredentialAccountImportRow(_AccountFields):
     """One imported row.
 
@@ -104,6 +118,7 @@ class CredentialAccountOut(BaseModel):
     directory: str
     account_name: str
     owner: str | None
+    display_name: str | None
     expiry_date: date | None
     never_expires: bool
     password_changed_date: date | None

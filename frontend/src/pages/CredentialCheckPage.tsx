@@ -31,6 +31,7 @@ import { usePermissions } from "../contexts/PermissionsContext";
 import { fieldLabel, inputClass, panelClass, primaryButton } from "../features/access/accessShared";
 import { DaysLeftBadge, daysUntil } from "../features/keyvault/kvShared";
 import AccountInventory from "../features/tools/AccountInventory";
+import AddToInventory from "../features/tools/AddToInventory";
 import { StatusChip, statusStyle } from "../features/tools/credentialStatus";
 import { formatAxiosError } from "../services/apiErrors";
 import {
@@ -176,6 +177,7 @@ const ResultPanel: React.FC<{ result: CredentialCheckResult | null; error: strin
       {result.inventory_updated && (
         <p className="mt-2 text-xs opacity-75">Saved to this account&apos;s row in the inventory below.</p>
       )}
+      <AddToInventory result={result} />
     </div>
   );
 };

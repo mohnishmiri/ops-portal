@@ -16,7 +16,7 @@ from app.auth import get_current_user
 from app.core.database import get_db
 from app.models.database import AuditLog, CredentialAccount
 from app.schemas.auth import UserContext, UserRole
-from app.schemas.credential_inventory import CredentialAccountImportRow, CredentialAccountIn
+from app.schemas.credential_inventory import CredentialAccountCreate, CredentialAccountImportRow, CredentialAccountIn
 from app.schemas.tools import CredentialAccountDetails
 from app.services import credential_inventory_service as inv
 from app.services.credential_check_service import CheckOutcome
@@ -486,3 +486,78 @@ async def test_a_check_of_a_listed_account_updates_its_row(writer_client, monkey
     assert seen["instance"] == "gold"
     rows = (await writer_client.get("/api/v1/tools/accounts")).json()
     assert rows[0]["last_check_status"] == "valid"
+
+
+# ── The directory's name for the account ──────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_a_domain_check_keeps_the_directorys_name_for_the_account(db_session):
+    """For a mechID the AD displayName names the person behind it."""
+    service = inv.CredentialInventoryService(db_session)
+    domain = await service.create(_account(), _writer())
+    jfrog = await service.create(_account(account_type="jfrog", directory="bronze", account_name="svc"), _writer())
+
+    async def _check(account_type, directory, name, display):
+        await service.record_check(
+            account_type=account_type,
+            directory=directory,
+            account_name=name,
+            outcome=CheckOutcome(
+                valid=True, status="valid", message="ok", account=CredentialAccountDetails(display_name=display)
+            ),
+            checked_by="w",
+        )
+
+    await _check("domain", "ITSERVICES", "m52142", "m52142 - KAREN RIDGEWAY (kr873u)")
+    await _check("jfrog", "bronze", "svc", "pipeline token")  # a token description, not a name
+
+    assert (await service.get(domain.id)).display_name == "m52142 - KAREN RIDGEWAY (kr873u)"
+    assert (await service.get(jfrog.id)).display_name is None
+
+
+@pytest.mark.anyio
+async def test_editing_an_account_never_erases_the_directorys_name(db_session):
+    service = inv.CredentialInventoryService(db_session)
+    created = await service.create(CredentialAccountCreate(**_account().model_dump(), display_name="Karen"), _writer())
+
+    await service.update(created.id, _account(owner="Someone else"), _writer())
+
+    row = await service.get(created.id)
+    assert (row.owner, row.display_name) == ("Someone else", "Karen")
+
+
+@pytest.mark.anyio
+async def test_a_check_says_what_it_checked_so_the_page_can_list_it(writer_client, monkeypatch):
+    from app.api.v1.endpoints import tools
+
+    async def _fake_check(domain, username, password):
+        return CheckOutcome(valid=True, status="valid", message="ok")
+
+    monkeypatch.setattr(tools._service, "check_domain", _fake_check)
+
+    response = await writer_client.post(
+        "/api/v1/tools/credential-checks/domain",
+        json={"domain": "TESTITSERVICES", "username": "m47355", "password": "p"},
+    )
+
+    body = response.json()
+    assert (body["directory"], body["account_name"], body["inventory_updated"]) == ("TESTITSERVICES", "m47355", False)
+
+
+@pytest.mark.anyio
+async def test_adding_from_a_check_result_keeps_its_details(writer_client):
+    response = await writer_client.post(
+        "/api/v1/tools/accounts",
+        json={
+            **_BODY,
+            "expiry_date": "2027-09-30",
+            "password_changed_date": "2026-09-30",
+            "last_login_date": "2026-10-11",
+            "display_name": "m52142 - KAREN RIDGEWAY (kr873u)",
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert (body["expiry_date"], body["display_name"]) == ("2027-09-30", "m52142 - KAREN RIDGEWAY (kr873u)")

@@ -1958,6 +1958,9 @@ class CredentialAccount(Base):
     account_name = Column(String(256), nullable=False)
     account_key = Column(String(256), nullable=False)
     owner = Column(String(255), nullable=True)
+    # The directory's own name for the account (AD displayName), from a
+    # check.  For a mechID it usually names the person behind it.
+    display_name = Column(String(255), nullable=True)
     expiry_date = Column(Date, nullable=True)
     never_expires = Column(Boolean, nullable=False, default=False)
     password_changed_date = Column(Date, nullable=True)

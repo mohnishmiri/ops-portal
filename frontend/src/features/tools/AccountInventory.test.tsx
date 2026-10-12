@@ -34,6 +34,7 @@ const account = (overrides: Partial<CredentialAccount>): CredentialAccount => ({
   directory: "ITSERVICES",
   account_name: "m52142",
   owner: "Jane Doe",
+  display_name: null,
   expiry_date: "2027-06-01",
   never_expires: false,
   password_changed_date: null,
@@ -175,6 +176,28 @@ describe("AccountInventory — grid", () => {
         responseType: "blob",
       }),
     );
+  });
+});
+
+describe("AccountInventory — what a check fills in", () => {
+  it("shows the directory's name for the account, and says when a check would fill a blank", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({
+      data: [
+        account({ id: 1, account_name: "m47355", display_name: "m47355 - KAREN RIDGEWAY (kr873u)", expiry_date: null }),
+      ],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AccountInventory canCheck onCheck={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("m47355 - KAREN RIDGEWAY (kr873u)")).toBeInTheDocument();
+    expect(screen.getAllByText("Not checked yet")).toHaveLength(2); // expiry and last login
+
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "ridgeway" } });
+    expect(gridRows()).toHaveLength(1);
   });
 });
 
