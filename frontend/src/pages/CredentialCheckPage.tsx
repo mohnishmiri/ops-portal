@@ -72,18 +72,19 @@ const DateValue: React.FC<{ iso: string }> = ({ iso }) => (
   <span title={formatDateTime(iso)}>{formatDate(parseApiDate(iso))}</span>
 );
 
+/** Label left, value right, with any caveat on its own line beneath. */
 const DetailRow: React.FC<{ label: string; hint?: string | null; children: React.ReactNode }> = ({
   label,
   hint,
   children,
 }) => (
-  <>
-    <dt className="font-medium opacity-75">{label}</dt>
-    <dd>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">{children}</div>
-      {hint && <p className="mt-0.5 opacity-75">{hint}</p>}
-    </dd>
-  </>
+  <div className="py-1.5">
+    <div className="flex items-baseline justify-between gap-4">
+      <dt className="shrink-0 opacity-75">{label}</dt>
+      <dd className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-right font-medium">{children}</dd>
+    </div>
+    {hint && <p className="mt-0.5 opacity-70">{hint}</p>}
+  </div>
 );
 
 const NotReported: React.FC<{ text?: string | null }> = ({ text }) => (
@@ -97,8 +98,8 @@ const NotReported: React.FC<{ text?: string | null }> = ({ text }) => (
 const AccountDetails: React.FC<{ kind: CheckKind; account: CredentialAccountDetails }> = ({ kind, account }) => {
   const labels = DETAIL_LABELS[kind];
   return (
-    <div className="mt-3 border-t border-black/5 pt-3 text-xs">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
+    <div className="mt-3 text-xs">
+      <dl className="divide-y divide-black/5 border-y border-black/5">
         {account.display_name && <DetailRow label={labels.name}>{account.display_name}</DetailRow>}
         <DetailRow label={labels.expires}>
           {account.never_expires ? (
@@ -162,11 +163,31 @@ const AccountDetails: React.FC<{ kind: CheckKind; account: CredentialAccountDeta
 
 // ── Result panel ─────────────────────────────────────────────────────────────
 
-const ResultPanel: React.FC<{ result: CredentialCheckResult | null; error: string | null }> = ({ result, error }) => {
+/** Clears an answer that has been read, so the card is ready for the next account. */
+const DismissButton: React.FC<{ onClick: () => void; label: string }> = ({ onClick, label }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    title={label}
+    aria-label={label}
+    className="absolute right-1.5 top-1.5 rounded p-1 opacity-60 transition hover:bg-black/5 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-current"
+  >
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" aria-hidden="true">
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  </button>
+);
+
+const ResultPanel: React.FC<{
+  result: CredentialCheckResult | null;
+  error: string | null;
+  onDismiss: () => void;
+}> = ({ result, error, onDismiss }) => {
   if (error) {
     return (
-      <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700" role="alert">
+      <div className="relative rounded-lg border border-red-200 bg-red-50 py-2.5 pl-4 pr-9 text-sm text-red-700" role="alert">
         {error}
+        <DismissButton onClick={onDismiss} label="Dismiss this message" />
       </div>
     );
   }
@@ -183,16 +204,18 @@ const ResultPanel: React.FC<{ result: CredentialCheckResult | null; error: strin
           : "border-slate-200 bg-slate-50 text-slate-700";
 
   return (
-    <div className={`rounded-lg border px-4 py-3 text-sm ${surface}`} role="status">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className={`relative rounded-lg border px-4 py-3 text-sm ${surface}`} role="status">
+      <div className="flex flex-wrap items-center gap-2 pr-6">
         <StatusChip status={result.status} />
-        <span className="font-mono text-xs">{result.target}</span>
+        <span className="break-all font-mono text-xs">{result.target}</span>
       </div>
+      <DismissButton onClick={onDismiss} label={`Dismiss the result for ${result.target}`} />
       <p className="mt-1.5">{result.message}</p>
       {result.account && <AccountDetails kind={result.kind} account={result.account} />}
-      {result.inventory_updated && (
-        <p className="mt-2 text-xs opacity-75">Saved to this account&apos;s row in the inventory below.</p>
-      )}
+      <p className="mt-2 text-xs opacity-70">
+        Checked {formatDateTime(result.checked_at)}
+        {result.inventory_updated && " · saved to this account's row in the inventory below"}
+      </p>
       <AddToInventory result={result} />
     </div>
   );
@@ -212,8 +235,10 @@ const CheckCard: React.FC<{
   pending: boolean;
   result: CredentialCheckResult | null;
   error: string | null;
+  /** Clears the answer shown under this card. */
+  onDismiss: () => void;
   children: React.ReactNode;
-}> = ({ title, description, icon, onSubmit, allowed, incomplete, pending, result, error, children }) => (
+}> = ({ title, description, icon, onSubmit, allowed, incomplete, pending, result, error, onDismiss, children }) => (
   <form
     className={`${panelClass} flex flex-col gap-4`}
     onSubmit={(event) => {
@@ -239,7 +264,7 @@ const CheckCard: React.FC<{
       {!allowed && <span className="text-xs text-gray-500">You do not have permission to run checks.</span>}
     </div>
 
-    <ResultPanel result={result} error={error} />
+    <ResultPanel result={result} error={error} onDismiss={onDismiss} />
   </form>
 );
 
@@ -298,6 +323,12 @@ const CredentialCheckPage: React.FC = () => {
     },
     [],
   );
+
+  /** Clear the answer under one card. */
+  const dismiss = useCallback((kind: CheckKind) => {
+    setResults((current) => ({ ...current, [kind]: undefined }));
+    setErrors((current) => ({ ...current, [kind]: undefined }));
+  }, []);
 
   /** The inventory's "Check": fill in the card for that account and put the cursor in its secret field. */
   const prefillCheck = (account: CredentialAccount) => {
@@ -359,6 +390,7 @@ const CredentialCheckPage: React.FC = () => {
           pending={domainCheck.isPending}
           result={results.domain ?? null}
           error={errors.domain ?? null}
+          onDismiss={() => dismiss("domain")}
         >
           <div>
             <label className={fieldLabel} htmlFor="cc-domain">
@@ -420,6 +452,7 @@ const CredentialCheckPage: React.FC = () => {
           pending={jfrogCheck.isPending}
           result={results.jfrog ?? null}
           error={errors.jfrog ?? null}
+          onDismiss={() => dismiss("jfrog")}
         >
           <div>
             <label className={fieldLabel} htmlFor="cc-jfrog-instance">
@@ -485,6 +518,7 @@ const CredentialCheckPage: React.FC = () => {
           pending={aafCheck.isPending}
           result={results.aaf ?? null}
           error={errors.aaf ?? null}
+          onDismiss={() => dismiss("aaf")}
         >
           <div>
             <label className={fieldLabel} htmlFor="cc-aaf-env">

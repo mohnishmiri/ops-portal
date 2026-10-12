@@ -239,3 +239,31 @@ describe("CredentialCheckPage — add a checked account to the inventory", () =>
     expect(screen.queryByRole("button", { name: "Add to inventory" })).not.toBeInTheDocument();
   });
 });
+
+describe("CredentialCheckPage — reading and clearing an answer", () => {
+  it("says when the check ran and clears the answer when dismissed", async () => {
+    await checkDomain(result({ target: "ITSERVICES\\m47355", checked_at: "2026-10-12T11:55:00" }));
+
+    expect(screen.getByText(/^Checked /)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss the result for ITSERVICES\\m47355" }));
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // The card stays filled in, ready to check the same account again.
+    expect((screen.getAllByLabelText("Username")[0] as HTMLInputElement).value).toBe("m52142");
+  });
+
+  it("clears a failed check the same way", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({ data: [] });
+    vi.mocked(apiClient.post).mockRejectedValueOnce(new Error("boom"));
+    renderPage();
+    fireEvent.change(screen.getAllByLabelText("Username")[0], { target: { value: "m52142" } });
+    fireEvent.change(screen.getAllByLabelText("Password")[0], { target: { value: "secret" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Check" })[0]);
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss this message" }));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
