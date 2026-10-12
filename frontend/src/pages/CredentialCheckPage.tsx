@@ -128,6 +128,22 @@ const AccountDetails: React.FC<{ kind: CheckKind; account: CredentialAccountDeta
             <NotReported text={account.last_used_note} />
           )}
         </DetailRow>
+        {(account.failed_sign_ins !== null || account.last_failed_at) && (
+          <DetailRow label="Failed sign-ins" hint={account.failed_sign_ins_note}>
+            {account.failed_sign_ins === null ? (
+              <NotReported />
+            ) : (
+              <span className={account.failed_sign_ins > 0 ? "font-semibold" : undefined}>
+                {account.failed_sign_ins}
+              </span>
+            )}
+            {account.last_failed_at && (
+              <span className="opacity-75">
+                last on <DateValue iso={account.last_failed_at} />
+              </span>
+            )}
+          </DetailRow>
+        )}
         {account.account_expires_at && (
           <DetailRow label="Account expires">
             <DateValue iso={account.account_expires_at} />

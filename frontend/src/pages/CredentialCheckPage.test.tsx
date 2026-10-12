@@ -33,6 +33,9 @@ const account = (overrides: Partial<CredentialAccountDetails> = {}): CredentialA
   last_used_at: null,
   last_used_note: null,
   account_expires_at: null,
+  failed_sign_ins: null,
+  last_failed_at: null,
+  failed_sign_ins_note: null,
   notes: [],
   ...overrides,
 });
@@ -168,7 +171,6 @@ describe("CredentialCheckPage — JFrog instance and the inventory", () => {
           directory: "nonprod",
           account_name: "m1@com.att.attcc",
           owner: null,
-          display_name: null,
           expiry_date: null,
           never_expires: false,
           password_changed_date: null,
@@ -227,7 +229,7 @@ describe("CredentialCheckPage — add a checked account to the inventory", () =>
         expiry_date: "2027-09-30",
         password_changed_date: "2026-09-30",
         last_login_date: "2026-10-11",
-        display_name: "m47355 - KAREN RIDGEWAY (kr873u)",
+        owner: "m47355 - KAREN RIDGEWAY (kr873u)",
       }),
     );
   });

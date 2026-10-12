@@ -5,16 +5,18 @@ keeps the list it is asked about: who owns each domain account, AAF identity
 and JFrog user, when it expires, when it last signed in, how many failed
 logins it has and where to reset it.
 
-**No password or token is ever stored here.**  The values come from three
-places, and only these:
+**No password or token is ever stored here.**  A row has two halves:
 
-* the Add / Edit form, which replaces every field;
-* an Excel / CSV import, which fills in and corrects but never erases — a
-  blank cell keeps what is already recorded;
-* a successful Credential Check of an account that is listed, which records
-  the verdict and whatever the source reported (expiry, password change,
-  last sign-in).  Failed logins are never taken from a check: a check's own
-  failures are not the account's sign-in history.
+* which account, under which application, where it is reset and any notes —
+  typed into the Add / Edit form, or imported from a spreadsheet;
+* the name the directory holds for it, its password expiry, when that
+  password last changed, when it was last used and how many sign-ins have
+  failed — never typed in.  These are written by a successful Credential
+  Check of that account, which is the only thing here that reads a
+  directory, and it reads only the account whose password was just proven.
+
+So a spreadsheet lists the accounts and the checks fill them in.  An import
+ignores an Expiry Date or Owner column rather than trusting it over AD.
 
 Every change made from the page is written to ``audit_logs``.  A check's
 update of a row is not — the row itself records who checked it and when, and
@@ -28,7 +30,7 @@ import io
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 
 import structlog
@@ -120,25 +122,6 @@ _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
         "identity",
         "login",
     ),
-    "owner": ("owner", "owner name", "owner email", "account owner", "owned by"),
-    "expiry_date": (
-        "expiry",
-        "expiry date",
-        "expires",
-        "expiration",
-        "expiration date",
-        "password expiry",
-        "password expires",
-    ),
-    "password_changed_date": (
-        "password last changed",
-        "password changed",
-        "last changed",
-        "pwd last set",
-        "password last set",
-    ),
-    "last_login_date": ("last login", "last login date", "last logon", "last sign-in", "last sign in", "last used"),
-    "failed_logins": ("failed logins", "failed login", "failed login count", "failed sign-ins", "bad password count"),
     "reset_url": ("reset link", "reset url", "reset", "password reset link", "reset password link"),
     "notes": ("notes", "additional information", "additional info", "comments", "comment", "description"),
 }
@@ -150,11 +133,6 @@ FIELD_LABELS = {
     "account_type": "Type",
     "directory": "Directory",
     "account_name": "Account",
-    "owner": "Owner",
-    "expiry_date": "Expiry Date",
-    "password_changed_date": "Password Last Changed",
-    "last_login_date": "Last Login",
-    "failed_logins": "Failed Logins",
     "reset_url": "Reset Link",
     "notes": "Notes",
 }
@@ -185,10 +163,6 @@ _DIRECTORY_WORDS: dict[str, str] = {
     "artifact-gold.it.att.com": "gold",
 }
 
-_NEVER_WORDS = frozenset({"never", "does not expire", "doesn't expire", "no expiry", "non-expiring"})
-_BLANK_WORDS = frozenset({"", "-", "—", "n/a", "na", "none", "null"})
-_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%d-%b-%Y", "%d %b %Y", "%b %d, %Y", "%d-%b-%y")
-
 
 def _norm(value: Any) -> str:
     return re.sub(r"[\s_]+", " ", str(value or "")).strip().lower()
@@ -204,49 +178,6 @@ def _cell_text(value: Any) -> str | None:
         return value.isoformat()
     text = str(value).strip()
     return text or None
-
-
-def _parse_date(value: Any) -> tuple[date | None, bool]:
-    """(date, says "never").  Raises ValueError for anything unreadable."""
-    if value is None:
-        return None, False
-    if isinstance(value, datetime):
-        return value.date(), False
-    if isinstance(value, date):
-        return value, False
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        # An Excel date serial in a cell that was not formatted as a date.
-        if 20_000 < value < 80_000:
-            return date(1899, 12, 30) + timedelta(days=int(value)), False
-        raise ValueError(f"'{value}' is not a date")
-    text = str(value).strip()
-    lowered = text.lower()
-    if lowered in _BLANK_WORDS:
-        return None, False
-    if lowered in _NEVER_WORDS:
-        return None, True
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).date(), False
-    except ValueError:
-        pass
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(text, fmt).date(), False
-        except ValueError:
-            continue
-    raise ValueError(f"'{text}' is not a date — use YYYY-MM-DD or MM/DD/YYYY")
-
-
-def _parse_count(value: Any) -> int | None:
-    if value is None or (isinstance(value, str) and value.strip().lower() in _BLANK_WORDS):
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"'{value}' is not a number") from None
-    if not number.is_integer() or number < 0:
-        raise ValueError(f"'{value}' is not a whole number")
-    return int(number)
 
 
 def _resolve_type(type_text: str | None, directory_text: str | None) -> tuple[str, str]:
@@ -391,23 +322,8 @@ def parse_import_row(raw: dict[str, Any]) -> tuple[CredentialAccountImportRow | 
     except ValueError as exc:
         errors.append(str(exc))
 
-    for field in ("application", "app_code", "account_name", "owner", "reset_url", "notes"):
+    for field in ("application", "app_code", "account_name", "reset_url", "notes"):
         values[field] = _cell_text(raw.get(field))
-
-    for field in ("expiry_date", "password_changed_date", "last_login_date"):
-        try:
-            parsed, never = _parse_date(raw.get(field))
-        except ValueError as exc:
-            errors.append(f"{FIELD_LABELS[field]}: {exc}")
-            continue
-        values[field] = parsed
-        if field == "expiry_date" and (parsed or never):
-            values["never_expires"] = never
-
-    try:
-        values["failed_logins"] = _parse_count(raw.get("failed_logins"))
-    except ValueError as exc:
-        errors.append(f"{FIELD_LABELS['failed_logins']}: {exc}")
 
     if not values.get("application"):
         errors.append("Application: required")
@@ -430,15 +346,20 @@ def _days_left(account: CredentialAccount, today: date) -> int | None:
 
 
 def _export_columns(today: date) -> list[tuple[str, Callable[[CredentialAccount], Any]]]:
-    """Same headers the import reads, so an export can be edited and imported back."""
+    """Everything the grid shows.
+
+    The first columns are the ones an import reads back; the rest are what the
+    directory reported at the last check, there to be read rather than edited.
+    """
     return [
         ("Application", lambda a: a.application),
         ("App Code", lambda a: a.app_code),
         ("Type", lambda a: TYPE_LABELS[a.account_type]),
         ("Directory", lambda a: DIRECTORY_LABELS.get(a.directory, a.directory)),
         ("Account", lambda a: a.account_name),
-        ("Directory Name", lambda a: a.display_name),
-        ("Owner", lambda a: a.owner),
+        ("Reset Link", lambda a: a.reset_url),
+        ("Notes", lambda a: a.notes),
+        ("Name (from directory)", lambda a: a.owner),
         ("Expiry Date", lambda a: "Never" if a.never_expires else a.expiry_date),
         ("Days Left", lambda a: _days_left(a, today)),
         ("Password Last Changed", lambda a: a.password_changed_date),
@@ -446,8 +367,6 @@ def _export_columns(today: date) -> list[tuple[str, Callable[[CredentialAccount]
         ("Failed Logins", lambda a: a.failed_logins),
         ("Last Check", lambda a: a.last_check_status),
         ("Last Checked (UTC)", lambda a: a.last_checked_at.replace(microsecond=0) if a.last_checked_at else None),
-        ("Reset Link", lambda a: a.reset_url),
-        ("Notes", lambda a: a.notes),
     ]
 
 
@@ -509,26 +428,16 @@ TEMPLATE_HEADERS = [
     "Type",
     "Directory",
     "Account",
-    "Owner",
-    "Expiry Date",
-    "Password Last Changed",
-    "Last Login",
-    "Failed Logins",
     "Reset Link",
     "Notes",
 ]
 
 _TEMPLATE_HELP = [
     ("Application", "Yes", "The application the account belongs to, e.g. ATTCC."),
-    ("App Code", "No", "MOTS / app code, e.g. 31599."),
+    ("App Code", "No", "MOTS / app ID, e.g. 31599."),
     ("Type", "Yes", "ITSERVICES, TESTITSERVICES, AAF or JFrog."),
     ("Directory", "No", "AAF: Prod or IST (default Prod). JFrog: Bronze or Gold (default Bronze)."),
     ("Account", "Yes", "Domain: m52142. AAF: m52142@com.att.attcc. JFrog: m52142@att.com."),
-    ("Owner", "No", "Who owns the account — name or email."),
-    ("Expiry Date", "No", "YYYY-MM-DD or MM/DD/YYYY, or Never."),
-    ("Password Last Changed", "No", "YYYY-MM-DD or MM/DD/YYYY."),
-    ("Last Login", "No", "YYYY-MM-DD or MM/DD/YYYY."),
-    ("Failed Logins", "No", "A whole number."),
     ("Reset Link", "No", "https:// link to where the password is reset."),
     ("Notes", "No", "Anything else: purpose, consumers, rotation steps."),
 ]
@@ -542,7 +451,10 @@ def import_template_xlsx() -> bytes:
     for col, header in enumerate(TEMPLATE_HEADERS, start=1):
         ws.cell(row=1, column=col, value=header).font = Font(bold=True)
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = max(len(header) + 4, 16)
-    dropdowns = (("C", "ITSERVICES,TESTITSERVICES,AAF,JFrog"), ("D", "ITSERVICES,TESTITSERVICES,Prod,IST,Bronze,Gold"))
+    dropdowns = (
+        ("C", "ITSERVICES,TESTITSERVICES,AAF,JFrog"),
+        ("D", "ITSERVICES,TESTITSERVICES,Prod,IST,Bronze,Gold"),
+    )
     for column, choices in dropdowns:
         validation = DataValidation(type="list", formula1=f'"{choices}"', allow_blank=True)
         ws.add_data_validation(validation)
@@ -562,8 +474,8 @@ def import_template_xlsx() -> bytes:
         row=len(_TEMPLATE_HELP) + 3,
         column=1,
         value=(
-            "Never put a password or token in this file. Re-importing updates existing accounts; "
-            "blank cells keep what is recorded."
+            "Never put a password or token in this file. The name, expiry, last sign-in and failed sign-ins "
+            "are read from the directory when the account is checked, so columns for them are ignored here."
         ),
     ).font = Font(bold=True)
 
@@ -620,7 +532,6 @@ def filter_accounts(accounts: list[CredentialAccount], flt: AccountFilter, *, to
                 account.application,
                 account.app_code,
                 account.account_name,
-                account.display_name,
                 account.owner,
                 account.notes,
                 f"{TYPE_LABELS[account.account_type]} {DIRECTORY_LABELS.get(account.directory, account.directory)}",
@@ -807,10 +718,13 @@ class CredentialInventoryService:
                 account.last_login_date = _utc_date(details.last_used_at)
             if details.last_changed_at is not None:
                 account.password_changed_date = _utc_date(details.last_changed_at)
-            # AD's displayName names the account; a JFrog "display name" is
-            # only the token's description, so it is not kept.
+            if details.failed_sign_ins is not None:
+                account.failed_logins = details.failed_sign_ins
+            # AD's displayName names the account, which is the closest thing
+            # the directory has to an owner.  A JFrog "display name" is only
+            # the token's description, so it is not kept.
             if account_type == "domain" and details.display_name:
-                account.display_name = details.display_name[:255]
+                account.owner = details.display_name[:255]
         await self._db.commit()
         return True
 

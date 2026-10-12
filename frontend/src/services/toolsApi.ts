@@ -38,6 +38,10 @@ export interface CredentialAccountDetails {
   last_used_note: string | null;
   /** AD account (not password) expiry; null when the account does not expire. */
   account_expires_at: string | null;
+  /** Failed sign-ins the directory counts against the lockout policy. */
+  failed_sign_ins: number | null;
+  last_failed_at: string | null;
+  failed_sign_ins_note: string | null;
   notes: string[];
 }
 
@@ -132,32 +136,40 @@ export const directoryLabel = (directory: AccountDirectory): string =>
     ? directory
     : `${TYPE_LABELS[ACCOUNT_DIRECTORIES.aaf.includes(directory) ? "aaf" : "jfrog"]} ${DIRECTORY_SHORT[directory]}`;
 
-/** Editable fields. Dates are YYYY-MM-DD calendar dates. No password or token, ever. */
+/**
+ * What a person types in: which account, under which application, where it is
+ * reset and any notes. Never a password or token — and never anything the
+ * directory answers for.
+ */
 export interface CredentialAccountInput {
   application: string;
   app_code: string | null;
   account_type: AccountType;
   directory: AccountDirectory;
   account_name: string;
+  reset_url: string | null;
+  notes: string | null;
+}
+
+/**
+ * What AD / AAF / Artifactory reported at the last check. Written by a check,
+ * never edited. Dates are YYYY-MM-DD calendar dates.
+ */
+export interface DirectoryFacts {
+  /** The directory's name for the account — shown as its owner. */
   owner: string | null;
   expiry_date: string | null;
   never_expires: boolean;
   password_changed_date: string | null;
   last_login_date: string | null;
   failed_logins: number | null;
-  reset_url: string | null;
-  notes: string | null;
 }
 
-/** Add — from the form, or from a check result carrying the directory's name for the account. */
-export interface CredentialAccountCreateInput extends CredentialAccountInput {
-  display_name?: string | null;
-}
+/** Add — the form sends only the typed fields; a check result also seeds what it just read. */
+export type CredentialAccountCreateInput = CredentialAccountInput & Partial<DirectoryFacts>;
 
-export interface CredentialAccount extends CredentialAccountInput {
+export interface CredentialAccount extends CredentialAccountInput, DirectoryFacts {
   id: number;
-  /** The directory's own name for the account (AD displayName), set by a check. */
-  display_name: string | null;
   /** The most recent Credential Check of this account: the verdict only. */
   last_checked_at: string | null;
   last_check_status: string | null;
@@ -168,10 +180,8 @@ export interface CredentialAccount extends CredentialAccountInput {
   updated_at: string | null;
 }
 
-/** An imported row: null means the file left it blank, which keeps what is recorded. */
-export type CredentialAccountImportRow = Omit<CredentialAccountInput, "never_expires"> & {
-  never_expires: boolean | null;
-};
+/** An imported row — the same fields the Add form takes; a blank keeps what is recorded. */
+export type CredentialAccountImportRow = CredentialAccountInput;
 
 export interface ImportPreviewRow {
   row: number;

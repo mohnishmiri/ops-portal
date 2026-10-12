@@ -56,16 +56,17 @@ const AddToInventory: React.FC<{ result: CredentialCheckResult }> = ({ result })
       account_type: result.kind,
       directory: result.directory!,
       account_name: result.account_name!,
-      owner: null,
+      reset_url: null,
+      notes: null,
+      // What the check just read, so the row is not blank until the next one.
+      // AD's displayName names the account; a JFrog "name" is only a token
+      // description, so it is not kept as an owner.
+      owner: result.kind === "domain" ? (details?.display_name ?? null) : null,
       expiry_date: details?.never_expires ? null : utcDate(details?.expires_at),
       never_expires: details?.never_expires ?? false,
       password_changed_date: utcDate(details?.last_changed_at),
       last_login_date: utcDate(details?.last_used_at),
-      failed_logins: null,
-      reset_url: null,
-      notes: null,
-      // AD's displayName names the account; a JFrog "name" is only a token description.
-      display_name: result.kind === "domain" ? (details?.display_name ?? null) : null,
+      failed_logins: details?.failed_sign_ins ?? null,
     });
 
   if (!open) {

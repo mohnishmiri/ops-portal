@@ -1937,10 +1937,13 @@ class CredentialAccount(Base):
     """One service account the team owns, listed by application.
 
     A domain account (ITSERVICES / TESTITSERVICES), an AAF identity or a JFrog
-    user.  **Never holds a password or token.**  Owner, reset link and notes
-    are typed in or imported; expiry, password change and last login come
-    from an import, the form, or a successful Credential Check of the same
-    account; failed logins only from an import or the form.
+    user.  **Never holds a password or token.**
+
+    Only the first columns are typed in — which account, under which
+    application, where to reset it and any notes.  Everything the directory
+    knows (``owner`` through ``failed_logins``) is written by a successful
+    Credential Check of that account and is never entered by hand, so the
+    grid shows what AD / AAF / Artifactory actually report.
 
     ``directory`` is where the account lives and depends on ``account_type``:
     ITSERVICES / TESTITSERVICES for domain, prod / nonprod for AAF, bronze /
@@ -1957,10 +1960,10 @@ class CredentialAccount(Base):
     directory = Column(String(32), nullable=False)
     account_name = Column(String(256), nullable=False)
     account_key = Column(String(256), nullable=False)
+    # The directory's own name for the account (AD displayName).  For a
+    # mechID it usually names the person behind it, which is as close to an
+    # owner as the directory knows.  Written by a check, never typed in.
     owner = Column(String(255), nullable=True)
-    # The directory's own name for the account (AD displayName), from a
-    # check.  For a mechID it usually names the person behind it.
-    display_name = Column(String(255), nullable=True)
     expiry_date = Column(Date, nullable=True)
     never_expires = Column(Boolean, nullable=False, default=False)
     password_changed_date = Column(Date, nullable=True)

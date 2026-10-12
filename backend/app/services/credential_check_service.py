@@ -285,6 +285,10 @@ _AD_ACCOUNT_ATTRIBUTES = [
     "accountExpires",
     "lastLogonTimestamp",
     "userAccountControl",
+    # Failed sign-ins.  Neither is replicated between domain controllers, so
+    # both describe the DC that answered this bind, not the domain.
+    "badPwdCount",
+    "badPasswordTime",
 ]
 
 
@@ -329,7 +333,7 @@ def _first_entry(response: Any) -> dict | None:
 
 
 def ad_account_details(entry: dict, *, now: datetime) -> CredentialAccountDetails:
-    """Expiry, last change and last sign-in from the account's own AD entry."""
+    """Expiry, last change, last sign-in and failed sign-ins from the account's own AD entry."""
     computed = _ad_int(entry, "msDS-UserPasswordExpiryTimeComputed")
     uac = _ad_int(entry, "userAccountControl") or 0
     never_expires = computed == _FILETIME_NEVER or bool(uac & _UF_DONT_EXPIRE_PASSWD)
@@ -349,6 +353,20 @@ def ad_account_details(entry: dict, *, now: datetime) -> CredentialAccountDetail
         last_used_at = last_logon
         last_used_note = "Approximate — Active Directory records sign-ins only every 9 to 14 days."
 
+    # badPwdCount is reset by a successful sign-in, so after a correct
+    # password it is the count since that sign-in, not a running total.
+    failed = _ad_int(entry, "badPwdCount")
+    last_failed = _filetime(_ad_int(entry, "badPasswordTime"))
+    if failed is None:
+        failed_note = "Not reported — the directory did not return a failed sign-in count."
+    elif failed == 0:
+        failed_note = "None on the domain controller that answered, since the last successful sign-in."
+    else:
+        failed_note = (
+            "Counted by the domain controller that answered, since the last successful sign-in. "
+            "Each controller keeps its own count."
+        )
+
     return CredentialAccountDetails(
         display_name=_ad_text(entry, "displayName"),
         expires_at=None if never_expires else _filetime(computed),
@@ -357,6 +375,9 @@ def ad_account_details(entry: dict, *, now: datetime) -> CredentialAccountDetail
         last_used_at=last_used_at,
         last_used_note=last_used_note,
         account_expires_at=_filetime(_ad_int(entry, "accountExpires")),
+        failed_sign_ins=failed,
+        last_failed_at=last_failed,
+        failed_sign_ins_note=failed_note,
     )
 
 

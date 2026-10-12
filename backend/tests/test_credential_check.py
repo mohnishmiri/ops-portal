@@ -609,3 +609,21 @@ async def test_an_unconfigured_jfrog_gold_says_what_to_set(monkeypatch):
     with pytest.raises(CredentialCheckError) as excinfo:
         await _service().check_jfrog("m52142@att.com", "tok", "gold")
     assert "CRED_CHECK_JFROG_URL_GOLD" in str(excinfo.value)
+
+
+def test_ad_details_report_failed_sign_ins_and_the_last_bad_password():
+    entry = _ad_entry(badPwdCount=b"3", badPasswordTime=_filetime(datetime(2026, 10, 11, 9, 0, tzinfo=UTC)))
+
+    details = module.ad_account_details(entry, now=NOW)
+
+    assert details.failed_sign_ins == 3
+    assert details.last_failed_at == datetime(2026, 10, 11, 9, 0, tzinfo=UTC)
+    # Each DC keeps its own count and a successful sign-in resets it.
+    assert "domain controller" in details.failed_sign_ins_note
+
+
+def test_a_directory_that_withholds_the_failed_count_says_so_rather_than_showing_zero():
+    details = module.ad_account_details(_ad_entry(displayName=b"Someone"), now=NOW)
+
+    assert details.failed_sign_ins is None
+    assert "Not reported" in details.failed_sign_ins_note

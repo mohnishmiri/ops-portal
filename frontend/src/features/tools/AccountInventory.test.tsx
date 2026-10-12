@@ -34,7 +34,6 @@ const account = (overrides: Partial<CredentialAccount>): CredentialAccount => ({
   directory: "ITSERVICES",
   account_name: "m52142",
   owner: "Jane Doe",
-  display_name: null,
   expiry_date: "2027-06-01",
   never_expires: false,
   password_changed_date: null,
@@ -183,7 +182,7 @@ describe("AccountInventory — what a check fills in", () => {
   it("shows the directory's name for the account, and says when a check would fill a blank", async () => {
     vi.mocked(apiClient.get).mockResolvedValue({
       data: [
-        account({ id: 1, account_name: "m47355", display_name: "m47355 - KAREN RIDGEWAY (kr873u)", expiry_date: null }),
+        account({ id: 1, account_name: "m47355", owner: "m47355 - KAREN RIDGEWAY (kr873u)", expiry_date: null }),
       ],
     });
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -201,6 +200,39 @@ describe("AccountInventory — what a check fills in", () => {
   });
 });
 
+describe("AccountInventory — the Add form", () => {
+  it("asks only for what a person knows, and posts only that", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+    vi.mocked(apiClient.post).mockResolvedValueOnce({ data: {} });
+
+    fireEvent.click(screen.getByRole("button", { name: /add account/i }));
+    const dialog = screen.getByRole("dialog", { name: "Add account" });
+
+    // Everything the directory answers for is absent — there is nothing to type it into.
+    for (const label of [/^owner/i, /expiry date/i, /password last changed/i, /last login/i, /failed logins/i]) {
+      expect(within(dialog).queryByLabelText(label)).not.toBeInTheDocument();
+    }
+
+    fireEvent.change(within(dialog).getByLabelText(/application/i), { target: { value: "ATTCC" } });
+    fireEvent.change(within(dialog).getByLabelText(/app code/i), { target: { value: "31599" } });
+    fireEvent.change(within(dialog).getByLabelText(/^account/i), { target: { value: "m47355" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add account" }));
+
+    await waitFor(() =>
+      expect(apiClient.post).toHaveBeenCalledWith("/tools/accounts", {
+        application: "ATTCC",
+        app_code: "31599",
+        account_type: "domain",
+        directory: "ITSERVICES",
+        account_name: "m47355",
+        reset_url: null,
+        notes: null,
+      }),
+    );
+  });
+});
+
 describe("AccountInventory — import", () => {
   const PREVIEW: ImportPreview = {
     rows: [
@@ -215,12 +247,6 @@ describe("AccountInventory — import", () => {
           account_type: "domain",
           directory: "ITSERVICES",
           account_name: "m1",
-          owner: null,
-          expiry_date: null,
-          never_expires: null,
-          password_changed_date: null,
-          last_login_date: null,
-          failed_logins: null,
           reset_url: null,
           notes: null,
         },

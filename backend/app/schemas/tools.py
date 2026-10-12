@@ -66,6 +66,12 @@ class CredentialAccountDetails(BaseModel):
         default=None,
         description="AD account (not password) expiry; None when the account does not expire",
     )
+    failed_sign_ins: int | None = Field(
+        default=None,
+        description="Failed sign-ins counted against the lockout policy on the domain controller that answered",
+    )
+    last_failed_at: datetime | None = Field(default=None, description="When a wrong password was last presented")
+    failed_sign_ins_note: str | None = None
     notes: list[str] = Field(default_factory=list, description="Other caveats about where the details came from")
 
 

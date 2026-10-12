@@ -43,7 +43,6 @@ def _account(**overrides) -> CredentialAccountIn:
         "account_type": "domain",
         "directory": "ITSERVICES",
         "account_name": "m52142",
-        "owner": "Jane Doe",
     }
     values.update(overrides)
     return CredentialAccountIn(**values)
@@ -104,41 +103,29 @@ def test_import_names_a_bad_type_or_directory(type_cell, directory_cell, fragmen
     assert fragment in errors[0]
 
 
-@pytest.mark.parametrize(
-    ("cell", "expected", "never"),
-    [
-        (datetime(2026, 12, 14, 9, 30), date(2026, 12, 14), None),
-        ("2026-12-14", date(2026, 12, 14), None),
-        ("12/14/2026", date(2026, 12, 14), None),
-        ("14-Dec-2026", date(2026, 12, 14), None),
-        (46370, date(2026, 12, 14), None),  # an Excel serial in an unformatted cell
-        ("Never", None, True),
-        ("N/A", None, None),
-    ],
-)
-def test_import_reads_expiry_dates(cell, expected, never):
-    row, errors = inv.parse_import_row(
-        {"application": "ATTCC", "account_type": "AAF", "account_name": "m1@com.att.attcc", "expiry_date": cell}
-    )
-    assert errors == []
-    assert row.expiry_date == expected
-    assert row.never_expires is (never if never is not None else (False if expected else None))
-
-
-def test_import_collects_every_problem_in_a_row():
+def test_import_ignores_columns_the_directory_answers_for():
+    """An Expiry Date or Owner column in someone's sheet must not beat AD."""
     row, errors = inv.parse_import_row(
         {
-            "account_type": "ITSERVICES",
-            "account_name": "",
+            "application": "ATTCC",
+            "account_type": "AAF",
+            "account_name": "m1@com.att.attcc",
             "expiry_date": "next tuesday",
+            "owner": "Jane Doe",
             "failed_logins": "lots",
         }
     )
+    assert errors == []
+    assert not hasattr(row, "expiry_date")
+    assert not hasattr(row, "owner")
+
+
+def test_import_collects_every_problem_in_a_row():
+    row, errors = inv.parse_import_row({"account_type": "Kerberos", "account_name": "", "reset_url": "ftp://x/y"})
     assert row is None
-    assert any(e.startswith("Expiry Date:") for e in errors)
-    assert any(e.startswith("Failed Logins:") for e in errors)
     assert "Application: required" in errors
     assert "Account: required" in errors
+    assert any("is not one of" in e for e in errors)
 
 
 def test_a_reset_link_must_be_a_web_link():
@@ -160,27 +147,36 @@ def test_a_reset_link_must_be_a_web_link():
 
 def test_import_finds_the_header_below_a_title_so_an_export_imports_back():
     content = _xlsx(
-        [["Application", "Type", "Account", "Owner"], ["ATTCC", "ITSERVICES", "m52142", "Jane"]],
+        [["Application", "Type", "Account", "Notes"], ["ATTCC", "ITSERVICES", "m52142", "nightly build"]],
         header_at=4,
     )
     rows = inv.read_import_file("accounts.xlsx", content)
-    expected = {"application": "ATTCC", "account_type": "ITSERVICES", "account_name": "m52142", "owner": "Jane"}
+    expected = {
+        "application": "ATTCC",
+        "account_type": "ITSERVICES",
+        "account_name": "m52142",
+        "notes": "nightly build",
+    }
     assert rows == [(5, expected)]
 
 
 def test_import_reads_header_aliases():
     content = _xlsx(
-        [["App Name", "Account Type", "MechID", "Expiration Date", "Comments"], ["DWS", "AAF", "m1", None, "x"]]
+        [
+            ["App Name", "MOTS ID", "Account Type", "MechID", "Expiration Date", "Comments"],
+            ["DWS", 31599, "AAF", "m1", None, "x"],
+        ]
     )
     ((_, raw),) = inv.read_import_file("ids.xlsx", content)
-    assert set(raw) == {"application", "account_type", "account_name", "expiry_date", "notes"}
+    # "Expiration Date" is not a column the import reads — the directory answers for it.
+    assert set(raw) == {"application", "app_code", "account_type", "account_name", "notes"}
 
 
 def test_import_reads_a_windows_excel_csv():
     """Excel on Windows saves "CSV" in the ANSI code page, not UTF-8."""
-    content = "Application,Type,Account,Owner\r\nATTCC,ITSERVICES,m1,José\r\n".encode("cp1252")
+    content = "Application,Type,Account,Notes\r\nATTCC,ITSERVICES,m1,Café build\r\n".encode("cp1252")
     ((_, raw),) = inv.read_import_file("ids.csv", content)
-    assert raw["owner"] == "José"
+    assert raw["notes"] == "Café build"
 
 
 @pytest.mark.parametrize(
@@ -224,7 +220,7 @@ def _row(**overrides) -> CredentialAccount:
         "directory": "ITSERVICES",
         "account_name": "m52142",
         "account_key": "m52142",
-        "owner": "Jane",
+        "owner": "m52142 - KAREN RIDGEWAY (kr873u)",
         "expiry_date": date(2026, 12, 14),
         "never_expires": False,
         "failed_logins": 0,
@@ -254,16 +250,25 @@ def test_xlsx_export_keeps_a_formula_like_note_as_text():
     assert cell.value == "=1+1"
 
 
-def test_an_export_imports_back_as_the_same_accounts():
-    rows = [_row(), _row(id=2, account_type="jfrog", directory="gold", account_name="svc@att.com", never_expires=True)]
+def test_an_export_lists_the_directorys_answers_and_still_imports_back():
+    rows = [
+        _row(reset_url="https://reset.example.com"),
+        _row(id=2, account_type="jfrog", directory="gold", account_name="svc@att.com", never_expires=True),
+    ]
     content = inv.export_xlsx(rows, today=TODAY, generated_at=datetime(2026, 10, 12, tzinfo=UTC))
 
-    parsed = [inv.parse_import_row(raw) for _, raw in inv.read_import_file("export.xlsx", content)]
+    headers = [c.value for c in load_workbook(io.BytesIO(content)).active[4]]
+    assert "Name (from directory)" in headers and "Expiry Date" in headers
 
+    parsed = [inv.parse_import_row(raw) for _, raw in inv.read_import_file("export.xlsx", content)]
     assert all(errors == [] for _, errors in parsed)
     first, second = (row for row, _ in parsed)
-    assert (first.account_type, first.directory, first.expiry_date) == ("domain", "ITSERVICES", date(2026, 12, 14))
-    assert (second.account_type, second.directory, second.never_expires) == ("jfrog", "gold", True)
+    assert (first.account_type, first.directory, first.reset_url) == (
+        "domain",
+        "ITSERVICES",
+        "https://reset.example.com",
+    )
+    assert (second.account_type, second.directory) == ("jfrog", "gold")
 
 
 def test_filters_match_the_grid_tiles():
@@ -272,7 +277,7 @@ def test_filters_match_the_grid_tiles():
     later = _row(id=3, expiry_date=date(2027, 6, 1))
     never = _row(id=4, expiry_date=None, never_expires=True)
     locked = _row(id=5, expiry_date=None, last_check_status="locked")
-    failed = _row(id=6, expiry_date=None, failed_logins=3)
+    failed = _row(id=6, expiry_date=None, failed_logins=3, last_check_status="valid")
     everything = [expired, expiring, later, never, locked, failed]
 
     def ids(view):
@@ -281,7 +286,8 @@ def test_filters_match_the_grid_tiles():
     assert ids("expired") == [1]
     assert ids("expiring") == [2]
     assert ids("failing") == [5, 6]
-    searched = inv.filter_accounts(everything, inv.AccountFilter(q="jane"), today=TODAY)
+    # Search reaches the name the directory gave, not just what was typed in.
+    searched = inv.filter_accounts(everything, inv.AccountFilter(q="ridgeway"), today=TODAY)
     assert [a.id for a in searched] == [1, 2, 3, 4, 5, 6]
 
 
@@ -319,20 +325,25 @@ async def test_preview_says_create_update_or_why_not(db_session):
 
 
 @pytest.mark.anyio
-async def test_an_import_fills_in_but_never_erases(db_session):
+async def test_an_import_fills_in_but_never_erases_or_touches_the_directorys_answers(db_session):
     service = inv.CredentialInventoryService(db_session)
     created = await service.create(
-        _account(expiry_date=date(2026, 12, 14), notes="rotate via CyberArk", failed_logins=1), _writer()
+        CredentialAccountCreate(
+            **_account(notes="rotate via CyberArk").model_dump(),
+            owner="KAREN RIDGEWAY",
+            expiry_date=date(2026, 12, 14),
+            failed_logins=1,
+        ),
+        _writer(),
     )
 
     result = await service.apply_import(
         [
             CredentialAccountImportRow(
-                application="ATTCC",
+                application="Commissions",
                 account_type="domain",
                 directory="ITSERVICES",
                 account_name="M52142",
-                failed_logins=4,
             ),
             CredentialAccountImportRow(application="DWS", account_type="aaf", directory="prod", account_name="m1"),
         ],
@@ -341,23 +352,26 @@ async def test_an_import_fills_in_but_never_erases(db_session):
 
     assert (result.created, result.updated) == (1, 1)
     row = await service.get(created.id)
-    assert row.failed_logins == 4
-    assert row.expiry_date == date(2026, 12, 14)  # blank in the file: kept
-    assert row.notes == "rotate via CyberArk"
+    assert row.application == "Commissions"
+    assert row.notes == "rotate via CyberArk"  # blank in the file: kept
+    # Nothing in a spreadsheet can overwrite what the directory said.
+    assert (row.owner, row.expiry_date, row.failed_logins) == ("KAREN RIDGEWAY", date(2026, 12, 14), 1)
 
 
 @pytest.mark.anyio
 async def test_a_check_writes_its_verdict_and_details_onto_the_listed_account(db_session):
     service = inv.CredentialInventoryService(db_session)
-    created = await service.create(_account(failed_logins=2), _writer())
+    created = await service.create(_account(), _writer())
     outcome = CheckOutcome(
         valid=True,
         status="valid",
         message="ok",
         account=CredentialAccountDetails(
+            display_name="m52142 - KAREN RIDGEWAY (kr873u)",
             expires_at=datetime(2026, 12, 14, 15, 0, tzinfo=UTC),
             last_used_at=datetime(2026, 10, 1, 8, 0, tzinfo=UTC),
             last_changed_at=datetime(2026, 9, 15, tzinfo=UTC),
+            failed_sign_ins=2,
         ),
     )
 
@@ -371,7 +385,9 @@ async def test_a_check_writes_its_verdict_and_details_onto_the_listed_account(db
     assert row.expiry_date == date(2026, 12, 14)
     assert row.last_login_date == date(2026, 10, 1)
     assert row.password_changed_date == date(2026, 9, 15)
-    assert row.failed_logins == 2  # never taken from a check
+    assert row.failed_logins == 2
+    # The directory's name for the account is what the grid shows as its owner.
+    assert row.owner == "m52142 - KAREN RIDGEWAY (kr873u)"
 
 
 @pytest.mark.anyio
@@ -492,8 +508,8 @@ async def test_a_check_of_a_listed_account_updates_its_row(writer_client, monkey
 
 
 @pytest.mark.anyio
-async def test_a_domain_check_keeps_the_directorys_name_for_the_account(db_session):
-    """For a mechID the AD displayName names the person behind it."""
+async def test_only_a_domain_check_names_the_owner(db_session):
+    """AD's displayName names the person behind a mechID; a JFrog one is a token description."""
     service = inv.CredentialInventoryService(db_session)
     domain = await service.create(_account(), _writer())
     jfrog = await service.create(_account(account_type="jfrog", directory="bronze", account_name="svc"), _writer())
@@ -512,19 +528,30 @@ async def test_a_domain_check_keeps_the_directorys_name_for_the_account(db_sessi
     await _check("domain", "ITSERVICES", "m52142", "m52142 - KAREN RIDGEWAY (kr873u)")
     await _check("jfrog", "bronze", "svc", "pipeline token")  # a token description, not a name
 
-    assert (await service.get(domain.id)).display_name == "m52142 - KAREN RIDGEWAY (kr873u)"
-    assert (await service.get(jfrog.id)).display_name is None
+    assert (await service.get(domain.id)).owner == "m52142 - KAREN RIDGEWAY (kr873u)"
+    assert (await service.get(jfrog.id)).owner is None
 
 
 @pytest.mark.anyio
-async def test_editing_an_account_never_erases_the_directorys_name(db_session):
+async def test_editing_an_account_cannot_touch_what_the_directory_said(db_session):
+    """The form has no field for these, and the API ignores one if it is sent anyway."""
     service = inv.CredentialInventoryService(db_session)
-    created = await service.create(CredentialAccountCreate(**_account().model_dump(), display_name="Karen"), _writer())
+    created = await service.create(
+        CredentialAccountCreate(
+            **_account().model_dump(), owner="KAREN RIDGEWAY", expiry_date=date(2027, 9, 30), failed_logins=3
+        ),
+        _writer(),
+    )
 
-    await service.update(created.id, _account(owner="Someone else"), _writer())
+    await service.update(
+        created.id,
+        CredentialAccountIn(**_account(notes="moved to the new pipeline").model_dump()),
+        _writer(),
+    )
 
     row = await service.get(created.id)
-    assert (row.owner, row.display_name) == ("Someone else", "Karen")
+    assert row.notes == "moved to the new pipeline"
+    assert (row.owner, row.expiry_date, row.failed_logins) == ("KAREN RIDGEWAY", date(2027, 9, 30), 3)
 
 
 @pytest.mark.anyio
@@ -554,10 +581,12 @@ async def test_adding_from_a_check_result_keeps_its_details(writer_client):
             "expiry_date": "2027-09-30",
             "password_changed_date": "2026-09-30",
             "last_login_date": "2026-10-11",
-            "display_name": "m52142 - KAREN RIDGEWAY (kr873u)",
+            "owner": "m52142 - KAREN RIDGEWAY (kr873u)",
+            "failed_logins": 0,
         },
     )
 
     assert response.status_code == 201
     body = response.json()
-    assert (body["expiry_date"], body["display_name"]) == ("2027-09-30", "m52142 - KAREN RIDGEWAY (kr873u)")
+    assert (body["expiry_date"], body["owner"]) == ("2027-09-30", "m52142 - KAREN RIDGEWAY (kr873u)")
+    assert (body["last_login_date"], body["failed_logins"]) == ("2026-10-11", 0)

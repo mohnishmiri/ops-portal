@@ -27,20 +27,21 @@ def _clean(value: str | None) -> str | None:
     return text or None
 
 
-class _AccountFields(BaseModel):
-    """Fields shared by the form and the import."""
+class CredentialAccountIn(BaseModel):
+    """What a person types in: which account, listed under which application.
+
+    Nothing here is read from a directory, and nothing a directory reports is
+    here.  The name the directory holds for the account, its password expiry,
+    when the password last changed, when it was last used and how many
+    sign-ins have failed are all written by a check — never typed in.
+    """
 
     application: str = Field(min_length=1, max_length=200)
-    app_code: str | None = Field(default=None, max_length=32)
+    app_code: str | None = Field(default=None, max_length=32, description="MOTS / app ID, e.g. 31599")
     account_type: AccountType
     directory: str = Field(description="ITSERVICES / TESTITSERVICES, prod / nonprod, or bronze / gold")
     account_name: str = Field(min_length=1, max_length=256, description="sAMAccountName, AAF identity or JFrog user")
-    owner: str | None = Field(default=None, max_length=255)
-    expiry_date: date | None = None
-    password_changed_date: date | None = None
-    last_login_date: date | None = None
-    failed_logins: int | None = Field(default=None, ge=0, le=1_000_000)
-    reset_url: str | None = Field(default=None, max_length=1000)
+    reset_url: str | None = Field(default=None, max_length=1000, description="Where this account's password is reset")
     notes: str | None = Field(default=None, max_length=4000)
 
     @field_validator("application", "account_name", mode="before")
@@ -48,7 +49,7 @@ class _AccountFields(BaseModel):
     def _strip_required(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("app_code", "owner", "notes", "reset_url", mode="before")
+    @field_validator("app_code", "notes", "reset_url", mode="before")
     @classmethod
     def _strip_optional(cls, value: object) -> object:
         return _clean(value) if isinstance(value, str) or value is None else value
@@ -65,7 +66,7 @@ class _AccountFields(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _directory_fits_type(self) -> _AccountFields:
+    def _directory_fits_type(self) -> CredentialAccountIn:
         allowed = DIRECTORIES[self.account_type]
         match = next((d for d in allowed if d.lower() == self.directory.strip().lower()), None)
         if match is None:
@@ -74,40 +75,41 @@ class _AccountFields(BaseModel):
         return self
 
 
-class CredentialAccountIn(_AccountFields):
-    """Add / edit form.  Every field is replaced on save."""
+class CredentialAccountCreate(CredentialAccountIn):
+    """Add an account.
 
+    The extra fields carry what a check has *just* read about the account, so
+    listing it from a check result keeps that answer instead of showing an
+    empty row until someone checks it again.  The Add form leaves them unset,
+    and editing never touches them: from then on only a check writes them.
+    """
+
+    owner: str | None = Field(default=None, max_length=255, description="The directory's name for the account")
+    expiry_date: date | None = None
     never_expires: bool = False
+    password_changed_date: date | None = None
+    last_login_date: date | None = None
+    failed_logins: int | None = Field(default=None, ge=0, le=1_000_000)
+
+    @field_validator("owner", mode="before")
+    @classmethod
+    def _strip_owner(cls, value: object) -> object:
+        return _clean(value) if isinstance(value, str) or value is None else value
 
     @model_validator(mode="after")
-    def _never_or_date(self) -> CredentialAccountIn:
+    def _never_or_date(self) -> CredentialAccountCreate:
         if self.never_expires:
             self.expiry_date = None
         return self
 
 
-class CredentialAccountCreate(CredentialAccountIn):
-    """Add — also from a check result, which carries the directory's name for the account.
+class CredentialAccountImportRow(CredentialAccountIn):
+    """One imported row — the same fields the Add form takes.
 
-    Editing never touches ``display_name``: only a check sets it.
+    A file may well carry an Expiry Date or Owner column; those are ignored
+    rather than imported, because a check reads them from the directory and
+    would overwrite anything the file said.
     """
-
-    display_name: str | None = Field(default=None, max_length=255)
-
-    @field_validator("display_name", mode="before")
-    @classmethod
-    def _strip_display_name(cls, value: object) -> object:
-        return _clean(value) if isinstance(value, str) or value is None else value
-
-
-class CredentialAccountImportRow(_AccountFields):
-    """One imported row.
-
-    ``None`` means "the file left this blank": an import fills in and
-    corrects, it never erases what is already recorded.
-    """
-
-    never_expires: bool | None = None
 
 
 class CredentialAccountOut(BaseModel):
@@ -117,8 +119,7 @@ class CredentialAccountOut(BaseModel):
     account_type: AccountType
     directory: str
     account_name: str
-    owner: str | None
-    display_name: str | None
+    owner: str | None = Field(default=None, description="The directory's name for the account, from a check")
     expiry_date: date | None
     never_expires: bool
     password_changed_date: date | None

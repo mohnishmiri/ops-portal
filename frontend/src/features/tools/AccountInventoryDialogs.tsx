@@ -33,9 +33,18 @@ const ACCOUNT_PLACEHOLDERS: Record<AccountType, string> = {
 
 const NEVER_A_SECRET = "Never enter a password or token here — the inventory describes the account, not its secret.";
 
+const DIRECTORY_FILLS_THE_REST =
+  "Name, expiry, last sign-in and failed sign-ins are read from the directory when the account is checked — " +
+  "never typed in. Never enter a password or token.";
+
 // ── Add / edit ───────────────────────────────────────────────────────────────
 
-type FormState = Omit<CredentialAccountInput, "failed_logins"> & { failed_logins: string };
+/**
+ * The form holds only what a person knows. The name, expiry, password change,
+ * last sign-in and failed sign-ins are read from the directory by a check, so
+ * there is nothing here to type them into — and editing cannot overwrite them.
+ */
+type FormState = CredentialAccountInput;
 
 const toForm = (account: CredentialAccount | null): FormState => ({
   application: account?.application ?? "",
@@ -43,12 +52,6 @@ const toForm = (account: CredentialAccount | null): FormState => ({
   account_type: account?.account_type ?? "domain",
   directory: account?.directory ?? "ITSERVICES",
   account_name: account?.account_name ?? "",
-  owner: account?.owner ?? "",
-  expiry_date: account?.expiry_date ?? "",
-  never_expires: account?.never_expires ?? false,
-  password_changed_date: account?.password_changed_date ?? "",
-  last_login_date: account?.last_login_date ?? "",
-  failed_logins: account?.failed_logins == null ? "" : String(account.failed_logins),
   reset_url: account?.reset_url ?? "",
   notes: account?.notes ?? "",
 });
@@ -61,12 +64,6 @@ const toInput = (form: FormState): CredentialAccountInput => ({
   account_type: form.account_type,
   directory: form.directory,
   account_name: form.account_name.trim(),
-  owner: blankToNull(form.owner),
-  expiry_date: form.never_expires ? null : blankToNull(form.expiry_date),
-  never_expires: form.never_expires,
-  password_changed_date: blankToNull(form.password_changed_date),
-  last_login_date: blankToNull(form.last_login_date),
-  failed_logins: form.failed_logins.trim() === "" ? null : Number(form.failed_logins),
   reset_url: blankToNull(form.reset_url),
   notes: blankToNull(form.notes),
 });
@@ -84,8 +81,7 @@ export const AccountFormModal: React.FC<{
   const mutation = account ? update : create;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((f) => ({ ...f, [key]: value }));
 
-  const failedInvalid = form.failed_logins.trim() !== "" && !/^\d+$/.test(form.failed_logins.trim());
-  const incomplete = !form.application.trim() || !form.account_name.trim() || failedInvalid;
+  const incomplete = !form.application.trim() || !form.account_name.trim();
 
   const save = () => {
     const input = toInput(form);
@@ -96,7 +92,7 @@ export const AccountFormModal: React.FC<{
   return (
     <Modal
       title={account ? "Edit account" : "Add account"}
-      subtitle={NEVER_A_SECRET}
+      subtitle={DIRECTORY_FILLS_THE_REST}
       onClose={onClose}
       widthClass="max-w-2xl"
       footer={
@@ -181,67 +177,6 @@ export const AccountFormModal: React.FC<{
             autoComplete="off"
           />
         </div>
-        <div>
-          <label className={fieldLabel} htmlFor="acct-owner">Owner</label>
-          <input
-            id="acct-owner"
-            className={inputClass}
-            value={form.owner ?? ""}
-            onChange={(e) => set("owner", e.target.value)}
-            placeholder="Name or email"
-          />
-        </div>
-        <div>
-          <label className={fieldLabel} htmlFor="acct-expiry">Expiry date</label>
-          <input
-            id="acct-expiry"
-            type="date"
-            className={inputClass}
-            value={form.never_expires ? "" : form.expiry_date ?? ""}
-            disabled={form.never_expires}
-            onChange={(e) => set("expiry_date", e.target.value)}
-          />
-          <label className="mt-1.5 inline-flex items-center gap-2 text-xs text-gray-600">
-            <input
-              type="checkbox"
-              checked={form.never_expires}
-              onChange={(e) => set("never_expires", e.target.checked)}
-            />
-            Never expires
-          </label>
-        </div>
-        <div>
-          <label className={fieldLabel} htmlFor="acct-changed">Password last changed</label>
-          <input
-            id="acct-changed"
-            type="date"
-            className={inputClass}
-            value={form.password_changed_date ?? ""}
-            onChange={(e) => set("password_changed_date", e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={fieldLabel} htmlFor="acct-last-login">Last login</label>
-          <input
-            id="acct-last-login"
-            type="date"
-            className={inputClass}
-            value={form.last_login_date ?? ""}
-            onChange={(e) => set("last_login_date", e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={fieldLabel} htmlFor="acct-failed">Failed logins</label>
-          <input
-            id="acct-failed"
-            type="number"
-            min={0}
-            className={inputClass}
-            value={form.failed_logins}
-            onChange={(e) => set("failed_logins", e.target.value)}
-          />
-          {failedInvalid && <p className="mt-1 text-xs text-red-600">A whole number, 0 or more.</p>}
-        </div>
         <div className="sm:col-span-2">
           <label className={fieldLabel} htmlFor="acct-reset">Reset link</label>
           <input
@@ -266,8 +201,11 @@ export const AccountFormModal: React.FC<{
         </div>
       </div>
       <p className="text-xs text-gray-500">
-        Expiry, password change and last login are also updated whenever someone runs a successful check of this
-        account above.
+        Once it is listed, run <strong>Check</strong> on its row with the account&apos;s own password: the name, expiry,
+        password change, last sign-in and failed sign-ins come back from
+        {" "}
+        {form.account_type === "domain" ? "Active Directory" : form.account_type === "aaf" ? "AAF" : "Artifactory"} and
+        fill the grid in.
       </p>
       {mutation.isError && (
         <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -342,9 +280,12 @@ export const ImportAccountsModal: React.FC<{ onClose: () => void }> = ({ onClose
       <div className="space-y-2 text-sm text-gray-600">
         <p>
           Columns are matched by name: <strong>Application</strong>, <strong>Type</strong> (ITSERVICES,
-          TESTITSERVICES, AAF or JFrog) and <strong>Account</strong> are required; Directory, Owner, Expiry Date,
-          Password Last Changed, Last Login, Failed Logins, Reset Link and Notes are optional. An export from this grid
-          imports back as it is.
+          TESTITSERVICES, AAF or JFrog) and <strong>Account</strong> are required; App Code, Directory, Reset Link and
+          Notes are optional. An export from this grid imports back as it is.
+        </p>
+        <p>
+          A column of names, expiry dates, last logins or failed logins is ignored: those are read from the directory
+          each time an account is checked, so a spreadsheet cannot overrule them.
         </p>
         <p>Re-importing updates accounts already listed. A blank cell keeps what is recorded — it never erases.</p>
       </div>

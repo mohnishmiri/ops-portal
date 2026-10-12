@@ -117,7 +117,7 @@ const VIEW_TESTS: Record<View, (a: CredentialAccount) => boolean> = {
 const searchLabel = (a: CredentialAccount) => `${TYPE_LABELS[a.account_type]} ${DIRECTORY_SHORT[a.directory]}`;
 
 const accountMatches = (a: CredentialAccount, query: string) =>
-  textMatches(query, a.application, a.app_code, a.account_name, a.display_name, a.owner, a.notes, searchLabel(a));
+  textMatches(query, a.application, a.app_code, a.account_name, a.owner, a.notes, searchLabel(a));
 
 const accountAccessor = (a: CredentialAccount, key: SortKey): string | number => {
   switch (key) {
@@ -144,12 +144,12 @@ const Muted: React.FC<{ children: React.ReactNode; title?: string }> = ({ childr
   </span>
 );
 
-/** A blank directory-sourced value: say whether a check would fill it. */
+/** Every blank in this grid is directory-sourced: say whether a check would fill it. */
 const NotRecorded: React.FC<{ account: CredentialAccount }> = ({ account }) =>
   account.last_checked_at ? (
-    <Muted>Not reported</Muted>
+    <Muted title="The directory did not report this at the last check">Not reported</Muted>
   ) : (
-    <Muted title="Run a check of this account above to read it from the directory">Not checked yet</Muted>
+    <Muted title="Check this account with its own password to read this from the directory">Not checked yet</Muted>
   );
 
 const ExpiryCell: React.FC<{ account: CredentialAccount }> = ({ account }) => (
@@ -347,8 +347,9 @@ const AccountInventory: React.FC<{
           Account inventory
         </h2>
         <p className="mt-0.5 text-sm text-gray-500">
-          The ITSERVICES, AAF and JFrog accounts each application owns — who owns them, when they expire and where to
-          reset them. A successful check above keeps an account&apos;s expiry and last sign-in current.
+          The ITSERVICES, AAF and JFrog accounts each application owns. You list the account; its name, expiry, last
+          sign-in and failed sign-ins are read from Active Directory, AAF or Artifactory each time it is checked —
+          from the cards above, or with <strong>Check</strong> on its row.
         </p>
       </div>
 
@@ -462,7 +463,7 @@ const AccountInventory: React.FC<{
               <tr>
                 {header("Application", "application")}
                 {header("Account", "account")}
-                {header("Owner", "owner")}
+                {header("Owner / name", "owner")}
                 {header("Expiry", "expiry")}
                 {header("Last login", "last_login")}
                 {header("Failed logins", "failed", true)}
@@ -499,7 +500,6 @@ const AccountInventory: React.FC<{
                     </td>
                     <td className={gridStyles.cell}>
                       <div className="break-all font-mono text-xs text-gray-800">{a.account_name}</div>
-                      {a.display_name && <p className="mt-0.5 text-[11px] text-gray-600">{a.display_name}</p>}
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <span className="rounded bg-att-50 px-1.5 py-0.5 text-[11px] font-medium text-att-700">
                           {directoryLabel(a.directory)}
@@ -515,7 +515,9 @@ const AccountInventory: React.FC<{
                         )}
                       </div>
                     </td>
-                    <td className={gridStyles.cell}>{a.owner || <Muted>—</Muted>}</td>
+                    <td className={gridStyles.cell}>
+                      {a.owner ?? <NotRecorded account={a} />}
+                    </td>
                     <td className={gridStyles.cell}>
                       <ExpiryCell account={a} />
                     </td>
@@ -531,7 +533,7 @@ const AccountInventory: React.FC<{
                     </td>
                     <td className={gridStyles.centerCell}>
                       {a.failed_logins == null ? (
-                        <Muted>—</Muted>
+                        <NotRecorded account={a} />
                       ) : (
                         <span className={a.failed_logins > 0 ? "font-semibold text-red-600" : "text-gray-600"}>
                           {a.failed_logins}
