@@ -45,3 +45,29 @@ describe("formatAxiosError", () => {
     expect(formatAxiosError(error, "fallback")).toContain("vault_uri");
   });
 });
+
+describe("formatAxiosError — failures with no detail", () => {
+  it("names a server error rather than blaming the request", () => {
+    const error = { response: { status: 500, data: {} } };
+
+    expect(formatAxiosError(error, "Could not save the account.")).toBe(
+      "Could not save the account. The backend returned HTTP 500 — check the backend log.",
+    );
+  });
+
+  it("says when nothing answered at all", () => {
+    expect(formatAxiosError(new Error("Network Error"), "Could not save the account.")).toBe(
+      "Could not save the account. The backend did not respond — it may be restarting.",
+    );
+  });
+
+  it("leaves a refusal the server explained alone", () => {
+    const error = { response: { status: 409, data: { detail: "Already in the inventory." } } };
+
+    expect(formatAxiosError(error, "Could not save the account.")).toBe("Already in the inventory.");
+  });
+
+  it("does not editorialise a plain 4xx with no detail", () => {
+    expect(formatAxiosError({ response: { status: 403, data: {} } }, "Not allowed.")).toBe("Not allowed.");
+  });
+});

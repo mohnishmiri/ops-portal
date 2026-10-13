@@ -53,6 +53,19 @@ export function formatApiErrorDetail(detail: unknown, fallback = "Request failed
 }
 
 export function formatAxiosError(error: unknown, fallback = "Request failed"): string {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  return formatApiErrorDetail(detail, fallback);
+  const response = (error as { response?: { status?: number; data?: { detail?: unknown } } })?.response;
+  const detail = response?.data?.detail;
+  if (detail != null && detail !== "") return formatApiErrorDetail(detail, fallback);
+
+  // A 500 or a dropped connection carries no detail, and the caller's fallback
+  // ("Could not save the account.") then reads as if the request were refused
+  // on its merits. Say where the failure actually was, so the next step is
+  // the backend log rather than the form.
+  if (response?.status != null && response.status >= 500) {
+    return `${fallback} The backend returned HTTP ${response.status} — check the backend log.`;
+  }
+  if (response == null) {
+    return `${fallback} The backend did not respond — it may be restarting.`;
+  }
+  return fallback;
 }
