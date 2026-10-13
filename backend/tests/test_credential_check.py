@@ -787,3 +787,51 @@ def test_an_account_with_no_recorded_sign_in_is_not_called_inactive():
     details = module.ad_account_details(_ad_entry(userAccountControl=b"512"), now=NOW)
 
     assert details.account_status == "active"
+
+
+# ── The reader's own name ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("configured", "bind_as"),
+    [
+        # What people naturally configure, because it is what the check form takes.
+        ("m47355", "ITSERVICES\\m47355"),
+        ("  m47355  ", "ITSERVICES\\m47355"),
+        # Already qualified, a UPN, or a full DN: left exactly as given.
+        ("ITSERVICES\\svc-read", "ITSERVICES\\svc-read"),
+        ("svc-read@itservices.att.com", "svc-read@itservices.att.com"),
+        ("CN=svc-read,OU=Service,DC=itservices,DC=att,DC=com", "CN=svc-read,OU=Service,DC=itservices,DC=att,DC=com"),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_bare_reader_name_is_qualified_with_its_domain(monkeypatch, configured, bind_as):
+    """An unqualified bind is refused as if the password were wrong."""
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_ITSERVICES", "ldaps://dc:636")
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_READER_ITSERVICES", configured)
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_READER_PASSWORD_ITSERVICES", "reader-secret")
+    seen = {}
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+
+    def _connection(*_a, **kwargs):
+        seen["user"] = kwargs.get("user")
+        return _Conn(True, entries={"": {"defaultNamingContext": [BASE_DN.encode()]}})
+
+    monkeypatch.setattr(module, "Connection", _connection)
+
+    await _service().lookup_domain_account("ITSERVICES", "m1")
+
+    assert seen["user"] == bind_as
+
+
+@pytest.mark.anyio
+async def test_a_rejected_reader_says_which_name_it_tried(monkeypatch, _reader):
+    """Without the name it bound as, a format problem looks like a wrong password."""
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Connection", lambda *a, **k: _Conn(False))
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "m47355")
+
+    assert "binding as ITSERVICES\\svc-read" in lookup.reason

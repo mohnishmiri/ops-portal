@@ -76,6 +76,21 @@ def _DOMAIN_SERVERS() -> dict[str, str]:  # noqa: N802 - settings are read per c
     }
 
 
+def _qualified_bind_user(domain: str, reader: str) -> str:
+    """The reader as Active Directory will accept it for a bind.
+
+    A bare ``m47355`` is what people naturally configure — it is what the
+    check form takes — but a simple bind needs a qualified name, and an
+    unqualified one is refused as if the password were wrong.  So qualify it
+    here, while leaving a name that is already ``DOMAIN\\user``, a UPN or a
+    full DN exactly as it was given.
+    """
+    reader = reader.strip()
+    if not reader or "\\" in reader or "@" in reader or "=" in reader:
+        return reader
+    return f"{domain}\\{reader}"
+
+
 def _DOMAIN_READERS() -> dict[str, tuple[str, str]]:  # noqa: N802
     return {
         "ITSERVICES": (
@@ -707,7 +722,7 @@ class CredentialCheckService:
         """
         server_url = _DOMAIN_SERVERS().get(domain, "").strip()
         reader, reader_password = _DOMAIN_READERS().get(domain, ("", ""))
-        reader, reader_password = reader.strip(), reader_password.strip()
+        reader, reader_password = _qualified_bind_user(domain, reader), reader_password.strip()
 
         if not LDAP_AVAILABLE:
             return DirectoryLookup("unconfigured", "Domain lookups need the ldap3 package, absent from this build.")
@@ -741,11 +756,13 @@ class CredentialCheckService:
         if not bound:
             # The reader's own credential is wrong or expired — an operator
             # problem, and never reported as something about the account.
+            # Naming the account it tried saves guessing at the format.
             logger.warning("credential_lookup_reader_rejected", domain=domain, reader=reader)
             return DirectoryLookup(
                 "error",
-                f"The {domain} directory rejected the portal's reader account. Check "
-                f"CRED_CHECK_LDAP_READER_{domain} and its password.",
+                f"The {domain} directory rejected the portal's reader account, binding as {reader}. Check "
+                f"CRED_CHECK_LDAP_READER_{domain} and its password — the account name may be a plain username, "
+                f"{domain}\\name, or a UPN.",
             )
 
         try:

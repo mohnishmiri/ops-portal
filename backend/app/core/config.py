@@ -329,7 +329,10 @@ class Settings(BaseSettings):
     # written.  Blank = the inventory simply waits to be told by a check.
     CRED_CHECK_LDAP_READER_ITSERVICES: str = Field(
         default="",
-        description="Read-only bind account for ITSERVICES, e.g. ITSERVICES\\svc-opsportal-read",
+        description=(
+            "Read-only bind account for ITSERVICES: a plain username, DOMAIN\\name, a UPN or a DN. "
+            "A plain username is qualified with the domain before binding."
+        ),
     )
     CRED_CHECK_LDAP_READER_PASSWORD_ITSERVICES: str = Field(
         default="",
