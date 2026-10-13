@@ -34,11 +34,13 @@ const account = (overrides: Partial<CredentialAccount>): CredentialAccount => ({
   directory: "ITSERVICES",
   account_name: "m52142",
   owner: "Jane Doe",
+  account_status: "active",
   expiry_date: "2027-06-01",
   never_expires: false,
   password_changed_date: null,
   last_login_date: null,
   failed_logins: 0,
+  directory_synced_at: null,
   reset_url: null,
   notes: null,
   last_checked_at: null,
@@ -193,10 +195,89 @@ describe("AccountInventory — what a check fills in", () => {
     );
 
     expect(await screen.findByText("m47355 - KAREN RIDGEWAY (kr873u)")).toBeInTheDocument();
-    expect(screen.getAllByText("Not checked yet")).toHaveLength(2); // expiry and last login
+    expect(screen.getAllByText("Not read yet")).toHaveLength(2); // expiry and last login
 
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "ridgeway" } });
     expect(gridRows()).toHaveLength(1);
+  });
+});
+
+describe("AccountInventory — whether an account can sign in", () => {
+  it("shows the state the directory reports, separately from the password verdict", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({
+      data: [
+        account({ id: 1, account_name: "svc-off", account_status: "disabled", last_check_status: "valid" }),
+        account({ id: 2, account_name: "svc-stale", account_status: "inactive" }),
+        account({ id: 3, account_name: "svc-new", account_status: null }),
+      ],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AccountInventory canCheck onCheck={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+
+    const disabled = screen.getByText("svc-off").closest("tr") as HTMLElement;
+    // The account is disabled even though its password checked out.
+    expect(within(disabled).getByText("Disabled")).toBeInTheDocument();
+    expect(within(disabled).getByText("Valid")).toBeInTheDocument();
+    const statusCell = (name: string) =>
+      (screen.getByText(name).closest("tr") as HTMLTableRowElement).cells[2]; // Application, Account, Status
+    expect(within(statusCell("svc-stale")).getByText("Inactive")).toBeInTheDocument();
+    // Never read: the Status cell says so rather than implying it is fine.
+    expect(within(statusCell("svc-new")).getByText("Not read yet")).toBeInTheDocument();
+  });
+
+  it("counts a disabled account as failing sign-in", async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({
+      data: [account({ id: 1, account_name: "svc-off", account_status: "disabled", failed_logins: 0 })],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AccountInventory canCheck onCheck={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(gridRows()).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /failed logins, or whose last check/i }));
+
+    expect(gridRows()).toHaveLength(1);
+  });
+});
+
+describe("AccountInventory — reading from the directory", () => {
+  it("re-reads a domain account and says so", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+    vi.mocked(apiClient.post).mockResolvedValueOnce({ data: { status: "ok", reason: null, account: ACCOUNTS[0] } });
+
+    fireEvent.click(screen.getByRole("button", { name: /Read svc-expired from the ITSERVICES directory/ }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Read svc-expired from the ITSERVICES/));
+    expect(apiClient.post).toHaveBeenCalledWith("/tools/accounts/1/refresh", {});
+  });
+
+  it("says why when the directory cannot answer", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+    vi.mocked(apiClient.post).mockResolvedValueOnce({
+      data: { status: "unconfigured", reason: "No directory reader is configured for ITSERVICES.", account: ACCOUNTS[0] },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Read svc-expired from the ITSERVICES directory/ }));
+
+    await waitFor(() => expect(screen.getByText("No directory reader is configured for ITSERVICES.")).toBeInTheDocument());
+  });
+
+  it("is not offered for JFrog or AAF accounts, which only a check can fill in", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+
+    expect(screen.queryByRole("button", { name: /Read svc@att.com from/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check svc@att.com" })).toBeInTheDocument();
   });
 });
 

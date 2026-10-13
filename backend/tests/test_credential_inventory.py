@@ -19,7 +19,7 @@ from app.schemas.auth import UserContext, UserRole
 from app.schemas.credential_inventory import CredentialAccountCreate, CredentialAccountImportRow, CredentialAccountIn
 from app.schemas.tools import CredentialAccountDetails
 from app.services import credential_inventory_service as inv
-from app.services.credential_check_service import CheckOutcome
+from app.services.credential_check_service import CheckOutcome, DirectoryLookup
 
 TODAY = date(2026, 10, 12)
 
@@ -590,3 +590,143 @@ async def test_adding_from_a_check_result_keeps_its_details(writer_client):
     body = response.json()
     assert (body["expiry_date"], body["owner"]) == ("2027-09-30", "m52142 - KAREN RIDGEWAY (kr873u)")
     assert (body["last_login_date"], body["failed_logins"]) == ("2026-10-11", 0)
+
+
+# ── Filling a row in from the directory ────────────────────────────────
+
+
+class _FakeChecks:
+    """Stands in for the directory: records what was asked, answers as told."""
+
+    def __init__(self, lookup: DirectoryLookup):
+        self.lookup = lookup
+        self.asked: list[tuple[str, str]] = []
+
+    async def lookup_domain_account(self, domain: str, username: str) -> DirectoryLookup:
+        self.asked.append((domain, username))
+        return self.lookup
+
+
+def _found(**overrides) -> DirectoryLookup:
+    details = CredentialAccountDetails(
+        display_name="m47355 - KAREN RIDGEWAY (kr873u)",
+        expires_at=datetime(2027, 9, 30, 15, 0, tzinfo=UTC),
+        last_changed_at=datetime(2026, 9, 30, tzinfo=UTC),
+        last_used_at=datetime(2026, 10, 11, 8, 0, tzinfo=UTC),
+        failed_sign_ins=0,
+        **overrides,
+    )
+    return DirectoryLookup("ok", None, details)
+
+
+@pytest.mark.anyio
+async def test_a_domain_account_is_filled_in_from_the_directory(db_session):
+    checks = _FakeChecks(_found())
+    service = inv.CredentialInventoryService(db_session, checks)
+    created = await service.create(_account(account_name="m47355"), _writer())
+
+    lookup = await service.sync_from_directory(created)
+
+    assert lookup.status == "ok"
+    assert checks.asked == [("ITSERVICES", "m47355")]
+    row = await service.get(created.id)
+    assert row.owner == "m47355 - KAREN RIDGEWAY (kr873u)"
+    assert row.expiry_date == date(2027, 9, 30)
+    assert row.password_changed_date == date(2026, 9, 30)
+    assert row.last_login_date == date(2026, 10, 11)
+    assert row.failed_logins == 0
+    assert row.directory_synced_at is not None
+    # Reading the account proves nothing about its password.
+    assert (row.last_check_status, row.last_checked_at) == (None, None)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("lookup", [DirectoryLookup("unconfigured", "no reader"), DirectoryLookup("error", "down")])
+async def test_a_directory_that_cannot_answer_leaves_the_row_alone(db_session, lookup):
+    service = inv.CredentialInventoryService(db_session, _FakeChecks(lookup))
+    created = await service.create(_account(), _writer())
+
+    result = await service.sync_from_directory(created)
+
+    assert result.status == lookup.status
+    row = await service.get(created.id)
+    assert (row.owner, row.expiry_date, row.directory_synced_at) == (None, None, None)
+
+
+@pytest.mark.anyio
+async def test_aaf_and_jfrog_accounts_say_a_check_is_the_way_in(db_session):
+    checks = _FakeChecks(_found())
+    service = inv.CredentialInventoryService(db_session, checks)
+    jfrog = await service.create(
+        _account(account_type="jfrog", directory="gold", account_name="svc@att.com"), _writer()
+    )
+
+    lookup = await service.sync_from_directory(jfrog)
+
+    assert lookup.status == "unsupported"
+    assert "check of the account itself" in lookup.reason
+    assert checks.asked == []  # no directory was asked
+
+
+@pytest.mark.anyio
+async def test_adding_an_itservices_account_fills_the_grid_in_at_once(writer_client, monkeypatch):
+    """What the user asked for: list the account, and its details are there."""
+    from app.api.v1.endpoints import credential_accounts as endpoint
+
+    async def _sync(self, account):
+        inv._apply_directory_details(account, _found().details, naming=True)
+        account.directory_synced_at = datetime.utcnow()
+        return _found()
+
+    monkeypatch.setattr(endpoint.CredentialInventoryService, "sync_from_directory", _sync)
+
+    response = await writer_client.post("/api/v1/tools/accounts", json={**_BODY, "account_name": "m47355"})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["owner"] == "m47355 - KAREN RIDGEWAY (kr873u)"
+    assert body["expiry_date"] == "2027-09-30"
+    assert body["directory_synced_at"] is not None
+
+
+@pytest.mark.anyio
+async def test_adding_from_a_check_result_does_not_read_the_directory_again(writer_client, monkeypatch):
+    """The check that just ran already read it — a second read would be wasted."""
+    from app.api.v1.endpoints import credential_accounts as endpoint
+
+    called = []
+
+    async def _sync(self, account):
+        called.append(account)
+        return DirectoryLookup("ok")
+
+    monkeypatch.setattr(endpoint.CredentialInventoryService, "sync_from_directory", _sync)
+
+    await writer_client.post(
+        "/api/v1/tools/accounts", json={**_BODY, "account_name": "m47355", "expiry_date": "2027-09-30"}
+    )
+
+    assert called == []
+
+
+@pytest.mark.anyio
+async def test_refresh_reports_why_the_directory_could_not_answer(writer_client, monkeypatch):
+    from app.api.v1.endpoints import credential_accounts as endpoint
+
+    created = await writer_client.post("/api/v1/tools/accounts", json=_BODY)
+
+    async def _sync(self, account):
+        return DirectoryLookup("unconfigured", "No directory reader is configured for ITSERVICES.")
+
+    monkeypatch.setattr(endpoint.CredentialInventoryService, "sync_from_directory", _sync)
+
+    response = await writer_client.post(f"/api/v1/tools/accounts/{created.json()['id']}/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "unconfigured"
+    assert "No directory reader" in response.json()["reason"]
+
+
+@pytest.mark.anyio
+async def test_a_reader_cannot_refresh(reader_client):
+    assert (await reader_client.post("/api/v1/tools/accounts/1/refresh")).status_code == 403

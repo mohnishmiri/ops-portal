@@ -66,6 +66,11 @@ class CredentialAccountDetails(BaseModel):
         default=None,
         description="AD account (not password) expiry; None when the account does not expire",
     )
+    account_status: str | None = Field(
+        default=None,
+        description="active | inactive | disabled | locked | expired — whether the account can sign in at all",
+    )
+    account_status_note: str | None = None
     failed_sign_ins: int | None = Field(
         default=None,
         description="Failed sign-ins counted against the lockout policy on the domain controller that answered",

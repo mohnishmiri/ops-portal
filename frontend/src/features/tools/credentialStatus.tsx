@@ -37,3 +37,37 @@ export const StatusChip: React.FC<{ status: string }> = ({ status }) => {
     </span>
   );
 };
+
+// ── The account itself, as its directory reports it ──────────────────────────
+
+/**
+ * Whether the account can sign in at all — a different question from whether
+ * one password works, so it reads differently: a verdict chip is about a
+ * moment, this is about the account.
+ *
+ * "Inactive" is the portal's own reading of a stale sign-in rather than a flag
+ * Active Directory holds, so the note that comes with it says the threshold.
+ */
+export const ACCOUNT_STATUS_STYLES: Record<string, { label: string; chip: string }> = {
+  active: { label: "Active", chip: "bg-green-100 text-green-700" },
+  inactive: { label: "Inactive", chip: "bg-amber-100 text-amber-800" },
+  disabled: { label: "Disabled", chip: "bg-red-100 text-red-700" },
+  locked: { label: "Locked out", chip: "bg-red-100 text-red-700" },
+  expired: { label: "Account expired", chip: "bg-red-100 text-red-700" },
+};
+
+/** Account states that mean it cannot sign in, whatever its password says. */
+export const UNUSABLE_STATUSES = new Set(["disabled", "locked", "expired"]);
+
+export const AccountStatusChip: React.FC<{ status: string; title?: string }> = ({ status, title }) => {
+  const style = ACCOUNT_STATUS_STYLES[status];
+  if (!style) return null;
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${style.chip}`}
+    >
+      {style.label}
+    </span>
+  );
+};

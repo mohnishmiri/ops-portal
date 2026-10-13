@@ -322,6 +322,27 @@ class Settings(BaseSettings):
         default="",
         description="LDAPS URL of the TESTITSERVICES domain controller",
     )
+    # Read-only directory reader, used to fill in an inventory account's
+    # details without anyone typing that account's own password.  It reads
+    # account attributes (name, password expiry, last sign-in, failed
+    # sign-ins) and nothing else: no password is read, and nothing is
+    # written.  Blank = the inventory simply waits to be told by a check.
+    CRED_CHECK_LDAP_READER_ITSERVICES: str = Field(
+        default="",
+        description="Read-only bind account for ITSERVICES, e.g. ITSERVICES\\svc-opsportal-read",
+    )
+    CRED_CHECK_LDAP_READER_PASSWORD_ITSERVICES: str = Field(
+        default="",
+        description="Password for CRED_CHECK_LDAP_READER_ITSERVICES",
+    )
+    CRED_CHECK_LDAP_READER_TESTITSERVICES: str = Field(
+        default="",
+        description="Read-only bind account for TESTITSERVICES",
+    )
+    CRED_CHECK_LDAP_READER_PASSWORD_TESTITSERVICES: str = Field(
+        default="",
+        description="Password for CRED_CHECK_LDAP_READER_TESTITSERVICES",
+    )
     CRED_CHECK_JFROG_URL: str = Field(
         default="https://artifact.it.att.com",
         description="Base URL of the JFrog Artifactory Bronze instance",

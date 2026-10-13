@@ -52,6 +52,10 @@ _EDIT = require_capability(_PAGE, permission_type="edit", fallback_role=UserRole
 
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# Seeded by "Add to inventory" on a check result: that check has just read the
+# account, so adding it must not immediately read it again.
+_DIRECTORY_FIELDS = {"owner", "expiry_date", "never_expires", "password_changed_date", "last_login_date"}
+
 
 def _service(db: AsyncSession | None) -> CredentialInventoryService:
     if db is None:
@@ -90,6 +94,13 @@ async def create_account(
         account = await service.create(payload, user)
     except DuplicateAccountError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # Fill the row in straight away, so a domain account is listed with its
+    # name and expiry rather than waiting to be checked.  Best effort: a row
+    # with no details is still a row, and the Refresh action says why.
+    if not payload.model_fields_set & _DIRECTORY_FIELDS:
+        await service.sync_from_directory(account)
+
     out = CredentialAccountOut.model_validate(account)
     await service.record_audit(
         user,
@@ -100,6 +111,42 @@ async def create_account(
         ip_address=_client_ip(request),
     )
     return out
+
+
+@router.post("/{account_id}/refresh", summary="Read this account's details from its directory")
+async def refresh_account(
+    account_id: int,
+    request: Request,
+    user: UserContext = Depends(_EDIT),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Re-read one account from Active Directory with the portal's reader account.
+
+    Reads attributes only — no password is read, and the account's own
+    credential is neither needed nor touched.  The verdict from its last
+    check is left as it was.
+    """
+    service = _service(db)
+    try:
+        account = await service.get(account_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    lookup = await service.sync_from_directory(account)
+    if lookup.status == "ok":
+        await service.record_audit(
+            user,
+            "refresh_credential_account",
+            resource_id=str(account_id),
+            summary=f"Read {account_label(account)} from the {account.directory} directory",
+            details={"account": account_label(account), "application": account.application},
+            ip_address=_client_ip(request),
+        )
+    return {
+        "status": lookup.status,
+        "reason": lookup.reason,
+        "account": CredentialAccountOut.model_validate(account),
+    }
 
 
 @router.put("/{account_id}", response_model=CredentialAccountOut, summary="Edit an inventory account")

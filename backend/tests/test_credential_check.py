@@ -202,7 +202,9 @@ def test_an_unreachable_directory_is_an_error_not_a_rejection(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_an_unconfigured_domain_is_refused_before_any_bind():
+async def test_an_unconfigured_domain_is_refused_before_any_bind(monkeypatch):
+    """A deployment with no domain controller must never attempt a bind."""
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_ITSERVICES", "")
     with pytest.raises(CredentialCheckError) as excinfo:
         await _service().check_domain("ITSERVICES", "m1", "s")
     assert excinfo.value.status == "unconfigured"
@@ -319,7 +321,8 @@ def test_an_unreachable_directory_names_the_server_and_cause(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_an_unconfigured_domain_says_what_to_set():
+async def test_an_unconfigured_domain_says_what_to_set(monkeypatch):
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_TESTITSERVICES", "")
     with pytest.raises(CredentialCheckError) as excinfo:
         await _service().check_domain("TESTITSERVICES", "m1", "s")
     message = str(excinfo.value)
@@ -627,3 +630,160 @@ def test_a_directory_that_withholds_the_failed_count_says_so_rather_than_showing
 
     assert details.failed_sign_ins is None
     assert "Not reported" in details.failed_sign_ins_note
+
+
+# ── Reading an account without its password ────────────────────────────
+
+
+@pytest.fixture
+def _reader(monkeypatch):
+    """A configured ITSERVICES reader account."""
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_ITSERVICES", "ldaps://dc:636")
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_READER_ITSERVICES", "ITSERVICES\\svc-read")
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_READER_PASSWORD_ITSERVICES", "reader-secret")
+
+
+@pytest.mark.anyio
+async def test_a_lookup_reads_the_named_account_over_the_readers_bind(monkeypatch, _reader):
+    conn = _Conn(
+        True,
+        entries={
+            "": {"defaultNamingContext": [BASE_DN.encode()]},
+            BASE_DN: {
+                "displayName": [b"m47355 - KAREN RIDGEWAY (kr873u)"],
+                "pwdLastSet": [_filetime(datetime(2026, 9, 30, tzinfo=UTC))],
+            },
+        },
+    )
+    seen = {}
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+
+    def _connection(*_a, **kwargs):
+        seen["user"] = kwargs.get("user")
+        return conn
+
+    monkeypatch.setattr(module, "Connection", _connection)
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "m47355")
+
+    assert lookup.status == "ok"
+    assert lookup.details.display_name == "m47355 - KAREN RIDGEWAY (kr873u)"
+    assert lookup.details.last_changed_at == datetime(2026, 9, 30, tzinfo=UTC)
+    # Bound as the reader, searched for the account named.
+    assert seen["user"] == "ITSERVICES\\svc-read"
+    assert conn.searches[1][1] == "(&(objectClass=user)(sAMAccountName=m47355))"
+    assert conn.unbound is True
+
+
+@pytest.mark.anyio
+async def test_a_lookup_without_a_reader_says_so_rather_than_binding(monkeypatch):
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_ITSERVICES", "ldaps://dc:636")
+    monkeypatch.setattr(settings, "CRED_CHECK_LDAP_READER_ITSERVICES", "")
+
+    def _never(*_a, **_k):
+        raise AssertionError("nothing may be sent to the directory without a reader")
+
+    monkeypatch.setattr(module, "Connection", _never)
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "m47355")
+
+    assert lookup.status == "unconfigured"
+    assert "CRED_CHECK_LDAP_READER_ITSERVICES" in lookup.reason
+
+
+@pytest.mark.anyio
+async def test_an_account_the_directory_does_not_hold_is_not_an_error(monkeypatch, _reader):
+    """ "No such account" is the answer to the question, not a failure."""
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(
+        module, "Connection", lambda *a, **k: _Conn(True, entries={"": {"defaultNamingContext": [BASE_DN.encode()]}})
+    )
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "nobody")
+
+    assert lookup.status == "not_found"
+    assert lookup.details is None
+
+
+@pytest.mark.anyio
+async def test_a_rejected_reader_is_reported_as_the_portals_problem(monkeypatch, _reader):
+    """The reader's own password failing must never read as something about the account."""
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Connection", lambda *a, **k: _Conn(False))
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "m47355")
+
+    assert lookup.status == "error"
+    assert "reader account" in lookup.reason
+    assert lookup.details is None
+
+
+@pytest.mark.anyio
+async def test_an_unreachable_directory_lookup_is_an_error(monkeypatch, _reader):
+    def _raise(*_a, **_k):
+        raise module.LDAPException("socket connection error: [Errno 61] Connection refused")
+
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Server", _raise)
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "m47355")
+
+    assert lookup.status == "error"
+    assert "refused" in lookup.reason
+
+
+# ── Can the account sign in at all? ────────────────────────────────────
+
+
+def test_an_enabled_account_that_signed_in_recently_is_active():
+    entry = _ad_entry(userAccountControl=b"512", lastLogonTimestamp=_filetime(NOW - timedelta(days=3)))
+
+    details = module.ad_account_details(entry, now=NOW)
+
+    assert details.account_status == "active"
+    assert details.account_status_note is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "status", "fragment"),
+    [
+        ({"userAccountControl": str(512 | 0x2).encode()}, "disabled", "cannot sign in"),
+        ({"userAccountControl": b"512", "lockoutTime": b"133400000000000000"}, "locked", "lockout policy"),
+        (
+            {"userAccountControl": b"512", "accountExpires": _filetime(datetime(2026, 1, 1, tzinfo=UTC))},
+            "expired",
+            "not its password expiry",
+        ),
+        (
+            {"userAccountControl": b"512", "lastLogonTimestamp": _filetime(datetime(2026, 1, 1, tzinfo=UTC))},
+            "inactive",
+            "90 days",
+        ),
+    ],
+)
+def test_the_directory_says_when_an_account_cannot_be_used(raw, status, fragment):
+    details = module.ad_account_details(_ad_entry(**raw), now=NOW)
+
+    assert details.account_status == status
+    assert fragment in details.account_status_note
+
+
+def test_disabled_outranks_everything_else():
+    """A disabled account is disabled whatever else is true of it."""
+    entry = _ad_entry(
+        userAccountControl=str(512 | 0x2).encode(),
+        lockoutTime=b"133400000000000000",
+        lastLogonTimestamp=_filetime(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    assert module.ad_account_details(entry, now=NOW).account_status == "disabled"
+
+
+def test_an_account_with_no_recorded_sign_in_is_not_called_inactive():
+    """A new account has no lastLogonTimestamp yet; that is not evidence of neglect."""
+    details = module.ad_account_details(_ad_entry(userAccountControl=b"512"), now=NOW)
+
+    assert details.account_status == "active"

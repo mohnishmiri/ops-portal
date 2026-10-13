@@ -38,6 +38,9 @@ export interface CredentialAccountDetails {
   last_used_note: string | null;
   /** AD account (not password) expiry; null when the account does not expire. */
   account_expires_at: string | null;
+  /** active | inactive | disabled | locked | expired — can it sign in at all? */
+  account_status: string | null;
+  account_status_note: string | null;
   /** Failed sign-ins the directory counts against the lockout policy. */
   failed_sign_ins: number | null;
   last_failed_at: string | null;
@@ -158,6 +161,8 @@ export interface CredentialAccountInput {
 export interface DirectoryFacts {
   /** The directory's name for the account — shown as its owner. */
   owner: string | null;
+  /** active | inactive | disabled | locked | expired, as the directory reports it. */
+  account_status: string | null;
   expiry_date: string | null;
   never_expires: boolean;
   password_changed_date: string | null;
@@ -170,6 +175,8 @@ export type CredentialAccountCreateInput = CredentialAccountInput & Partial<Dire
 
 export interface CredentialAccount extends CredentialAccountInput, DirectoryFacts {
   id: number;
+  /** When the portal last read this account from its directory. */
+  directory_synced_at: string | null;
   /** The most recent Credential Check of this account: the verdict only. */
   last_checked_at: string | null;
   last_check_status: string | null;
@@ -235,6 +242,22 @@ export const useUpdateCredentialAccount = () =>
 
 export const useDeleteCredentialAccount = () =>
   useAccountMutation(async (id: number) => (await apiClient.delete(`${ACCOUNTS}/${id}`)).data);
+
+/** What a directory read answered. Only "ok" means the row was filled in. */
+export interface AccountRefreshResult {
+  status: "ok" | "unconfigured" | "unsupported" | "not_found" | "error";
+  reason: string | null;
+  account: CredentialAccount;
+}
+
+/**
+ * Re-read one account from its directory with the portal's reader account —
+ * no password for the account itself, and its last verdict is left alone.
+ */
+export const useRefreshCredentialAccount = () =>
+  useAccountMutation(
+    async (id: number) => (await apiClient.post<AccountRefreshResult>(`${ACCOUNTS}/${id}/refresh`, {})).data,
+  );
 
 /** Reads the file and says what importing it would do. Writes nothing. */
 export const usePreviewAccountImport = () =>

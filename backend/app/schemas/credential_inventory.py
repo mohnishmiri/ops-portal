@@ -127,6 +127,14 @@ class CredentialAccountOut(BaseModel):
     failed_logins: int | None
     reset_url: str | None
     notes: str | None
+    account_status: str | None = Field(
+        default=None,
+        description="active | inactive | disabled | locked | expired, as the directory reports it",
+    )
+    directory_synced_at: datetime | None = Field(
+        default=None,
+        description="When the portal last read this account from its directory",
+    )
     last_checked_at: datetime | None
     last_check_status: str | None
     last_checked_by: str | None

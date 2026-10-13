@@ -201,11 +201,17 @@ export const AccountFormModal: React.FC<{
         </div>
       </div>
       <p className="text-xs text-gray-500">
-        Once it is listed, run <strong>Check</strong> on its row with the account&apos;s own password: the name, expiry,
-        password change, last sign-in and failed sign-ins come back from
-        {" "}
-        {form.account_type === "domain" ? "Active Directory" : form.account_type === "aaf" ? "AAF" : "Artifactory"} and
-        fill the grid in.
+        {form.account_type === "domain" ? (
+          <>
+            The name, expiry, password change, last sign-in and failed sign-ins are read from Active Directory as soon
+            as this account is added, and again whenever you press <strong>Refresh</strong> on its row.
+          </>
+        ) : (
+          <>
+            Once it is listed, run <strong>Check</strong> on its row with the account&apos;s own password: the expiry
+            and last use come back from {form.account_type === "aaf" ? "AAF" : "Artifactory"} and fill the grid in.
+          </>
+        )}
       </p>
       {mutation.isError && (
         <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

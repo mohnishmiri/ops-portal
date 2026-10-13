@@ -1971,6 +1971,15 @@ class CredentialAccount(Base):
     failed_logins = Column(Integer, nullable=True)
     reset_url = Column(String(1000), nullable=True)
     notes = Column(Text, nullable=True)
+    # Whether the account can sign in at all, as the directory reports it:
+    # active | inactive | disabled | locked | expired.  Distinct from
+    # last_check_status, which is about one password at one moment.
+    account_status = Column(String(20), nullable=True)
+    # When the portal last read this account from its directory, with the
+    # read-only reader account rather than a password check.  Kept apart from
+    # last_checked_at so "we know its expiry" never reads as "its password
+    # was proven".
+    directory_synced_at = Column(DateTime, nullable=True)
     # The most recent Credential Check of this account: the verdict only.
     last_checked_at = Column(DateTime, nullable=True)
     last_check_status = Column(String(20), nullable=True)

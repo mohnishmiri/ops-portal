@@ -44,16 +44,27 @@ import {
   downloadAccountsExport,
   useCredentialAccounts,
   useDeleteCredentialAccount,
+  useRefreshCredentialAccount,
 } from "../../services/toolsApi";
 import { formatDate, formatDateTime, parseApiDate } from "../../utils/dateFormat";
 import { AccountFormModal, ImportAccountsModal } from "./AccountInventoryDialogs";
-import { FAILING_STATUSES, StatusChip, statusStyle } from "./credentialStatus";
+import {
+  ACCOUNT_STATUS_STYLES,
+  AccountStatusChip,
+  FAILING_STATUSES,
+  StatusChip,
+  UNUSABLE_STATUSES,
+  statusStyle,
+} from "./credentialStatus";
 
 const PAGE = "credential_check_main";
 const EXPIRING_DAYS = 30;
 
 type View = "expired" | "expiring" | "failing";
-type SortKey = "application" | "account" | "owner" | "expiry" | "last_login" | "failed";
+type SortKey = "application" | "account" | "status" | "owner" | "expiry" | "last_login" | "failed";
+
+/** Worst first when sorting, so the accounts needing attention rise together. */
+const STATUS_RANK: Record<string, number> = { disabled: 0, locked: 1, expired: 2, inactive: 3, active: 4 };
 
 const ALL_DIRECTORIES = Object.values(ACCOUNT_DIRECTORIES).flat();
 
@@ -103,7 +114,9 @@ export const isExpiring = (a: CredentialAccount) => {
 };
 
 export const isFailing = (a: CredentialAccount) =>
-  (a.failed_logins ?? 0) > 0 || (a.last_check_status !== null && FAILING_STATUSES.has(a.last_check_status));
+  (a.failed_logins ?? 0) > 0 ||
+  (a.last_check_status !== null && FAILING_STATUSES.has(a.last_check_status)) ||
+  (a.account_status !== null && UNUSABLE_STATUSES.has(a.account_status));
 
 const VIEW_TESTS: Record<View, (a: CredentialAccount) => boolean> = {
   expired: isExpired,
@@ -117,12 +130,24 @@ const VIEW_TESTS: Record<View, (a: CredentialAccount) => boolean> = {
 const searchLabel = (a: CredentialAccount) => `${TYPE_LABELS[a.account_type]} ${DIRECTORY_SHORT[a.directory]}`;
 
 const accountMatches = (a: CredentialAccount, query: string) =>
-  textMatches(query, a.application, a.app_code, a.account_name, a.owner, a.notes, searchLabel(a));
+  textMatches(
+    query,
+    a.application,
+    a.app_code,
+    a.account_name,
+    a.owner,
+    a.notes,
+    searchLabel(a),
+    a.account_status ? ACCOUNT_STATUS_STYLES[a.account_status]?.label : null,
+  );
 
 const accountAccessor = (a: CredentialAccount, key: SortKey): string | number => {
   switch (key) {
     case "account":
       return a.account_name.toLowerCase();
+    case "status":
+      // Unknown last: a blank is not a clean bill of health.
+      return STATUS_RANK[a.account_status ?? ""] ?? 9;
     case "owner":
       return (a.owner ?? "").toLowerCase();
     case "expiry":
@@ -146,10 +171,12 @@ const Muted: React.FC<{ children: React.ReactNode; title?: string }> = ({ childr
 
 /** Every blank in this grid is directory-sourced: say whether a check would fill it. */
 const NotRecorded: React.FC<{ account: CredentialAccount }> = ({ account }) =>
-  account.last_checked_at ? (
-    <Muted title="The directory did not report this at the last check">Not reported</Muted>
+  account.directory_synced_at || account.last_checked_at ? (
+    <Muted title="The directory did not report this">Not reported</Muted>
   ) : (
-    <Muted title="Check this account with its own password to read this from the directory">Not checked yet</Muted>
+    <Muted title="Read it from the directory with Refresh, or check this account with its own password">
+      Not read yet
+    </Muted>
   );
 
 const ExpiryCell: React.FC<{ account: CredentialAccount }> = ({ account }) => (
@@ -280,6 +307,7 @@ const AccountInventory: React.FC<{
 
   const accountsQuery = useCredentialAccounts();
   const deleteMutation = useDeleteCredentialAccount();
+  const refreshMutation = useRefreshCredentialAccount();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
 
   const [application, setApplication] = useState("");
@@ -289,6 +317,7 @@ const AccountInventory: React.FC<{
   const [deleting, setDeleting] = useState<CredentialAccount | null>(null);
   const [importing, setImporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [refreshNote, setRefreshNote] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
 
   const applications = useMemo(
     () => Array.from(new Set(accounts.map((a) => a.application))).sort((a, b) => a.localeCompare(b)),
@@ -319,6 +348,21 @@ const AccountInventory: React.FC<{
 
   const toggleView = (next: View | null) => setView((current) => (current === next ? null : next));
 
+  /** Re-read one account from its directory, and say plainly if that could not be done. */
+  const refresh = (account: CredentialAccount) => {
+    setRefreshNote(null);
+    refreshMutation.mutate(account.id, {
+      onSuccess: (result) =>
+        setRefreshNote(
+          result.status === "ok"
+            ? { tone: "ok", text: `Read ${account.account_name} from the ${account.directory} directory.` }
+            : { tone: "warn", text: result.reason ?? `The directory could not answer for ${account.account_name}.` },
+        ),
+      onError: (error) =>
+        setRefreshNote({ tone: "warn", text: formatAxiosError(error, "The directory could not be read.") }),
+    });
+  };
+
   const exportFilters: AccountExportFilters = {
     application: application || undefined,
     directory: directory || undefined,
@@ -338,7 +382,7 @@ const AccountInventory: React.FC<{
     </th>
   );
 
-  const COLUMNS = 8;
+  const COLUMNS = 9;
 
   return (
     <section className="space-y-4" aria-labelledby="account-inventory-heading">
@@ -348,8 +392,9 @@ const AccountInventory: React.FC<{
         </h2>
         <p className="mt-0.5 text-sm text-gray-500">
           The ITSERVICES, AAF and JFrog accounts each application owns. You list the account; its name, expiry, last
-          sign-in and failed sign-ins are read from Active Directory, AAF or Artifactory each time it is checked —
-          from the cards above, or with <strong>Check</strong> on its row.
+          sign-in and failed sign-ins come from the directory. A domain account is read as soon as it is added and
+          whenever you press <strong>Refresh</strong> on its row; an AAF or JFrog account is filled in by a{" "}
+          <strong>Check</strong> with its own password.
         </p>
       </div>
 
@@ -389,7 +434,7 @@ const AccountInventory: React.FC<{
           value={counts.failing}
           icon={MetricCardIcons.shield("h-5 w-5")}
           tone="orange"
-          subtitle="Failed logins, or last check rejected"
+          subtitle="Disabled, locked, failed logins, or last check rejected"
           onClick={() => toggleView("failing")}
           active={view === "failing"}
           actionLabel="Show accounts with failed logins, or whose last check was rejected, locked or expired"
@@ -448,6 +493,21 @@ const AccountInventory: React.FC<{
           )}
         </GridHeader>
 
+        {refreshNote && (
+          <div
+            role="status"
+            className={`flex items-start justify-between gap-3 border-b px-4 py-2 text-sm ${
+              refreshNote.tone === "ok"
+                ? "border-green-100 bg-green-50 text-green-800"
+                : "border-amber-100 bg-amber-50 text-amber-900"
+            }`}
+          >
+            <span>{refreshNote.text}</span>
+            <button type="button" className="text-xs font-semibold" onClick={() => setRefreshNote(null)}>
+              Dismiss
+            </button>
+          </div>
+        )}
         {exportError && (
           <div role="alert" className="flex items-start justify-between gap-3 border-b border-red-100 bg-red-50 px-4 py-2 text-sm text-red-700">
             <span>{exportError}</span>
@@ -463,6 +523,7 @@ const AccountInventory: React.FC<{
               <tr>
                 {header("Application", "application")}
                 {header("Account", "account")}
+                {header("Status", "status")}
                 {header("Owner / name", "owner")}
                 {header("Expiry", "expiry")}
                 {header("Last login", "last_login")}
@@ -504,13 +565,34 @@ const AccountInventory: React.FC<{
                         <span className="rounded bg-att-50 px-1.5 py-0.5 text-[11px] font-medium text-att-700">
                           {directoryLabel(a.directory)}
                         </span>
+                      </div>
+                    </td>
+                    <td className={gridStyles.cell}>
+                      <div className="flex flex-col items-start gap-1">
+                        {a.account_status ? (
+                          <AccountStatusChip
+                            status={a.account_status}
+                            title={
+                              a.directory_synced_at
+                                ? `Read from the ${a.directory} directory ${formatDateTime(a.directory_synced_at)}`
+                                : undefined
+                            }
+                          />
+                        ) : (
+                          <NotRecorded account={a} />
+                        )}
                         {a.last_check_status && (
                           <span
                             className="inline-flex items-center gap-1"
-                            title={`Last checked ${formatDateTime(a.last_checked_at)}${a.last_checked_by ? ` by ${a.last_checked_by}` : ""}: ${statusStyle(a.last_check_status).label}`}
+                            title={`Password checked ${formatDateTime(a.last_checked_at)}${a.last_checked_by ? ` by ${a.last_checked_by}` : ""}`}
                           >
                             <StatusChip status={a.last_check_status} />
                             <span className="text-[11px] text-gray-500">{sinceText(a.last_checked_at)}</span>
+                          </span>
+                        )}
+                        {a.directory_synced_at && (
+                          <span className="text-[11px] text-gray-500">
+                            From directory {sinceText(a.directory_synced_at)}
                           </span>
                         )}
                       </div>
@@ -545,6 +627,27 @@ const AccountInventory: React.FC<{
                     </td>
                     <td className={gridStyles.centerCell}>
                       <div className="inline-flex items-center gap-1">
+                        {canEdit && a.account_type === "domain" && (
+                          <ActionIconButton
+                            title={`Read ${a.account_name} from the ${a.directory} directory`}
+                            tone="gray"
+                            disabled={refreshMutation.isPending}
+                            onClick={() => refresh(a)}
+                          >
+                            <svg
+                              viewBox="0 0 24 24"
+                              className="h-[18px] w-[18px]"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth={2}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden="true"
+                            >
+                              <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+                            </svg>
+                          </ActionIconButton>
+                        )}
                         {canCheck && (
                           <ActionIconButton title={`Check ${a.account_name}`} tone="att" onClick={() => onCheck(a)}>
                             {AccessIcons.key("h-[18px] w-[18px]")}

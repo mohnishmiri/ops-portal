@@ -32,7 +32,7 @@ import { fieldLabel, inputClass, panelClass, primaryButton } from "../features/a
 import { DaysLeftBadge, daysUntil } from "../features/keyvault/kvShared";
 import AccountInventory from "../features/tools/AccountInventory";
 import AddToInventory from "../features/tools/AddToInventory";
-import { StatusChip, statusStyle } from "../features/tools/credentialStatus";
+import { AccountStatusChip, StatusChip, statusStyle } from "../features/tools/credentialStatus";
 import { formatAxiosError } from "../services/apiErrors";
 import {
   type AafEnvironment,
@@ -101,6 +101,11 @@ const AccountDetails: React.FC<{ kind: CheckKind; account: CredentialAccountDeta
     <div className="mt-3 text-xs">
       <dl className="divide-y divide-black/5 border-y border-black/5">
         {account.display_name && <DetailRow label={labels.name}>{account.display_name}</DetailRow>}
+        {account.account_status && (
+          <DetailRow label="Account" hint={account.account_status_note}>
+            <AccountStatusChip status={account.account_status} />
+          </DetailRow>
+        )}
         <DetailRow label={labels.expires}>
           {account.never_expires ? (
             <span>Never</span>

@@ -51,6 +51,7 @@ from app.schemas.credential_inventory import (
     ImportPreview,
     ImportPreviewRow,
 )
+from app.schemas.tools import CredentialAccountDetails
 from app.services.compliance_excel_service import (
     _apply_freeze_and_filter,
     _auto_fit_columns,
@@ -58,7 +59,7 @@ from app.services.compliance_excel_service import (
     _write_column_headers,
     _write_data_cell,
 )
-from app.services.credential_check_service import CheckOutcome
+from app.services.credential_check_service import CheckOutcome, CredentialCheckService, DirectoryLookup
 
 logger = structlog.get_logger(__name__)
 
@@ -66,6 +67,14 @@ IMPORT_MAX_ROWS = 2000
 IMPORT_MAX_BYTES = 5 * 1024 * 1024
 
 TYPE_LABELS = {"domain": "Domain", "aaf": "AAF", "jfrog": "JFrog"}
+# How each account state reads in an export.
+STATUS_LABELS = {
+    "active": "Active",
+    "inactive": "Inactive",
+    "disabled": "Disabled",
+    "locked": "Locked out",
+    "expired": "Account expired",
+}
 DIRECTORY_LABELS = {
     "ITSERVICES": "ITSERVICES",
     "TESTITSERVICES": "TESTITSERVICES",
@@ -100,6 +109,36 @@ def account_label(account: Any) -> str:
 
 def _utc_date(value: datetime) -> date:
     return (value.astimezone(UTC) if value.tzinfo else value).date()
+
+
+def _apply_directory_details(account: CredentialAccount, details: CredentialAccountDetails, *, naming: bool) -> None:
+    """Copy what a source reported onto the row.
+
+    Shared by the two ways a row learns anything: a check of the account, and
+    a read with the portal's reader account.  A field the source did not
+    report is left as it was rather than blanked — "not reported" is not the
+    same as "none".
+
+    ``naming`` says whether this source's display name identifies the account:
+    AD's displayName does, so it becomes the owner; a JFrog "display name" is
+    only the token's description, so it does not.
+    """
+    if details.never_expires:
+        account.never_expires = True
+        account.expiry_date = None
+    elif details.expires_at is not None:
+        account.never_expires = False
+        account.expiry_date = _utc_date(details.expires_at)
+    if details.last_used_at is not None:
+        account.last_login_date = _utc_date(details.last_used_at)
+    if details.last_changed_at is not None:
+        account.password_changed_date = _utc_date(details.last_changed_at)
+    if details.failed_sign_ins is not None:
+        account.failed_logins = details.failed_sign_ins
+    if details.account_status is not None:
+        account.account_status = details.account_status
+    if naming and details.display_name:
+        account.owner = details.display_name[:255]
 
 
 # ── Import: reading a spreadsheet ──────────────────────────────────────
@@ -357,6 +396,7 @@ def _export_columns(today: date) -> list[tuple[str, Callable[[CredentialAccount]
         ("Type", lambda a: TYPE_LABELS[a.account_type]),
         ("Directory", lambda a: DIRECTORY_LABELS.get(a.directory, a.directory)),
         ("Account", lambda a: a.account_name),
+        ("Status", lambda a: STATUS_LABELS.get(a.account_status or "", a.account_status)),
         ("Reset Link", lambda a: a.reset_url),
         ("Notes", lambda a: a.notes),
         ("Name (from directory)", lambda a: a.owner),
@@ -505,8 +545,16 @@ def is_expiring(account: CredentialAccount, today: date) -> bool:
     return days is not None and 0 <= days <= EXPIRING_WINDOW_DAYS
 
 
+# Account states that mean it cannot sign in, whatever its password says.
+UNUSABLE_STATUSES = frozenset({"disabled", "locked", "expired"})
+
+
 def is_failing(account: CredentialAccount) -> bool:
-    return bool(account.failed_logins) or account.last_check_status in FAILING_STATUSES
+    return (
+        bool(account.failed_logins)
+        or account.last_check_status in FAILING_STATUSES
+        or account.account_status in UNUSABLE_STATUSES
+    )
 
 
 def filter_accounts(accounts: list[CredentialAccount], flt: AccountFilter, *, today: date) -> list[CredentialAccount]:
@@ -534,6 +582,7 @@ def filter_accounts(accounts: list[CredentialAccount], flt: AccountFilter, *, to
                 account.account_name,
                 account.owner,
                 account.notes,
+                STATUS_LABELS.get(account.account_status or "", ""),
                 f"{TYPE_LABELS[account.account_type]} {DIRECTORY_LABELS.get(account.directory, account.directory)}",
             )
             if not any(query in str(value).lower() for value in fields if value):
@@ -546,8 +595,10 @@ def filter_accounts(accounts: list[CredentialAccount], flt: AccountFilter, *, to
 
 
 class CredentialInventoryService:
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, checks: CredentialCheckService | None = None) -> None:
         self._db = db
+        # Injectable so a test can read a directory without one being there.
+        self._checks = checks or CredentialCheckService()
 
     async def list_accounts(self) -> list[CredentialAccount]:
         result = await self._db.execute(
@@ -706,27 +757,37 @@ class CredentialInventoryService:
         account.last_checked_at = datetime.utcnow()
         account.last_check_status = outcome.status
         account.last_checked_by = checked_by
-        details = outcome.account
-        if details is not None:
-            if details.never_expires:
-                account.never_expires = True
-                account.expiry_date = None
-            elif details.expires_at is not None:
-                account.never_expires = False
-                account.expiry_date = _utc_date(details.expires_at)
-            if details.last_used_at is not None:
-                account.last_login_date = _utc_date(details.last_used_at)
-            if details.last_changed_at is not None:
-                account.password_changed_date = _utc_date(details.last_changed_at)
-            if details.failed_sign_ins is not None:
-                account.failed_logins = details.failed_sign_ins
-            # AD's displayName names the account, which is the closest thing
-            # the directory has to an owner.  A JFrog "display name" is only
-            # the token's description, so it is not kept.
-            if account_type == "domain" and details.display_name:
-                account.owner = details.display_name[:255]
+        if outcome.account is not None:
+            _apply_directory_details(account, outcome.account, naming=account_type == "domain")
         await self._db.commit()
         return True
+
+    async def sync_from_directory(self, account: CredentialAccount) -> DirectoryLookup:
+        """Fill a row in from its directory, holding no password for the account.
+
+        Domain accounts only.  Active Directory is the one source here the
+        portal can read with a reader account of its own; AAF answers only to
+        an admin of the identity's namespace and Artifactory only to a
+        platform admin, so for those a check of the account remains the way in.
+
+        The verdict columns are left alone on purpose: reading an account's
+        attributes says nothing about whether its password still works.
+        """
+        if account.account_type != "domain":
+            return DirectoryLookup(
+                "unsupported",
+                f"{TYPE_LABELS[account.account_type]} accounts are filled in by a check of the account itself.",
+            )
+
+        lookup = await self._checks.lookup_domain_account(account.directory, account.account_name)
+        if lookup.status != "ok" or lookup.details is None:
+            return lookup
+
+        _apply_directory_details(account, lookup.details, naming=True)
+        account.directory_synced_at = datetime.utcnow()
+        await self._db.commit()
+        await self._db.refresh(account)
+        return lookup
 
     # ── Audit ──────────────────────────────────────────────────────────
 

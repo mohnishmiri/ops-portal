@@ -67,6 +67,28 @@ except ModuleNotFoundError:  # pragma: no cover - import guard
 
 
 CheckKind = Literal["domain", "jfrog", "aaf"]
+
+
+def _DOMAIN_SERVERS() -> dict[str, str]:  # noqa: N802 - settings are read per call, not at import
+    return {
+        "ITSERVICES": settings.CRED_CHECK_LDAP_ITSERVICES,
+        "TESTITSERVICES": settings.CRED_CHECK_LDAP_TESTITSERVICES,
+    }
+
+
+def _DOMAIN_READERS() -> dict[str, tuple[str, str]]:  # noqa: N802
+    return {
+        "ITSERVICES": (
+            settings.CRED_CHECK_LDAP_READER_ITSERVICES,
+            settings.CRED_CHECK_LDAP_READER_PASSWORD_ITSERVICES,
+        ),
+        "TESTITSERVICES": (
+            settings.CRED_CHECK_LDAP_READER_TESTITSERVICES,
+            settings.CRED_CHECK_LDAP_READER_PASSWORD_TESTITSERVICES,
+        ),
+    }
+
+
 JFROG_INSTANCE_LABELS = {"bronze": "Bronze", "gold": "Gold"}
 
 # Lockout guard.  Consecutive failures against one target before the portal
@@ -98,6 +120,19 @@ _SUBCODE_RE = re.compile(r"data\s+([0-9a-fA-F]{3,4})")
 # says nothing about the credential itself (DNS, TLS, timeout).
 VALID = "valid"
 INVALID = "invalid"
+
+
+@dataclass
+class DirectoryLookup:
+    """What a reader-bound lookup found.  Never carries a credential.
+
+    ``status`` is ``ok`` | ``unconfigured`` | ``not_found`` | ``error``; only
+    ``ok`` carries details, and only an operator-facing reason otherwise.
+    """
+
+    status: str
+    reason: str | None = None
+    details: CredentialAccountDetails | None = None
 
 
 @dataclass
@@ -276,6 +311,12 @@ def _epoch(value: Any) -> datetime | None:
 _FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
 _FILETIME_NEVER = 0x7FFFFFFFFFFFFFFF
 _UF_DONT_EXPIRE_PASSWD = 0x10000
+_UF_ACCOUNTDISABLE = 0x0002
+
+# An account that has not signed in for this long is reported as inactive.
+# Active Directory has no such flag — this is the portal drawing a line, so
+# the number is said out loud wherever the status is shown.
+INACTIVE_AFTER_DAYS = 90
 
 _AD_ACCOUNT_ATTRIBUTES = [
     "displayName",
@@ -289,7 +330,33 @@ _AD_ACCOUNT_ATTRIBUTES = [
     # both describe the DC that answered this bind, not the domain.
     "badPwdCount",
     "badPasswordTime",
+    # Non-zero while the account is locked out; cleared when it unlocks.
+    "lockoutTime",
 ]
+
+
+def _account_status(entry: dict, *, uac: int, last_logon: datetime | None, now: datetime) -> tuple[str, str | None]:
+    """Is this account usable at all?  ``(status, note)``.
+
+    Reported in the order that matters operationally: a disabled account is
+    disabled whatever else is true of it, and a locked one cannot sign in even
+    though everything about it is otherwise in order.  "Inactive" is the
+    portal's own reading of a stale sign-in, not a flag the directory holds,
+    so it says the threshold it used.
+    """
+    if uac & _UF_ACCOUNTDISABLE:
+        return "disabled", "The account is disabled in Active Directory and cannot sign in."
+    if _filetime(_ad_int(entry, "lockoutTime")) is not None:
+        return "locked", "Locked out on the domain controller that answered; it unlocks on the lockout policy's timer."
+    account_expires = _filetime(_ad_int(entry, "accountExpires"))
+    if account_expires is not None and account_expires <= now:
+        return "expired", f"The account itself expired on {account_expires:%d %b %Y} — this is not its password expiry."
+    if last_logon is not None and (now - last_logon) > timedelta(days=INACTIVE_AFTER_DAYS):
+        return "inactive", (
+            f"Enabled, but no sign-in recorded in {INACTIVE_AFTER_DAYS} days. Active Directory records sign-ins only "
+            "every 9 to 14 days, so a little older than it looks."
+        )
+    return "active", None
 
 
 def _filetime(value: int | None) -> datetime | None:
@@ -367,8 +434,12 @@ def ad_account_details(entry: dict, *, now: datetime) -> CredentialAccountDetail
             "Each controller keeps its own count."
         )
 
+    status, status_note = _account_status(entry, uac=uac, last_logon=last_logon, now=now)
+
     return CredentialAccountDetails(
         display_name=_ad_text(entry, "displayName"),
+        account_status=status,
+        account_status_note=status_note,
         expires_at=None if never_expires else _filetime(computed),
         never_expires=never_expires,
         last_changed_at=_filetime(_ad_int(entry, "pwdLastSet")),
@@ -502,10 +573,7 @@ class CredentialCheckService:
 
     async def check_domain(self, domain: str, username: str, password: str) -> CheckOutcome:
         """Simple bind as ``DOMAIN\\user``.  The bind is the whole check."""
-        server_url = {
-            "ITSERVICES": settings.CRED_CHECK_LDAP_ITSERVICES,
-            "TESTITSERVICES": settings.CRED_CHECK_LDAP_TESTITSERVICES,
-        }.get(domain, "").strip()
+        server_url = _DOMAIN_SERVERS().get(domain, "").strip()
 
         if not server_url:
             raise CredentialCheckError(
@@ -521,31 +589,36 @@ class CredentialCheckService:
 
         return await asyncio.to_thread(self._bind, server_url, f"{domain}\\{username}", password)
 
+    @staticmethod
+    def _connect(server_url: str, bind_user: str, password: str) -> Any:
+        """An unbound ldap3 Connection over LDAPS.  Shared by every bind here."""
+        # None = the system trust store, which is where the corporate
+        # root lives.  Pinning certifi here rejected every internal DC.
+        ca_file = settings.CRED_CHECK_CA_BUNDLE.strip() or None
+        tls = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=ca_file)
+        server = Server(
+            server_url,
+            use_ssl=server_url.lower().startswith("ldaps://"),
+            tls=tls,
+            connect_timeout=settings.CRED_CHECK_TIMEOUT_SECONDS,
+            # The default downloads the whole AD schema on every bind;
+            # the account details below read raw values instead.
+            get_info=NO_SERVER_INFO,
+        )
+        return Connection(
+            server,
+            user=bind_user,
+            password=password,
+            auto_bind=False,
+            receive_timeout=settings.CRED_CHECK_TIMEOUT_SECONDS,
+            # Following a referral would present the password to another server.
+            auto_referrals=False,
+        )
+
     def _bind(self, server_url: str, bind_user: str, password: str) -> CheckOutcome:
         """Blocking LDAP bind — always called through ``asyncio.to_thread``."""
         try:
-            # None = the system trust store, which is where the corporate
-            # root lives.  Pinning certifi here rejected every internal DC.
-            ca_file = settings.CRED_CHECK_CA_BUNDLE.strip() or None
-            tls = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=ca_file)
-            server = Server(
-                server_url,
-                use_ssl=server_url.lower().startswith("ldaps://"),
-                tls=tls,
-                connect_timeout=settings.CRED_CHECK_TIMEOUT_SECONDS,
-                # The default downloads the whole AD schema on every bind;
-                # the account details below read raw values instead.
-                get_info=NO_SERVER_INFO,
-            )
-            conn = Connection(
-                server,
-                user=bind_user,
-                password=password,
-                auto_bind=False,
-                receive_timeout=settings.CRED_CHECK_TIMEOUT_SECONDS,
-                # Following a referral would present the password to another server.
-                auto_referrals=False,
-            )
+            conn = self._connect(server_url, bind_user, password)
             bound = conn.bind()
         except LDAPException as exc:
             domain_name = bind_user.split("\\")[0]
@@ -587,15 +660,20 @@ class CredentialCheckService:
         return CheckOutcome(valid=False, status=INVALID, message="The password was rejected by the directory.")
 
     @staticmethod
-    def _read_ad_account(conn: Any, username: str) -> CredentialAccountDetails:
-        """Read the account's own entry over the connection it just bound.
+    def _read_ad_account(conn: Any, username: str, *, found_only: bool = False) -> Any:
+        """Read one account's entry over an already-bound connection.
 
-        Best effort: the bind has already given the verdict, and a hardened
-        directory may not let an account read itself — that is a note, not a
-        failure.  Only possible after a successful bind, so an expired or
-        locked account gets its verdict without details.
+        Used two ways: by a check, over the account's own connection, where a
+        hardened directory may refuse the read and that is a note rather than
+        a failure; and by a lookup, over the reader's connection, where
+        ``found_only`` returns None instead so "no such account" can be told
+        apart from "could not read".
         """
-        unavailable = CredentialAccountDetails(notes=["The directory did not return details for this account."])
+        unavailable = (
+            None
+            if found_only
+            else CredentialAccountDetails(notes=["The directory did not return details for this account."])
+        )
         try:
             conn.search("", "(objectClass=*)", search_scope=BASE, attributes=["defaultNamingContext"])
             root = _first_entry(conn.response)
@@ -613,6 +691,72 @@ class CredentialCheckService:
             logger.info("credential_check_ad_details_unavailable", error=str(exc)[:200])
             return unavailable
         return ad_account_details(entry, now=datetime.now(UTC)) if entry else unavailable
+
+    # ── Domain lookup (no password for the account itself) ─────────────
+
+    async def lookup_domain_account(self, domain: str, username: str) -> DirectoryLookup:
+        """What the directory says about ``username``, read with the portal's reader account.
+
+        The companion to ``check_domain``: that one proves a password and
+        learns the details as a side effect; this one just reads the details,
+        for an account the team has listed but holds no password for here.
+
+        It only ever *reads* account attributes — the same ones a check
+        reports.  No password is read (AD does not expose one), nothing is
+        written, and a missing reader account simply means "not configured".
+        """
+        server_url = _DOMAIN_SERVERS().get(domain, "").strip()
+        reader, reader_password = _DOMAIN_READERS().get(domain, ("", ""))
+        reader, reader_password = reader.strip(), reader_password.strip()
+
+        if not LDAP_AVAILABLE:
+            return DirectoryLookup("unconfigured", "Domain lookups need the ldap3 package, absent from this build.")
+        if not server_url:
+            return DirectoryLookup(
+                "unconfigured",
+                f"No LDAP server is configured for {domain}. Set CRED_CHECK_LDAP_{domain}.",
+            )
+        if not (reader and reader_password):
+            return DirectoryLookup(
+                "unconfigured",
+                f"No directory reader is configured for {domain}, so details can only come from a check of the "
+                f"account itself. Set CRED_CHECK_LDAP_READER_{domain} and its password.",
+            )
+
+        return await asyncio.to_thread(self._lookup, server_url, reader, reader_password, domain, username)
+
+    def _lookup(
+        self, server_url: str, reader: str, reader_password: str, domain: str, username: str
+    ) -> DirectoryLookup:
+        """Blocking reader bind + one search — always called through ``asyncio.to_thread``."""
+        try:
+            conn = self._connect(server_url, reader, reader_password)
+            bound = conn.bind()
+        except LDAPException as exc:
+            logger.warning("credential_lookup_transport_failed", domain=domain, server=server_url, error=str(exc)[:300])
+            return DirectoryLookup(
+                "error", f"Could not reach the {domain} directory at {server_url} — {_transport_reason(exc)}."
+            )
+
+        if not bound:
+            # The reader's own credential is wrong or expired — an operator
+            # problem, and never reported as something about the account.
+            logger.warning("credential_lookup_reader_rejected", domain=domain, reader=reader)
+            return DirectoryLookup(
+                "error",
+                f"The {domain} directory rejected the portal's reader account. Check "
+                f"CRED_CHECK_LDAP_READER_{domain} and its password.",
+            )
+
+        try:
+            details = self._read_ad_account(conn, username, found_only=True)
+        finally:
+            with contextlib.suppress(LDAPException):
+                conn.unbind()
+
+        if details is None:
+            return DirectoryLookup("not_found", f"{domain}\\{username} was not found in the directory.")
+        return DirectoryLookup("ok", None, details)
 
     # ── JFrog Artifactory ──────────────────────────────────────────────
 

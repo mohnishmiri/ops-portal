@@ -103,6 +103,11 @@ backend:
     # The network policy below must also allow egress to 636 for LDAPS.
     CRED_CHECK_LDAP_ITSERVICES: ""
     CRED_CHECK_LDAP_TESTITSERVICES: ""
+    # Read-only reader account, so an inventory row can be filled in from AD
+    # without that account's own password. Reads attributes only. The passwords
+    # belong in the Key Vault secrets below, never here.
+    CRED_CHECK_LDAP_READER_ITSERVICES: ""
+    CRED_CHECK_LDAP_READER_TESTITSERVICES: ""
     # JFrog Bronze / Gold — separate instances, separate tokens.
     CRED_CHECK_JFROG_URL: "https://artifact.it.att.com"
     CRED_CHECK_JFROG_URL_GOLD: "https://artifact-gold.it.att.com"
@@ -266,6 +271,18 @@ backend:
         kubernetesSecretName: ops-portal-backend-k8s-dashboard-session-secret
         optional: true
         group: k8sDashboard
+      # ── Credential checks: the read-only directory reader ──
+      # Absent secret = the inventory is filled in by checks only.
+      - envName: CRED_CHECK_LDAP_READER_PASSWORD_ITSERVICES
+        akvSecretName: opsportal-backend-cred-check-ldap-reader-password-itservices
+        kubernetesSecretName: ops-portal-backend-cred-check-ldap-reader-password-itservices
+        optional: true
+        group: credentialCheck
+      - envName: CRED_CHECK_LDAP_READER_PASSWORD_TESTITSERVICES
+        akvSecretName: opsportal-backend-cred-check-ldap-reader-password-testitservices
+        kubernetesSecretName: ops-portal-backend-cred-check-ldap-reader-password-testitservices
+        optional: true
+        group: credentialCheck
       # ── Keyfactor Command (Certificate Management) ──
       - envName: KEYFACTOR_BASE_URL
         akvSecretName: opsportal-backend-keyfactor-base-url
