@@ -201,6 +201,36 @@ def test_an_unreachable_directory_is_an_error_not_a_rejection(monkeypatch):
     assert outcome.valid is False
 
 
+_NOT_AD = {"result": 34, "description": "invalidDNSyntax", "message": ""}
+
+
+def test_a_server_that_is_not_active_directory_is_an_error_not_a_rejection(monkeypatch):
+    """A non-AD server (e.g. AAF LDAP) refuses DOMAIN\\user outright; no password was compared."""
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Connection", lambda *a, **k: _Conn(False, dict(_NOT_AD)))
+
+    outcome = _service()._bind("ldaps://aaf.example.com:636", "TESTITSERVICES\\m1", "s")
+
+    assert outcome.valid is False
+    assert outcome.status == "error"
+    assert "CRED_CHECK_LDAP_TESTITSERVICES" in outcome.message
+    assert "not checked" in outcome.message
+
+
+@pytest.mark.anyio
+async def test_a_lookup_against_a_non_ad_server_blames_the_server_not_the_reader(monkeypatch, _reader):
+    monkeypatch.setattr(module, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Tls", lambda *a, **k: object())
+    monkeypatch.setattr(module, "Connection", lambda *a, **k: _Conn(False, dict(_NOT_AD)))
+
+    lookup = await _service().lookup_domain_account("ITSERVICES", "m47355")
+
+    assert lookup.status == "error"
+    assert "CRED_CHECK_LDAP_ITSERVICES" in lookup.reason
+    assert "reader account" not in lookup.reason
+
+
 @pytest.mark.anyio
 async def test_an_unconfigured_domain_is_refused_before_any_bind(monkeypatch):
     """A deployment with no domain controller must never attempt a bind."""

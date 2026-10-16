@@ -131,6 +131,25 @@ _AD_SUBCODES: dict[str, tuple[str, str]] = {
 }
 _SUBCODE_RE = re.compile(r"data\s+([0-9a-fA-F]{3,4})")
 
+# LDAP resultCode 34.  Active Directory accepts DOMAIN\user as a bind name, so
+# this answer means the configured server is some other directory (e.g. an
+# AAF LDAP endpoint) and no password was ever compared.
+_INVALID_DN_SYNTAX = 34
+
+
+def _not_active_directory(conn: Any) -> bool:
+    result = getattr(conn, "result", None) or {}
+    return result.get("result") == _INVALID_DN_SYNTAX or result.get("description") == "invalidDNSyntax"
+
+
+def _not_active_directory_message(domain: str, server_url: str, bind_user: str) -> str:
+    return (
+        f"The server at {server_url} refused {bind_user} as a sign-in name, so it is not the {domain} "
+        f"Active Directory. Point CRED_CHECK_LDAP_{domain} at a {domain} domain controller and restart "
+        "the backend. The password was not checked."
+    )
+
+
 # Status values the UI knows how to colour.  "error" covers anything that
 # says nothing about the credential itself (DNS, TLS, timeout).
 VALID = "valid"
@@ -666,6 +685,16 @@ class CredentialCheckService:
                 account=account,
             )
 
+        if _not_active_directory(conn):
+            domain_name = bind_user.split("\\")[0]
+            logger.warning("credential_check_server_not_ad", domain=domain_name, server=server_url)
+            # "error" keeps this out of the lockout guard: no password was compared.
+            return CheckOutcome(
+                valid=False,
+                status="error",
+                message=_not_active_directory_message(domain_name, server_url, bind_user),
+            )
+
         # Not bound: read the sub-code before falling back to a generic answer.
         diagnostic = str(getattr(conn, "result", {}) or {})
         match = _SUBCODE_RE.search(diagnostic)
@@ -752,6 +781,10 @@ class CredentialCheckService:
             return DirectoryLookup(
                 "error", f"Could not reach the {domain} directory at {server_url} — {_transport_reason(exc)}."
             )
+
+        if not bound and _not_active_directory(conn):
+            logger.warning("credential_lookup_server_not_ad", domain=domain, server=server_url)
+            return DirectoryLookup("error", _not_active_directory_message(domain, server_url, reader))
 
         if not bound:
             # The reader's own credential is wrong or expired — an operator

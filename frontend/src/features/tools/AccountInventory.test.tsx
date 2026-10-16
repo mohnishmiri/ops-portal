@@ -70,8 +70,8 @@ const ACCOUNTS: CredentialAccount[] = [
   }),
 ];
 
-function renderInventory(onCheck = vi.fn(), canCheck = true) {
-  vi.mocked(apiClient.get).mockResolvedValue({ data: ACCOUNTS });
+function renderInventory(onCheck = vi.fn(), canCheck = true, accounts = ACCOUNTS) {
+  vi.mocked(apiClient.get).mockResolvedValue({ data: accounts });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
@@ -96,6 +96,66 @@ afterEach(() => {
 });
 
 describe("AccountInventory — grid", () => {
+  it("provides an accessible scroll region and keeps row actions pinned", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+
+    const region = screen.getByRole("region", { name: "Account inventory table" });
+    expect(region).toHaveAttribute("tabindex", "0");
+    expect(within(region).getByRole("table")).toHaveAccessibleName(/account inventory with directory status/i);
+    expect(screen.getByRole("columnheader", { name: "Actions" })).toHaveClass("sticky", "right-0");
+    expect(screen.getByRole("button", { name: "Check svc-soon" }).closest("td")).toHaveClass("sticky", "right-0");
+  });
+
+  it("clears search, directory, application and tile filters together", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+
+    fireEvent.change(screen.getByLabelText("Application"), { target: { value: "ATTCC" } });
+    fireEvent.change(screen.getByLabelText("Directory"), { target: { value: "ITSERVICES" } });
+    fireEvent.click(screen.getByRole("button", { name: /expiry date has passed/i }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "missing" } });
+    expect(screen.getByText("No accounts match the current search or filter.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(gridRows()).toHaveLength(3);
+    expect(screen.getByLabelText("Application")).toHaveValue("");
+    expect(screen.getByLabelText("Directory")).toHaveValue("");
+    expect(screen.getByRole("searchbox")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Show every account" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("paginates after sorting and resets pagination when searching or changing page size", async () => {
+    renderInventory(vi.fn(), true, Array.from({ length: 26 }, (_, index) =>
+      account({ id: index + 1, account_name: `svc-${String(index + 1).padStart(2, "0")}` }),
+    ));
+    await waitFor(() => expect(gridRows()).toHaveLength(10));
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByText("svc-11")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Rows per page"), { target: { value: "25" } });
+    expect(gridRows()).toHaveLength(25);
+    expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+    expect(within(gridRows()[0]).getByText("svc-26")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Account" })).toHaveAttribute("aria-sort", "descending");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "svc-26" } });
+    expect(gridRows()).toHaveLength(1);
+    expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  });
+
+  it("sorts additional information without sorting the actions column", async () => {
+    renderInventory();
+    await waitFor(() => expect(gridRows()).toHaveLength(3));
+    fireEvent.click(screen.getByRole("button", { name: "Additional information" }));
+    fireEvent.click(screen.getByRole("button", { name: "Additional information" }));
+    expect(within(gridRows()[0]).getByText("svc@att.com")).toBeInTheDocument();
+    expect(within(screen.getByRole("columnheader", { name: "Actions" })).queryByRole("button")).not.toBeInTheDocument();
+  });
+
   it("lists every account with owner, expiry, last check and reset link", async () => {
     renderInventory();
     await waitFor(() => expect(gridRows()).toHaveLength(3));

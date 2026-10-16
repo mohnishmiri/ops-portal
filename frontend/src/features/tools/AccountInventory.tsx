@@ -61,7 +61,7 @@ const PAGE = "credential_check_main";
 const EXPIRING_DAYS = 30;
 
 type View = "expired" | "expiring" | "failing";
-type SortKey = "application" | "account" | "status" | "owner" | "expiry" | "last_login" | "failed";
+type SortKey = "application" | "account" | "status" | "owner" | "expiry" | "last_login" | "failed" | "notes";
 
 /** Worst first when sorting, so the accounts needing attention rise together. */
 const STATUS_RANK: Record<string, number> = { disabled: 0, locked: 1, expired: 2, inactive: 3, active: 4 };
@@ -158,13 +158,15 @@ const accountAccessor = (a: CredentialAccount, key: SortKey): string | number =>
       return calendarDaysUntil(a.last_login_date) ?? -1e9;
     case "failed":
       return a.failed_logins ?? -1;
+    case "notes":
+      return `${a.notes ?? ""} ${a.reset_url ?? ""}`.toLowerCase();
     default:
       return `${a.application} ${a.account_name}`.toLowerCase();
   }
 };
 
 const Muted: React.FC<{ children: React.ReactNode; title?: string }> = ({ children, title }) => (
-  <span className="text-xs text-gray-400" title={title}>
+  <span className="text-xs leading-5 text-gray-500" title={title}>
     {children}
   </span>
 );
@@ -184,15 +186,18 @@ const ExpiryCell: React.FC<{ account: CredentialAccount }> = ({ account }) => (
     {account.never_expires ? (
       <span className="text-sm text-gray-700">Never</span>
     ) : account.expiry_date ? (
-      <span className="inline-flex flex-wrap items-center gap-2">
-        <span>{formatDate(account.expiry_date)}</span>
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="whitespace-nowrap tabular-nums">{formatDate(account.expiry_date)}</span>
         <DaysLeftBadge days={calendarDaysUntil(account.expiry_date)} />
       </span>
     ) : (
       <NotRecorded account={account} />
     )}
     {account.password_changed_date && (
-      <p className="mt-0.5 text-[11px] text-gray-500">Password changed {formatDate(account.password_changed_date)}</p>
+      <p className="mt-1 text-xs leading-5 text-gray-500">
+        Password changed
+        <span className="block whitespace-nowrap tabular-nums">{formatDate(account.password_changed_date)}</span>
+      </p>
     )}
   </>
 );
@@ -313,6 +318,7 @@ const AccountInventory: React.FC<{
   const [application, setApplication] = useState("");
   const [directory, setDirectory] = useState<AccountDirectory | "">("");
   const [view, setView] = useState<View | null>(null);
+  const [pageSize, setPageSize] = useState(10);
   const [editing, setEditing] = useState<CredentialAccount | "new" | null>(null);
   const [deleting, setDeleting] = useState<CredentialAccount | null>(null);
   const [importing, setImporting] = useState(false);
@@ -335,6 +341,7 @@ const AccountInventory: React.FC<{
     matches: accountMatches,
     accessor: accountAccessor,
     initialSort: { key: "application", direction: "asc" },
+    pageSize,
   });
 
   const counts = useMemo(
@@ -371,7 +378,11 @@ const AccountInventory: React.FC<{
   };
 
   const header = (label: string, key: SortKey, center = false) => (
-    <th className={center ? gridStyles.headerCellCenter : gridStyles.headerCell}>
+    <th
+      scope="col"
+      aria-sort={grid.sort.key === key ? (grid.sort.direction === "asc" ? "ascending" : "descending") : "none"}
+      className={`${center ? gridStyles.headerCellCenter : gridStyles.headerCell} whitespace-nowrap tracking-[0.06em]`}
+    >
       <SortableHeader
         label={label}
         active={grid.sort.key === key}
@@ -398,7 +409,7 @@ const AccountInventory: React.FC<{
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           title="Accounts"
           value={scoped.length}
@@ -441,7 +452,7 @@ const AccountInventory: React.FC<{
         />
       </div>
 
-      <div className={gridStyles.shell}>
+      <div className={`${gridStyles.shell} min-w-0`}>
         <GridHeader
           title="Accounts"
           subtitle={
@@ -452,46 +463,65 @@ const AccountInventory: React.FC<{
           search={grid.search}
           onSearch={grid.setSearch}
           placeholder="Search account, owner, app…"
-        >
-          <select
-            aria-label="Application"
-            className={compactSelectClass}
-            value={application}
-            onChange={(e) => setApplication(e.target.value)}
-          >
-            <option value="">All applications</option>
-            {applications.map((app) => (
-              <option key={app} value={app}>
-                {app}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="Directory"
-            className={compactSelectClass}
-            value={directory}
-            onChange={(e) => setDirectory(e.target.value as AccountDirectory | "")}
-          >
-            <option value="">All directories</option>
-            {ALL_DIRECTORIES.map((d) => (
-              <option key={d} value={d}>
-                {directoryLabel(d)}
-              </option>
-            ))}
-          </select>
-          {canEdit && (
-            <button type="button" className={secondaryButton} onClick={() => setImporting(true)}>
-              Import
-            </button>
-          )}
-          <ExportMenu filters={exportFilters} disabled={grid.total === 0} onError={setExportError} />
-          {canEdit && (
-            <button type="button" className={primaryButton} onClick={() => setEditing("new")}>
-              {AccessIcons.plus()}
-              Add account
-            </button>
-          )}
-        </GridHeader>
+        />
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-att-100 bg-white px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Application"
+              className={compactSelectClass}
+              value={application}
+              onChange={(e) => setApplication(e.target.value)}
+            >
+              <option value="">All applications</option>
+              {applications.map((app) => (
+                <option key={app} value={app}>
+                  {app}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Directory"
+              className={compactSelectClass}
+              value={directory}
+              onChange={(e) => setDirectory(e.target.value as AccountDirectory | "")}
+            >
+              <option value="">All directories</option>
+              {ALL_DIRECTORIES.map((d) => (
+                <option key={d} value={d}>
+                  {directoryLabel(d)}
+                </option>
+              ))}
+            </select>
+            {(application || directory || view || grid.search) && (
+              <button
+                type="button"
+                className="rounded-lg px-3 py-2 text-sm font-medium text-att-700 hover:bg-att-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-att-400"
+                onClick={() => {
+                  setApplication("");
+                  setDirectory("");
+                  setView(null);
+                  grid.setSearch("");
+                }}
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {canEdit && (
+              <button type="button" className={secondaryButton} onClick={() => setImporting(true)}>
+                Import
+              </button>
+            )}
+            <ExportMenu filters={exportFilters} disabled={grid.total === 0} onError={setExportError} />
+            {canEdit && (
+              <button type="button" className={primaryButton} onClick={() => setEditing("new")}>
+                {AccessIcons.plus()}
+                Add account
+              </button>
+            )}
+          </div>
+        </div>
 
         {refreshNote && (
           <div
@@ -517,8 +547,27 @@ const AccountInventory: React.FC<{
           </div>
         )}
 
-        <div className="overflow-x-auto">
-          <table className={gridStyles.table}>
+        <div
+          className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-att-400"
+          role="region"
+          aria-label="Account inventory table"
+          tabIndex={0}
+        >
+          <table className={`${gridStyles.table} min-w-[1560px] table-fixed`}>
+            <caption className="sr-only">
+              Account inventory with directory status, ownership, expiry, sign-in details and account actions.
+            </caption>
+            <colgroup>
+              <col className="w-[130px]" />
+              <col className="w-[190px]" />
+              <col className="w-[170px]" />
+              <col className="w-[210px]" />
+              <col className="w-[180px]" />
+              <col className="w-[135px]" />
+              <col className="w-[110px]" />
+              <col className="w-[200px]" />
+              <col className="w-[168px]" />
+            </colgroup>
             <thead className={gridStyles.head}>
               <tr>
                 {header("Application", "application")}
@@ -528,8 +577,10 @@ const AccountInventory: React.FC<{
                 {header("Expiry", "expiry")}
                 {header("Last login", "last_login")}
                 {header("Failed logins", "failed", true)}
-                <th className={gridStyles.headerCell}>Additional information</th>
-                <th className={gridStyles.headerCellCenter}>Actions</th>
+                {header("Additional information", "notes")}
+                <th scope="col" className={`${gridStyles.headerCellCenter} sticky right-0 z-10 border-l border-att-100 bg-att-50`}>
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -554,20 +605,20 @@ const AccountInventory: React.FC<{
                 <GridMessageRow colSpan={COLUMNS}>No accounts match the current search or filter.</GridMessageRow>
               ) : (
                 grid.pageRows.map((a) => (
-                  <tr key={a.id} className={`${gridStyles.row} align-top`}>
-                    <td className={gridStyles.strongCell}>
+                  <tr key={a.id} className={`${gridStyles.row} group align-top even:bg-slate-50/50 transition-colors`}>
+                    <td className={`${gridStyles.strongCell} break-words !py-4`}>
                       {a.application}
                       {a.app_code && <p className="text-[11px] font-normal text-gray-500">App code {a.app_code}</p>}
                     </td>
-                    <td className={gridStyles.cell}>
-                      <div className="break-all font-mono text-xs text-gray-800">{a.account_name}</div>
+                    <td className={`${gridStyles.cell} !py-4`}>
+                      <div className="break-words font-mono text-sm font-medium leading-5 text-gray-900 [overflow-wrap:anywhere]">{a.account_name}</div>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                        <span className="rounded bg-att-50 px-1.5 py-0.5 text-[11px] font-medium text-att-700">
+                        <span className="rounded-md border border-att-100 bg-att-50 px-2 py-0.5 text-xs font-medium text-att-700">
                           {directoryLabel(a.directory)}
                         </span>
                       </div>
                     </td>
-                    <td className={gridStyles.cell}>
+                    <td className={`${gridStyles.cell} !py-4`}>
                       <div className="flex flex-col items-start gap-1">
                         {a.account_status ? (
                           <AccountStatusChip
@@ -583,54 +634,56 @@ const AccountInventory: React.FC<{
                         )}
                         {a.last_check_status && (
                           <span
-                            className="inline-flex items-center gap-1"
+                            className="inline-flex flex-wrap items-center gap-1.5"
                             title={`Password checked ${formatDateTime(a.last_checked_at)}${a.last_checked_by ? ` by ${a.last_checked_by}` : ""}`}
                           >
                             <StatusChip status={a.last_check_status} />
-                            <span className="text-[11px] text-gray-500">{sinceText(a.last_checked_at)}</span>
+                            <span className="text-xs text-gray-500">{sinceText(a.last_checked_at)}</span>
                           </span>
                         )}
                         {a.directory_synced_at && (
-                          <span className="text-[11px] text-gray-500">
+                          <span className="text-xs leading-5 text-gray-500">
                             From directory {sinceText(a.directory_synced_at)}
                           </span>
                         )}
                       </div>
                     </td>
-                    <td className={gridStyles.cell}>
+                    <td className={`${gridStyles.cell} break-words !py-4`}>
                       {a.owner ?? <NotRecorded account={a} />}
                     </td>
-                    <td className={gridStyles.cell}>
+                    <td className={`${gridStyles.cell} !py-4`}>
                       <ExpiryCell account={a} />
                     </td>
-                    <td className={gridStyles.cell}>
+                    <td className={`${gridStyles.cell} !py-4`}>
                       {a.last_login_date ? (
                         <>
-                          <span>{formatDate(a.last_login_date)}</span>
-                          <p className="text-[11px] text-gray-500">{daysAgoText(a.last_login_date)}</p>
+                          <span className="whitespace-nowrap tabular-nums">{formatDate(a.last_login_date)}</span>
+                          <p className="mt-1 text-xs text-gray-500">{daysAgoText(a.last_login_date)}</p>
                         </>
                       ) : (
                         <NotRecorded account={a} />
                       )}
                     </td>
-                    <td className={gridStyles.centerCell}>
+                    <td className={`${gridStyles.centerCell} !py-4`}>
                       {a.failed_logins == null ? (
                         <NotRecorded account={a} />
                       ) : (
-                        <span className={a.failed_logins > 0 ? "font-semibold text-red-600" : "text-gray-600"}>
+                        <span className={`inline-flex min-w-8 items-center justify-center rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums ${
+                          a.failed_logins > 0 ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200" : "bg-slate-100 text-slate-600"
+                        }`}>
                           {a.failed_logins}
                         </span>
                       )}
                     </td>
-                    <td className={gridStyles.cell}>
+                    <td className={`${gridStyles.cell} break-words !py-4`}>
                       <AdditionalInfo account={a} />
                     </td>
-                    <td className={gridStyles.centerCell}>
-                      <div className="inline-flex items-center gap-1">
+                    <td className={`${gridStyles.centerCell} sticky right-0 border-l border-att-100 bg-white !px-2 !py-3 group-even:bg-slate-50 group-hover:bg-att-50`}>
+                      <div className="flex items-center justify-center gap-1">
                         {canEdit && a.account_type === "domain" && (
                           <ActionIconButton
                             title={`Read ${a.account_name} from the ${a.directory} directory`}
-                            tone="gray"
+                            tone="att"
                             disabled={refreshMutation.isPending}
                             onClick={() => refresh(a)}
                           >
@@ -679,14 +732,31 @@ const AccountInventory: React.FC<{
             </tbody>
           </table>
         </div>
-        <GridPagerBar
-          page={grid.page}
-          totalPages={grid.totalPages}
-          total={grid.total}
-          pageSize={grid.pageSize}
-          onPage={grid.setPage}
-          noun="accounts"
-        />
+        <div className="flex flex-wrap items-center justify-between gap-x-4 border-t border-att-100 bg-att-50/40 px-4 [&>div]:flex-wrap [&>div]:gap-3 [&>div]:border-0 [&>div]:bg-transparent [&>div]:px-0">
+          <label className="flex items-center gap-2 py-3 text-sm text-gray-600">
+            Rows per page
+            <select
+              className={compactSelectClass}
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                grid.setPage(0);
+              }}
+            >
+              {[10, 25, 50].map((size) => (
+                <option key={size} value={size}>{size}</option>
+              ))}
+            </select>
+          </label>
+          <GridPagerBar
+            page={grid.page}
+            totalPages={grid.totalPages}
+            total={grid.total}
+            pageSize={grid.pageSize}
+            onPage={grid.setPage}
+            noun="accounts"
+          />
+        </div>
       </div>
 
       {editing && (

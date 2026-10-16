@@ -63,6 +63,21 @@
 | PDF Generation     | react-pdf / jsPDF   | Client-side report rendering              |
 | Styling            | Tailwind CSS        | Enterprise-grade responsive UI            |
 
+#### Credential Check account inventory
+
+The `/tools/credential-check` route includes the account inventory in
+`frontend/src/features/tools/AccountInventory.tsx`. It reuses the shared ATT
+grid, metric cards, search, sorting and pagination controls. Search is in the
+grid header; application and directory filters sit below it alongside management
+actions. Clear filters resets those filters, the selected metric and search.
+Filtering and sorting precede pagination, with 10, 25 or 50 rows per page.
+
+The table scrolls horizontally on narrower screens instead of squeezing account
+names and dates; row actions stay pinned to the right. Its scroll region is
+keyboard-focusable. Existing permission gates, exports and mutation endpoints
+are unchanged; the presentation does not add backend mutations, audit tables or
+AI dependencies.
+
 ### 2.2 Backend — FastAPI Microservices
 | Service                  | Path Prefix           | Responsibility                           |
 |--------------------------|-----------------------|------------------------------------------|
