@@ -18,12 +18,14 @@ import {
   type AtlasCluster,
   type AtlasProject,
   type AtlasStatus,
+  type ConnectionTestResult,
   type DatabaseUser,
   type DatabaseUserInput,
   useAccessList,
   useAcknowledgeAlert,
   useAddAccessListEntry,
   useAlerts,
+  useConnectionTest,
   useCreateDatabaseUser,
   useDatabaseUsers,
   useDeleteAccessListEntry,
@@ -45,11 +47,65 @@ import {
 
 // ── Connection ───────────────────────────────────────────────────────────────
 
+const STEP_STYLE = {
+  ok: { icon: "✓", cls: "bg-green-100 text-green-700", label: "Passed" },
+  failed: { icon: "✕", cls: "bg-red-100 text-red-700", label: "Failed" },
+  skipped: { icon: "–", cls: "bg-slate-100 text-slate-500", label: "Skipped" },
+} as const;
+
+/** The connection test's steps, in order, with where it broke. */
+export const ConnectionTestResults: React.FC<{ result: ConnectionTestResult }> = ({ result }) => (
+  <div className="mt-3 space-y-2">
+    <ol className="divide-y divide-att-100 rounded-lg border border-att-100 bg-white" aria-label="Connection test steps">
+      {result.steps.map((step) => {
+        const style = STEP_STYLE[step.status];
+        return (
+          <li key={step.name} className="flex items-start gap-3 px-3 py-2 text-sm">
+            <span
+              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold ${style.cls}`}
+              aria-label={style.label}
+              title={style.label}
+            >
+              {style.icon}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="font-medium text-slate-800">{step.label}</span>
+              {step.ms != null && <span className="ml-2 text-xs text-slate-400">{step.ms} ms</span>}
+              <span className={`block break-words text-xs ${step.status === "failed" ? "text-red-700" : "text-slate-500"}`}>{step.detail}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+    {!result.ok && result.steps.some((s) => (s.name === "tcp" || s.name === "https") && s.status === "failed") && result.proxy_source === "none" && (
+      <InfoNote tone="warning">
+        The backend calls Atlas directly; your browser most likely reaches the internet through a proxy (PAC file) that
+        Python does not read. Find the proxy for <span className="font-mono">cloud.mongodb.com</span> (Windows:{" "}
+        <span className="font-mono">netsh winhttp show proxy</span>, or Chrome&apos;s{" "}
+        <span className="font-mono">chrome://net-internals/#proxy</span>), set{" "}
+        <span className="font-mono">MONGODB_ATLAS_PROXY=http://host:port</span> in the backend&apos;s environment, restart it and
+        test again.
+      </InfoNote>
+    )}
+  </div>
+);
+
 export const ConnectionPanel: React.FC<{ status: AtlasStatus | undefined; isLoading: boolean; formatDate: (v: string | null | undefined) => string }> = ({
   status,
   isLoading,
   formatDate,
 }) => {
+  const test = useConnectionTest();
+  const unreachable = Boolean(status?.configured && !status.reachable);
+  const autoRan = React.useRef(false);
+  // When Atlas can't be reached, show where it breaks without making anyone ask.
+  useEffect(() => {
+    if (unreachable && !autoRan.current) {
+      autoRan.current = true;
+      test.mutate();
+    }
+  }, [unreachable, test]);
+
   if (isLoading || !status) {
     return (
       <div className="flex items-center gap-2 text-sm text-slate-500">
@@ -62,15 +118,29 @@ export const ConnectionPanel: React.FC<{ status: AtlasStatus | undefined; isLoad
     <section className={`rounded-xl border p-4 ${ok ? "border-att-100 bg-white" : "border-amber-200 bg-amber-50/60"}`} aria-label="Atlas connection">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-slate-800">Atlas API connection</h3>
-        <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${ok ? "bg-green-50 text-green-700 ring-1 ring-green-200" : "bg-amber-100 text-amber-800"}`}>
-          {!status.configured ? "Not configured" : ok ? "Connected" : "Not reachable"}
-        </span>
+        <div className="flex items-center gap-2">
+          {status.configured && (
+            <button type="button" className={buttonTone.neutral} onClick={() => test.mutate()} disabled={test.isPending}>
+              {test.isPending ? <Spinner /> : <AtlasIcons.refresh />}
+              {test.isPending ? "Testing…" : "Run connection test"}
+            </button>
+          )}
+          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${ok ? "bg-green-50 text-green-700 ring-1 ring-green-200" : "bg-amber-100 text-amber-800"}`}>
+            {!status.configured ? "Not configured" : ok ? "Connected" : "Not reachable"}
+          </span>
+        </div>
       </div>
-      {status.error && <p className="mt-2 text-sm text-amber-900">{status.error}</p>}
-      <dl className="mt-3 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+      {status.error && <p className="mt-2 break-words text-sm text-amber-900">{status.error}</p>}
+      <dl className="mt-3 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
         <div>
           <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">API key</dt>
           <dd className="font-mono text-slate-800">{status.public_key ?? "—"}</dd>
+        </div>
+        <div>
+          <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Route to Atlas</dt>
+          <dd className="break-all text-slate-800" title={status.proxy_source === "environment" ? "From HTTPS_PROXY / system proxy settings" : undefined}>
+            {status.proxy ? <span className="font-mono">{status.proxy}</span> : "Direct (no proxy)"}
+          </dd>
         </div>
         <div>
           <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Portal's outbound IP</dt>
@@ -109,6 +179,8 @@ export const ConnectionPanel: React.FC<{ status: AtlasStatus | undefined; isLoad
           secrets <span className="font-mono">opsportal-backend-mongodb-atlas-*</span>) and restart the backend.
         </p>
       )}
+      {test.isError && <div className="mt-3"><InfoNote tone="error">{formatAxiosError(test.error, "The connection test could not run")}</InfoNote></div>}
+      {test.data && <ConnectionTestResults result={test.data} />}
     </section>
   );
 };

@@ -172,6 +172,18 @@ async def get_status(
     return await service.status()
 
 
+@router.get(
+    "/connection-test",
+    summary="Step-by-step check of the path to Atlas: DNS, TCP, HTTPS, API key, projects",
+)
+async def connection_test(
+    user: UserContext = Depends(get_current_user),
+    service: AtlasService = Depends(_service),
+) -> dict:
+    # Changes nothing; it reports where the portal's network path to Atlas breaks.
+    return await service.connection_test()
+
+
 @router.get("/projects", summary="Atlas projects the portal's API key can see")
 async def list_projects(
     refresh: bool = Query(False),

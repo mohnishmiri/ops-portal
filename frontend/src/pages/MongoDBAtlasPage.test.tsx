@@ -41,6 +41,8 @@ const status = (overrides: Partial<AtlasStatus> = {}): AtlasStatus => ({
   api_key_roles: [],
   project_count: 1,
   checked_at: "2026-10-17T10:00:00Z",
+  proxy: null,
+  proxy_source: "none",
   ...overrides,
 });
 
@@ -116,6 +118,28 @@ const SCHEDULE: AtlasSchedule = {
   updated_at: "2026-10-01T00:00:00Z",
 };
 
+const CONNECTION_TEST = {
+  ok: false,
+  summary: "Could not reach cloud.mongodb.com (SSLEOFError: EOF occurred in violation of protocol). Set MONGODB_ATLAS_PROXY.",
+  proxy: null,
+  proxy_source: "none",
+  checked_at: "2026-10-17T10:00:00Z",
+  steps: [
+    { name: "configuration", label: "Configuration", status: "ok", detail: "API key vfgi•••• · direct (no proxy)", ms: null },
+    { name: "dns", label: "DNS lookup of cloud.mongodb.com", status: "ok", detail: "203.0.113.1", ms: 4 },
+    { name: "tcp", label: "TCP connect to cloud.mongodb.com:443", status: "ok", detail: "Connected", ms: 30 },
+    {
+      name: "https",
+      label: "HTTPS to cloud.mongodb.com",
+      status: "failed",
+      detail: "Could not reach cloud.mongodb.com (SSLEOFError: EOF occurred in violation of protocol). Set MONGODB_ATLAS_PROXY.",
+      ms: 41,
+    },
+    { name: "api_key", label: "API key", status: "skipped", detail: "Skipped — Atlas not reached", ms: null },
+    { name: "projects", label: "Projects", status: "skipped", detail: "Skipped", ms: null },
+  ],
+};
+
 function mockApi(statusBody: AtlasStatus = status()) {
   vi.mocked(apiClient.get).mockImplementation(async (url: string) => {
     if (url.endsWith("/status")) return { data: statusBody };
@@ -124,6 +148,7 @@ function mockApi(statusBody: AtlasStatus = status()) {
     if (url.endsWith("/utilization")) return { data: { clusters: { [`${PID}/dev-cluster`]: { cpu: 41.5, memory: 63 } }, fetched_at: "2026-10-17T10:00:00Z" } };
     if (url.endsWith("/schedules")) return { data: { schedules: [SCHEDULE], count: 1 } };
     if (url.endsWith("/operations")) return { data: { operations: [], count: 0, in_progress: 0 } };
+    if (url.endsWith("/connection-test")) return { data: CONNECTION_TEST };
     if (url.includes("/operations/")) return { data: { id: 11, action: "pause", trigger: "manual", status: "in_progress", targets: [], requested_by: "lead@att.com", requested_at: "2026-10-17T10:00:00Z" } };
     return { data: {} };
   });
@@ -212,6 +237,23 @@ describe("MongoDBAtlasPage", () => {
     expect(await screen.findByText("Atlas not configured")).toBeInTheDocument();
     expect(screen.getAllByText(/MONGODB_ATLAS_PUBLIC_KEY/).length).toBeGreaterThan(0);
     expect(vi.mocked(apiClient.get).mock.calls.some(([url]) => String(url).endsWith("/clusters"))).toBe(false);
+  });
+});
+
+describe("MongoDBAtlasPage — Atlas not reachable", () => {
+  it("runs the connection test by itself, shows the broken step, and does not wait on cluster calls", async () => {
+    asUser(true);
+    mockApi(status({ reachable: false, error: "Could not reach cloud.mongodb.com (SSLEOFError)", portal_ip: null, project_count: 0 }));
+    renderPage();
+    expect(await screen.findByText("HTTPS to cloud.mongodb.com")).toBeInTheDocument();
+    const steps = screen.getByRole("list", { name: "Connection test steps" });
+    expect(within(steps).getAllByLabelText("Failed")).toHaveLength(1);
+    expect(within(steps).getAllByLabelText("Skipped")).toHaveLength(2);
+    expect(screen.getByText(/netsh winhttp show proxy/)).toBeInTheDocument();
+    expect(screen.getByText("Direct (no proxy)")).toBeInTheDocument();
+    const called = vi.mocked(apiClient.get).mock.calls.map(([url]) => String(url));
+    expect(called.some((url) => url.endsWith("/clusters") || url.endsWith("/utilization"))).toBe(false);
+    expect(called.filter((url) => url.endsWith("/connection-test"))).toHaveLength(1);
   });
 });
 

@@ -396,6 +396,14 @@ class Settings(BaseSettings):
         ),
     )
     MONGODB_ATLAS_TIMEOUT_SECONDS: int = Field(default=30, description="Timeout for one Atlas API call")
+    MONGODB_ATLAS_PROXY: str = Field(
+        default="",
+        description=(
+            "Optional HTTP(S) proxy for Atlas calls, e.g. http://proxy.example.com:8080. Corporate networks "
+            "often block direct HTTPS to cloud.mongodb.com: the browser gets out through a PAC file, which "
+            "Python does not read. Blank = HTTPS_PROXY / system proxy settings, else direct."
+        ),
+    )
     MONGODB_ATLAS_CA_BUNDLE: str = Field(
         default="",
         description="Optional PEM CA file trusted in addition to the default bundle (TLS-inspecting proxy)",

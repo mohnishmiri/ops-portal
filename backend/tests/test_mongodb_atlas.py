@@ -96,6 +96,7 @@ class FakeAtlas:
         self.requests: list[httpx.Request] = []
         self.access_list: list[dict] = [{"cidrBlock": "10.0.0.0/24", "comment": "vnet"}]
         self.fail_next: tuple[int, dict] | None = None
+        self.transport_error: Exception | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -103,6 +104,17 @@ class FakeAtlas:
             status, body = self.fail_next
             self.fail_next = None
             return httpx.Response(status, json=body)
+        if self.transport_error is not None:
+            raise self.transport_error
+        if "authorization" not in request.headers:
+            # Atlas answers every unauthenticated call with a Digest challenge.
+            return httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": 'Digest realm="MMS Public API", domain="", nonce="n0nce", algorithm=MD5, qop="auth", stale=false'
+                },
+                json={"error": 401, "errorCode": "UNAUTHORIZED", "detail": "Current user is not authorized"},
+            )
         raw_path = request.url.raw_path.decode().split("?", 1)[0]
         path = raw_path.removeprefix("/api/atlas/v2")
         parts = [unquote(p) for p in path.strip("/").split("/")] if path.strip("/") else []
@@ -760,3 +772,135 @@ async def test_user_without_any_subscription_grant_can_still_use_atlas(app, atla
         azure = await ac.get("/api/v1/aks/clusters/cached")
     assert atlas.status_code == 200, atlas.text
     assert azure.status_code == 403
+
+
+# ── reaching Atlas through a corporate network ─────────────────────────
+
+
+async def test_tls_handshake_cut_by_the_network_is_explained_not_blank():
+    """A firewall closing the TLS handshake surfaces in httpx as ConnectError('').
+
+    The message must name the real cause and the fix, and the client must not
+    retry a connection that cannot be made.
+    """
+    import asyncio
+
+    connections = 0
+
+    async def _drop(reader, writer):
+        nonlocal connections
+        connections += 1
+        await reader.read(10)
+        writer.close()
+
+    server = await asyncio.start_server(_drop, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        client = AtlasClient(base_url=f"https://127.0.0.1:{port}", public_key="k", private_key="p", timeout=5)
+        with pytest.raises(AtlasError) as info:
+            await client.request("GET", "/groups")
+    finally:
+        server.close()
+    error = info.value
+    assert error.error_code == "UNREACHABLE" and error.status_code == 502
+    assert "SSLEOFError" in error.user_message
+    assert "TLS handshake" in error.user_message and "MONGODB_ATLAS_PROXY" in error.user_message
+    assert connections == 1
+
+
+def test_proxy_credentials_are_never_shown():
+    from app.services.mongodb_atlas_service import mask_proxy
+
+    assert mask_proxy("http://svc:s3cret@proxy.corp.example:8080") == "http://***@proxy.corp.example:8080"
+    assert mask_proxy("proxy.corp.example:3128") == "http://proxy.corp.example:3128"
+    assert mask_proxy("") is None
+
+
+async def test_configured_proxy_is_used_and_its_refusal_explained(monkeypatch):
+    """Requests go to MONGODB_ATLAS_PROXY as CONNECT cloud.mongodb.com:443."""
+    import asyncio
+
+    seen: list[bytes] = []
+
+    async def _proxy(reader, writer):
+        seen.append(await reader.readline())
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(_proxy, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(settings, "MONGODB_ATLAS_PUBLIC_KEY", "abcd")
+    monkeypatch.setattr(settings, "MONGODB_ATLAS_PRIVATE_KEY", "secret-key")
+    monkeypatch.setattr(settings, "MONGODB_ATLAS_PROXY", f"http://svc:pw@127.0.0.1:{port}")
+    set_atlas_service(None)
+    try:
+        with pytest.raises(AtlasError) as info:
+            await scheduler_service().list_projects(fresh=True)
+    finally:
+        server.close()
+        set_atlas_service(None)
+    assert seen and seen[0].startswith(b"CONNECT cloud.mongodb.com:443")
+    message = info.value.user_message
+    assert "through proxy http://***@127.0.0.1" in message and "pw" not in message
+    assert "proxy refused" in message
+
+
+async def test_status_stops_after_a_network_failure(fake_atlas):
+    fake_atlas.transport_error = httpx.ConnectError("")
+    status = await scheduler_service().status()
+    assert status["reachable"] is False and status["error_code"] == "UNREACHABLE"
+    assert "MONGODB_ATLAS_PROXY" in status["error"]
+    # One attempt at the key check, and no second call for the project list.
+    assert len(fake_atlas.requests) == 1
+
+
+@pytest.fixture
+async def no_real_network(monkeypatch):
+    import asyncio
+
+    class _Writer:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    async def _open(host, port):
+        return None, _Writer()
+
+    async def _resolve(host, port, **kwargs):
+        return [(2, 1, 6, "", ("192.0.2.10", port))]
+
+    monkeypatch.setattr("app.services.mongodb_atlas_service.asyncio.open_connection", _open)
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _resolve)
+
+
+async def test_connection_test_walks_every_step(fake_atlas, no_real_network, monkeypatch):
+    monkeypatch.setattr(settings, "MONGODB_ATLAS_PROJECT_IDS", f"{PID},{'f' * 24}")
+    result = await scheduler_service().connection_test()
+    steps = {step["name"]: step for step in result["steps"]}
+    assert [step["name"] for step in result["steps"]] == ["configuration", "dns", "tcp", "https", "api_key", "projects"]
+    assert steps["https"]["status"] == "ok" and "Digest challenge" in steps["https"]["detail"]
+    assert steps["api_key"]["status"] == "ok" and "203.0.113.9" in steps["api_key"]["detail"]
+    # The allow-listed project the key cannot see is called out.
+    assert steps["projects"]["status"] == "failed" and "f" * 24 in steps["projects"]["detail"]
+    assert result["ok"] is False and "Not visible to the key" in result["summary"]
+
+
+async def test_connection_test_points_at_the_broken_step(fake_atlas, no_real_network):
+    fake_atlas.transport_error = httpx.ConnectError("")
+    result = await scheduler_service().connection_test()
+    steps = {step["name"]: step for step in result["steps"]}
+    assert steps["tcp"]["status"] == "ok"
+    assert steps["https"]["status"] == "failed"
+    assert steps["api_key"]["status"] == "skipped" and steps["projects"]["status"] == "skipped"
+    assert result["ok"] is False and result["summary"] == steps["https"]["detail"]
+
+
+async def test_connection_test_route_is_open_to_readers(fake_atlas, no_real_network, client_as):
+    client = await client_as(UserRole.READ)
+    response = await client.get("/api/v1/mongodb-atlas/connection-test")
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True

@@ -125,6 +125,9 @@ backend:
     MONGODB_ATLAS_ORG_ID: ""
     MONGODB_ATLAS_PROJECT_IDS: ""
     MONGODB_ATLAS_TIMEOUT_SECONDS: "30"
+    # Egress proxy for cloud.mongodb.com, if the cluster has no direct internet
+    # access. Credentials in the URL? Move it to a Key Vault secret instead.
+    MONGODB_ATLAS_PROXY: ""
     MONGODB_ATLAS_OPERATION_TIMEOUT_MINUTES: "60"
     MONGODB_ATLAS_CA_BUNDLE: ""
 

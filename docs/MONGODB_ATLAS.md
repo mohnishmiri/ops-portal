@@ -42,6 +42,8 @@ Atlas API key that the portal holds**. Users never get an Atlas credential.
      project, even if the key can see it.
    - `MONGODB_ATLAS_CA_BUNDLE` points at a CA file, for when a TLS-inspecting
      proxy sits in front of `cloud.mongodb.com`.
+   - `MONGODB_ATLAS_PROXY` sends Atlas calls through an HTTP(S) proxy. Use it
+     when the network blocks direct HTTPS to `cloud.mongodb.com` — see §6.
 
 4. **Deploy.** The two tables (`atlas_schedules`, `atlas_operations`) are
    created on startup. `backend/migrations/add_mongodb_atlas.sql` is provided
@@ -168,3 +170,24 @@ look.
 
 **Not yet exercised against a live Atlas organization:** every call above,
 especially the tier-change PATCH. The tests run against a simulated Atlas API.
+
+---
+
+## 6. "Atlas not reachable" — troubleshooting
+
+Open the **Administration** tab, or look at the page header when Atlas cannot
+be reached. The **Run connection test** button checks the path one step at a
+time: configuration → DNS → TCP → HTTPS → API key → projects. It runs by
+itself when Atlas is unreachable.
+
+| Failing step / message | Cause | Fix |
+|---|---|---|
+| HTTPS: *connection was closed during the TLS handshake* (`SSLEOFError`) | The network blocks direct HTTPS to Atlas. The browser gets out through a proxy or PAC file, which Python does not read. | Set `MONGODB_ATLAS_PROXY=http://host:port` to the corporate proxy and restart the backend. To find the proxy on Windows: `netsh winhttp show proxy`, or open `chrome://net-internals/#proxy`. |
+| TCP: *no answer within 10s* | A firewall drops the traffic | The same proxy fix, or have egress to `cloud.mongodb.com:443` opened |
+| DNS failed, no proxy | Outside names don't resolve on this network | The same proxy fix |
+| HTTPS: *certificate is not trusted* | A TLS-inspecting proxy re-signs the connection | Set `MONGODB_ATLAS_CA_BUNDLE` to the corporate root CA (PEM file) |
+| HTTPS: *proxy refused* | Wrong proxy address or credentials, or the proxy blocks Atlas | Check `MONGODB_ATLAS_PROXY` |
+| API key: HTTP 401 | The public/private key pair is wrong, or the key was deleted | Check the key in Atlas |
+| API key: HTTP 403, *access list* | The portal's outbound IP is not on the key's API access list | Add the IP from the error message to the key's access list |
+| Projects: *not visible to the key* | `MONGODB_ATLAS_PROJECT_IDS` names a project the key has no role on | Give the key a role on it, or fix the ID |
+

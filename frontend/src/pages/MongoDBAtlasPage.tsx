@@ -55,7 +55,9 @@ const MongoDBAtlasPage: React.FC = () => {
   const qc = useQueryClient();
 
   const status = useAtlasStatus();
-  const ready = Boolean(status.data?.configured);
+  // Only ask Atlas for data once the status check reached it: otherwise every
+  // tab waits out the same network failure the connection panel already shows.
+  const ready = Boolean(status.data?.configured && status.data.reachable);
   const clusters = useAtlasClusters(ready);
   const projects = useAtlasProjects(ready);
   const utilization = useFleetUtilization(ready && Boolean(clusters.data?.clusters.some((c) => !c.paused)));
@@ -200,7 +202,13 @@ const MongoDBAtlasPage: React.FC = () => {
               formatDate={formatDate}
             />
           ) : (
-            !status.isLoading && <p className="text-sm text-slate-500">Configure the Atlas API key to list clusters.</p>
+            !status.isLoading && (
+              <p className="text-sm text-slate-500">
+                {status.data?.configured
+                  ? "Clusters load once Atlas is reachable — the connection test above shows where the connection breaks."
+                  : "Configure the Atlas API key to list clusters."}
+              </p>
+            )
           ))}
         {tab === "schedules" && <ScheduleManager clusters={all} formatDate={formatDate} />}
         {tab === "activity" && <OperationsGrid formatDate={formatDate} />}

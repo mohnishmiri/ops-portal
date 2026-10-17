@@ -38,13 +38,15 @@ import contextlib
 import random
 import re
 import secrets
+import socket
 import ssl
 import string
 import time
+import urllib.request
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import certifi
 import httpx
@@ -61,6 +63,13 @@ V_CLUSTER_PATCH = "2024-10-23"
 V_RESTART_PRIMARIES = "2023-02-01"
 V_ALERT_ACK = "2024-05-30"
 PAGE_SIZE = 500
+# Fail fast when the network blocks Atlas; a slow answer is a separate, longer limit.
+CONNECT_TIMEOUT = 10.0
+
+
+def http_timeout(total: float) -> httpx.Timeout:
+    return httpx.Timeout(total, connect=min(CONNECT_TIMEOUT, total))
+
 
 # Chart period → sample size. Atlas keeps 1- and 5-minute samples for 48 hours
 # and hourly samples for 63 days.
@@ -153,6 +162,84 @@ def _seg(value: str) -> str:
     return quote(value, safe="")
 
 
+def mask_proxy(proxy: str | None) -> str | None:
+    """A proxy URL without its credentials, for logs and the UI."""
+    if not proxy:
+        return None
+    parts = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    auth = "***@" if parts.username else ""
+    return f"{parts.scheme}://{auth}{host}{port}"
+
+
+def environment_proxy(url: str) -> str | None:
+    """The proxy httpx would take from HTTPS_PROXY / system settings for ``url``, if any."""
+    host = urlsplit(url).hostname or ""
+    proxies = urllib.request.getproxies()
+    if not proxies or urllib.request.proxy_bypass(host):
+        return None
+    return proxies.get("https") or proxies.get("all")
+
+
+def _error_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def describe_transport_error(exc: BaseException, host: str, proxy: str | None) -> str:
+    """One readable sentence for a failed connection, naming the real cause and the likely fix.
+
+    httpx often reports a connection cut during the TLS handshake as
+    ``ConnectError('')`` — an empty message — with the actual
+    ``SSLEOFError`` three exceptions down the chain. That is what a corporate
+    firewall or proxy blocking direct HTTPS looks like, so it gets its own hint.
+    """
+    chain = _error_chain(exc)
+    root = next((e for e in reversed(chain) if str(e).strip()), chain[-1])
+    text = " ".join(f"{type(e).__name__} {e}" for e in chain).lower()
+    via = f" through proxy {mask_proxy(proxy)}" if proxy else ""
+    if isinstance(exc, httpx.ProxyError) or "proxyerror" in text:
+        hint = "The proxy refused the request — check MONGODB_ATLAS_PROXY (address, port, credentials)."
+    elif "certificate_verify_failed" in text or "sslcertverificationerror" in text:
+        hint = (
+            "The TLS certificate is not trusted: a TLS-inspecting proxy is re-signing the connection. "
+            "Point MONGODB_ATLAS_CA_BUNDLE at the corporate root CA (PEM file)."
+        )
+    elif any(k in text for k in ("unexpected_eof", "endofstream", "ssleoferror", "connection reset", "10054")):
+        hint = (
+            f"The connection was closed during the TLS handshake — the network blocks direct HTTPS to {host}. "
+            "Set MONGODB_ATLAS_PROXY to the corporate proxy (or have outbound access to port 443 opened)."
+            if not proxy
+            else f"The proxy closed the connection — it may not allow {host}."
+        )
+    elif any(
+        k in text for k in ("gaierror", "getaddrinfo", "name or service not known", "nodename nor servname", "11001")
+    ):
+        hint = (
+            f"{host} does not resolve from the backend — outside access probably goes through a proxy "
+            "(MONGODB_ATLAS_PROXY)."
+        )
+    elif any(k in text for k in ("refused", "all connection attempts failed", "10061", "unreachable")):
+        hint = "Nothing accepted the connection — outbound HTTPS is blocked here or a proxy is required (MONGODB_ATLAS_PROXY)."
+    elif isinstance(exc, httpx.ConnectError):
+        hint = (
+            f"The connection to {host} failed without a reason — usually a firewall or proxy blocking HTTPS. "
+            "Set MONGODB_ATLAS_PROXY to the corporate proxy, or run the connection test."
+            if not proxy
+            else "The connection through the proxy failed — check MONGODB_ATLAS_PROXY."
+        )
+    else:
+        hint = ""
+    message = str(root).strip()
+    detail = f"{type(root).__name__}: {message}" if message else type(root).__name__
+    return f"Could not reach {host}{via} ({detail[:240]}). {hint}".strip()
+
+
 class AtlasClient:
     """Thin async HTTP client: digest auth, versioned Accept, 429 back-off, paging."""
 
@@ -163,9 +250,12 @@ class AtlasClient:
         public_key: str,
         private_key: str,
         timeout: float = 30,
+        proxy: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.host = urlsplit(self.base_url).hostname or self.base_url
+        self.proxy = proxy or None
         self._auth = httpx.DigestAuth(public_key, private_key)
         self._timeout = timeout
         self._transport = transport
@@ -177,11 +267,13 @@ class AtlasClient:
         # asyncio objects belong to the loop that made them; tests run a new loop each time.
         loop = asyncio.get_running_loop()
         if self._client is None or self._loop is not loop or self._client.is_closed:
-            kwargs: dict[str, Any] = {"auth": self._auth, "timeout": self._timeout}
+            kwargs: dict[str, Any] = {"auth": self._auth, "timeout": http_timeout(self._timeout)}
             if self._transport is not None:
                 kwargs["transport"] = self._transport
             else:
                 kwargs["verify"] = _tls_verify()
+                if self.proxy:
+                    kwargs["proxy"] = self.proxy
             self._client = httpx.AsyncClient(**kwargs)
             self._loop = loop
         return self._client
@@ -203,13 +295,24 @@ class AtlasClient:
         for attempt in range(3):
             try:
                 response = await self._http().request(method, url, params=params, json=json, headers=headers)
+            except httpx.ConnectTimeout as exc:
+                raise AtlasError(
+                    504,
+                    f"No connection to {self.host} within {CONNECT_TIMEOUT:.0f}s — a firewall is dropping the traffic "
+                    "or a proxy is required (MONGODB_ATLAS_PROXY).",
+                    "UNREACHABLE",
+                ) from exc
             except httpx.TimeoutException as exc:
                 raise AtlasError(504, f"Atlas did not answer within {self._timeout:.0f}s", "TIMEOUT") from exc
             except httpx.HTTPError as exc:
-                if method == "GET" and attempt == 0:
+                # One quick retry for a read that hit a dropped keep-alive; a
+                # connection that cannot be made fails the same way twice.
+                if method == "GET" and attempt == 0 and not isinstance(exc, httpx.ConnectError):
                     await asyncio.sleep(0.5)
                     continue
-                raise AtlasError(502, f"Could not reach Atlas: {str(exc)[:200]}", "UNREACHABLE") from exc
+                message = describe_transport_error(exc, self.host, self.proxy)
+                logger.warning("atlas_unreachable", host=self.host, proxy=mask_proxy(self.proxy), error=message)
+                raise AtlasError(502, message, "UNREACHABLE") from exc
             if response.status_code == 429 and attempt < 2:
                 await asyncio.sleep(self._retry_after(response, attempt))
                 continue
@@ -520,6 +623,7 @@ class AtlasService:
                 public_key=settings.MONGODB_ATLAS_PUBLIC_KEY.strip(),
                 private_key=settings.MONGODB_ATLAS_PRIVATE_KEY.strip(),
                 timeout=settings.MONGODB_ATLAS_TIMEOUT_SECONDS,
+                proxy=settings.MONGODB_ATLAS_PROXY.strip() or None,
             )
         return self._client
 
@@ -556,6 +660,7 @@ class AtlasService:
             "api_key_roles": [],
             "project_count": 0,
             "checked_at": _iso_z(datetime.now(UTC)),
+            **self._proxy_info(),
         }
         if not settings.mongodb_atlas_configured:
             base["error"] = AtlasNotConfiguredError().detail
@@ -566,6 +671,9 @@ class AtlasService:
             me = None
             base["error"] = exc.user_message
             base["error_code"] = exc.error_code
+            if exc.error_code in ("UNREACHABLE", "TIMEOUT"):
+                # The project list would fail the same way and double the wait.
+                return base
         if me:
             base["portal_ip"] = me.get("ipAddress")
             key = me.get("apiKey") or {}
@@ -586,6 +694,191 @@ class AtlasService:
             base["error"] = exc.user_message
             base["error_code"] = exc.error_code
         return base
+
+    @staticmethod
+    def _proxy_info() -> dict:
+        configured = settings.MONGODB_ATLAS_PROXY.strip()
+        if configured:
+            return {"proxy": mask_proxy(configured), "proxy_source": "MONGODB_ATLAS_PROXY"}
+        from_env = environment_proxy(settings.MONGODB_ATLAS_BASE_URL)
+        if from_env:
+            return {"proxy": mask_proxy(from_env), "proxy_source": "environment"}
+        return {"proxy": None, "proxy_source": "none"}
+
+    async def connection_test(self) -> dict:
+        """Walk the path to Atlas one step at a time and say where it breaks.
+
+        configuration → DNS → TCP (to the proxy when one is used) → HTTPS
+        without credentials (Atlas must answer 401 with a Digest challenge) →
+        the API key → the projects it can see. A step that cannot run because
+        an earlier one failed is reported as skipped.
+        """
+        steps: list[dict] = []
+
+        def _step(name: str, label: str, ok: bool | None, detail: str, started: float | None = None) -> bool | None:
+            steps.append(
+                {
+                    "name": name,
+                    "label": label,
+                    "status": "skipped" if ok is None else ("ok" if ok else "failed"),
+                    "detail": detail,
+                    "ms": round((time.monotonic() - started) * 1000) if started is not None else None,
+                }
+            )
+            return ok
+
+        base_url = settings.MONGODB_ATLAS_BASE_URL.rstrip("/")
+        host = urlsplit(base_url).hostname or base_url
+        proxy_info = self._proxy_info()
+        configured_proxy = settings.MONGODB_ATLAS_PROXY.strip() or None
+        route_proxy = configured_proxy or environment_proxy(base_url)
+        via = (
+            f"through proxy {proxy_info['proxy']} ({proxy_info['proxy_source']})"
+            if route_proxy
+            else "direct (no proxy)"
+        )
+
+        if not settings.mongodb_atlas_configured:
+            _step("configuration", "Configuration", False, AtlasNotConfiguredError().detail)
+        else:
+            _step(
+                "configuration",
+                "Configuration",
+                True,
+                f"API key {settings.MONGODB_ATLAS_PUBLIC_KEY.strip()[:4]}•••• · {base_url} · {via}"
+                + (" · custom CA bundle" if settings.MONGODB_ATLAS_CA_BUNDLE.strip() else ""),
+            )
+
+        loop = asyncio.get_running_loop()
+        started = time.monotonic()
+        try:
+            infos = await asyncio.wait_for(loop.getaddrinfo(host, 443, type=socket.SOCK_STREAM), CONNECT_TIMEOUT)
+            addresses = sorted({info[4][0] for info in infos})
+            _step("dns", f"DNS lookup of {host}", True, ", ".join(addresses[:4]), started)
+        except Exception as exc:
+            # Behind a proxy the proxy resolves the name, so this is not fatal there.
+            _step(
+                "dns",
+                f"DNS lookup of {host}",
+                False,
+                f"{type(exc).__name__}: {exc}"
+                + (" — expected when only the proxy can resolve outside names" if route_proxy else ""),
+                started,
+            )
+
+        target = (
+            urlsplit(route_proxy if "://" in (route_proxy or "") else f"http://{route_proxy}") if route_proxy else None
+        )
+        tcp_host = (target.hostname if target else host) or host
+        tcp_port = (target.port or (443 if target and target.scheme == "https" else 80)) if target else 443
+        started = time.monotonic()
+        try:
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(tcp_host, tcp_port), CONNECT_TIMEOUT)
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            tcp_ok = _step("tcp", f"TCP connect to {tcp_host}:{tcp_port}", True, "Connected", started)
+        except TimeoutError:
+            tcp_ok = _step(
+                "tcp",
+                f"TCP connect to {tcp_host}:{tcp_port}",
+                False,
+                f"No answer within {CONNECT_TIMEOUT:.0f}s — the traffic is being dropped"
+                + ("" if route_proxy else "; a proxy is probably required (MONGODB_ATLAS_PROXY)"),
+                started,
+            )
+        except Exception as exc:
+            tcp_ok = _step(
+                "tcp",
+                f"TCP connect to {tcp_host}:{tcp_port}",
+                False,
+                describe_transport_error(exc, tcp_host, None),
+                started,
+            )
+
+        https_ok: bool | None = None
+        if tcp_ok:
+            started = time.monotonic()
+            try:
+                kwargs: dict[str, Any] = {"timeout": http_timeout(settings.MONGODB_ATLAS_TIMEOUT_SECONDS)}
+                transport = getattr(self._client, "_transport", None) if self._client else None
+                if transport is not None:
+                    kwargs["transport"] = transport
+                else:
+                    kwargs["verify"] = _tls_verify()
+                    if configured_proxy:
+                        kwargs["proxy"] = configured_proxy
+                async with httpx.AsyncClient(**kwargs) as probe:
+                    response = await probe.get(
+                        f"{base_url}{API_PREFIX}", headers={"Accept": f"application/vnd.atlas.{V_DEFAULT}+json"}
+                    )
+                challenge = "digest" in response.headers.get("WWW-Authenticate", "").lower()
+                https_ok = _step(
+                    "https",
+                    f"HTTPS to {host}",
+                    response.status_code == 401 and challenge,
+                    f"Atlas answered HTTP {response.status_code}"
+                    + (
+                        " with a Digest challenge, as expected without credentials"
+                        if challenge
+                        else " — not the Atlas API; a proxy or captive portal may be answering instead"
+                    ),
+                    started,
+                )
+            except Exception as exc:
+                https_ok = _step(
+                    "https", f"HTTPS to {host}", False, describe_transport_error(exc, host, route_proxy), started
+                )
+        else:
+            _step("https", f"HTTPS to {host}", None, "Skipped — no TCP connection")
+
+        key_ok: bool | None = None
+        if https_ok and settings.mongodb_atlas_configured:
+            started = time.monotonic()
+            try:
+                me = await self.client.request("GET", "")
+                roles = ", ".join(r.get("roleName", "") for r in ((me or {}).get("apiKey") or {}).get("roles") or [])
+                key_ok = _step(
+                    "api_key",
+                    "API key",
+                    True,
+                    f"Accepted. Atlas sees the portal at {(me or {}).get('ipAddress') or '—'}"
+                    + (f"; roles: {roles}" if roles else ""),
+                    started,
+                )
+            except AtlasError as exc:
+                key_ok = _step("api_key", "API key", False, f"HTTP {exc.status_code}: {exc.user_message}", started)
+        else:
+            _step("api_key", "API key", None, "Skipped — Atlas not reached" if not https_ok else "Skipped — no key")
+
+        if key_ok:
+            started = time.monotonic()
+            try:
+                projects = await self.list_projects(fresh=True)
+                allow = sorted(settings.mongodb_atlas_project_allowlist)
+                missing = [pid for pid in allow if pid.lower() not in {(p["id"] or "").lower() for p in projects}]
+                detail = f"{len(projects)} project(s) in scope: " + ", ".join(p["name"] for p in projects[:6])
+                if missing:
+                    detail += (
+                        f". Not visible to the key: {', '.join(missing)} — give the key a role on "
+                        f"{'that project' if len(missing) == 1 else 'those projects'} or fix MONGODB_ATLAS_PROJECT_IDS"
+                    )
+                _step("projects", "Projects", bool(projects) and not missing, detail, started)
+            except AtlasError as exc:
+                _step("projects", "Projects", False, f"HTTP {exc.status_code}: {exc.user_message}", started)
+        else:
+            _step("projects", "Projects", None, "Skipped")
+
+        # Behind a proxy a failed local DNS lookup is normal, so it doesn't count.
+        counted = [step for step in steps if not (step["name"] == "dns" and route_proxy)]
+        failed = next((step for step in counted if step["status"] == "failed"), None)
+        return {
+            "ok": all(step["status"] == "ok" for step in counted),
+            "summary": failed["detail"] if failed else "Atlas is reachable and the API key works.",
+            "steps": steps,
+            **proxy_info,
+            "checked_at": _iso_z(datetime.now(UTC)),
+        }
 
     # ── projects & clusters ─────────────────────────────────────────────
 
@@ -1239,17 +1532,23 @@ def _access_entry(raw: dict) -> dict:
 # ── Singleton ───────────────────────────────────────────────────────────
 
 _service: AtlasService | None = None
-_service_key: tuple[str, str, str] | None = None
+_service_key: tuple[str, ...] | None = None
+
+
+def _settings_key() -> tuple[str, ...]:
+    return (
+        settings.MONGODB_ATLAS_BASE_URL,
+        settings.MONGODB_ATLAS_PUBLIC_KEY.strip(),
+        settings.MONGODB_ATLAS_PRIVATE_KEY.strip(),
+        settings.MONGODB_ATLAS_PROXY.strip(),
+        settings.MONGODB_ATLAS_CA_BUNDLE.strip(),
+    )
 
 
 def get_atlas_service() -> AtlasService:
     """One service (and HTTP client) per worker; rebuilt if the key settings change."""
     global _service, _service_key
-    key = (
-        settings.MONGODB_ATLAS_BASE_URL,
-        settings.MONGODB_ATLAS_PUBLIC_KEY.strip(),
-        settings.MONGODB_ATLAS_PRIVATE_KEY.strip(),
-    )
+    key = _settings_key()
     if _service is None or _service_key != key:
         _service = AtlasService()
         _service_key = key
@@ -1260,12 +1559,4 @@ def set_atlas_service(service: AtlasService | None) -> None:
     """Tests: install a service with a mock transport (None restores the default)."""
     global _service, _service_key
     _service = service
-    _service_key = (
-        (
-            settings.MONGODB_ATLAS_BASE_URL,
-            settings.MONGODB_ATLAS_PUBLIC_KEY.strip(),
-            settings.MONGODB_ATLAS_PRIVATE_KEY.strip(),
-        )
-        if service
-        else None
-    )
+    _service_key = _settings_key() if service else None

@@ -41,6 +41,26 @@ export interface AtlasStatus {
   api_key_roles: { scope: "organization" | "project"; id: string; role: string }[];
   project_count: number;
   checked_at: string;
+  /** Proxy the backend uses for Atlas (credentials masked), and where it came from. */
+  proxy: string | null;
+  proxy_source: "MONGODB_ATLAS_PROXY" | "environment" | "none";
+}
+
+export interface ConnectionTestStep {
+  name: "configuration" | "dns" | "tcp" | "https" | "api_key" | "projects";
+  label: string;
+  status: "ok" | "failed" | "skipped";
+  detail: string;
+  ms: number | null;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  summary: string;
+  steps: ConnectionTestStep[];
+  proxy: string | null;
+  proxy_source: AtlasStatus["proxy_source"];
+  checked_at: string;
 }
 
 export interface AtlasProject {
@@ -330,6 +350,17 @@ export function useAtlasStatus() {
     queryKey: atlasKeys.status(),
     queryFn: async () => (await apiClient.get(`${BASE}/status`)).data,
     staleTime: 60_000,
+  });
+}
+
+/** Step-by-step network/key check. A success refreshes everything that depends on it. */
+export function useConnectionTest() {
+  const qc = useQueryClient();
+  return useMutation<ConnectionTestResult, unknown, void>({
+    mutationFn: async () => (await apiClient.get(`${BASE}/connection-test`)).data,
+    onSuccess: (result) => {
+      if (result.ok) qc.invalidateQueries({ queryKey: atlasKeys.all });
+    },
   });
 }
 
