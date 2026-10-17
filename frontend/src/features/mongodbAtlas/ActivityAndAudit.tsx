@@ -28,11 +28,28 @@ import {
 
 type OpSort = "requested" | "status" | "action";
 
-export const OperationsGrid: React.FC<{ formatDate: (v: string | null | undefined) => string }> = ({ formatDate }) => {
+export const ATTENTION_WINDOW_MS = 7 * 86400_000;
+
+export const OperationsGrid: React.FC<{
+  formatDate: (v: string | null | undefined) => string;
+  /** Outcome filter, owned by the page (the "Needs attention" tile sets it). */
+  status: string;
+  onStatusChange: (status: string) => void;
+}> = ({ formatDate, status, onStatusChange }) => {
   const { data, isLoading, error } = useOperations();
-  const [status, setStatus] = useState("");
   const [open, setOpen] = useState<AtlasOperation | null>(null);
-  const rows = useMemo(() => (data?.operations ?? []).filter((op) => !status || op.status === status), [data, status]);
+  const rows = useMemo(
+    () =>
+      (data?.operations ?? []).filter((op) =>
+        !status
+          ? true
+          : status === "attention"
+            ? // Same window as the "Needs attention" tile.
+              (op.status === "failed" || op.status === "partial") && Date.now() - new Date(op.requested_at).getTime() < ATTENTION_WINDOW_MS
+            : op.status === status,
+      ),
+    [data, status],
+  );
   const grid = useGridRows<AtlasOperation, OpSort>(rows, {
     matches: useCallback(
       (op: AtlasOperation, q: string) =>
@@ -58,8 +75,9 @@ export const OperationsGrid: React.FC<{ formatDate: (v: string | null | undefine
         onSearch={grid.setSearch}
         placeholder="Search cluster, schedule, person…"
       >
-        <select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by outcome" className="rounded-lg border border-att-200 bg-white px-2 py-2 text-sm">
+        <select value={status} onChange={(e) => onStatusChange(e.target.value)} aria-label="Filter by outcome" className="rounded-lg border border-att-200 bg-white px-2 py-2 text-sm">
           <option value="">Any outcome</option>
+          <option value="attention">Needs attention (failed, last 7 days)</option>
           <option value="in_progress">In progress</option>
           <option value="completed">Completed</option>
           <option value="partial">Partly failed</option>

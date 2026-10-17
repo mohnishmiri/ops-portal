@@ -19,8 +19,8 @@ import { MetricCard, MetricCardIcons } from "../components/MetricCard";
 import Toast, { type ToastState } from "../components/Toast";
 import { usePortalTimezone } from "../contexts/TimezoneContext";
 import { ClusterDetail } from "../features/mongodbAtlas/ClusterDetail";
-import { ClusterGrid } from "../features/mongodbAtlas/ClusterGrid";
-import { AuditGrid, OperationsGrid } from "../features/mongodbAtlas/ActivityAndAudit";
+import { CLUSTER_FILTERS, type ClusterFilter, ClusterGrid } from "../features/mongodbAtlas/ClusterGrid";
+import { ATTENTION_WINDOW_MS, AuditGrid, OperationsGrid } from "../features/mongodbAtlas/ActivityAndAudit";
 import { PowerDialog } from "../features/mongodbAtlas/PowerDialog";
 import { ConnectionPanel, ProjectAdmin } from "../features/mongodbAtlas/ProjectAdmin";
 import { ScheduleManager } from "../features/mongodbAtlas/ScheduleManager";
@@ -47,10 +47,22 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "audit", label: "Audit log" },
 ];
 
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
 const MongoDBAtlasPage: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const tab = (TABS.some((t) => t.key === params.get("tab")) ? params.get("tab") : "clusters") as Tab;
-  const setTab = (next: Tab) => setParams(next === "clusters" ? {} : { tab: next }, { replace: true });
+  // ?filter= narrows the grid of the current tab; the KPI tiles set both.
+  const filter = params.get("filter") ?? "";
+  const openView = (next: Tab, nextFilter = "") => {
+    const query: Record<string, string> = {};
+    if (next !== "clusters") query.tab = next;
+    if (nextFilter) query.filter = nextFilter;
+    setParams(query, { replace: true });
+  };
+  const setTab = (next: Tab) => openView(next);
+  const clusterFilter = (CLUSTER_FILTERS as readonly string[]).includes(filter) ? (filter as ClusterFilter) : "";
+  const viewing = (t: Tab, f = "") => tab === t && filter === f;
   const { formatDate } = usePortalTimezone();
   const qc = useQueryClient();
 
@@ -83,7 +95,7 @@ const MongoDBAtlasPage: React.FC = () => {
       .flatMap((s) => [s.next_stop_at, s.next_start_at])
       .filter((x): x is string => Boolean(x))
       .sort()[0];
-    const weekAgo = Date.now() - 7 * 86400_000;
+    const weekAgo = Date.now() - ATTENTION_WINDOW_MS;
     const failed = (operations.data?.operations ?? []).filter(
       (o) => (o.status === "failed" || o.status === "partial") && new Date(o.requested_at).getTime() > weekAgo,
     ).length;
@@ -122,7 +134,7 @@ const MongoDBAtlasPage: React.FC = () => {
             title={status.data.error ?? `API key ${status.data.public_key ?? ""}`}
           >
             <span className={`h-2 w-2 rounded-full ${status.data.configured && status.data.reachable ? "bg-green-500" : "bg-amber-500"}`} aria-hidden="true" />
-            {!status.data.configured ? "Atlas not configured" : status.data.reachable ? `Connected · ${status.data.project_count} projects` : "Atlas not reachable"}
+            {!status.data.configured ? "Atlas not configured" : status.data.reachable ? `Connected · ${plural(status.data.project_count, "project")}` : "Atlas not reachable"}
           </span>
         )}
       </header>
@@ -133,15 +145,39 @@ const MongoDBAtlasPage: React.FC = () => {
 
       {ready && (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {/* Each tile opens the view behind its number. */}
           <MetricCard
             compact
             title="Clusters"
             value={clusters.isLoading ? "…" : all.length}
             icon={MetricCardIcons.database()}
-            subtitle={`${clusters.data?.project_count ?? 0} projects`}
+            subtitle={plural(clusters.data?.project_count ?? 0, "project")}
+            onClick={() => openView("clusters")}
+            active={viewing("clusters")}
+            actionLabel="Show all clusters"
           />
-          <MetricCard compact tone="green" title="Running" value={clusters.isLoading ? "…" : kpis.running} icon={MetricCardIcons.activity()} subtitle={kpis.changing ? `${kpis.changing} changing` : "IDLE in Atlas"} />
-          <MetricCard compact tone="slate" title="Paused" value={clusters.isLoading ? "…" : kpis.paused} icon={MetricCardIcons.server()} subtitle="billed for storage only" />
+          <MetricCard
+            compact
+            tone="green"
+            title="Running"
+            value={clusters.isLoading ? "…" : kpis.running}
+            icon={MetricCardIcons.activity()}
+            subtitle={kpis.changing ? `${kpis.changing} changing` : "IDLE in Atlas"}
+            onClick={() => openView("clusters", "running")}
+            active={viewing("clusters", "running")}
+            actionLabel="Show running clusters"
+          />
+          <MetricCard
+            compact
+            tone="slate"
+            title="Paused"
+            value={clusters.isLoading ? "…" : kpis.paused}
+            icon={MetricCardIcons.server()}
+            subtitle="billed for storage only"
+            onClick={() => openView("clusters", "paused")}
+            active={viewing("clusters", "paused")}
+            actionLabel="Show paused clusters"
+          />
           <MetricCard
             compact
             tone="att"
@@ -149,6 +185,9 @@ const MongoDBAtlasPage: React.FC = () => {
             value={schedules.isLoading ? "…" : kpis.enabled}
             icon={MetricCardIcons.calendar()}
             subtitle={kpis.next ? `next run ${relativeTime(kpis.next)}` : "none upcoming"}
+            onClick={() => openView("schedules")}
+            active={viewing("schedules")}
+            actionLabel="Show start/stop schedules"
           />
           <MetricCard
             compact
@@ -163,6 +202,14 @@ const MongoDBAtlasPage: React.FC = () => {
                     .join(" · ")
                 : "all clear"
             }
+            // Cluster problems first (they need someone to act); else the failed stops/starts.
+            onClick={
+              attention
+                ? () => (kpis.warnings || clusters.data?.errors.length ? openView("clusters", "attention") : openView("activity", "attention"))
+                : undefined
+            }
+            active={viewing("clusters", "attention") || viewing("activity", "attention")}
+            actionLabel="Show what needs attention"
           />
         </div>
       )}
@@ -200,6 +247,8 @@ const MongoDBAtlasPage: React.FC = () => {
               onPower={(cluster, action) => setPower({ cluster, action })}
               onOpen={(cluster) => setOpenKey(`${cluster.project_id}/${cluster.name}`)}
               formatDate={formatDate}
+              status={clusterFilter}
+              onStatusChange={(next) => openView("clusters", next)}
             />
           ) : (
             !status.isLoading && (
@@ -211,7 +260,9 @@ const MongoDBAtlasPage: React.FC = () => {
             )
           ))}
         {tab === "schedules" && <ScheduleManager clusters={all} formatDate={formatDate} />}
-        {tab === "activity" && <OperationsGrid formatDate={formatDate} />}
+        {tab === "activity" && (
+          <OperationsGrid formatDate={formatDate} status={filter} onStatusChange={(next) => openView("activity", next)} />
+        )}
         {tab === "admin" && (
           <ProjectAdmin projects={projects.data ?? []} clusters={all} status={status.data} statusLoading={status.isLoading} formatDate={formatDate} />
         )}

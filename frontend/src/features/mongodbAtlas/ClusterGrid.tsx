@@ -25,6 +25,9 @@ import {
 
 type SortKey = "name" | "project" | "status" | "tier" | "cpu" | "memory" | "next";
 
+export const CLUSTER_FILTERS = ["", "running", "paused", "busy", "attention"] as const;
+export type ClusterFilter = (typeof CLUSTER_FILTERS)[number];
+
 function nextRun(cluster: AtlasCluster): { at: string; leg: "stop" | "start" } | null {
   let best: { at: string; leg: "stop" | "start" } | null = null;
   for (const s of cluster.schedules ?? []) {
@@ -49,11 +52,13 @@ export const ClusterGrid: React.FC<{
   onPower: (cluster: AtlasCluster, action: PowerAction) => void;
   onOpen: (cluster: AtlasCluster) => void;
   formatDate: (v: string | null | undefined) => string;
-}> = ({ inventory, isLoading, error, utilization, onRefresh, refreshing, onPower, onOpen, formatDate }) => {
+  /** The status filter is the page's (the KPI tiles set it), so it is controlled. */
+  status: ClusterFilter;
+  onStatusChange: (status: ClusterFilter) => void;
+}> = ({ inventory, isLoading, error, utilization, onRefresh, refreshing, onPower, onOpen, formatDate, status, onStatusChange }) => {
   const can = useAtlasCan();
   const canPower = can("atlas_cluster_power");
   const [project, setProject] = useState("");
-  const [status, setStatus] = useState<"" | "running" | "paused" | "busy">("");
 
   const clusters = useMemo(() => inventory?.clusters ?? [], [inventory]);
   const projects = useMemo(() => [...new Set(clusters.map((c) => c.project_name))].sort(), [clusters]);
@@ -64,6 +69,7 @@ export const ClusterGrid: React.FC<{
         if (status === "running") return !c.paused && c.state === "IDLE" && !c.operation_in_progress;
         if (status === "paused") return c.paused;
         if (status === "busy") return Boolean(c.operation_in_progress) || c.state !== "IDLE";
+        if (status === "attention") return Boolean(c.auto_resume_warning);
         return true;
       }),
     [clusters, project, status],
@@ -153,11 +159,12 @@ export const ClusterGrid: React.FC<{
               </option>
             ))}
           </select>
-          <select value={status} onChange={(e) => setStatus(e.target.value as typeof status)} aria-label="Filter by status" className="rounded-lg border border-att-200 bg-white px-2 py-2 text-sm">
+          <select value={status} onChange={(e) => onStatusChange(e.target.value as ClusterFilter)} aria-label="Filter by status" className="rounded-lg border border-att-200 bg-white px-2 py-2 text-sm">
             <option value="">Any status</option>
             <option value="running">Running</option>
             <option value="paused">Paused</option>
             <option value="busy">Changing</option>
+            <option value="attention">Needs attention</option>
           </select>
           <button type="button" onClick={exportCsv} className={buttonTone.neutral} disabled={!filtered.length} title="Export the filtered clusters to CSV">
             <AtlasIcons.download />
@@ -191,7 +198,13 @@ export const ClusterGrid: React.FC<{
                   {formatAxiosError(error, "Could not load clusters")}
                 </GridMessageRow>
               ) : grid.pageRows.length === 0 ? (
-                <GridMessageRow colSpan={9}>{clusters.length ? "No cluster matches the filters." : "The API key sees no clusters."}</GridMessageRow>
+                <GridMessageRow colSpan={9}>
+                  {!clusters.length
+                    ? "The API key sees no clusters."
+                    : status === "attention"
+                      ? "No cluster needs attention."
+                      : "No cluster matches the filters."}
+                </GridMessageRow>
               ) : (
                 grid.pageRows.map((c) => {
                   const u = usage(c);

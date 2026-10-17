@@ -52,6 +52,7 @@ import { PortalAccessGate, useSession } from "./contexts/SessionContext";
 import SubscriptionScopePicker from "./components/SubscriptionScopePicker";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { AccessAdminRoute, SuperAdminRoute } from "./components/RoleGuards";
+import { ADMIN_NAV, adminEntryVisible, NavDropdown, navLinkClass, type NavItem } from "./components/NavDropdown";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -79,27 +80,6 @@ const BrandMark: React.FC<{ sizeClassName?: string; imageClassName?: string }> =
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-/**
- * Nav item definition.
- *
- * module/page strings map directly to resource_name values in the backend
- * resource registry.  The access and admin entries are rendered separately
- * because they are role-gated (session isSuperAdmin / adminProjectIds), not
- * permission-record gated.
- */
-interface NavItem {
-  to: string;
-  label: string;
-  module?: string;
-  page?: string;
-  /**
-   * Rendered as a dropdown under this item. The parent stays a link to its
-   * own page; the children are separate pages grouped beneath it. Used to
-   * keep the nav bar from overflowing as pages are added.
-   */
-  children?: NavItem[];
-}
-
 const ALL_NAV_ITEMS: NavItem[] = [
   { to: "/",           label: "Cost Forecast", module: "cost_management",  page: "leadership_dashboard" },
   { to: "/env-costs",  label: "Amortized Costs",      module: "cost_management",  page: "amortized_costs" },
@@ -117,82 +97,6 @@ const ALL_NAV_ITEMS: NavItem[] = [
   { to: "/env-scheduler", label: "Env Scheduler",      module: "aks_operations",   page: "env_scheduler" },
   { to: "/mongodb-atlas", label: "MongoDB Atlas",      module: "mongodb_atlas",    page: "mongodb_atlas_main" },
 ];
-
-const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `px-3 py-2 rounded-md text-sm font-medium transition ${
-    isActive ? "bg-att-50 text-att-600" : "text-gray-600 hover:text-att-500 hover:bg-att-50"
-  }`;
-
-/**
- * A nav entry with children: the label opens a dropdown of its pages rather
- * than navigating. Highlighted whenever any of its children is the active
- * route, so the group still reads as "where you are".
- */
-const NavDropdown: React.FC<{ item: NavItem; isVisible: (child: NavItem) => boolean }> = ({ item, isVisible }) => {
-  const [open, setOpen] = useState(false);
-  const containerRef = React.useRef<HTMLDivElement>(null);
-  const location = useLocation();
-  const children = (item.children ?? []).filter(isVisible);
-  const active = children.some((child) => location.pathname === child.to);
-
-  // Close on an outside click or Escape, the way a menu is expected to behave.
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
-  if (children.length === 0) return null;
-
-  return (
-    <div className="relative" ref={containerRef}>
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        aria-expanded={open}
-        aria-haspopup="menu"
-        className={`${navLinkClass({ isActive: active })} inline-flex items-center gap-1`}
-      >
-        {item.label}
-        <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="currentColor" aria-hidden="true">
-          <path d="M6 9 1.5 4h9L6 9Z" />
-        </svg>
-      </button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute left-0 z-20 mt-1 min-w-[13rem] overflow-hidden rounded-lg border border-att-100 bg-white py-1 shadow-lg"
-        >
-          {children.map((child) => (
-            <NavLink
-              key={child.to}
-              to={child.to}
-              role="menuitem"
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                `block px-4 py-2 text-sm transition ${
-                  isActive ? "bg-att-50 text-att-600 font-medium" : "text-gray-700 hover:bg-att-50 hover:text-att-600"
-                }`
-              }
-            >
-              {child.label}
-            </NavLink>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
 
 const Navigation: React.FC = () => {
   const msal = isDevMode ? null : useMsal();
@@ -214,6 +118,10 @@ const Navigation: React.FC = () => {
     [isAdmin, permsLoading, canViewModule, canViewPage],
   );
   const visibleNavItems = ALL_NAV_ITEMS.filter(isVisible);
+  const isAdminEntryVisible = useCallback(
+    (item: NavItem) => adminEntryVisible(item, { isSuperAdmin, canManageAccess }),
+    [isSuperAdmin, canManageAccess],
+  );
 
   return (
     <nav className="bg-white shadow-sm border-b border-att-400/20">
@@ -242,17 +150,11 @@ const Navigation: React.FC = () => {
               <NavLink to="/access" end className={navLinkClass}>
                 My Access
               </NavLink>
-              {canManageAccess && (
-                <NavLink to="/access/manage" className={navLinkClass}>
-                  Manage Access
-                </NavLink>
-              )}
-              {/* Portal-wide admin console: Super Admin only (backend-enforced). */}
-              {isSuperAdmin && (
-                <NavLink to="/admin" className={navLinkClass}>
-                  Admin
-                </NavLink>
-              )}
+              {/*
+                Admin console (Super Admin) and access management (Super and
+                Project Admins) under one menu; both are backend-enforced.
+              */}
+              <NavDropdown item={ADMIN_NAV} isVisible={isAdminEntryVisible} />
             </div>
           </div>
 

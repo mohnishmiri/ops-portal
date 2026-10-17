@@ -240,6 +240,46 @@ describe("MongoDBAtlasPage", () => {
   });
 });
 
+describe("MongoDBAtlasPage — KPI tiles", () => {
+  const clusterNames = () =>
+    within(screen.getByRole("table"))
+      .queryAllByRole("row")
+      .slice(1)
+      .map((row) => row.querySelector("td button")?.textContent)
+      .filter(Boolean);
+
+  it("opens the matching view and shows which tile is selected", async () => {
+    asUser(true);
+    mockApi();
+    renderPage();
+    await screen.findByText("prod-main");
+    expect(clusterNames()).toEqual(["dev-cluster", "prod-main", "parked"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show paused clusters" }));
+    await waitFor(() => expect(clusterNames()).toEqual(["parked"]));
+    expect(screen.getByRole("button", { name: "Show paused clusters" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Filter by status")).toHaveValue("paused");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show running clusters" }));
+    await waitFor(() => expect(clusterNames()).toEqual(["dev-cluster", "prod-main"]));
+
+    // One paused cluster is near Atlas's 30-day auto-start.
+    fireEvent.click(screen.getByRole("button", { name: "Show what needs attention" }));
+    await waitFor(() => expect(clusterNames()).toEqual(["parked"]));
+
+    fireEvent.click(screen.getByRole("button", { name: "Show start/stop schedules" }));
+    expect(await screen.findByText("Non-prod off-hours")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("says 1 project, not 1 projects", async () => {
+    asUser(true);
+    mockApi();
+    renderPage();
+    expect(await screen.findByText("Connected · 1 project")).toBeInTheDocument();
+  });
+});
+
 describe("MongoDBAtlasPage — Atlas not reachable", () => {
   it("runs the connection test by itself, shows the broken step, and does not wait on cluster calls", async () => {
     asUser(true);
