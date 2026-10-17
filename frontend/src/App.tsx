@@ -43,6 +43,7 @@ import CertificatesPage from "./pages/CertificatesPage";
 import AmortizedCostDashboard from "./pages/AmortizedCostDashboard";
 import EnvironmentSchedulerPage from "./pages/EnvironmentSchedulerPage";
 import CredentialCheckPage from "./pages/CredentialCheckPage";
+import MongoDBAtlasPage from "./pages/MongoDBAtlasPage";
 import { TimezoneProvider } from "./contexts/TimezoneContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PermissionsProvider, usePermissions } from "./contexts/PermissionsContext";
@@ -114,6 +115,7 @@ const ALL_NAV_ITEMS: NavItem[] = [
   },
   { to: "/infra-alerts", label: "Infra Alerts",        module: "infra_alerts",     page: "infra_alerts_main" },
   { to: "/env-scheduler", label: "Env Scheduler",      module: "aks_operations",   page: "env_scheduler" },
+  { to: "/mongodb-atlas", label: "MongoDB Atlas",      module: "mongodb_atlas",    page: "mongodb_atlas_main" },
 ];
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -482,6 +484,19 @@ const MainContent: React.FC = () => (
             element={
               <ProtectedRoute module="aks_operations" page="env_scheduler" label="Environment Scheduler">
                 <EnvironmentSchedulerPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/*
+            MongoDB Atlas. Atlas projects are not Azure subscriptions, so the
+            page needs the module permission but no subscription grant.
+          */}
+          <Route
+            path="/mongodb-atlas"
+            element={
+              <ProtectedRoute module="mongodb_atlas" page="mongodb_atlas_main" label="MongoDB Atlas" requiresSubscription={false}>
+                <MongoDBAtlasPage />
               </ProtectedRoute>
             }
           />

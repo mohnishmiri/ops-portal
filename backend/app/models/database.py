@@ -11,6 +11,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     Date,
@@ -1990,6 +1991,113 @@ class CredentialAccount(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("account_type", "directory", "account_key", name="uq_credential_account"),)
+
+
+# =============================================================================
+# MONGODB ATLAS: START / STOP SCHEDULES AND OPERATIONS
+# =============================================================================
+
+# JSONB on PostgreSQL, plain JSON elsewhere, so the test suite's SQLite
+# database can create these tables as they are.
+_JSON_DOC = JSON().with_variant(JSONB(), "postgresql")
+
+
+class AtlasSchedule(Base):
+    """Automatic stop (pause) and start (resume) of MongoDB Atlas clusters.
+
+    One schedule covers any number of clusters and has two legs, each
+    optional: *stop* and *start*. A recurring schedule gives each leg a cron
+    expression; a one-time schedule gives each leg a wall-clock date and time.
+    Both are read in ``timezone``.
+
+    ``next_stop_at`` / ``next_start_at`` are naive UTC. The runner claims a due
+    leg by moving that column forward with a compare-and-swap UPDATE, so
+    exactly one worker of one replica runs it.
+
+    ``targets`` is ``[{"project_id", "project_name", "cluster_name"}]``.
+    """
+
+    __tablename__ = "atlas_schedules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    targets = Column(_JSON_DOC, nullable=False)
+    schedule_type = Column(String(20), nullable=False, default="recurring")  # recurring | one_time
+    timezone = Column(String(100), nullable=False, default="UTC")
+    stop_cron = Column(String(120), nullable=True)
+    start_cron = Column(String(120), nullable=True)
+    # One-time legs: wall clock in ``timezone``.
+    stop_at = Column(DateTime, nullable=True)
+    start_at = Column(DateTime, nullable=True)
+    next_stop_at = Column(DateTime, nullable=True)
+    next_start_at = Column(DateTime, nullable=True)
+    # "Keep it running tonight": the next run of that leg is recorded as
+    # skipped instead of acting, then the flag clears itself.
+    skip_next_stop = Column(Boolean, nullable=False, default=False, server_default="false")
+    skip_next_start = Column(Boolean, nullable=False, default=False, server_default="false")
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    notify_on = Column(String(20), nullable=False, default="always", server_default="always")
+    notification_emails = Column(String(1000), nullable=True)
+    # Heads-up email this many minutes before a leg runs; 0 = none.
+    remind_minutes_before = Column(Integer, nullable=False, default=0, server_default="0")
+    # The run time a heads-up was sent for, so each run is announced once.
+    stop_reminded_for = Column(DateTime, nullable=True)
+    start_reminded_for = Column(DateTime, nullable=True)
+    last_stop_run_at = Column(DateTime, nullable=True)
+    last_start_run_at = Column(DateTime, nullable=True)
+    last_run_status = Column(String(20), nullable=True)
+    created_by = Column(String(255), nullable=False)
+    created_by_email = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_by = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_atlas_schedules_next_stop", "is_enabled", "next_stop_at"),
+        Index("ix_atlas_schedules_next_start", "is_enabled", "next_start_at"),
+    )
+
+
+class AtlasOperation(Base):
+    """One stop (pause) or start (resume) of one or more Atlas clusters.
+
+    Atlas answers a pause/resume request at once and then takes minutes to
+    finish, so a request is recorded here as ``in_progress`` and a background
+    tick watches each cluster until it settles. Any worker may pick it up: it
+    takes a short lease (``lease_until``) first, so two never check the same
+    operation at once. The summary email is sent by whichever worker moves it
+    to its final status.
+
+    ``targets`` holds one entry per cluster with its own status:
+    ``pending | in_progress | completed | no_change | skipped | failed``.
+    """
+
+    __tablename__ = "atlas_operations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action = Column(String(20), nullable=False)  # pause | resume
+    trigger = Column(String(20), nullable=False)  # manual | scheduled | run_now
+    schedule_id = Column(Integer, nullable=True, index=True)
+    schedule_name = Column(String(200), nullable=True)
+    status = Column(String(20), nullable=False, default="in_progress")
+    targets = Column(_JSON_DOC, nullable=False)
+    reason = Column(String(500), nullable=True)
+    requested_by = Column(String(255), nullable=False)
+    requested_by_email = Column(String(255), nullable=True)
+    requested_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    timezone = Column(String(100), nullable=True)
+    notify_on = Column(String(20), nullable=False, default="always", server_default="always")
+    notification_emails = Column(String(1000), nullable=True)
+    notified_at = Column(DateTime, nullable=True)
+    lease_until = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_atlas_operations_status", "status", "lease_until"),
+        Index("ix_atlas_operations_requested_at", "requested_at"),
+    )
 
 
 # =============================================================================

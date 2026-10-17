@@ -127,7 +127,15 @@ _API_MODULE_PREFIXES: tuple[tuple[str, str], ...] = (
     # was an ungated alternative route to data the core path protects.
     ("/api/v1/plugins/keyvault_ops", "keyvault"),
     ("/api/v1/plugins/aks_insights", "aks_operations"),
+    ("/api/v1/mongodb-atlas", "mongodb_atlas"),
 )
+
+# Modules whose data lives outside Azure, so a user needs module access but no
+# subscription grant.  MongoDB Atlas clusters belong to Atlas projects, which
+# the portal's Prod / Non-Prod subscription grants know nothing about; without
+# this, bind_subscription_scope would refuse every Atlas call from a user who
+# simply has no Azure grant yet.
+SUBSCRIPTION_FREE_MODULES: frozenset[str] = frozenset({"mongodb_atlas"})
 
 
 def _module_for_path(path: str) -> str | None:

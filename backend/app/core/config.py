@@ -371,6 +371,48 @@ class Settings(BaseSettings):
         description="AAF path listing an identity's credentials and their expiry; {id} is the identity",
     )
 
+    # ── MongoDB Atlas ─────────────────────────────────────────────────
+    # A programmatic API key (HTTP Digest). Every Atlas call the portal makes
+    # runs as this key, so give it only the roles the module needs — Project
+    # Cluster Manager for start/stop and tier changes, Project Owner for
+    # database users and the IP access list — on the projects it should see.
+    # When the organization requires an IP access list for the Admin API, the
+    # portal's egress IP must be on the key's API access list.
+    MONGODB_ATLAS_BASE_URL: str = Field(
+        default="https://cloud.mongodb.com",
+        description="Atlas host; the Admin API v2 is served under /api/atlas/v2",
+    )
+    MONGODB_ATLAS_PUBLIC_KEY: str = Field(default="", description="Atlas API key public key")
+    MONGODB_ATLAS_PRIVATE_KEY: str = Field(default="", description="Atlas API key private key (Key Vault)")
+    MONGODB_ATLAS_ORG_ID: str = Field(
+        default="",
+        description="Optional: only show projects of this Atlas organization",
+    )
+    MONGODB_ATLAS_PROJECT_IDS: str = Field(
+        default="",
+        description=(
+            "Optional comma-separated Atlas project IDs. When set, the portal shows and acts on these "
+            "projects only, even if the API key can see more."
+        ),
+    )
+    MONGODB_ATLAS_TIMEOUT_SECONDS: int = Field(default=30, description="Timeout for one Atlas API call")
+    MONGODB_ATLAS_CA_BUNDLE: str = Field(
+        default="",
+        description="Optional PEM CA file trusted in addition to the default bundle (TLS-inspecting proxy)",
+    )
+    MONGODB_ATLAS_OPERATION_TIMEOUT_MINUTES: int = Field(
+        default=60,
+        description="How long a stop/start may take before the portal reports it as failed",
+    )
+
+    @property
+    def mongodb_atlas_configured(self) -> bool:
+        return bool(self.MONGODB_ATLAS_PUBLIC_KEY.strip() and self.MONGODB_ATLAS_PRIVATE_KEY.strip())
+
+    @property
+    def mongodb_atlas_project_allowlist(self) -> frozenset[str]:
+        return frozenset(p.strip() for p in self.MONGODB_ATLAS_PROJECT_IDS.split(",") if p.strip())
+
     # ── RBAC Roles ────────────────────────────────────────────────────
     # Super Admin manages every project. It is deliberately an Entra app role
     # only — nothing in the portal can grant it.

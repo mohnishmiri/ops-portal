@@ -118,13 +118,24 @@ backend:
     CRED_CHECK_TIMEOUT_SECONDS: "15"
     CRED_CHECK_CA_BUNDLE: ""
 
+    # ── MongoDB Atlas (MongoDB Atlas page) ──
+    # The API key itself is in the Key Vault items below (group mongodbAtlas).
+    # Optional scoping: one organization, and/or an allow-list of project IDs.
+    MONGODB_ATLAS_BASE_URL: "https://cloud.mongodb.com"
+    MONGODB_ATLAS_ORG_ID: ""
+    MONGODB_ATLAS_PROJECT_IDS: ""
+    MONGODB_ATLAS_TIMEOUT_SECONDS: "30"
+    MONGODB_ATLAS_OPERATION_TIMEOUT_MINUTES: "60"
+    MONGODB_ATLAS_CA_BUNDLE: ""
+
   # akv2k8s sync: one AzureKeyVaultSecret per item, wired into the backend env.
   # When the vault doesn't hold a secret, or this project doesn't use the
   # feature, skip it instead of deleting the item. A skipped item gets no
   # AzureKeyVaultSecret and no secretKeyRef, so nothing looks for the secret
   # and the app falls back to its default (or to backend.env):
   #   skipGroups: [agentLlm, keyfactor]  # whole optional feature, by `group:`
-  #                                      # (ollama, agentLlm, k8sDashboard, keyfactor)
+  #                                      # (ollama, agentLlm, k8sDashboard, keyfactor,
+  #                                      #  credentialCheck, mongodbAtlas)
   #   skip: [SMTP_PASSWORD]              # single items, by envName
   # `enabled: false` on an item also skips it; `enabled: false` here turns the
   # whole sync off. Unknown names in skip/skipGroups fail the render.
@@ -283,6 +294,18 @@ backend:
         kubernetesSecretName: ops-portal-backend-cred-check-ldap-reader-password-testitservices
         optional: true
         group: credentialCheck
+      # ── MongoDB Atlas: the portal's programmatic API key ──
+      # Absent secrets = the Atlas page reports itself unconfigured.
+      - envName: MONGODB_ATLAS_PUBLIC_KEY
+        akvSecretName: opsportal-backend-mongodb-atlas-public-key
+        kubernetesSecretName: ops-portal-backend-mongodb-atlas-public-key
+        optional: true
+        group: mongodbAtlas
+      - envName: MONGODB_ATLAS_PRIVATE_KEY
+        akvSecretName: opsportal-backend-mongodb-atlas-private-key
+        kubernetesSecretName: ops-portal-backend-mongodb-atlas-private-key
+        optional: true
+        group: mongodbAtlas
       # ── Keyfactor Command (Certificate Management) ──
       - envName: KEYFACTOR_BASE_URL
         akvSecretName: opsportal-backend-keyfactor-base-url

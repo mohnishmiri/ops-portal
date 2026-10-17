@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.core.access_scope import UNRESTRICTED, bind_access_scope, resolve_access_scope
-from app.core.authz import _module_for_path
+from app.core.authz import SUBSCRIPTION_FREE_MODULES, _module_for_path
 from app.core.database import get_db
 from app.core.subscription_resolver import get_monitored_subscription_ids
 from app.models.auth import UserContext, UserRole
@@ -177,7 +177,8 @@ async def bind_subscription_scope(
     # Refusing here, before a service runs, matters: several services treat
     # an empty scope as "not configured yet" and fall back to every
     # subscription they can find.
-    if not access.unrestricted and not effective and _module_for_path(request.url.path) is not None:
+    module = _module_for_path(request.url.path)
+    if not access.unrestricted and not effective and module is not None and module not in SUBSCRIPTION_FREE_MODULES:
         logger.info("subscription_scope_empty_denied", user_id=user.user_id, path=request.url.path)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

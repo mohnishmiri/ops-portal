@@ -78,6 +78,14 @@ RESOURCE_SEEDS: list[dict] = [
         "parent_name": None,
         "is_system": True,
     },
+    {
+        "resource_type": "module",
+        "resource_name": "mongodb_atlas",
+        "description": "MongoDB Atlas clusters — start/stop, schedules, utilization and administration",
+        "route_path": "/mongodb-atlas",
+        "parent_name": None,
+        "is_system": True,
+    },
     # ── Pages under cost_management ──────────────────────────────────────
     {
         "resource_type": "page",
@@ -211,6 +219,15 @@ RESOURCE_SEEDS: list[dict] = [
         "description": "Certificate lifecycle dashboard (list, enroll, renew, revoke, delete)",
         "route_path": "/certificates",
         "parent_name": "certificates",
+        "is_system": True,
+    },
+    # ── Pages under mongodb_atlas ────────────────────────────────────────
+    {
+        "resource_type": "page",
+        "resource_name": "mongodb_atlas_main",
+        "description": "MongoDB Atlas clusters, start/stop schedules, utilization, administration and audit",
+        "route_path": "/mongodb-atlas",
+        "parent_name": "mongodb_atlas",
         "is_system": True,
     },
     # ── Admin module ─────────────────────────────────────────────────────
@@ -410,6 +427,38 @@ CAPABILITY_SEEDS: list[tuple[str, str, str, tuple[str, ...], str]] = [
         ("write",),
         "compliance",
     ),
+    # MongoDB Atlas.  Every operation runs as the portal's Atlas API key, so
+    # these capabilities — not the key's own Atlas roles — decide who may use
+    # it.  Split so an operator can, say, let a team stop and start clusters
+    # without letting it create database users.
+    (
+        "atlas_cluster_power",
+        "Stop (pause) and start (resume) MongoDB Atlas clusters",
+        "edit",
+        ("write",),
+        "mongodb_atlas",
+    ),
+    (
+        "atlas_schedule_manage",
+        "Create, edit, skip, run and delete MongoDB Atlas start/stop schedules",
+        "edit",
+        ("write",),
+        "mongodb_atlas",
+    ),
+    (
+        "atlas_cluster_admin",
+        "Change Atlas cluster tier, test failover, take snapshots and acknowledge alerts",
+        "edit",
+        ("write",),
+        "mongodb_atlas",
+    ),
+    (
+        "atlas_database_access",
+        "Manage Atlas database users and the project IP access list",
+        "edit",
+        ("write",),
+        "mongodb_atlas",
+    ),
     (
         "cost_resource_cleanup",
         "Delete unattached managed disks and disconnected private endpoints",
@@ -473,6 +522,8 @@ DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     ("read", "infra_alerts_main", "view"),
     ("read", "certificates", "view"),
     ("read", "certificates_main", "view"),
+    ("read", "mongodb_atlas", "view"),
+    ("read", "mongodb_atlas_main", "view"),
     # write role — view + edit on all non-admin resources
     ("write", "cost_management", "view"),
     ("write", "cost_management", "edit"),
@@ -502,6 +553,10 @@ DEFAULT_PERMISSION_SEEDS: list[tuple[str, str, str]] = [
     ("write", "certificates", "edit"),
     ("write", "certificates_main", "view"),
     ("write", "certificates_main", "edit"),
+    ("write", "mongodb_atlas", "view"),
+    ("write", "mongodb_atlas", "edit"),
+    ("write", "mongodb_atlas_main", "view"),
+    ("write", "mongodb_atlas_main", "edit"),
 ]
 
 

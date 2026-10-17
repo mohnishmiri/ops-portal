@@ -20,6 +20,7 @@ from app.api.v1.endpoints import (
     infra_alerts,
     infra_resource_admin,
     keyvault,
+    mongodb_atlas,
     notifications,
     optimization,
     permissions,
@@ -84,6 +85,9 @@ api_router.include_router(checksum_schedules.router, prefix="/checksum-schedules
 # Operational self-service tools (credential checks)
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
 api_router.include_router(credential_accounts.router, prefix="/tools/accounts", tags=["tools"])
+
+# Module 7: MongoDB Atlas — start/stop, schedules, utilization, administration
+api_router.include_router(mongodb_atlas.router, prefix="/mongodb-atlas", tags=["mongodb-atlas"])
 
 # Background sync job queue — non-blocking refresh + polling
 api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])

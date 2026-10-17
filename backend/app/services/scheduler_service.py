@@ -173,6 +173,31 @@ def _register_platform_jobs(scheduler: AsyncIOScheduler) -> None:
         coalesce=True,
     )
 
+    # MongoDB Atlas start/stop. Both run in every worker of every replica;
+    # each due leg and each operation check is claimed atomically in the DB.
+    # Both return at once while no Atlas API key is configured.
+    from app.services.mongodb_atlas_scheduler import run_atlas_schedules_job, verify_atlas_operations_job
+
+    scheduler.add_job(
+        run_atlas_schedules_job,
+        IntervalTrigger(minutes=1),
+        id="atlas_schedule_runner",
+        name="MongoDB Atlas Schedule Runner",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        verify_atlas_operations_job,
+        IntervalTrigger(minutes=1),
+        id="atlas_operation_verifier",
+        name="MongoDB Atlas Operation Verifier",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     # An alert schedule edit reaches only the worker that served the request;
     # without this every other worker keeps firing the old trigger until restart.
     scheduler.add_job(
