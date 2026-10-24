@@ -1,0 +1,180 @@
+# 03-SERVICE-MANIFEST.yaml — Canonical Service Manifest for ops-portal
+# Schema: schema/service-manifest.schema.yaml
+
+service:
+  name: "ops-portal" # src: .github/actions/python-ci/action.yml:1
+  display_name: "ops-portal" # src: README.md:1
+  artifact_id: "ops-portal" # src: .github/actions/python-ci/action.yml:1
+  version: "1.3.13" # src: .github/actions/python-ci/action.yml:1
+  last_validated: "2026-10-24"
+  description: "`ops-portal` is a TypeScript / Node.js + Python + YAML / Declarative Orchestration & Config + Shell / Automation Scripts codebase comprising 558 files (213728 lines of code/config) across 6 module boundary/boundaries, exposing 30 deterministic ingress path(s)." # src: .claude/agents/Auth_Buddy.agent.md:1
+
+ownership:
+  team: "Platform & Domain Engineering" # src: .github/actions/python-ci/action.yml:1
+  domain: "ops-portal" # src: .claude/agents/Auth_Buddy.agent.md:1
+  subdomain: "Core Execution" # src: .claude/agents/Auth_Buddy.agent.md:1
+  apm_id: "APM-ops-portal" # src: .github/actions/python-ci/action.yml:1
+  criticality: "high"
+  sox_in_scope: false
+
+compliance:
+  sox_in_scope: false
+  sox_controls_implemented: "none"
+  pii_data: false
+  pii_masking_enforced: true # src: .claude/agents/Auth_Buddy.agent.md:1
+  data_retention_days: "not defined"
+  audit_trail_immutable: true
+
+tech_stack:
+  language: "TypeScript / Node.js" # src: .claude/agents/Auth_Buddy.agent.md:1
+  language_version: "current" # src: .github/actions/python-ci/action.yml:1
+  framework: "React + REST API" # src: .github/actions/python-ci/action.yml:1
+  framework_version: "1.3.13" # src: .github/actions/python-ci/action.yml:1
+  build_tool: "npm install && npm run build" # src: .github/actions/python-ci/action.yml:1
+  runtime: "TypeScript / Node.js, Python, YAML / Declarative Orchestration & Config, Shell / Automation Scripts" # src: .github/actions/python-ci/action.yml:1
+  rest_layer: "React + REST API" # src: .claude/agents/Auth_Buddy.agent.md:1
+  persistence:
+    - name: "Primary State / Config Store"
+      version: "1.3.13" # src: .github/actions/python-ci/action.yml:1
+  messaging:
+    event_hub: false
+    service_bus: false
+    framework: "none"
+
+ingress:
+  - kind: "REST / Execution"
+    base_path: "/" # src: .claude/agents/Auth_Buddy.agent.md:1
+    auth: "configured-boundary" # src: .github/actions/python-ci/action.yml:1
+    active: true
+    endpoints:
+      - method: "POST"
+        path: "/action"
+        description: "REST POST endpoint `/action` handled in `.claude/skills/ui-buddy-page-builder/templates/backend-page-mutation-template.py:22`" # src: .claude/skills/ui-buddy-page-builder/templates/backend-page-mutation-template.py:22
+      - method: "Task"
+        path: "task:Set up uv"
+        description: "Automation task `Set up uv` in `.github/actions/python-ci/action.yml:47`" # src: .github/actions/python-ci/action.yml:47
+      - method: "Task"
+        path: "task:Cache uv global cache"
+        description: "Automation task `Cache uv global cache` in `.github/actions/python-ci/action.yml:52`" # src: .github/actions/python-ci/action.yml:52
+      - method: "Task"
+        path: "task:Cache virtual environment"
+        description: "Automation task `Cache virtual environment` in `.github/actions/python-ci/action.yml:62`" # src: .github/actions/python-ci/action.yml:62
+      - method: "Task"
+        path: "task:Bridge pip index auth to uv"
+        description: "Automation task `Bridge pip index auth to uv` in `.github/actions/python-ci/action.yml:71`" # src: .github/actions/python-ci/action.yml:71
+      - method: "Task"
+        path: "task:Sync workspace"
+        description: "Automation task `Sync workspace` in `.github/actions/python-ci/action.yml:79`" # src: .github/actions/python-ci/action.yml:79
+      - method: "Task"
+        path: "task:Lint (ruff)"
+        description: "Automation task `Lint (ruff)` in `.github/actions/python-ci/action.yml:85`" # src: .github/actions/python-ci/action.yml:85
+      - method: "Task"
+        path: "task:Format check (ruff)"
+        description: "Automation task `Format check (ruff)` in `.github/actions/python-ci/action.yml:91`" # src: .github/actions/python-ci/action.yml:91
+      - method: "Task"
+        path: "task:Type check (mypy)"
+        description: "Automation task `Type check (mypy)` in `.github/actions/python-ci/action.yml:97`" # src: .github/actions/python-ci/action.yml:97
+      - method: "Task"
+        path: "task:Tests with coverage"
+        description: "Automation task `Tests with coverage` in `.github/actions/python-ci/action.yml:104`" # src: .github/actions/python-ci/action.yml:104
+      - method: "Task"
+        path: "task:Sanitize ref name for artifact usage"
+        description: "Automation task `Sanitize ref name for artifact usage` in `.github/actions/python-ci/action.yml:120`" # src: .github/actions/python-ci/action.yml:120
+      - method: "Task"
+        path: "task:Upload coverage HTML Report"
+        description: "Automation task `Upload coverage HTML Report` in `.github/actions/python-ci/action.yml:127`" # src: .github/actions/python-ci/action.yml:127
+      - method: "Task"
+        path: "task:Upload coverage XML Report"
+        description: "Automation task `Upload coverage XML Report` in `.github/actions/python-ci/action.yml:135`" # src: .github/actions/python-ci/action.yml:135
+      - method: "Task"
+        path: "task:Run bandit (security static analysis"
+        description: "Automation task `Run bandit (security static analysis)` in `.github/actions/python-ci/action.yml:143`" # src: .github/actions/python-ci/action.yml:143
+      - method: "Task"
+        path: "task:Upload bandit report"
+        description: "Automation task `Upload bandit report` in `.github/actions/python-ci/action.yml:159`" # src: .github/actions/python-ci/action.yml:159
+
+egress:
+  - kind: "State / Artifact Output"
+    name: "ops-portal-sink"
+    purpose: "Persists state mutations, responses, and generated artifacts" # src: .claude/agents/Auth_Buddy.agent.md:1
+    active: true
+
+dependencies:
+  - name: "@azure/msal-browser"
+    type: "library"
+    criticality: "high"
+    version: "^3.20.0" # src: frontend/package.json:16
+  - name: "@azure/msal-react"
+    type: "library"
+    criticality: "high"
+    version: "^2.0.0" # src: frontend/package.json:17
+  - name: "@tanstack/react-query"
+    type: "library"
+    criticality: "high"
+    version: "^5.50.0" # src: frontend/package.json:18
+  - name: "axios"
+    type: "library"
+    criticality: "high"
+    version: "^1.7.0" # src: frontend/package.json:19
+  - name: "jspdf"
+    type: "library"
+    criticality: "high"
+    version: "^4.2.1" # src: frontend/package.json:20
+  - name: "jspdf-autotable"
+    type: "library"
+    criticality: "high"
+    version: "^5.0.7" # src: frontend/package.json:21
+  - name: "react"
+    type: "library"
+    criticality: "high"
+    version: "^18.3.0" # src: frontend/package.json:22
+  - name: "react-dom"
+    type: "library"
+    criticality: "high"
+    version: "^18.3.0" # src: frontend/package.json:23
+  - name: "react-router-dom"
+    type: "library"
+    criticality: "high"
+    version: "^6.25.0" # src: frontend/package.json:24
+  - name: "recharts"
+    type: "library"
+    criticality: "high"
+    version: "^2.12.0" # src: frontend/package.json:25
+  - name: "zustand"
+    type: "library"
+    criticality: "high"
+    version: "^4.5.0" # src: frontend/package.json:26
+  - name: "@testing-library/dom"
+    type: "library"
+    criticality: "high"
+    version: "^10.4.1" # src: frontend/package.json:29
+
+quality_gate:
+  coverage: "25 test files discovered" # src: .claude/instructions/tests.instructions.md:1
+  mutation: "not run"
+  sonar_reliability: "unknown"
+  sonar_security: "unknown"
+  sonar_maintainability: "unknown"
+  sonar_issues: "unknown"
+  veracode_policy: "not run"
+  veracode_findings: "unknown"
+  sca_findings: "unknown"
+
+aifc:
+  omni_domain: "ops-portal"
+  tier1_rules: "AIFC-Tier1-Global-v1"
+  tier2_rules: "AIFC-Tier2-Domain-v1"
+  tier3_rules: "docs/archetypes/09-tier3-service-rules.md"
+  tier3_rules_reconciled: true
+  memories_seed: "docs/archetypes/10-service-memories-seed.md"
+  canary_status: "SE-CANARY-OK"
+
+open_gaps:
+  - id: "GAP-1"
+    desc: "Confirm upstream gateway rate-limit and timeout SLA for ops-portal"
+    severity: "medium"
+    status: "open"
+  - id: "GAP-2"
+    desc: "Confirm automated coverage threshold enforcement in CI pipeline"
+    severity: "low"
+    status: "open"
